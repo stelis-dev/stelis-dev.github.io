@@ -1,0 +1,5 @@
+# Local working area for plans, scratch files, and external references.
+.WORK/
+
+# OS metadata.
+.DS_Store
