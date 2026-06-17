@@ -8,11 +8,10 @@
  * Auth: All user-facing routes require Authorization: Bearer <developerJwt>
  * verified locally against host-owned trust material (STUDIO_DEVELOPER_JWT_TRUST_JSON).
  *
- * POST routes share a JWT → block → rate-limit prelude via the `runStudioAuth`
+ * User-facing GET and POST routes share a JWT → block → rate-limit prelude via the `runStudioAuth`
  * helper (packages/app-api/src/middleware/studioAuth.ts), called AFTER the
  * route-local 503 guards so infrastructure failures keep precedence over
- * 401/429. GET routes verify JWT inline only — they intentionally do not
- * participate in the block/rate-limit gate.
+ * 401/429.
  *
  * Only available in dual mode when the studio env set is complete.
  */
@@ -37,14 +36,14 @@ import {
 } from '@stelis/core-api';
 import type { AppApiContext } from '../context.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
-import { runStudioAuth, verifyDeveloperJwtFromRequest } from '../middleware/studioAuth.js';
+import { runStudioAuth } from '../middleware/studioAuth.js';
 import { mapError, respondMapped } from '../errorMap.js';
 
 export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
   const app = new Hono();
 
   // ── GET /studio/promotions — developer-JWT principal promotion list ──
-  // Auth: Authorization: Bearer <developerJwt> (inline, no block/rate-limit).
+  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.get('/promotions', async (c) => {
     try {
       const ctx = await getCtx();
@@ -52,7 +51,9 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
         return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
       }
 
-      const identity = await verifyDeveloperJwtFromRequest(c.req.raw, ctx);
+      const auth = await runStudioAuth(c, ctx, { rateLimitPrefix: 'promo_list' });
+      if (!auth.ok) return auth.response;
+      const { identity } = auth;
       const userId = identity.userId;
 
       const promotions = await ctx.promotionStore.list({ status: 'active' });
@@ -82,7 +83,7 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
   });
 
   // ── GET /studio/promotions/:id — developer-JWT principal promotion detail ──
-  // Auth: Authorization: Bearer <developerJwt> (inline, no block/rate-limit).
+  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.get('/promotions/:id', async (c) => {
     try {
       const ctx = await getCtx();
@@ -90,7 +91,9 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
         return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
       }
 
-      const identity = await verifyDeveloperJwtFromRequest(c.req.raw, ctx);
+      const auth = await runStudioAuth(c, ctx, { rateLimitPrefix: 'promo_detail' });
+      if (!auth.ok) return auth.response;
+      const { identity } = auth;
       const userId = identity.userId;
 
       const promotionId = c.req.param('id');

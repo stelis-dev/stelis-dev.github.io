@@ -84,8 +84,8 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── POST /relay/prepare ───────────────────────────────────────────
   app.post('/prepare', async (c) => {
-    const ip = getClientIp(c);
     try {
+      const ip = getClientIp(c);
       const ctx = await getCtx();
       const relay = ctx.relay;
 
@@ -118,7 +118,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // Rate limit
-      const rl = await relay.rateLimiter.check(`prepare:${ip}`);
+      const rl = await relay.rateLimiter.check(`prepare:client-ip:${ip}`);
       if (!rl.allowed) {
         return c.json(
           { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
@@ -231,8 +231,8 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── POST /relay/sponsor ───────────────────────────────────────────
   app.post('/sponsor', async (c) => {
-    const ip = getClientIp(c);
     try {
+      const ip = getClientIp(c);
       const ctx = await getCtx();
       const relay = ctx.relay;
 
@@ -256,7 +256,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // Rate limit
-      const rl = await relay.rateLimiter.check(`sponsor:${ip}`);
+      const rl = await relay.rateLimiter.check(`sponsor:client-ip:${ip}`);
       if (!rl.allowed) {
         return c.json(
           { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },

@@ -61,6 +61,22 @@ export function formatRuntimeMode(mode: BootResult['mode']): string {
   return mode === 'dual' ? 'dual (relay + studio)' : 'generic (relay only)';
 }
 
+export function resolveTrustedProxyHopsForBoot(input: {
+  trustedProxyHops: string | null | undefined;
+  nodeEnv: string | null | undefined;
+}): number {
+  const trustedProxyHops = parseTrustedProxyHops(input.trustedProxyHops);
+  if (input.trustedProxyHops?.trim()) return trustedProxyHops;
+
+  const nodeEnv = input.nodeEnv?.trim();
+  if (nodeEnv === 'development' || nodeEnv === 'test') return trustedProxyHops;
+
+  throw new Error(
+    '[app-api] TRUSTED_PROXY_HOPS must be set before deployed app-api starts. ' +
+      'Use TRUSTED_PROXY_HOPS=0 only when app-api is directly exposed, or set the exact reverse-proxy hop count.',
+  );
+}
+
 /**
  * Runs all fail-fast boot validation. Must complete before accepting requests.
  *
@@ -144,17 +160,10 @@ export async function runBootValidation(): Promise<BootResult> {
   const simulateProbePoolId = settlementSwapPathRegistryEntries[0].poolId;
 
   // ── 4. Trusted proxy hops validation ─────────────────────────────────────
-  const trustedProxyHops = parseTrustedProxyHops(process.env.TRUSTED_PROXY_HOPS);
-  if (trustedProxyHops === 0 && !process.env.TRUSTED_PROXY_HOPS?.trim()) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[app-api] ⚠️  TRUSTED_PROXY_HOPS is not set — defaulting to 0 (no XFF trust). ' +
-        'Rate limiting uses the socket remote address directly. ' +
-        'If this server is behind a reverse proxy, all requests will appear as the proxy IP — ' +
-        'set TRUSTED_PROXY_HOPS to the actual proxy depth to extract client IPs from X-Forwarded-For. ' +
-        'See docs/operations.md#reverse-proxy-and-cors.',
-    );
-  }
+  void resolveTrustedProxyHopsForBoot({
+    trustedProxyHops: process.env.TRUSTED_PROXY_HOPS,
+    nodeEnv: process.env.NODE_ENV,
+  });
 
   // ── 5. Prepare in-flight validation ──────────────────────────────────
   void parseOptionalPositiveIntegerEnv(

@@ -466,9 +466,9 @@ describe('studio routes', () => {
       });
       expect(res.status).toBe(200);
       const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
-      expect(calls).toContain('promo_prepare:127.0.0.1');
-      expect(calls).toContain('promo_prepare:uid:mock-user');
-      expect(calls).toContain('promo_prepare:pid:promo-1');
+      expect(calls).toContain('promo_prepare:client-ip:127.0.0.1');
+      expect(calls).toContain('promo_prepare:developer-user:mock-user');
+      expect(calls).toContain('promo_prepare:promotion:promo-1');
     });
 
     it('passes PromotionPrepareError statusHint through', async () => {
@@ -765,9 +765,9 @@ describe('studio routes', () => {
       });
       expect(res.status).toBe(200);
       const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
-      expect(calls).toContain('promo_sponsor:127.0.0.1');
-      expect(calls).toContain('promo_sponsor:uid:mock-user');
-      expect(calls).toContain('promo_sponsor:pid:promo-1');
+      expect(calls).toContain('promo_sponsor:client-ip:127.0.0.1');
+      expect(calls).toContain('promo_sponsor:developer-user:mock-user');
+      expect(calls).toContain('promo_sponsor:promotion:promo-1');
     });
 
     it('returns promotion sponsor failure as 422 (PromotionSponsorError)', async () => {

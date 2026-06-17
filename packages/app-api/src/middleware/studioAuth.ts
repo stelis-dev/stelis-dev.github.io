@@ -1,7 +1,9 @@
 /**
  * [app-api] studio auth helper — JWT verify → block check → rate-limit.
  *
- * Owns the prelude shared by POST /studio/promotions/:id/{claim,prepare,sponsor}.
+ * Owns the prelude shared by user-facing Studio routes:
+ * GET /studio/promotions, GET /studio/promotions/:id, and
+ * POST /studio/promotions/:id/{claim,prepare,sponsor}.
  * Intentionally does NOT own: promotionStore/executionLedger null-guard, studio
  * mode, globalTargetHashes, sponsor operations gate, body parse, handler call,
  * per-route error mapping. Those stay in the route because their guard set and
@@ -56,9 +58,10 @@ export class DeveloperJwtAuthError extends Error {
 
 export interface StudioAuthOptions {
   /**
-   * Rate-limit key prefix, e.g. `'promo_claim'` / `'promo_prepare'` /
-   * `'promo_sponsor'`. Keys are `${prefix}:${ip}`, `${prefix}:uid:${userId}`,
-   * `${prefix}:pid:${promotionId}` (checked in this order).
+   * Rate-limit key prefix, e.g. `'promo_list'` / `'promo_detail'` /
+   * `'promo_claim'` / `'promo_prepare'` / `'promo_sponsor'`. Keys are
+   * `${prefix}:client-ip:${ip}`, `${prefix}:developer-user:${userId}`, and,
+   * when the route has a promotion id, `${prefix}:promotion:${promotionId}`.
    */
   rateLimitPrefix: string;
   /**
@@ -159,13 +162,13 @@ export async function runStudioAuth(
     };
   }
 
-  // 3. Rate-limit — per-IP, per-userId, per-promotionId (short-circuit in order).
+  // 3. Rate-limit — per-client-IP, per-developer-user, per-promotion (short-circuit in order).
   const promotionId = c.req.param('id') ?? '';
   const keys = [
-    `${opts.rateLimitPrefix}:${ip}`,
-    `${opts.rateLimitPrefix}:uid:${identity.userId}`,
-    `${opts.rateLimitPrefix}:pid:${promotionId}`,
+    `${opts.rateLimitPrefix}:client-ip:${ip}`,
+    `${opts.rateLimitPrefix}:developer-user:${identity.userId}`,
   ];
+  if (promotionId) keys.push(`${opts.rateLimitPrefix}:promotion:${promotionId}`);
   for (const key of keys) {
     const rl = await ctx.relay.rateLimiter.check(key);
     if (!rl.allowed) {

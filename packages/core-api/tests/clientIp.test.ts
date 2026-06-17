@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ClientIpResolutionError,
   normalizeTrustedProxyHops,
   parseTrustedProxyHops,
   resolveClientIp,
@@ -38,12 +39,55 @@ describe('clientIp helper', () => {
     ).toBe('203.0.113.10');
   });
 
-  it('fails closed when the XFF chain is shorter than the configured hop count', () => {
-    expect(
-      resolveClientIp(headers('203.0.113.10'), {
+  it('fails closed when no direct socket IP is available', () => {
+    expect(() =>
+      resolveClientIp(headers('198.51.100.10, 10.0.0.5'), {
+        directIp: null,
+        trustedProxyHops: 0,
+      }),
+    ).toThrow(ClientIpResolutionError);
+  });
+
+  it('fails closed when the direct socket IP is invalid', () => {
+    expect(() =>
+      resolveClientIp(headers('198.51.100.10, 10.0.0.5'), {
+        directIp: 'unknown',
+        trustedProxyHops: 0,
+      }),
+    ).toThrow(ClientIpResolutionError);
+  });
+
+  it('fails closed when XFF is missing under a trusted-proxy policy', () => {
+    expect(() =>
+      resolveClientIp(headers(), {
         trustedProxyHops: 1,
       }),
-    ).toBe('unknown');
+    ).toThrow(ClientIpResolutionError);
+  });
+
+  it('fails closed when the XFF chain is shorter than the configured hop count', () => {
+    expect(
+      () =>
+        resolveClientIp(headers('203.0.113.10'), {
+          trustedProxyHops: 1,
+        }),
+    ).toThrow(ClientIpResolutionError);
+  });
+
+  it('fails closed when the selected XFF client value is invalid', () => {
+    expect(() =>
+      resolveClientIp(headers('unknown, 10.0.0.5'), {
+        trustedProxyHops: 1,
+      }),
+    ).toThrow(ClientIpResolutionError);
+  });
+
+  it('fails closed instead of shifting XFF indexes around invalid chain entries', () => {
+    expect(() =>
+      resolveClientIp(headers('203.0.113.10, unknown, 10.0.0.5'), {
+        trustedProxyHops: 1,
+      }),
+    ).toThrow(ClientIpResolutionError);
   });
 
   it('parses TRUSTED_PROXY_HOPS and defaults to zero when unset', () => {

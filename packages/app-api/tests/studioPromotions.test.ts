@@ -145,7 +145,7 @@ describe('studio promotion routes', () => {
       assertArrayItemKeys(body, 'promotions', 'promotionListItem');
     });
 
-    it('does not invoke block check or rate-limit on success (inline JWT only)', async () => {
+    it('checks block state and rate-limit keys on successful list', async () => {
       const record = await ctx.promotionStore!.create(BASE_PROMO);
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
 
@@ -153,9 +153,29 @@ describe('studio promotion routes', () => {
         headers: { Authorization: 'Bearer test-jwt' },
       });
       expect(res.status).toBe(200);
+      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
+      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).toHaveBeenCalledWith(
+        { kind: 'studio_user', userId: 'user-1' },
+      );
+      expect(vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
+        'promo_list:client-ip:127.0.0.1',
+        'promo_list:developer-user:user-1',
+      ]);
+    });
+
+    it('returns 429 when list request is blocked', async () => {
+      vi.mocked(ctx.relay.abuseBlocker.checkIp).mockResolvedValueOnce({
+        blocked: true,
+        retryAfterMs: 60000,
+      });
+
+      const res = await app.request('/studio/promotions', {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get('Retry-After')).toBeTruthy();
       expect(vi.mocked(ctx.relay.rateLimiter.check)).not.toHaveBeenCalled();
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).not.toHaveBeenCalled();
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).not.toHaveBeenCalled();
     });
 
     it('does not include draft/paused promotions', async () => {
@@ -229,7 +249,7 @@ describe('studio promotion routes', () => {
       assertNestedObjectKeys(body, 'detail', 'userPromotionDetail');
     });
 
-    it('does not invoke block check or rate-limit on success (inline JWT only)', async () => {
+    it('checks block state and rate-limit keys on successful detail', async () => {
       const record = await ctx.promotionStore!.create(BASE_PROMO);
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
 
@@ -237,9 +257,32 @@ describe('studio promotion routes', () => {
         headers: { Authorization: 'Bearer test-jwt' },
       });
       expect(res.status).toBe(200);
-      expect(vi.mocked(ctx.relay.rateLimiter.check)).not.toHaveBeenCalled();
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).not.toHaveBeenCalled();
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).not.toHaveBeenCalled();
+      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
+      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).toHaveBeenCalledWith(
+        { kind: 'studio_user', userId: 'user-1' },
+      );
+      expect(vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
+        'promo_detail:client-ip:127.0.0.1',
+        'promo_detail:developer-user:user-1',
+        `promo_detail:promotion:${record.promotionId}`,
+      ]);
+    });
+
+    it('returns 429 when detail request exceeds rate limit', async () => {
+      const record = await ctx.promotionStore!.create(BASE_PROMO);
+      await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      vi.mocked(ctx.relay.rateLimiter.check).mockResolvedValueOnce({
+        allowed: false,
+        retryAfterMs: 5000,
+      });
+
+      const res = await app.request(`/studio/promotions/${record.promotionId}`, {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(429);
+      const body = await res.json();
+      expect(body.error).toBe('Rate limit exceeded');
     });
 
     it('returns future startAt as detail.canClaim=false + unavailableReason=promotion_not_started', async () => {
@@ -498,9 +541,9 @@ describe('studio promotion routes', () => {
         body: JSON.stringify({}),
       });
       const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
-      expect(calls).toContain('promo_claim:127.0.0.1');
-      expect(calls).toContain('promo_claim:uid:user-1');
-      expect(calls).toContain(`promo_claim:pid:${record.promotionId}`);
+      expect(calls).toContain('promo_claim:client-ip:127.0.0.1');
+      expect(calls).toContain('promo_claim:developer-user:user-1');
+      expect(calls).toContain(`promo_claim:promotion:${record.promotionId}`);
     });
   });
 

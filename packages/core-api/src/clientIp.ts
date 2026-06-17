@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 export interface HeaderValueReader {
   header(name: string): string | undefined;
 }
@@ -7,9 +9,19 @@ export interface ClientIpResolutionOptions {
   trustedProxyHops?: number;
 }
 
+export class ClientIpResolutionError extends Error {
+  public readonly code = 'CLIENT_IP_UNRESOLVED';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ClientIpResolutionError';
+  }
+}
+
 function normalizeIp(value?: string | null): string | null {
   const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
+  if (!trimmed || trimmed.toLowerCase() === 'unknown') return null;
+  return isIP(trimmed) === 0 ? null : trimmed;
 }
 
 /**
@@ -19,7 +31,8 @@ function normalizeIp(value?: string | null): string | null {
  * - `trustedProxyHops=0` means "do not trust X-Forwarded-For".
  * - `trustedProxyHops>0` means "trust exactly N proxy hops" and take the
  *   client IP from the XFF chain by counting from the right.
- * - If the chain is shorter than expected, return `unknown` (fail closed).
+ * - If no valid client IP can be resolved, throw `ClientIpResolutionError`
+ *   before callers reach shared abuse/rate-limit keys.
  */
 export function resolveClientIp(
   headers: HeaderValueReader,
@@ -28,21 +41,43 @@ export function resolveClientIp(
   const trustedProxyHops = options.trustedProxyHops ?? 0;
 
   if (trustedProxyHops === 0) {
-    return normalizeIp(options.directIp) ?? 'unknown';
+    const directIp = normalizeIp(options.directIp);
+    if (!directIp) {
+      throw new ClientIpResolutionError('Client IP could not be resolved from socket address');
+    }
+    return directIp;
   }
 
   const xff = headers.header('x-forwarded-for');
-  if (!xff) return 'unknown';
+  if (!xff) {
+    throw new ClientIpResolutionError(
+      'Client IP could not be resolved from X-Forwarded-For header',
+    );
+  }
 
   const chain = xff
     .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean);
+    .map((part) => part.trim());
+  if (chain.some((part) => normalizeIp(part) === null)) {
+    throw new ClientIpResolutionError(
+      'Client IP could not be resolved from the trusted proxy chain',
+    );
+  }
 
   const clientIndex = chain.length - (trustedProxyHops + 1);
-  if (clientIndex < 0) return 'unknown';
+  if (clientIndex < 0) {
+    throw new ClientIpResolutionError(
+      'Client IP could not be resolved from the trusted proxy chain',
+    );
+  }
 
-  return chain[clientIndex] ?? 'unknown';
+  const clientIp = normalizeIp(chain[clientIndex]);
+  if (!clientIp) {
+    throw new ClientIpResolutionError(
+      'Client IP could not be resolved from the trusted proxy chain',
+    );
+  }
+  return clientIp;
 }
 
 /**

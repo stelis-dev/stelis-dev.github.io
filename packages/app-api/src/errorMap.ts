@@ -83,6 +83,13 @@ interface ExtractedHints {
   fixedHeaders?: Record<string, string>;
 }
 
+function isClientIpResolutionError(err: Error): boolean {
+  return (
+    err.name === 'ClientIpResolutionError' ||
+    (err as { readonly code?: unknown }).code === 'CLIENT_IP_UNRESOLVED'
+  );
+}
+
 // ─────────────────────────────────────────────
 // Class → FailureCode + hint extraction
 // ─────────────────────────────────────────────
@@ -95,6 +102,10 @@ function extractHints(err: Error): ExtractedHints | null {
   // 400 — request body parse failure (uses generic BAD_REQUEST code).
   if (err instanceof RequestBodyParseError) {
     return { code: 'BAD_REQUEST' };
+  }
+  // 400 — request-source identity cannot be resolved safely.
+  if (isClientIpResolutionError(err)) {
+    return { code: 'CLIENT_IP_UNRESOLVED' };
   }
   // 503 + Retry-After: 2 — in-flight prepare overload.
   if (err instanceof PrepareOverloadError) {

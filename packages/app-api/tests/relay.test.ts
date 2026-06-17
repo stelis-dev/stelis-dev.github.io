@@ -59,6 +59,7 @@ vi.mock('../src/sponsor-operations/gateResponse.js', () => ({
 }));
 
 import { createRelayRoutes } from '../src/routes/relay.js';
+import { getClientIp } from '../src/clientIp.js';
 import { buildSponsorUnavailableResponse } from '../src/sponsor-operations/gateResponse.js';
 import type { AppApiContext } from '../src/context.js';
 
@@ -234,6 +235,9 @@ describe('relay routes', () => {
     app = new Hono();
     app.route('/relay', routes);
 
+    vi.mocked(getClientIp).mockReset();
+    vi.mocked(getClientIp).mockReturnValue('127.0.0.1');
+
     // Reset mocked core-api and sponsor operations module-level functions:
     // clear accumulated call history first, then re-apply default behavior.
     // `vi.mock()`-hoisted mocks persist for the entire file, so explicit
@@ -394,6 +398,30 @@ describe('relay routes', () => {
       },
     );
 
+    it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
+      const coreApi = await import('@stelis/core-api');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        const err = new Error('Client IP could not be resolved');
+        err.name = 'ClientIpResolutionError';
+        (err as { code?: string }).code = 'CLIENT_IP_UNRESOLVED';
+        throw err;
+      });
+
+      const res = await app.request('/relay/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prepareBody()),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
+      expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
+      expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
+      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(coreApi.handlePrepare).not.toHaveBeenCalled();
+    });
+
     it('returns 400 on missing txKindBytes', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
@@ -528,6 +556,9 @@ describe('relay routes', () => {
         }),
       });
       expect(res.status).toBe(429);
+      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith(
+        'prepare:client-ip:127.0.0.1',
+      );
     });
 
     it('does not check sender address abuse at the HTTP route before authorization', async () => {
@@ -857,6 +888,30 @@ describe('relay routes', () => {
       },
     );
 
+    it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
+      const coreApi = await import('@stelis/core-api');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        const err = new Error('Client IP could not be resolved');
+        err.name = 'ClientIpResolutionError';
+        (err as { code?: string }).code = 'CLIENT_IP_UNRESOLVED';
+        throw err;
+      });
+
+      const res = await app.request('/relay/sponsor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validBody),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
+      expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
+      expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
+      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(coreApi.handleSponsor).not.toHaveBeenCalled();
+    });
+
     it('returns 400 on missing fields', async () => {
       const res = await app.request('/relay/sponsor', {
         method: 'POST',
@@ -879,6 +934,9 @@ describe('relay routes', () => {
         body: JSON.stringify(validBody),
       });
       expect(res.status).toBe(429);
+      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith(
+        'sponsor:client-ip:127.0.0.1',
+      );
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {

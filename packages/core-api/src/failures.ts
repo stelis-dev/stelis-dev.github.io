@@ -21,6 +21,9 @@
  *     `FAILURE_TABLE[code]` for the default HTTP status; class-thin
  *     carriers contribute dynamic body fields (`digest`, `subcode`,
  *     `meta`).
+ *   - Host admission failures that happen before route handlers can enter
+ *     abuse/rate-limit keys are server-owned codes, kept here with the same
+ *     policy data as route-bound transport codes.
  *   - `recordPromotionAbuseEvent` re-exports the `PROMOTION_ABUSE_CODES`
  *     codes defined here. The event emitters
  *     (`SPONSOR_FAILURE_RECORDED` and `PROMOTION_ABUSE_RECORDED`) stay
@@ -95,20 +98,28 @@ export const PROMOTION_ABUSE_CODES = {
 
 export type PromotionAbuseCode = (typeof PROMOTION_ABUSE_CODES)[keyof typeof PROMOTION_ABUSE_CODES];
 
+export const ADMISSION_FAILURE_CODES = {
+  CLIENT_IP_UNRESOLVED: 'CLIENT_IP_UNRESOLVED',
+} as const;
+
+export type AdmissionFailureCode =
+  (typeof ADMISSION_FAILURE_CODES)[keyof typeof ADMISSION_FAILURE_CODES];
+
 /**
  * Server-side failure code union covering both the four route-bound transport
  * codes (locked to `docs/schemas/relay-api.schema.json` via
- * `errorCode.ts`) and the promotion-specific abuse codes
- * (`PROMOTION_ABUSE_CODES`). Classification, HTTP status (where
- * applicable), and abuse-impact policy live in `FAILURE_TABLE` for both
- * groups; the table is consumed by abuse-blocker
- * adapters and the host error mapper.
+ * `errorCode.ts`), server-owned host admission codes
+ * (`ADMISSION_FAILURE_CODES`), and the promotion-specific abuse codes
+ * (`PROMOTION_ABUSE_CODES`). Classification, HTTP status (where applicable),
+ * and abuse-impact policy live in `FAILURE_TABLE` for every group; the table
+ * is consumed by abuse-blocker adapters and the host error mapper.
  */
 export type FailureCode =
   | KnownPrepareErrorCode
   | KnownSponsorErrorCode
   | KnownPromotionPrepareErrorCode
   | KnownPromotionSponsorErrorCode
+  | AdmissionFailureCode
   | PromotionAbuseCode;
 
 /**
@@ -262,6 +273,15 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     httpStatus: 413,
     abuseImpact: SKIP_BOTH,
     bodyFields: NO_BODY_EXTRAS,
+  },
+  CLIENT_IP_UNRESOLVED: {
+    code: 'CLIENT_IP_UNRESOLVED',
+    classification: 'normal',
+    httpStatus: 400,
+    abuseImpact: SKIP_BOTH,
+    bodyFields: NO_BODY_EXTRAS,
+    notes:
+      'Client IP resolution failed before abuse-block and rate-limit keys were selected.',
   },
 
   // ── /relay/prepare authorization ─────────────────────────────────

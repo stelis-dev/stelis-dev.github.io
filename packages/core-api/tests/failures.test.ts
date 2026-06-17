@@ -25,6 +25,7 @@ import {
   subjectCounterFamily,
   getFailurePolicy,
   FAILURE_TABLE,
+  ADMISSION_FAILURE_CODES,
   PROMOTION_ABUSE_CODES,
   VAULT_DRIFT_NEW_USER_VAULT_EXISTS,
   VAULT_DRIFT_QUERY_FAILED,
@@ -288,12 +289,13 @@ describe('vault-drift vocabulary — public-code pin', () => {
 // ─────────────────────────────────────────────
 
 describe('FAILURE_TABLE — coverage lock', () => {
-  it('contains an entry for every public error code in the four route-bound unions and every PROMO_* code', () => {
+  it('contains an entry for every route-bound, host-admission, and PROMO_* code', () => {
     const allKnownCodes = new Set<string>([
       ...KNOWN_PREPARE_ERROR_CODES,
       ...KNOWN_SPONSOR_ERROR_CODES,
       ...KNOWN_PROMOTION_PREPARE_ERROR_CODES,
       ...KNOWN_PROMOTION_SPONSOR_ERROR_CODES,
+      ...Object.values(ADMISSION_FAILURE_CODES),
       ...Object.values(PROMOTION_ABUSE_CODES),
     ]);
     const tableKeys = new Set<string>(Object.keys(FAILURE_TABLE));

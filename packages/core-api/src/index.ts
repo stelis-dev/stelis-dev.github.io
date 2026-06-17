@@ -1,7 +1,12 @@
 // @stelis/core-api — public API (framework-agnostic domain logic)
 
 // Client IP resolution
-export { resolveClientIp, parseTrustedProxyHops, normalizeTrustedProxyHops } from './clientIp.js';
+export {
+  ClientIpResolutionError,
+  resolveClientIp,
+  parseTrustedProxyHops,
+  normalizeTrustedProxyHops,
+} from './clientIp.js';
 export {
   ABUSE_BLOCKED_CODE,
   DEFAULT_ABUSE_BLOCKER_CONFIG,
