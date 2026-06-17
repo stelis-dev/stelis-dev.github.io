@@ -24,9 +24,29 @@ At boot, the host validates configured endpoints against the selected `NETWORK`,
 
 `TRUSTED_PROXY_HOPS` controls how the host reads `X-Forwarded-For` for rate limiting and abuse checks.
 
-When it is not set, the host defaults to `0` and uses the socket remote address. If the API runs behind a reverse proxy, set `TRUSTED_PROXY_HOPS` to the actual proxy depth.
+In deployed runtimes, `TRUSTED_PROXY_HOPS` must be set explicitly before the host starts. Use `TRUSTED_PROXY_HOPS=0` only when the API is directly exposed, or set it to the actual reverse-proxy hop count.
+
+In `development` and `test`, an unset `TRUSTED_PROXY_HOPS` defaults to `0` and uses the socket remote address.
 
 `/relay/*` and `/studio/*` allow all origins. `/auth/*` and `/api/*` allow only origins listed in `CORS_ORIGINS`.
+
+## On-Chain Admin Updates
+
+On-chain admin updates use a queue and apply flow.
+
+Emergency pause to `true` is immediate and admin-only. Unpause is queued through `set_paused(config, false, ctx)` and applies only after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`.
+
+Config and treasury changes are also queued first:
+
+- `update_config(...)` queues economic config changes.
+- `update_protocol_treasury(...)` queues the protocol treasury change.
+- `set_paused(config, false, ctx)` queues unpause.
+
+Queued updates become eligible at `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. `ADMIN_UPDATE_DELAY_EPOCHS` is `2`.
+
+Only admin can propose or cancel queued config, treasury, and pause updates. After maturity, any caller can apply the exact queued values with the matching `apply_*` function.
+
+`config_version` increments when protocol state changes through an applied queued update, when emergency pause changes the pause state, or when emergency pause cancels a pending unpause.
 
 ## Production Store Adapters
 
@@ -39,7 +59,7 @@ Default Redis namespaces are owned by their adapter modules:
 | Namespace | Runtime state |
 | --- | --- |
 | `stelis:prepare:` | Prepared transaction records and prepare indexes. |
-| `stelis:inflight:slots` | Cluster-wide prepare in-flight limiter. |
+| `stelis:inflight:slots` | Shared prepare in-flight limiter. |
 | `stelis:rate_limit:` | Fixed-window request counters. |
 | `stelis:abuse:` | Abuse counters and temporary blocks. |
 | `stelis:sponsor_lease:` | Sponsor slot leases. |
@@ -75,7 +95,7 @@ This policy matches current Redis key usage. Prepare store consumption uses Lua 
 
 Sponsor operation state is checked before prepare and sponsor routes continue.
 
-The prepare in-flight limiter is Redis-backed and cluster-wide. It limits concurrent expensive
+The prepare in-flight limiter is Redis-backed and shared across all `app-api` instances that use the same Redis write authority. It limits concurrent expensive
 prepare work after cheap request validation and before build/simulation work completes.
 When `PREPARE_INFLIGHT_CAPACITY` is not set, the host uses `sponsor slot count * 2`.
 `SPONSOR_SECRET_KEY` supports 1..256 comma-separated sponsor keys. Boot rejects deployments outside that range.
@@ -136,7 +156,7 @@ Optional refill variables:
 - `SPONSOR_BALANCE_REFILL_TARGET_MIST`
 
 `RELAYER_FEE_MIST` is optional. When unset, the quoted relayer fee defaults to zero.
-`PREPARE_INFLIGHT_CAPACITY` is optional. When set, it must be a positive integer and becomes the cluster-wide prepare in-flight capacity.
+`PREPARE_INFLIGHT_CAPACITY` is optional. When set, it must be a positive integer and becomes the shared prepare in-flight capacity for one Redis write authority.
 
 Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
 

@@ -43,9 +43,12 @@ The sponsor also rejects when:
 Move settlement checks that:
 
 - `relayer_claim <= max_claim_mist`
-- `total_in >= min_settle_mist`
+- token-funded swap settlement input is at least `min_settle_mist`
+- credit-only settlement is exempt from `min_settle_mist`
 - settlement input covers relayer claim, quoted relayer fee, and protocol fee
 - quoted relayer fee is not above the on-chain relayer fee cap
+- the expected config version matches the current on-chain config version
+- the vault nonce advances monotonically
 
 Move transfers `relayer_claim + quoted_relayer_fee_mist` to `relayer_recipient`.
 The protocol flat fee is transferred separately to the protocol treasury.

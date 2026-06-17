@@ -19,7 +19,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | ID | Rule | Enforced by |
 | --- | --- | --- |
 | S-2 | `relayer_claim` must not exceed `max_claim_mist`. | Move and relay validation |
-| S-3 | `total_in` must be at least `min_settle_mist`. | Move |
+| S-3 | Token-funded swap settlement input must be at least `min_settle_mist`. Credit-only settlement is exempt from `min_settle_mist` and must satisfy exact sufficiency, fee cap, config version, and nonce checks. | Move |
 | S-4 | Settlement input must cover relayer claim, quoted relayer fee, and protocol fee. | Move |
 | S-9 | Surplus is joined into vault balance; no extra surplus coin is created. | Move |
 | S-10 | `receipt_id` is empty or 32 bytes. | Move |
@@ -59,10 +59,12 @@ The IDs are used in code comments, tests, and package README files. They are sho
 
 | ID | Rule | Enforced by |
 | --- | --- | --- |
-| A-1 | Admin mutations emit events. | Move |
-| A-2 | Only admin can change protocol treasury. | Move |
-| A-3 | Only admin can change protocol flat fee. | Move |
-| A-4 | Only admin can change relayer fee cap and spread cap. | Move |
+| A-1 | Admin transfer proposals, admin transfers, and applied protocol state changes emit events. | Move |
+| A-2 | Only admin can propose or cancel protocol treasury changes. A queued treasury change applies only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
+| A-3 | Only admin can propose or cancel protocol flat fee changes. Queued economic changes apply only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
+| A-4 | Only admin can propose or cancel relayer fee cap and spread cap changes. Queued economic changes apply only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
+| A-5 | Emergency pause to `true` is immediate and admin-only. Unpause is a delayed pending change. | Move |
+| A-6 | Applying a matured pending config, treasury, or pause change is permissionless and can only execute exact queued values. `config_version` increments when the pending change is applied. | Move |
 
 ## Relay Policy
 

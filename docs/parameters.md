@@ -13,6 +13,7 @@ If a value here conflicts with code, treat the code as current and update this d
 | `MAX_CLAIM_MIST` | `100000000` | `packages/contracts/move/sources/config.move` |
 | `INITIAL_MAX_CLAIM_MIST` | `75000000` | `packages/contracts/move/sources/config.move` |
 | `MIN_SETTLE_MIST` | `1000` | `packages/contracts/move/sources/config.move` |
+| `ADMIN_UPDATE_DELAY_EPOCHS` | `2` | `packages/contracts/move/sources/config.move` |
 | `SLIPPAGE_CAP_BPS` | `500` | `packages/contracts/src/constants.ts` |
 | `GAS_MARGIN_CAP_BPS` | `10000` | `packages/contracts/src/constants.ts` |
 | `GAS_VARIANCE_FIXED_MIST` | `100000` | `packages/core-relay/src/gasEstimate.ts` |
@@ -20,16 +21,16 @@ If a value here conflicts with code, treat the code as current and update this d
 
 ## Initial On-Chain Config Values
 
-These values are written by `packages/contracts/move/sources/config.move` at package initialization. The on-chain admin can change selected fields through `update_config`.
+These values are written by `packages/contracts/move/sources/config.move` at package initialization. The on-chain admin can queue selected field changes through `update_config`. Matured queued values are applied by `apply_config_update` at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`.
 
 | Field | Initial value | Notes |
 | --- | ---: | --- |
-| `max_relayer_fee_mist` | `0` | Admin can update, bounded by fee-cap checks. |
-| `protocol_flat_fee_mist` | `0` | Admin can update. |
+| `max_relayer_fee_mist` | `0` | Admin can queue an update, bounded by fee-cap checks. |
+| `protocol_flat_fee_mist` | `0` | Admin can queue an update. |
 | `max_claim_mist` | `75000000` | Starts from `INITIAL_MAX_CLAIM_MIST`; cannot exceed `MAX_CLAIM_MIST`. |
 | `min_settle_mist` | `100000` | Cannot be set below `MIN_SETTLE_MIST`. |
-| `max_spread_bps` | `500` | Admin can update within `1..10000`. |
-| `config_version` | `0` | Incremented on each `update_config`. |
+| `max_spread_bps` | `500` | Admin can queue an update within `1..10000`. |
+| `config_version` | `0` | Incremented when a queued admin change is applied, when emergency pause changes protocol state, or when emergency pause cancels a pending unpause. |
 
 <a id="off-chain-constants"></a>
 

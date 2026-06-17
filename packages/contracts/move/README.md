@@ -47,7 +47,7 @@ Prefer the docs first when you only need system-level context:
 
 ```
 sources/
-├── config.move     Config (Shared Object) — global settings + admin functions
+├── config.move     Config (Shared Object) — global settings + delayed admin updates
 ├── vault.move      UserVault (Owned Object) + VaultRegistry (Shared Object) — per-user credit vault + registered vault enforcement
 ├── settle.move     Settlement entry points — 1-hop swap_and_settle_* + settle_with_credit() + spread guard
 └── events.move     All on-chain event definitions
@@ -70,6 +70,7 @@ sources/
 All `swap_and_settle_*` variants atomically swap a payment token (e.g. DEEP) to SUI via DeepBook, then run settlement in a single transaction.
 Before each swap, the on-chain spread guard rejects the transaction (abort 110: `ESpreadTooWide`) when the DeepBook order book is empty, one-sided, crossed, or has bid/ask spread exceeding `max_spread_bps`.
 `settle_with_credit()` skips the swap and settles using vault credit only.
+`settle_with_credit()` is credit-only settlement, so it does not enforce `min_settle_mist`; it still checks exact sufficiency, fee cap, config version, and nonce.
 Leftover payment coin is returned to the sender automatically in swap variants. No separate DEEP coin is returned from settlement. See [`docs/architecture/onchain-settlement.md → DeepBook Fee Model`](../../../docs/architecture/onchain-settlement.md#deepbook-fee-model).
 
 ### Owned Object Protection
@@ -92,12 +93,18 @@ Only the owner can include it in transactions. No third party (including relayer
 | `settle_with_credit`             | `settle` | `(config, registry, clock, vault, use_credit_amount, relayer_claim, relayer_recipient, receipt_id, nonce, sim_gas, gas_variance_fixed_mist, slippage_buffer_mist, quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version, quote_timestamp_ms, policy_hash, order_id_hash, ctx)` | Existing user: vault credit only, no swap                                                                                     |
 | `withdraw`                       | `vault`  | `(vault, ctx)`                                                                                                                                                                                                                                                                                        | Withdraw entire vault balance                                                                                                 |
 | `balance`                        | `vault`  | `(vault): u64`                                                                                                                                                                                                                                                                                        | Query vault credit balance                                                                                                    |
-| `set_paused`                     | `config` | `(config, paused, ctx)`                                                                                                                                                                                                                                                                               | Toggle pause (admin only)                                                                                                     |
-| `update_config`                  | `config` | `(config, max_relayer_fee_mist, protocol_flat_fee_mist, max_claim, min_settle, max_spread_bps, ctx)`                                                                                                                                                                                                  | Update settings including spread cap (admin only)                                                                             |
-| `propose_admin`                  | `config` | `(config, new_admin, ctx)`                                                                                                                                                                                                                                                                            | S-5: Step 1 — propose new admin (admin only). Aborts if a pending proposal already exists; call `cancel_admin_proposal` first |
-| `cancel_admin_proposal`          | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | S-5: Cancel pending admin proposal (admin only)                                                                               |
-| `accept_admin`                   | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | S-5: Step 2 — accept admin role (pending admin only)                                                                          |
-| `update_protocol_treasury`       | `config` | `(config, new_treasury, ctx)`                                                                                                                                                                                                                                                                         | Change fee recipient (admin only)                                                                                             |
+| `set_paused`                     | `config` | `(config, paused, ctx)`                                                                                                                                                                                                                                                                               | Emergency pause to `true` immediately; queue unpause when `paused=false` (admin only)                                         |
+| `apply_paused_update`            | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Apply a matured pending pause update (permissionless)                                                                         |
+| `cancel_paused_update`           | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Cancel a pending pause update (admin only)                                                                                    |
+| `update_config`                  | `config` | `(config, max_relayer_fee_mist, protocol_flat_fee_mist, max_claim, min_settle, max_spread_bps, ctx)`                                                                                                                                                                                                  | Queue settings update including spread cap (admin only)                                                                       |
+| `apply_config_update`            | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Apply a matured pending config update (permissionless)                                                                        |
+| `cancel_config_update`           | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Cancel a pending config update (admin only)                                                                                   |
+| `propose_admin`                  | `config` | `(config, new_admin, ctx)`                                                                                                                                                                                                                                                                            | Propose new admin (admin only). Aborts if a pending proposal already exists; call `cancel_admin_proposal` first                |
+| `cancel_admin_proposal`          | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Cancel pending admin proposal (admin only)                                                                                    |
+| `accept_admin`                   | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Accept admin role (pending admin only)                                                                                        |
+| `update_protocol_treasury`       | `config` | `(config, new_treasury, ctx)`                                                                                                                                                                                                                                                                         | Queue fee recipient change (admin only)                                                                                       |
+| `apply_protocol_treasury_update` | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Apply a matured pending treasury update (permissionless)                                                                      |
+| `cancel_protocol_treasury_update` | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                      | Cancel a pending treasury update (admin only)                                                                                 |
 
 > **Withdrawal policy**: `vault::withdraw_amount()` exists on-chain as an owner-only helper, but it is intentionally not part of the sponsored execution allowlist or SDK API.
 > Supported sponsored PTBs only expose full withdrawal through `withdraw()`.
@@ -127,8 +134,9 @@ Only the owner can include it in transactions. No third party (including relayer
 | ----------------- | ------------------------------------ | ---- | --------------- |
 | `MAX_CLAIM_MIST`  | `docs/parameters.md` package constants | MIST | S-2, E-4        |
 | `MIN_SETTLE_MIST` | `docs/parameters.md` package constants | MIST | dust prevention |
+| `ADMIN_UPDATE_DELAY_EPOCHS` | `docs/parameters.md` package constants | epochs | delayed admin updates |
 
-`Config.max_claim_mist` initializes from `INITIAL_MAX_CLAIM_MIST` at package init and remains admin-adjustable up to `MAX_CLAIM_MIST`.
+`Config.max_claim_mist` initializes from `INITIAL_MAX_CLAIM_MIST` at package init and remains admin-adjustable up to `MAX_CLAIM_MIST` through delayed config updates.
 
 ---
 
@@ -138,6 +146,8 @@ The core math inside `settle_core()` (called by all settlement paths via `settle
 
 ```
 total_in = sui_received_from_swap [+ use_credit_amount]
+enforce_min_settle_mist = true for swap settlement paths
+enforce_min_settle_mist = false for settle_with_credit
 
 quoted_relayer_fee = quoted_relayer_fee_mist     // relayer quoted fee, capped by max_relayer_fee_mist
 protocol_fee       = config.protocol_flat_fee_mist
@@ -147,8 +157,9 @@ assert!(config.config_version == expected_config_version) // drift detection
 assert!(config.protocol_flat_fee_mist == expected_protocol_fee_mist) // exact match
 assert!(quoted_relayer_fee_mist <= config.max_relayer_fee_mist)       // fee cap
 assert!(relayer_claim <= max_claim_mist)         // S-2
-assert!(total_in >= min_settle_mist)             // S-3
-assert!(total_in >= total_deduction)             // S-4/S-5
+if enforce_min_settle_mist:
+  assert!(total_in >= min_settle_mist)           // S-3
+assert!(total_in >= total_deduction)             // S-4
 assert!(nonce > vault.last_nonce)                // S-14: on-chain monotonic nonce replay prevention
 surplus = total_in − payout − protocol_fee       // S-9: deposited to vault
 ```
@@ -158,18 +169,33 @@ surplus = total_in − payout − protocol_fee       // S-9: deposited to vault
 
 ---
 
+## Admin Update Flow
+
+Admin updates use a queue and apply flow.
+
+- `set_paused(config, true, ctx)` applies emergency pause immediately and is admin-only.
+- `set_paused(config, false, ctx)` queues unpause. The queued unpause can be applied at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`.
+- `update_config(...)` queues economic config changes. `apply_config_update(...)` applies the matured values.
+- `update_protocol_treasury(...)` queues the treasury change. `apply_protocol_treasury_update(...)` applies the matured value.
+- Admin can cancel pending config, treasury, and pause updates before they are applied.
+- Matured queued protocol updates are permissionless to apply and can only execute the exact queued values.
+- `ADMIN_UPDATE_DELAY_EPOCHS` is `2`.
+- `config_version` increments when protocol state changes through an applied update, when emergency pause changes the pause state, or when emergency pause cancels a pending unpause.
+
+---
+
 ## Events
 
-All state changes emit events for full audit traceability.
+Applied state changes and admin transfer flows emit events for audit traceability.
 
 | Event                         | Trigger                          | Key Fields                                                                                                                                                                                                                                                                                           |
 | ----------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SettleEvent`                 | Settlement entry succeeded       | receipt_id, policy_hash, quote_timestamp_ms, exec_timestamp_ms, sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist, relayer_claim, quoted_relayer_fee_mist, protocol_fee, protocol_treasury, payout, total_in, surplus_credited, config_version, user, relayer_recipient, order_id_hash |
 | `CreditUsedEvent`             | Credit used from vault           | user, amount, remaining                                                                                                                                                                                                                                                                              |
 | `WithdrawEvent`               | Vault withdrawal                 | user, amount                                                                                                                                                                                                                                                                                         |
-| `ConfigUpdatedEvent`          | Settings changed                 | old/new value pairs (including max_spread_bps), by, epoch                                                                                                                                                                                                                                            |
-| `TreasuryUpdatedEvent`        | Treasury address changed         | old/new treasury, by, epoch                                                                                                                                                                                                                                                                          |
-| `PausedEvent`                 | Pause toggled                    | is_paused, by, epoch                                                                                                                                                                                                                                                                                 |
+| `ConfigUpdatedEvent`          | Matured settings update applied  | old/new value pairs (including max_spread_bps), by, epoch                                                                                                                                                                                                                                            |
+| `TreasuryUpdatedEvent`        | Matured treasury update applied  | old/new treasury, by, epoch                                                                                                                                                                                                                                                                          |
+| `PausedEvent`                 | Emergency pause or matured pause update applied | is_paused, by, epoch                                                                                                                                                                                                                                                                    |
 | `AdminProposedEvent`          | Admin transfer proposed          | current_admin, proposed_admin, epoch                                                                                                                                                                                                                                                                 |
 | `AdminProposalCancelledEvent` | Pending admin transfer cancelled | admin, cancelled_proposed, epoch                                                                                                                                                                                                                                                                     |
 | `AdminTransferredEvent`       | Admin transferred                | old/new admin, by, epoch                                                                                                                                                                                                                                                                             |
@@ -214,7 +240,7 @@ sui move test --path packages/contracts/move settle
 packages/contracts/move/
 ├── Move.toml                Package manifest (edition 2024)
 ├── sources/
-│   ├── config.move          Config + admin functions + VaultRegistry init
+│   ├── config.move          Config + delayed admin updates + VaultRegistry init
 │   ├── events.move          9 event definitions
 │   ├── settle.move          Settlement logic — 1-hop swap_and_settle_* + settle_with_credit()
 │   └── vault.move           UserVault CRUD + monotonic nonce replay prevention + VaultRegistry
