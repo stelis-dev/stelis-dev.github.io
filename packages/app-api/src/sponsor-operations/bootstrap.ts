@@ -24,6 +24,7 @@ import type { SponsorSlotState } from '@stelis/contracts';
 import type {
   SponsorRefillAccountWriteFields,
   RedisSponsorOperationsState,
+  SlotRead,
   SlotWriteFields,
 } from './redisState.js';
 import { normalizeSponsorOperationsLastError } from './lastError.js';
@@ -50,10 +51,88 @@ function computeRefillsRemaining(balance: bigint, refillTargetMist: bigint | nul
   return (balance / refillTargetMist).toString();
 }
 
+function clearRefillAttemptFields(): Pick<
+  SlotWriteFields,
+  | 'pendingRefillDigest'
+  | 'refillAttemptedAmountMist'
+  | 'refillObservedBalanceMist'
+  | 'refillReconciliationResult'
+> {
+  return {
+    pendingRefillDigest: '',
+    refillAttemptedAmountMist: '',
+    refillObservedBalanceMist: '',
+    refillReconciliationResult: '',
+  };
+}
+
+function hasUnresolvedRefill(slot: SlotRead | null): boolean {
+  if (slot === null) return false;
+  if (slot.pendingRefillDigest !== null) return true;
+  if (
+    slot.refillReconciliationResult === 'dispatch_started' ||
+    slot.refillReconciliationResult === 'dispatch_submitted' ||
+    slot.refillReconciliationResult === 'dispatch_timeout' ||
+    slot.refillReconciliationResult === 'still_pending'
+  ) {
+    return true;
+  }
+  return slot.state === 'awaiting_confirmation' && slot.refillAttemptedAmountMist !== null;
+}
+
+function refillConfirmationThreshold(
+  deps: BootstrapSponsorOperationsDeps,
+): bigint {
+  return deps.refillTargetMist ?? deps.warnThresholdMist;
+}
+
+function reconcileUnresolvedRefillFromBalance(
+  deps: BootstrapSponsorOperationsDeps,
+  previous: SlotRead,
+  balance: bigint,
+): SlotWriteFields {
+  if (balance >= refillConfirmationThreshold(deps)) {
+    return {
+      state: classifySlotState(balance, deps.warnThresholdMist),
+      balanceMist: balance.toString(),
+      lastError: '',
+      pendingRefillDigest: '',
+      refillAttemptedAmountMist: previous.refillAttemptedAmountMist ?? '',
+      refillObservedBalanceMist: balance.toString(),
+      refillReconciliationResult: 'confirmed',
+    };
+  }
+  return {
+    state: 'awaiting_confirmation',
+    balanceMist: balance.toString(),
+    lastError: '',
+    pendingRefillDigest: previous.pendingRefillDigest ?? '',
+    refillAttemptedAmountMist: previous.refillAttemptedAmountMist ?? '',
+    refillObservedBalanceMist: balance.toString(),
+    refillReconciliationResult: 'still_pending',
+  };
+}
+
+function preserveUnresolvedRefillAfterProbeFailure(
+  previous: SlotRead,
+  err: unknown,
+): SlotWriteFields {
+  return {
+    state: 'awaiting_confirmation',
+    balanceMist: '',
+    lastError: normalizeSponsorOperationsLastError(err),
+    pendingRefillDigest: previous.pendingRefillDigest ?? '',
+    refillAttemptedAmountMist: previous.refillAttemptedAmountMist ?? '',
+    refillObservedBalanceMist: previous.refillObservedBalanceMist ?? '',
+    refillReconciliationResult: 'still_pending',
+  };
+}
+
 async function syncOneSlot(
   deps: BootstrapSponsorOperationsDeps,
   slotAddress: string,
 ): Promise<void> {
+  const previous = await deps.state.readSlot(slotAddress);
   let fields: SlotWriteFields;
   try {
     const balance = await withTimeout(
@@ -64,17 +143,25 @@ async function syncOneSlot(
         return parseChainBalanceMist(res.balance.balance, `Slot ${slotAddress} balance`);
       },
     );
-    fields = {
-      state: classifySlotState(balance, deps.warnThresholdMist),
-      balanceMist: balance.toString(),
-      lastError: '',
-    };
+    fields =
+      previous !== null && hasUnresolvedRefill(previous)
+        ? reconcileUnresolvedRefillFromBalance(deps, previous, balance)
+        : {
+            state: classifySlotState(balance, deps.warnThresholdMist),
+            balanceMist: balance.toString(),
+            lastError: '',
+            ...clearRefillAttemptFields(),
+          };
   } catch (err) {
-    fields = {
-      state: 'rpc_unreachable',
-      balanceMist: '',
-      lastError: normalizeSponsorOperationsLastError(err),
-    };
+    fields =
+      previous !== null && hasUnresolvedRefill(previous)
+        ? preserveUnresolvedRefillAfterProbeFailure(previous, err)
+        : {
+            state: 'rpc_unreachable',
+            balanceMist: '',
+            lastError: normalizeSponsorOperationsLastError(err),
+            ...clearRefillAttemptFields(),
+          };
   }
   // Redis write failure here propagates. `initContext()` converts it
   // to a fail-fast boot, matching the existing `admin:not_before` pattern.

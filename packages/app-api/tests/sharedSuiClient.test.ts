@@ -86,6 +86,7 @@ vi.mock('../src/redisClient.js', () => ({
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(1),
+    hgetall: vi.fn().mockResolvedValue({}),
     eval: vi.fn().mockResolvedValue(null),
     dispose: vi.fn().mockResolvedValue(undefined),
   }),

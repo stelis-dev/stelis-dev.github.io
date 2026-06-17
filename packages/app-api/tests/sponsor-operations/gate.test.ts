@@ -16,6 +16,10 @@ function view(overrides: Partial<SponsorAvailabilityView> = {}): SponsorAvailabi
         lastObservedAtMs: 1_700_000_000_000,
         lastError: null,
         writeSeq: 1,
+        pendingRefillDigest: null,
+        refillAttemptedAmountMist: null,
+        refillObservedBalanceMist: null,
+        refillReconciliationResult: null,
       },
     ],
     sponsorRefillAccount: {
@@ -94,6 +98,10 @@ describe('sponsor operations gate', () => {
               lastObservedAtMs: 1_700_000_000_000,
               lastError: 'rpc down',
               writeSeq: 1,
+              pendingRefillDigest: null,
+              refillAttemptedAmountMist: null,
+              refillObservedBalanceMist: null,
+              refillReconciliationResult: null,
             },
           ],
           sponsorRefillAccount: {

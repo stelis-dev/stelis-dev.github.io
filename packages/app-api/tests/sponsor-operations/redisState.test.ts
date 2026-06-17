@@ -80,6 +80,10 @@ class StubRedis implements RedisClientLike {
           get('lastError'),
           get('lastObservedAtMs'),
           get('writeSeq'),
+          get('pendingRefillDigest'),
+          get('refillAttemptedAmountMist'),
+          get('refillObservedBalanceMist'),
+          get('refillReconciliationResult'),
         ];
       });
       const sponsorRefillAccountHash = this.hashes.get(keys[keys.length - 1] ?? '');
@@ -141,6 +145,7 @@ describe('redisState keyspace helpers', () => {
 
   it('READ_ALL_LUA reads slot and sponsor refill account fields without HGETALL', () => {
     expect(READ_ALL_LUA).toContain("redis.call('HGET', key, 'state')");
+    expect(READ_ALL_LUA).toContain("redis.call('HGET', key, 'pendingRefillDigest')");
     expect(READ_ALL_LUA).toContain("redis.call('HGET', sponsorKey, 'healthy')");
     expect(READ_ALL_LUA).toContain('return { slotRows, sponsorRefillAccount }');
   });
@@ -253,12 +258,20 @@ describe('createRedisSponsorOperationsState — reads', () => {
       state: 'low_balance',
       balanceMist: '1000',
       lastError: 'timeout',
+      pendingRefillDigest: '0xabc',
+      refillAttemptedAmountMist: '9000',
+      refillObservedBalanceMist: '1000',
+      refillReconciliationResult: 'dispatch_timeout',
     });
     const read = await state.readSlot(SLOT_A);
     expect(read).not.toBeNull();
     expect(read!.state).toBe('low_balance');
     expect(read!.balanceMist).toBe('1000');
     expect(read!.lastError).toBe('timeout');
+    expect(read!.pendingRefillDigest).toBe('0xabc');
+    expect(read!.refillAttemptedAmountMist).toBe('9000');
+    expect(read!.refillObservedBalanceMist).toBe('1000');
+    expect(read!.refillReconciliationResult).toBe('dispatch_timeout');
     expect(read!.writeSeq).toBe(1);
     expect(read!.lastObservedAtMs).not.toBeNull();
   });
@@ -349,6 +362,10 @@ describe('createRedisSponsorOperationsState — reads', () => {
         lastError: null,
         lastObservedAtMs: expect.any(Number),
         writeSeq: 1,
+        pendingRefillDigest: null,
+        refillAttemptedAmountMist: null,
+        refillObservedBalanceMist: null,
+        refillReconciliationResult: null,
       },
       {
         address: SLOT_B,
@@ -357,6 +374,10 @@ describe('createRedisSponsorOperationsState — reads', () => {
         lastError: 'below threshold',
         lastObservedAtMs: expect.any(Number),
         writeSeq: 1,
+        pendingRefillDigest: null,
+        refillAttemptedAmountMist: null,
+        refillObservedBalanceMist: null,
+        refillReconciliationResult: null,
       },
     ]);
     expect(read.sponsorRefillAccount).toEqual({

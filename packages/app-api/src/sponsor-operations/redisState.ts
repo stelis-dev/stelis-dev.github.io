@@ -25,6 +25,19 @@
 import type { RedisClientLike } from '@stelis/core-api';
 import type { SponsorSlotState } from '@stelis/contracts';
 
+export const REFILL_RECONCILIATION_RESULTS = [
+  'not_needed',
+  'dispatch_started',
+  'dispatch_submitted',
+  'dispatch_failed',
+  'dispatch_timeout',
+  'confirmed',
+  'still_pending',
+  'balance_below_target',
+] as const;
+
+export type RefillReconciliationResult = (typeof REFILL_RECONCILIATION_RESULTS)[number];
+
 // ─────────────────────────────────────────────
 // Keyspace
 // ─────────────────────────────────────────────
@@ -52,6 +65,14 @@ export interface SlotWriteFields {
   balanceMist?: string;
   /** Last observed error. Normalized by sponsor operations writers. Empty means none. */
   lastError?: string;
+  /** Refill transaction digest while the attempt still needs balance reconciliation. */
+  pendingRefillDigest?: string;
+  /** Refill transfer amount attempted for the current/last refill lifecycle. */
+  refillAttemptedAmountMist?: string;
+  /** Slot balance observed by the refill lifecycle before or during reconciliation. */
+  refillObservedBalanceMist?: string;
+  /** Current refill reconciliation status. Empty string clears stale status. */
+  refillReconciliationResult?: RefillReconciliationResult | '';
 }
 
 /** Fields a caller may update on the sponsor refill account HASH. */
@@ -77,6 +98,10 @@ export interface SlotRead {
   readonly lastError: string | null;
   readonly lastObservedAtMs: number | null;
   readonly writeSeq: number | null;
+  readonly pendingRefillDigest: string | null;
+  readonly refillAttemptedAmountMist: string | null;
+  readonly refillObservedBalanceMist: string | null;
+  readonly refillReconciliationResult: RefillReconciliationResult | null;
 }
 
 export interface SponsorRefillAccountRead {
@@ -135,7 +160,11 @@ export const READ_ALL_LUA = [
   "    redis.call('HGET', key, 'balanceMist') or '',",
   "    redis.call('HGET', key, 'lastError') or '',",
   "    redis.call('HGET', key, 'lastObservedAtMs') or '',",
-  "    redis.call('HGET', key, 'writeSeq') or ''",
+  "    redis.call('HGET', key, 'writeSeq') or '',",
+  "    redis.call('HGET', key, 'pendingRefillDigest') or '',",
+  "    redis.call('HGET', key, 'refillAttemptedAmountMist') or '',",
+  "    redis.call('HGET', key, 'refillObservedBalanceMist') or '',",
+  "    redis.call('HGET', key, 'refillReconciliationResult') or ''",
   '  })',
   'end',
   'local sponsorKey = KEYS[#KEYS]',
@@ -210,6 +239,15 @@ function parseStringOrNull(raw: string | undefined): string | null {
   return raw === '' ? null : raw;
 }
 
+function parseRefillReconciliationResultOrNull(
+  raw: string | undefined,
+): RefillReconciliationResult | null {
+  if (raw === undefined || raw === '') return null;
+  return (REFILL_RECONCILIATION_RESULTS as readonly string[]).includes(raw)
+    ? (raw as RefillReconciliationResult)
+    : null;
+}
+
 function parseMistStringOrNull(raw: string | undefined): string | null {
   if (raw === undefined || raw === '') return null;
   return /^(?:0|[1-9]\d*)$/.test(raw) ? raw : null;
@@ -269,6 +307,12 @@ export function createRedisSponsorOperationsState(
       lastError: parseStringOrNull(hash.lastError),
       lastObservedAtMs: parseIntOrNull(hash.lastObservedAtMs),
       writeSeq: parseIntOrNull(hash.writeSeq),
+      pendingRefillDigest: parseStringOrNull(hash.pendingRefillDigest),
+      refillAttemptedAmountMist: parseMistStringOrNull(hash.refillAttemptedAmountMist),
+      refillObservedBalanceMist: parseMistStringOrNull(hash.refillObservedBalanceMist),
+      refillReconciliationResult: parseRefillReconciliationResultOrNull(
+        hash.refillReconciliationResult,
+      ),
     };
   }
 
@@ -324,6 +368,10 @@ export function createRedisSponsorOperationsState(
         lastError: parseStringOrNull(stringAt(row, 3)),
         lastObservedAtMs: parseIntOrNull(stringAt(row, 4)),
         writeSeq: parseIntOrNull(stringAt(row, 5)),
+        pendingRefillDigest: parseStringOrNull(stringAt(row, 6)),
+        refillAttemptedAmountMist: parseMistStringOrNull(stringAt(row, 7)),
+        refillObservedBalanceMist: parseMistStringOrNull(stringAt(row, 8)),
+        refillReconciliationResult: parseRefillReconciliationResultOrNull(stringAt(row, 9)),
       };
     });
 

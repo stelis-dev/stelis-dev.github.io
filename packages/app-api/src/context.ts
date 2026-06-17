@@ -473,19 +473,16 @@ async function initContext(): Promise<AppApiContext> {
       refillTimeoutMs,
       confirmationTimeoutMs,
       sponsorRefillAccountBalanceTimeoutMs,
-      executeRefill: async (slotAddress: string) => {
+      executeRefill: async (slotAddress: string, amountMist: bigint) => {
         if (!refillEnabled || refillTargetMist == null) {
           throw new Error('refill disabled or target not configured');
         }
-        const result = await executeSponsorSlotRefill({
+        return await executeSponsorSlotRefill({
           sui: relayRefForSponsorOperations.sui,
           signer: sponsorRefillAccountKey,
           sponsorAddress: slotAddress,
-          amountMist: refillTargetMist,
+          amountMist,
         });
-        if (!result.success) {
-          throw new Error(result.error ?? 'refill tx failed');
-        }
       },
       getSlotBalance: async (slotAddress: string) => {
         const res = await relayRefForSponsorOperations.sui.getBalance({ owner: slotAddress });

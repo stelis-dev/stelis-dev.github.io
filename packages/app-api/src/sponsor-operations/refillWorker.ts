@@ -14,24 +14,20 @@
  *        via `SET NX PX`. If another instance holds it, the worker
  *        skips this slot — the still-running instance will drive the
  *        refill to completion.
- *     2. Write `state='refilling'` (caller-owned fields only; Lua
- *        stamps `lastObservedAtMs` / `writeSeq`).
- *     3. Acquire the sponsor-refill-account dispatch lock, then execute
+ *     2. Reconcile any previous pending/timeout refill attempt before
+ *        sending a new transfer.
+ *     3. Observe the current slot balance and calculate the refill
+ *        transfer as `max(0, refillTargetMist - currentBalance)`.
+ *     4. Acquire the sponsor-refill-account dispatch lock. Only after
+ *        that lock is held, write durable attempt fields and execute
  *        the injected refill TX under the remaining `refillTimeoutMs`
- *        budget. On rejection, write `state='refill_failed'` + the
- *        error message, release the slot lock, return.
- *     4. Refresh sponsor refill account state with one bounded probe, then write the
- *        sponsor refill account HASH. RPC failure here is swallowed: the refill itself
- *        succeeded on chain, and a later sponsor refill account refresh can
- *        rewrite the shared state.
- *     5. Write `state='awaiting_confirmation'`.
- *     6. Confirmation phase — `getSlotBalance(addr)` under
- *        `withTimeout(confirmationTimeoutMs, …)`. Balance ≥ warn
- *        threshold → write `state='healthy'` + fresh balance. Balance
- *        below threshold → write `state='refill_failed'` + empty
- *        `lastError`. Rejection/timeout → write `state='refill_failed'`
- *        + error message.
- *     7. Release the slot lock via a matching-token Lua CAS delete.
+ *        budget.
+ *     5. Dispatch success writes `state='awaiting_confirmation'` with
+ *        the pending digest, refreshes the sponsor refill account
+ *        best-effort, then confirms the slot balance against the refill
+ *        target. Dispatch timeout writes `state='awaiting_confirmation'`
+ *        and lets the underlying promise reconcile late success/failure.
+ *     6. Release the slot lock via a matching-token Lua CAS delete.
  *
  * Slot lock TTL:
  *   Derived from the bounded lifecycle phase timers plus
@@ -51,8 +47,17 @@ import {
   logStructuredEvent,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
 } from '@stelis/core-api/observability';
-import type { RedisSponsorOperationsState } from './redisState.js';
-import type { RefillLock, SponsorRefillAccountDispatchLock } from './refillLock.js';
+import type {
+  RedisSponsorOperationsState,
+  RefillReconciliationResult,
+  SlotRead,
+  SlotWriteFields,
+} from './redisState.js';
+import type {
+  RefillLock,
+  SponsorRefillAccountDispatchLock,
+  SponsorRefillAccountDispatchLockHandle,
+} from './refillLock.js';
 import { normalizeSponsorOperationsLastError } from './lastError.js';
 import { probeAndWriteSponsorRefillAccountState } from './sponsorRefillAccountProbe.js';
 import { SponsorOperationsTimeoutError, withTimeout } from './timeout.js';
@@ -72,9 +77,33 @@ export interface SponsorOperationsRefillWorkerDeps {
   /** Upper bound for the bounded post-refill sponsor refill account probe. Required. */
   readonly sponsorRefillAccountBalanceTimeoutMs: number;
   /** Unbounded refill dispatch. Wrapped in `withTimeout(refillTimeoutMs, …)`. */
-  readonly executeRefill: (slotAddress: string) => Promise<void>;
+  readonly executeRefill: (
+    slotAddress: string,
+    amountMist: bigint,
+  ) => Promise<SponsorOperationsRefillDispatchResult>;
   /** Unbounded slot balance reader. Wrapped in `withTimeout(confirmationTimeoutMs, …)`. */
   readonly getSlotBalance: (slotAddress: string) => Promise<bigint>;
+}
+
+export interface SponsorOperationsRefillDispatchResult {
+  readonly success: boolean;
+  readonly digest: string | null;
+  readonly error: string | null;
+}
+
+interface RefillAttempt {
+  readonly observedBalanceMist: bigint;
+  readonly amountMist: bigint;
+}
+
+interface ActiveRefillDispatch {
+  readonly remainingMs: number;
+  readonly resultPromise: Promise<SponsorOperationsRefillDispatchResult>;
+}
+
+interface AcquiredRefillDispatchLock {
+  readonly handle: SponsorRefillAccountDispatchLockHandle;
+  readonly remainingMs: number;
 }
 
 export interface SponsorOperationsRefillWorker {
@@ -101,6 +130,75 @@ function assertPositiveFinite(name: string, value: number): void {
 
 function classifySlotFromBalance(balance: bigint, warnThresholdMist: bigint): SponsorSlotState {
   return balance >= warnThresholdMist ? 'healthy' : 'low_balance';
+}
+
+function refillConfirmationThreshold(
+  deps: Pick<SponsorOperationsRefillWorkerDeps, 'refillTargetMist' | 'warnThresholdMist'>,
+): bigint {
+  return deps.refillTargetMist ?? deps.warnThresholdMist;
+}
+
+function computeRefillAmount(currentBalanceMist: bigint, refillTargetMist: bigint): bigint {
+  return currentBalanceMist >= refillTargetMist ? 0n : refillTargetMist - currentBalanceMist;
+}
+
+function clearRefillAttemptFields(): Pick<
+  SlotWriteFields,
+  | 'pendingRefillDigest'
+  | 'refillAttemptedAmountMist'
+  | 'refillObservedBalanceMist'
+  | 'refillReconciliationResult'
+> {
+  return {
+    pendingRefillDigest: '',
+    refillAttemptedAmountMist: '',
+    refillObservedBalanceMist: '',
+    refillReconciliationResult: '',
+  };
+}
+
+function refillAttemptFields(input: {
+  readonly pendingRefillDigest?: string | null;
+  readonly attemptedAmountMist: bigint | string | null;
+  readonly observedBalanceMist: bigint | string | null;
+  readonly reconciliationResult: RefillReconciliationResult;
+}): Pick<
+  SlotWriteFields,
+  | 'pendingRefillDigest'
+  | 'refillAttemptedAmountMist'
+  | 'refillObservedBalanceMist'
+  | 'refillReconciliationResult'
+> {
+  return {
+    pendingRefillDigest: input.pendingRefillDigest ?? '',
+    refillAttemptedAmountMist:
+      typeof input.attemptedAmountMist === 'bigint'
+        ? input.attemptedAmountMist.toString()
+        : (input.attemptedAmountMist ?? ''),
+    refillObservedBalanceMist:
+      typeof input.observedBalanceMist === 'bigint'
+        ? input.observedBalanceMist.toString()
+        : (input.observedBalanceMist ?? ''),
+    refillReconciliationResult: input.reconciliationResult,
+  };
+}
+
+function hasUnresolvedRefill(slot: SlotRead | null): boolean {
+  if (slot === null) return false;
+  if (slot.pendingRefillDigest !== null) return true;
+  if (
+    slot.refillReconciliationResult === 'dispatch_started' ||
+    slot.refillReconciliationResult === 'dispatch_submitted' ||
+    slot.refillReconciliationResult === 'dispatch_timeout' ||
+    slot.refillReconciliationResult === 'still_pending'
+  ) {
+    return true;
+  }
+  return slot.state === 'awaiting_confirmation' && slot.refillAttemptedAmountMist !== null;
+}
+
+function refillTargetNotConfiguredError(): Error {
+  return new Error('refill target not configured');
 }
 
 function getErrorMessage(err: unknown): string {
@@ -171,81 +269,6 @@ export function createSponsorOperationsRefillWorker(
     );
   }
 
-  async function runSlotLifecycle(address: string): Promise<void> {
-    if (disposed) return;
-
-    const handle = await deps.refillLock.acquire(address);
-    if (handle === null) {
-      // Another instance is driving this slot. Skip silently; the
-      // other instance's completion will propagate via the shared
-      // state store.
-      return;
-    }
-
-    try {
-      // Phase 1: mark as refilling.
-      if (!(await writeSlot(address, { state: 'refilling', lastError: '' }))) return;
-
-      // Phase 2: dispatch refill TX under the account-scoped distributed lock.
-      try {
-        await dispatchRefillWithAccountLock(address);
-      } catch (err) {
-        await writeSlot(address, {
-          state: 'refill_failed',
-          lastError: normalizeSponsorOperationsLastError(err),
-        });
-        return;
-      }
-      if (disposed) return;
-
-      // Phase 3: refresh sponsor refill account state (best-effort; does not fail the lifecycle).
-      await refreshSponsorRefillAccount();
-      if (disposed) return;
-
-      // Phase 4: mark as awaiting_confirmation.
-      if (!(await writeSlot(address, { state: 'awaiting_confirmation', lastError: '' }))) return;
-
-      // Phase 5: confirmation probe.
-      try {
-        const balance = await withTimeout(
-          `refillWorker.confirmation(${address})`,
-          deps.confirmationTimeoutMs,
-          () => deps.getSlotBalance(address),
-        );
-        if (disposed) return;
-        if (balance >= deps.warnThresholdMist) {
-          if (
-            !(await writeSlot(address, {
-              state: classifySlotFromBalance(balance, deps.warnThresholdMist),
-              balanceMist: balance.toString(),
-              lastError: '',
-            }))
-          ) {
-            return;
-          }
-        } else {
-          if (
-            !(await writeSlot(address, {
-              state: 'refill_failed',
-              balanceMist: balance.toString(),
-              lastError: '',
-            }))
-          ) {
-            return;
-          }
-        }
-      } catch (err) {
-        if (disposed) return;
-        await writeSlot(address, {
-          state: 'refill_failed',
-          lastError: normalizeSponsorOperationsLastError(err),
-        });
-      }
-    } finally {
-      await deps.refillLock.release(handle);
-    }
-  }
-
   async function acquireAccountDispatchLock(deadlineMs: number) {
     const pollMs = 25;
     while (!disposed) {
@@ -266,12 +289,201 @@ export function createSponsorOperationsRefillWorker(
     );
   }
 
-  async function dispatchRefillWithAccountLock(address: string): Promise<void> {
+  async function readSlotBalanceForRefill(address: string, operation: string): Promise<bigint> {
+    return withTimeout(operation, deps.confirmationTimeoutMs, () => deps.getSlotBalance(address));
+  }
+
+  async function reconcileExistingRefill(address: string, slot: SlotRead | null): Promise<boolean> {
+    if (!hasUnresolvedRefill(slot)) return false;
+    if (slot === null) return false;
+    if (deps.refillTargetMist === null) {
+      await writeSlot(address, {
+        state: 'refill_failed',
+        lastError: normalizeSponsorOperationsLastError(refillTargetNotConfiguredError()),
+        ...refillAttemptFields({
+          pendingRefillDigest: slot.pendingRefillDigest,
+          attemptedAmountMist: slot.refillAttemptedAmountMist,
+          observedBalanceMist: slot.refillObservedBalanceMist,
+          reconciliationResult: 'dispatch_failed',
+        }),
+      });
+      return true;
+    }
+
+    try {
+      const balance = await readSlotBalanceForRefill(
+        address,
+        `refillWorker.reconcileExistingRefill(${address})`,
+      );
+      if (disposed) return true;
+      if (balance >= refillConfirmationThreshold(deps)) {
+        await writeSlot(address, {
+          state: classifySlotFromBalance(balance, deps.warnThresholdMist),
+          balanceMist: balance.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: slot.refillAttemptedAmountMist,
+            observedBalanceMist: balance,
+            reconciliationResult: 'confirmed',
+          }),
+        });
+      } else {
+        await writeSlot(address, {
+          state: 'awaiting_confirmation',
+          balanceMist: balance.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: slot.pendingRefillDigest,
+            attemptedAmountMist: slot.refillAttemptedAmountMist,
+            observedBalanceMist: balance,
+            reconciliationResult: 'still_pending',
+          }),
+        });
+      }
+    } catch (err) {
+      if (disposed) return true;
+      await writeSlot(address, {
+        state: 'awaiting_confirmation',
+        lastError: normalizeSponsorOperationsLastError(err),
+        ...refillAttemptFields({
+          pendingRefillDigest: slot.pendingRefillDigest,
+          attemptedAmountMist: slot.refillAttemptedAmountMist,
+          observedBalanceMist: slot.refillObservedBalanceMist,
+          reconciliationResult: 'still_pending',
+        }),
+      });
+    }
+    return true;
+  }
+
+  async function confirmRefillAttempt(
+    address: string,
+    attempt: RefillAttempt,
+    digest: string | null,
+  ): Promise<void> {
+    try {
+      const balance = await readSlotBalanceForRefill(
+        address,
+        `refillWorker.confirmation(${address})`,
+      );
+      if (disposed) return;
+      if (balance >= refillConfirmationThreshold(deps)) {
+        await writeSlot(address, {
+          state: classifySlotFromBalance(balance, deps.warnThresholdMist),
+          balanceMist: balance.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: attempt.amountMist,
+            observedBalanceMist: balance,
+            reconciliationResult: 'confirmed',
+          }),
+        });
+      } else {
+        await writeSlot(address, {
+          state: 'refill_failed',
+          balanceMist: balance.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: attempt.amountMist,
+            observedBalanceMist: balance,
+            reconciliationResult: 'balance_below_target',
+          }),
+        });
+      }
+    } catch (err) {
+      if (disposed) return;
+      await writeSlot(address, {
+        state: 'awaiting_confirmation',
+        lastError: normalizeSponsorOperationsLastError(err),
+        ...refillAttemptFields({
+          pendingRefillDigest: digest,
+          attemptedAmountMist: attempt.amountMist,
+          observedBalanceMist: attempt.observedBalanceMist,
+          reconciliationResult: 'still_pending',
+        }),
+      });
+    }
+  }
+
+  async function applyDispatchResult(
+    address: string,
+    attempt: RefillAttempt,
+    result: SponsorOperationsRefillDispatchResult,
+  ): Promise<void> {
+    if (!result.success) {
+      await writeSlot(address, {
+        state: 'refill_failed',
+        balanceMist: attempt.observedBalanceMist.toString(),
+        lastError: normalizeSponsorOperationsLastError(result.error ?? 'refill tx failed'),
+        ...refillAttemptFields({
+          pendingRefillDigest: '',
+          attemptedAmountMist: attempt.amountMist,
+          observedBalanceMist: attempt.observedBalanceMist,
+          reconciliationResult: 'dispatch_failed',
+        }),
+      });
+      return;
+    }
+
+    if (
+      !(await writeSlot(address, {
+        state: 'awaiting_confirmation',
+        balanceMist: attempt.observedBalanceMist.toString(),
+        lastError: '',
+        ...refillAttemptFields({
+          pendingRefillDigest: result.digest,
+          attemptedAmountMist: attempt.amountMist,
+          observedBalanceMist: attempt.observedBalanceMist,
+          reconciliationResult: 'dispatch_submitted',
+        }),
+      }))
+    ) {
+      return;
+    }
     if (disposed) return;
+    await refreshSponsorRefillAccount();
+    if (disposed) return;
+    await confirmRefillAttempt(address, attempt, result.digest);
+  }
+
+  function watchLateDispatch(
+    address: string,
+    attempt: RefillAttempt,
+    resultPromise: Promise<SponsorOperationsRefillDispatchResult>,
+  ): void {
+    void resultPromise.then(
+      async (result) => {
+        if (disposed) return;
+        await applyDispatchResult(address, attempt, result);
+      },
+      async (err) => {
+        if (disposed) return;
+        await writeSlot(address, {
+          state: 'refill_failed',
+          balanceMist: attempt.observedBalanceMist.toString(),
+          lastError: normalizeSponsorOperationsLastError(err),
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: attempt.amountMist,
+            observedBalanceMist: attempt.observedBalanceMist,
+            reconciliationResult: 'dispatch_failed',
+          }),
+        });
+      },
+    );
+  }
+
+  async function acquireRefillDispatchLock(
+    address: string,
+  ): Promise<AcquiredRefillDispatchLock | null> {
+    if (disposed) return null;
 
     const deadlineMs = Date.now() + deps.refillTimeoutMs;
     const handle = await acquireAccountDispatchLock(deadlineMs);
-    if (handle === null) return;
+    if (handle === null) return null;
 
     const remainingMs = deadlineMs - Date.now();
     if (remainingMs <= 0) {
@@ -282,14 +494,168 @@ export function createSponsorOperationsRefillWorker(
       );
     }
 
-    await withTimeout(`refillWorker.executeRefill(${address})`, remainingMs, async () => {
+    return { handle, remainingMs };
+  }
+
+  function startRefillDispatchWithAccountLock(
+    address: string,
+    amountMist: bigint,
+    acquired: AcquiredRefillDispatchLock,
+  ): ActiveRefillDispatch {
+    const resultPromise = (async () => {
       try {
-        if (disposed) return;
-        await deps.executeRefill(address);
+        if (disposed) return { success: false, digest: null, error: 'disposed' };
+        return await deps.executeRefill(address, amountMist);
       } finally {
-        await deps.sponsorRefillAccountDispatchLock.release(handle);
+        await deps.sponsorRefillAccountDispatchLock.release(acquired.handle);
       }
-    });
+    })();
+
+    return { remainingMs: acquired.remainingMs, resultPromise };
+  }
+
+  async function runSlotLifecycle(address: string): Promise<void> {
+    if (disposed) return;
+
+    const handle = await deps.refillLock.acquire(address);
+    if (handle === null) {
+      // Another instance is driving this slot. Skip silently; the
+      // other instance's completion will propagate via the shared
+      // state store.
+      return;
+    }
+
+    try {
+      const previous = await deps.state.readSlot(address);
+      if (await reconcileExistingRefill(address, previous)) return;
+
+      if (deps.refillTargetMist === null) {
+        await writeSlot(address, {
+          state: 'refill_failed',
+          lastError: normalizeSponsorOperationsLastError(refillTargetNotConfiguredError()),
+          ...clearRefillAttemptFields(),
+        });
+        return;
+      }
+
+      let observedBalanceMist: bigint;
+      try {
+        observedBalanceMist = await readSlotBalanceForRefill(
+          address,
+          `refillWorker.observeBalanceBeforeRefill(${address})`,
+        );
+      } catch (err) {
+        await writeSlot(address, {
+          state: 'refill_failed',
+          lastError: normalizeSponsorOperationsLastError(err),
+          ...clearRefillAttemptFields(),
+        });
+        return;
+      }
+      if (disposed) return;
+
+      const amountMist = computeRefillAmount(observedBalanceMist, deps.refillTargetMist);
+      if (amountMist === 0n) {
+        await writeSlot(address, {
+          state: classifySlotFromBalance(observedBalanceMist, deps.warnThresholdMist),
+          balanceMist: observedBalanceMist.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: 0n,
+            observedBalanceMist,
+            reconciliationResult: 'not_needed',
+          }),
+        });
+        return;
+      }
+
+      const attempt: RefillAttempt = { observedBalanceMist, amountMist };
+      let acquiredDispatchLock: AcquiredRefillDispatchLock | null;
+      try {
+        acquiredDispatchLock = await acquireRefillDispatchLock(address);
+      } catch (err) {
+        await writeSlot(address, {
+          state: 'refill_failed',
+          balanceMist: observedBalanceMist.toString(),
+          lastError: normalizeSponsorOperationsLastError(err),
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: amountMist,
+            observedBalanceMist,
+            reconciliationResult: 'dispatch_failed',
+          }),
+        });
+        return;
+      }
+      if (acquiredDispatchLock === null) return;
+      if (disposed) {
+        await deps.sponsorRefillAccountDispatchLock.release(acquiredDispatchLock.handle);
+        return;
+      }
+
+      if (
+        !(await writeSlot(address, {
+          state: 'refilling',
+          balanceMist: observedBalanceMist.toString(),
+          lastError: '',
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: amountMist,
+            observedBalanceMist,
+            reconciliationResult: 'dispatch_started',
+          }),
+        }))
+      ) {
+        await deps.sponsorRefillAccountDispatchLock.release(acquiredDispatchLock.handle);
+        return;
+      }
+
+      const activeDispatch = startRefillDispatchWithAccountLock(
+        address,
+        amountMist,
+        acquiredDispatchLock,
+      );
+
+      try {
+        const result = await withTimeout(
+          `refillWorker.executeRefill(${address})`,
+          activeDispatch.remainingMs,
+          () => activeDispatch.resultPromise,
+        );
+        if (disposed) return;
+        await applyDispatchResult(address, attempt, result);
+      } catch (err) {
+        if (err instanceof SponsorOperationsTimeoutError) {
+          watchLateDispatch(address, attempt, activeDispatch.resultPromise);
+          await writeSlot(address, {
+            state: 'awaiting_confirmation',
+            balanceMist: observedBalanceMist.toString(),
+            lastError: normalizeSponsorOperationsLastError(err),
+            ...refillAttemptFields({
+              pendingRefillDigest: '',
+              attemptedAmountMist: amountMist,
+              observedBalanceMist,
+              reconciliationResult: 'dispatch_timeout',
+            }),
+          });
+          return;
+        }
+        await writeSlot(address, {
+          state: 'refill_failed',
+          balanceMist: observedBalanceMist.toString(),
+          lastError: normalizeSponsorOperationsLastError(err),
+          ...refillAttemptFields({
+            pendingRefillDigest: '',
+            attemptedAmountMist: amountMist,
+            observedBalanceMist,
+            reconciliationResult: 'dispatch_failed',
+          }),
+        });
+      }
+    } finally {
+      await deps.refillLock.release(handle);
+    }
   }
 
   function startSlotLifecycle(slotAddress: string): void {
