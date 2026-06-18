@@ -23,8 +23,8 @@ import {
   queryUserCredit,
   sha256Bytes,
   validateNonlossSponsor,
+  validateGenericSettlementTransaction,
   validateGenericUserTransactionKind,
-  validatePtbStructure,
   validateSettleArgs,
 } from '@stelis/core-relay';
 import type { AllowedSettlementSwapPath, OnchainConfig, RelayerEnv } from '@stelis/core-relay';
@@ -743,7 +743,7 @@ async function runGenericSelfCheck(
       ...buildPrepareEnv(options.relayerContext),
       allowedSettlementSwapPaths: [...prepare.config.allowedSettlementSwapPaths],
     };
-    const l1 = validatePtbStructure(builtCommands, builtEnv);
+    const l1 = validateGenericSettlementTransaction(builtTx, builtEnv);
     if (!l1.ok) throw new PrepareValidationError(l1.code, l1.message);
 
     const settleArgs = extractSettleArgsFromBuiltTx(builtCommands, builtTxData.inputs, builtEnv, {
@@ -1362,7 +1362,7 @@ async function revalidateGenericSponsorPolicy(
   const builtCommands = convertSdkCommands(builtTxData.commands);
   const txSender = extractTxSender(builtTx);
 
-  const l1 = validatePtbStructure(builtCommands, env);
+  const l1 = validateGenericSettlementTransaction(builtTx, env);
   if (!l1.ok) {
     emitGenericDriftEvent(
       'l1_ptb_structure',
