@@ -15,7 +15,6 @@ import { fromHex, toBase64 } from '@mysten/sui/utils';
 import type { SettleProfile, SingleHopSettlementSwapPath } from '@stelis/contracts';
 import { GAS_MARGIN_CAP_BPS, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
 import {
-  containsSponsorWithdrawal,
   convertSdkCommands,
   CreditQueryInconsistentStateError,
   DEFAULT_GAS_MARGIN_BPS,
@@ -24,9 +23,9 @@ import {
   queryUserCredit,
   sha256Bytes,
   validateNonlossSponsor,
+  validateGenericUserTransactionKind,
   validatePtbStructure,
   validateSettleArgs,
-  validateUserCommands,
 } from '@stelis/core-relay';
 import type { AllowedSettlementSwapPath, OnchainConfig, RelayerEnv } from '@stelis/core-relay';
 import { validatePaymentInputIntegrity } from '@stelis/core-relay/server';
@@ -557,19 +556,16 @@ async function runGenericRequestValidation(
     prepare.params.txKindBytes,
     options.relayerContext.sui,
   );
-  const commands = convertSdkCommands(userTx.getData().commands);
   const env = buildPrepareEnv(options.relayerContext);
-  const validationResult = validateUserCommands(commands, env);
+  const validationResult = validateGenericUserTransactionKind(
+    userTx,
+    env,
+    prepare.params.paymentTokenType,
+  );
   if (!validationResult.ok) {
     throw new PrepareValidationError(
       validationResult.code,
       `P1 validation failed: ${validationResult.message}`,
-    );
-  }
-  if (containsSponsorWithdrawal(userTx)) {
-    throw new PrepareValidationError(
-      'P1_SPONSOR_WITHDRAWAL_FORBIDDEN',
-      'User TX contains FundsWithdrawal(Sponsor) — rejected to protect sponsor funds',
     );
   }
 

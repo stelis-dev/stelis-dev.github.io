@@ -17,12 +17,15 @@ import {
   type GenericExecutionPolicyState,
   type GenericSponsorErrorFactory,
 } from '../src/session/sponsoredExecution/genericExecutionPolicy.js';
+import { runPrepareStateMachine } from '../src/session/sponsoredExecution/runner.js';
 import type {
   PostConsumeSponsorContext,
   PreConsumeSponsorContext,
 } from '../src/session/sponsoredExecution/index.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
 import { SenderSignatureError } from '../src/session/sessionPrimitives.js';
+import { PrepareValidationError } from '../src/prepare/replay.js';
+import { getFailurePolicy } from '../src/failures.js';
 import type {
   GenericPreparedTxEntry,
   PromotionPreparedTxEntry,
@@ -34,6 +37,7 @@ const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const SENDER = `0x${'11'.repeat(32)}`;
 const OTHER_SENDER = `0x${'33'.repeat(32)}`;
 const SPONSOR = `0x${'22'.repeat(32)}`;
+const PAYMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
 const GAS_USED = {
   computationCost: '1000',
@@ -146,6 +150,38 @@ function makeSponsorOptions(
   };
 }
 
+function makePrepareOptions(
+  input: {
+    ctx?: RelayerContext;
+    deps?: Partial<GenericExecutionPolicyDependencies>;
+  } = {},
+): GenericExecutionPolicyOptions {
+  const ctx = input.ctx ?? makeContext();
+  return {
+    relayerContext: ctx,
+    prepare: {
+      params: {
+        txKindBytes: 'mock-tx-kind-bytes',
+        senderAddress: SENDER,
+        paymentTokenType: PAYMENT_TOKEN_TYPE,
+        clientIp: '127.0.0.1',
+        txKindBytesHash: 'a'.repeat(64),
+        prepareAuthorizationTimestampMs: 1,
+        prepareAuthorizationRequestNonce: 'nonce',
+        prepareAuthorizationSignature: 'signature',
+      },
+      config: {
+        deepbookPackageId: `0x${'77'.repeat(32)}`,
+        supportedSettlementSwapPaths: [],
+        poolDescriptors: new Map(),
+        allowedSettlementSwapPaths: [],
+        quotedRelayerFeeMist: 0n,
+      },
+    },
+    deps: input.deps,
+  };
+}
+
 function makePostCtx(): PostConsumeSponsorContext {
   return {
     receiptId: RECEIPT_ID,
@@ -157,6 +193,32 @@ function makePostCtx(): PostConsumeSponsorContext {
       hmacCommitVerified: true,
     }),
   };
+}
+
+function makePrepareHookCtx() {
+  return {
+    receiptId: RECEIPT_ID,
+    senderAddress: SENDER,
+    clientIp: '127.0.0.1',
+  };
+}
+
+function makeUnaccountableWithdrawalTx(): Transaction {
+  return {
+    getData: () => ({
+      inputs: [
+        {
+          $kind: 'FundsWithdrawal',
+          FundsWithdrawal: {
+            reservation: { $kind: 'UnknownShape', UnknownShape: '5000000' },
+            typeArg: { $kind: 'Balance', Balance: PAYMENT_TOKEN_TYPE },
+            withdrawFrom: { $kind: 'Sender' },
+          },
+        },
+      ],
+      commands: [],
+    }),
+  } as unknown as Transaction;
 }
 
 function makePreCtx(): PreConsumeSponsorContext {
@@ -232,6 +294,82 @@ describe('createGenericExecutionPolicy', () => {
     });
     expect(policy.handleRequirements.sponsorResult).toEqual({ sponsorSlot: true });
     expect(policy.hooks.RouteReservationAfterBuild).toBeDefined();
+  });
+
+  test('generic prepare rejects unaccountable withdrawal in RequestValidation before resource acquisition', async () => {
+    const deserializeUserTxKind = vi.fn().mockResolvedValue(makeUnaccountableWithdrawalTx());
+    const recordSponsorFailure = vi.fn().mockResolvedValue(undefined);
+    const ctx = makeContext({
+      abuseBlocker: {
+        recordSponsorFailure,
+      } as unknown as RelayerContext['abuseBlocker'],
+    });
+    const { policy } = createGenericExecutionPolicy(
+      makePrepareOptions({
+        ctx,
+        deps: {
+          deserializeUserTxKind:
+            deserializeUserTxKind as GenericExecutionPolicyDependencies['deserializeUserTxKind'],
+        },
+      }),
+    );
+    const host = {
+      inflightLimiter: {
+        tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
+      },
+      sponsorPool: {
+        checkout: vi.fn(),
+        commit: vi.fn(),
+        checkin: vi.fn(),
+      },
+      prepareStore: {
+        reserveNonce: vi.fn(),
+        releaseReservation: vi.fn(),
+        store: vi.fn(),
+      },
+    };
+    const preparedCommitInputs = vi.fn();
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    try {
+      const err = await runPrepareStateMachine(
+        host,
+        {
+          hookContext: makePrepareHookCtx(),
+          preparedCommitInputs,
+        },
+        policy,
+      ).catch((caught: unknown) => caught);
+
+      expect(err).toBeInstanceOf(PrepareValidationError);
+      expect((err as PrepareValidationError).code).toBe('UNACCOUNTABLE_WITHDRAWAL');
+      expect((err as PrepareValidationError).statusHint).toBeUndefined();
+      expect(getFailurePolicy('UNACCOUNTABLE_WITHDRAWAL')).toMatchObject({
+        classification: 'manipulation',
+        httpStatus: 422,
+        abuseImpact: { ip: 'skip', subject: 'skip' },
+      });
+      expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
+      expect(host.inflightLimiter.tryAcquire).not.toHaveBeenCalled();
+      expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
+      expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
+      expect(host.prepareStore.store).not.toHaveBeenCalled();
+      expect(preparedCommitInputs).not.toHaveBeenCalled();
+      expect(recordSponsorFailure).not.toHaveBeenCalled();
+
+      const buildEvents = infoSpy.mock.calls
+        .map((args) => {
+          try {
+            return JSON.parse(String(args[0])) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry) => entry?.event === 'PREPARE_BUILD_STAGE');
+      expect(buildEvents).toHaveLength(0);
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 
   test('does not widen the package main barrel', async () => {
