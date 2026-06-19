@@ -427,6 +427,7 @@ describe('studio prepare hooks', () => {
       gasInput,
     );
 
+    expect(kindTx.getData().gasData.owner).toBe(SPONSOR);
     expect(buildResult.measuredGasMist).toBe(101_300n);
     const commitInput = buildStudioPreparedCommitInputs(options, state, {
       receiptId: RECEIPT_ID,

@@ -365,11 +365,19 @@ module stelis::settle_tests {
             test_scenario::return_to_sender(&scenario, vault);
         };
 
-        // 4. Verify Treasury Receipt (Admin Address)
+        // 4. Verify Relayer Receipt
+        test_scenario::next_tx(&mut scenario, ADDR_RELAYER);
+        {
+            let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
+            assert!(coin::value(&coin) == 15_000_000, 6); // Claim + quoted relayer fee
+            test_scenario::return_to_sender(&scenario, coin);
+        };
+
+        // 5. Verify Treasury Receipt (Admin Address)
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN); // Treasury initially set to deployer
         {
             let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
-            assert!(coin::value(&coin) == 10_000_000, 6); // Protocol flat fee
+            assert!(coin::value(&coin) == 10_000_000, 7); // Protocol flat fee
             test_scenario::return_to_sender(&scenario, coin);
         };
         clock::destroy_for_testing(clock);
