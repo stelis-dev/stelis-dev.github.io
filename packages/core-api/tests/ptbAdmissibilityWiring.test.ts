@@ -9,6 +9,10 @@ function readWorkspaceFile(pathFromRoot: string): string {
   return readFileSync(resolve(repoRoot, pathFromRoot), 'utf8');
 }
 
+function countMatches(source: string, pattern: RegExp): number {
+  return source.match(pattern)?.length ?? 0;
+}
+
 describe('PTB admissibility wiring lock', () => {
   it('keeps SDK and generic prepare on the same user TransactionKind validator', () => {
     const sdk = readWorkspaceFile('packages/sdk/src/sdk.ts');
@@ -41,5 +45,35 @@ describe('PTB admissibility wiring lock', () => {
 
     expect(genericPolicy).not.toContain('extractPrefixWithdrawals');
     expect(prepareBuild).toContain('extractPrefixWithdrawals(tx, paymentTokenType)');
+  });
+
+  it('keeps GasCoin detection in the shared primitive and reuses it from integrity and promotion layers', () => {
+    const staticValidation = readWorkspaceFile('packages/core-relay/src/validate/static.ts');
+    const sdkIntegrity = readWorkspaceFile('packages/sdk/src/integrity.ts');
+    const promotionValidation = readWorkspaceFile('packages/core-api/src/studio/validation.ts');
+
+    expect(staticValidation).toContain('export function containsGasCoinReference');
+    expect(countMatches(staticValidation, /containsGasCoinReference\(/g)).toBeGreaterThanOrEqual(3);
+
+    expect(sdkIntegrity).toContain('containsGasCoinReference,');
+    expect(sdkIntegrity).toContain('if (cmd.arguments && containsGasCoinReference(cmd.arguments))');
+    expect(sdkIntegrity).not.toContain('function containsGasCoinReference');
+
+    expect(promotionValidation).toContain('containsGasCoinReference,');
+    expect(promotionValidation).toContain('if (containsGasCoinReference(cmd.arguments))');
+    expect(promotionValidation).not.toContain('function containsGasCoinReference');
+  });
+
+  it('keeps SDK returned-transaction integrity as a separate layer from generic validators', () => {
+    const sdkIntegrity = readWorkspaceFile('packages/sdk/src/integrity.ts');
+
+    expect(sdkIntegrity).toContain('export function verifyPrefix');
+    expect(sdkIntegrity).toContain('export function verifySuffix');
+    expect(sdkIntegrity).toContain('verifySuffix(suffix, packageId)');
+    expect(sdkIntegrity).toContain('coin');
+    expect(sdkIntegrity).toContain('redeem_funds');
+    expect(sdkIntegrity).toContain('expected exactly 1 settle call in suffix');
+    expect(sdkIntegrity).not.toContain('validateGenericUserTransactionKind');
+    expect(sdkIntegrity).not.toContain('validateGenericSettlementTransaction');
   });
 });
