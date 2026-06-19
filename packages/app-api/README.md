@@ -47,11 +47,38 @@ From the repository root:
 cp packages/app-api/.env.local.example packages/app-api/.env.local
 cp packages/app-api/settlement-swap-paths.json.example packages/app-api/settlement-swap-paths.json
 cp packages/app-api/rpc.json.example packages/app-api/rpc.json
-set -a
-source packages/app-api/.env.local
-set +a
+```
+
+Start this package:
+
+```bash
 npm run dev:app-api
 ```
+
+The root `dev:app-api` command loads `packages/app-api/.env.local`, starts an isolated Redis
+memory server through `redis-memory-server`, sets `REDIS_URL` for the child process, and then
+starts this package. Local development does not use Docker Redis or an external Redis service.
+
+## Runtime Scripts
+
+Local development uses repository-root helper commands:
+
+```bash
+npm run dev:app-api
+```
+
+Those root `dev:*` commands are local development helpers. They are not deployment commands.
+
+Compiled Node execution uses package commands:
+
+```bash
+npm run build -w @stelis/app-api
+npm run start -w @stelis/app-api
+```
+
+The package `start` command runs `node dist/index.js`. It does not load `.env.local` and does not start Redis. The runtime environment must provide a real Redis `REDIS_URL` and the other required environment variables.
+
+This repository currently has no Vercel, Cloud Run, Dockerfile, or other platform deployment entrypoint. Platform deployment commands belong in the platform configuration that deploys this package.
 
 For a full local self-hosted bring-up, follow [docs/getting-started.md](../../docs/getting-started.md).
 For operator policy, sponsor management, Studio mode, and incident handling, use [docs/operations.md](../../docs/operations.md).

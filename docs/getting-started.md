@@ -16,6 +16,14 @@ It describes only commands and files currently present in this repository.
 
 For the full documentation map, use [`index.md`](./index.md).
 
+## Script Responsibility
+
+Use repository-root scripts for local development and repository checks. Do not use root `dev:*`
+scripts as deployment commands.
+
+Use package `build` and `start` scripts, or platform-specific deployment configuration, for deployed
+product packages.
+
 ## Install
 
 ```bash
@@ -57,14 +65,15 @@ cp packages/app-api/rpc.json.example packages/app-api/rpc.json
 
 Fill in real values in `.env.local`, `settlement-swap-paths.json`, and `rpc.json`.
 
-Then run:
+Start the API host:
 
 ```bash
-set -a
-source packages/app-api/.env.local
-set +a
 npm run dev:app-api
 ```
+
+The root `dev:app-api` command loads `packages/app-api/.env.local`, starts an isolated Redis
+memory server through `redis-memory-server`, sets `REDIS_URL` for the child process, and then
+starts the API host. Local development does not use Docker Redis or an external Redis service.
 
 ## Run Web Apps
 

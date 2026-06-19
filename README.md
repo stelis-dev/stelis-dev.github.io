@@ -39,6 +39,25 @@ For user transaction constraints, see [User TransactionKind rules](./docs/api.md
 
 For the package layout, product package policy, and dependency rules, see [repository structure](./docs/repository-structure.md).
 
+## Script Responsibility
+
+Repository-root scripts are for local development, repository checks, and local verification builds.
+They are not deployment entrypoints.
+
+Package scripts define each package's own runtime contract:
+
+- `npm run dev:app-api`, `npm run dev:app-web`, and `npm run dev:app-admin`
+  are root-level local development helpers. `dev:app-api` always starts an isolated Redis
+  memory server for the API host.
+- `npm test`, `npm run lint`, `npm run typecheck`, `npm run release:check`, and `npm run build`
+  are repository verification commands.
+- Package `build` scripts create package artifacts.
+- Package `start` scripts, where present, run compiled package artifacts and expect environment values
+  from the shell, container, or deployment platform.
+
+Platform deployment commands belong in the platform configuration that deploys a product package.
+Do not treat root `dev:*` scripts as deployment commands.
+
 ## Package Policy
 
 Workspace packages are allowed when they make development safer and clearer. They are not automatically public products.
