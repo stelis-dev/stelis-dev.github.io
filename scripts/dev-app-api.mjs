@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const envFilePath = resolve('packages/app-api/.env.local');
+const envFilePath = resolve('packages/app-api/.env');
 
 function parseEnvFile(content) {
   const parsed = {};

@@ -56,7 +56,7 @@ npm run build --workspace=@stelis/app-admin
 Copy the example file:
 
 ```bash
-cp .env.local.example .env.local
+cp .env.example .env
 ```
 
 Required:

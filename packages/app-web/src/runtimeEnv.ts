@@ -11,7 +11,7 @@ function readRequiredEnv(key: 'VITE_STELIS_RELAYER_URL' | 'VITE_SUI_RPC_URL'): s
   if (value) return value;
 
   throw new Error(
-    `[app-web] Missing required env ${key}. Set it in packages/app-web/.env.local (see .env.local.example).`,
+    `[app-web] Missing required env ${key}. Set it in packages/app-web/.env (see .env.example).`,
   );
 }
 

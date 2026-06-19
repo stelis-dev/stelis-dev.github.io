@@ -141,7 +141,7 @@ export async function runBootValidation(): Promise<BootResult> {
   } catch (err) {
     throw new Error(
       `[app-api] Cannot read settlement-swap-paths.json at "${settlementSwapPathRegistryPath}": ${err instanceof Error ? err.message : String(err)}. ` +
-        'Copy packages/app-api/settlement-swap-paths.json.example → packages/app-api/settlement-swap-paths.json and fill in the actual DeepBook pool IDs before starting app-api.',
+        'Restore the tracked packages/app-api/settlement-swap-paths.json config file and configure the active NETWORK section before starting app-api.',
     );
   }
   // Capture the first pool ID for downstream simulateTransaction capability probe.
@@ -156,6 +156,7 @@ export async function runBootValidation(): Promise<BootResult> {
   }
   const settlementSwapPathRegistryEntries = parseSettlementSwapPathRegistryJson(
     settlementSwapPathRegistryJson,
+    network,
   );
   const simulateProbePoolId = settlementSwapPathRegistryEntries[0].poolId;
 
@@ -258,7 +259,7 @@ export async function runBootValidation(): Promise<BootResult> {
   }
 
   // ── 10a. Load RPC fleet + validate chain identity ─────────────────────────
-  const rpcEndpoints = loadRpcConfig();
+  const rpcEndpoints = loadRpcConfig(network);
 
   // ── Endpoint verification: chain identity + functional probe ──────────
   // 1. Chain identity: each endpoint must return correct chainIdentifier

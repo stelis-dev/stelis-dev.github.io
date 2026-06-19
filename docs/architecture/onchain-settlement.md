@@ -32,6 +32,6 @@ User vaults are owned objects. Users can withdraw directly through the vault mod
 
 ## DeepBook Fee Model
 
-Settlement swap paths use DeepBook pools. Path data comes from `packages/app-api/settlement-swap-paths.json`, and the API host derives path details from on-chain pool data at boot.
+Settlement swap paths use DeepBook pools. Path data comes from the `NETWORK` section in `packages/app-api/settlement-swap-paths.json`, and the API host derives path details from on-chain pool data at boot.
 
 Leftover payment coin is returned to the sender in swap variants. Settlement surplus is credited to the user's vault balance.

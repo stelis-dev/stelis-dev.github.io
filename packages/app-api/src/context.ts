@@ -306,6 +306,7 @@ async function initContext(): Promise<AppApiContext> {
       suiClient,
       deepbookIds.packageId,
       settlementSwapPathRegistryPath,
+      network,
     );
     const settlementSwapPathDescriptors =
       createPrepareSettlementSwapPathDescriptorMap(settlementSwapPaths);

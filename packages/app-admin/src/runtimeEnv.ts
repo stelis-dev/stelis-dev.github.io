@@ -6,7 +6,7 @@ function readRequiredEnv(key: 'VITE_SUI_RPC_URL'): string {
   if (value) return value;
 
   throw new Error(
-    `[app-admin] Missing required env ${key}. Set it in packages/app-admin/.env.local (see .env.local.example).`,
+    `[app-admin] Missing required env ${key}. Set it in packages/app-admin/.env (see .env.example).`,
   );
 }
 

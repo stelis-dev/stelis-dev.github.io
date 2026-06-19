@@ -68,9 +68,9 @@ function makeFailCall<I extends object, O extends object>(
 describe('loadRpcConfig', () => {
   it('loads endpoints from a JSON file', () => {
     const path = '/tmp/test-rpc-load.json';
-    writeFileSync(path, '[{"url":"https://a.com"},{"url":"https://b.com"}]');
+    writeFileSync(path, rpcConfigJson([{ url: 'https://a.com' }, { url: 'https://b.com' }]));
     try {
-      const result = loadRpcConfig(path);
+      const result = loadRpcConfig('testnet', path);
       expect(result).toEqual([{ url: 'https://a.com' }, { url: 'https://b.com' }]);
     } finally {
       unlinkSync(path);
@@ -78,17 +78,21 @@ describe('loadRpcConfig', () => {
   });
 
   it('throws on missing file with guidance', () => {
-    expect(() => loadRpcConfig('/tmp/nonexistent-rpc.json')).toThrow('rpc.json.example');
+    expect(() => loadRpcConfig('testnet', '/tmp/nonexistent-rpc.json')).toThrow(
+      'tracked packages/app-api/rpc.json',
+    );
   });
 
   it('resolves auth.valueEnv from env lookup', () => {
     const path = '/tmp/test-rpc-auth.json';
     writeFileSync(
       path,
-      '[{"url":"https://a.com","auth":{"header":"x-token","valueEnv":"TEST_TOK"}}]',
+      rpcConfigJson([{ url: 'https://a.com', auth: { header: 'x-token', valueEnv: 'TEST_TOK' } }]),
     );
     try {
-      const result = loadRpcConfig(path, (name) => (name === 'TEST_TOK' ? 'secret' : undefined));
+      const result = loadRpcConfig('testnet', path, (name) =>
+        name === 'TEST_TOK' ? 'secret' : undefined,
+      );
       expect(result[0].meta).toEqual({ 'x-token': 'secret' });
     } finally {
       unlinkSync(path);
@@ -99,27 +103,27 @@ describe('loadRpcConfig', () => {
     const path = '/tmp/test-rpc-malformed.json';
     writeFileSync(path, '{bad json');
     try {
-      expect(() => loadRpcConfig(path)).toThrow('rpc.json');
+      expect(() => loadRpcConfig('testnet', path)).toThrow('rpc.json');
     } finally {
       unlinkSync(path);
     }
   });
 
-  it('throws rpc.json error on empty array', () => {
+  it('throws rpc.json error on empty selected network endpoints', () => {
     const path = '/tmp/test-rpc-empty.json';
-    writeFileSync(path, '[]');
+    writeFileSync(path, rpcConfigJson([]));
     try {
-      expect(() => loadRpcConfig(path)).toThrow('at least one endpoint');
+      expect(() => loadRpcConfig('testnet', path)).toThrow('at least one endpoint');
     } finally {
       unlinkSync(path);
     }
   });
 
-  it('throws rpc.json error on non-array JSON', () => {
-    const path = '/tmp/test-rpc-nonarray.json';
-    writeFileSync(path, '{"url":"https://a.com"}');
+  it('throws rpc.json error on flat-array JSON', () => {
+    const path = '/tmp/test-rpc-flat-array.json';
+    writeFileSync(path, '[{"url":"https://a.com"}]');
     try {
-      expect(() => loadRpcConfig(path)).toThrow('JSON array');
+      expect(() => loadRpcConfig('testnet', path)).toThrow('object');
     } finally {
       unlinkSync(path);
     }
@@ -172,6 +176,20 @@ interface InternalEndpoint {
 
 function getEndpoints(transport: SuiRpcFailoverTransport): InternalEndpoint[] {
   return (transport as unknown as { _endpoints: InternalEndpoint[] })._endpoints;
+}
+
+function rpcConfigJson(
+  testnet: unknown,
+  mainnet: unknown = [{ url: 'https://mainnet.example' }],
+): string {
+  return JSON.stringify({ testnet, mainnet });
+}
+
+function parseTestnetRpcConfig(
+  testnet: unknown,
+  envLookup?: (name: string) => string | undefined,
+) {
+  return parseEndpointConfigJson(rpcConfigJson(testnet), 'testnet', envLookup);
 }
 
 describe('SuiRpcFailoverTransport', () => {
@@ -406,30 +424,52 @@ describe('createSuiClient', () => {
 // ── parseEndpointConfigJson ─────────────────────────────────────────────────
 
 describe('parseEndpointConfigJson', () => {
-  it('parses plain endpoint array', () => {
-    const result = parseEndpointConfigJson('[{"url":"https://a.com"},{"url":"https://b.com"}]');
+  it('parses the selected network endpoint section', () => {
+    const result = parseEndpointConfigJson(
+      rpcConfigJson([{ url: 'https://testnet-a.com' }], [{ url: 'https://mainnet-a.com' }]),
+      'mainnet',
+    );
+    expect(result).toEqual([{ url: 'https://mainnet-a.com' }]);
+  });
+
+  it('parses multiple endpoints from the selected network section', () => {
+    const result = parseTestnetRpcConfig([
+      { url: 'https://a.com' },
+      { url: 'https://b.com' },
+    ]);
     expect(result).toEqual([{ url: 'https://a.com' }, { url: 'https://b.com' }]);
   });
 
   it('resolves auth env indirection', () => {
-    const result = parseEndpointConfigJson(
-      '[{"url":"https://a.com","auth":{"header":"x-token","valueEnv":"MY_TOKEN"}}]',
+    const result = parseTestnetRpcConfig(
+      [{ url: 'https://a.com', auth: { header: 'x-token', valueEnv: 'MY_TOKEN' } }],
       (name) => (name === 'MY_TOKEN' ? 'secret123' : undefined),
     );
     expect(result).toEqual([{ url: 'https://a.com', meta: { 'x-token': 'secret123' } }]);
   });
 
   it('resolves auth with prefix', () => {
-    const result = parseEndpointConfigJson(
-      '[{"url":"https://a.com","auth":{"header":"Authorization","valueEnv":"MY_TOKEN","prefix":"Bearer "}}]',
+    const result = parseTestnetRpcConfig(
+      [
+        {
+          url: 'https://a.com',
+          auth: { header: 'Authorization', valueEnv: 'MY_TOKEN', prefix: 'Bearer ' },
+        },
+      ],
       (name) => (name === 'MY_TOKEN' ? 'abc' : undefined),
     );
     expect(result[0].meta).toEqual({ Authorization: 'Bearer abc' });
   });
 
   it('merges static meta with auth meta', () => {
-    const result = parseEndpointConfigJson(
-      '[{"url":"https://a.com","meta":{"x-custom":"val"},"auth":{"header":"x-token","valueEnv":"T"}}]',
+    const result = parseTestnetRpcConfig(
+      [
+        {
+          url: 'https://a.com',
+          meta: { 'x-custom': 'val' },
+          auth: { header: 'x-token', valueEnv: 'T' },
+        },
+      ],
       (name) => (name === 'T' ? 'tok' : undefined),
     );
     expect(result[0].meta).toEqual({ 'x-custom': 'val', 'x-token': 'tok' });
@@ -437,8 +477,8 @@ describe('parseEndpointConfigJson', () => {
 
   it('throws on missing auth env', () => {
     expect(() =>
-      parseEndpointConfigJson(
-        '[{"url":"https://a.com","auth":{"header":"x-token","valueEnv":"MISSING"}}]',
+      parseTestnetRpcConfig(
+        [{ url: 'https://a.com', auth: { header: 'x-token', valueEnv: 'MISSING' } }],
         () => undefined,
       ),
     ).toThrow('MISSING');
@@ -446,54 +486,84 @@ describe('parseEndpointConfigJson', () => {
 
   it('throws on non-string auth.prefix', () => {
     expect(() =>
-      parseEndpointConfigJson(
-        '[{"url":"https://a.com","auth":{"header":"x-token","valueEnv":"T","prefix":123}}]',
+      parseTestnetRpcConfig(
+        [{ url: 'https://a.com', auth: { header: 'x-token', valueEnv: 'T', prefix: 123 } }],
         (name) => (name === 'T' ? 'tok' : undefined),
       ),
     ).toThrow('auth.prefix');
   });
 
   it('throws on empty JSON', () => {
-    expect(() => parseEndpointConfigJson('')).toThrow('must not be empty');
+    expect(() => parseEndpointConfigJson('', 'testnet')).toThrow('must not be empty');
   });
 
   it('throws on invalid JSON', () => {
-    expect(() => parseEndpointConfigJson('{bad')).toThrow('not valid JSON');
+    expect(() => parseEndpointConfigJson('{bad', 'testnet')).toThrow('not valid JSON');
   });
 
-  it('throws on non-array JSON', () => {
-    expect(() => parseEndpointConfigJson('{"url":"https://a.com"}')).toThrow('JSON array');
+  it('throws on old flat-array JSON', () => {
+    expect(() => parseEndpointConfigJson('[{"url":"https://a.com"}]', 'testnet')).toThrow(
+      'object',
+    );
   });
 
-  it('throws on empty array', () => {
-    expect(() => parseEndpointConfigJson('[]')).toThrow('at least one endpoint');
+  it('throws on missing network section', () => {
+    expect(() =>
+      parseEndpointConfigJson(
+        JSON.stringify({ mainnet: [{ url: 'https://mainnet.com' }] }),
+        'testnet',
+      ),
+    ).toThrow('testnet');
+  });
+
+  it('throws on unsupported network section', () => {
+    expect(() =>
+      parseEndpointConfigJson(
+        JSON.stringify({
+          testnet: [{ url: 'https://a.com' }],
+          mainnet: [{ url: 'https://b.com' }],
+          devnet: [{ url: 'https://c.com' }],
+        }),
+        'testnet',
+      ),
+    ).toThrow('unsupported network section');
+  });
+
+  it('throws on empty selected network endpoints', () => {
+    expect(() => parseEndpointConfigJson(rpcConfigJson([]), 'testnet')).toThrow('testnet');
   });
 
   it('throws on missing url', () => {
-    expect(() => parseEndpointConfigJson('[{}]')).toThrow('url');
+    expect(() => parseTestnetRpcConfig([{}])).toThrow('url');
   });
 
   it('does not echo invalid raw URL values in parser errors', () => {
-    expect(() => parseEndpointConfigJson('[{"url":"not a url with secret-token"}]')).toThrow(
+    expect(() => parseTestnetRpcConfig([{ url: 'not a url with secret-token' }])).toThrow(
       '[INVALID_URL]',
     );
     try {
-      parseEndpointConfigJson('[{"url":"not a url with secret-token"}]');
+      parseTestnetRpcConfig([{ url: 'not a url with secret-token' }]);
     } catch (err) {
       expect(String(err)).not.toContain('secret-token');
     }
   });
 
   it('throws on URL with embedded credentials in JSON config', () => {
-    expect(() => parseEndpointConfigJson('[{"url":"https://user:secret@provider.com"}]')).toThrow(
+    expect(() => parseTestnetRpcConfig([{ url: 'https://user:secret@provider.com' }])).toThrow(
       'embedded credentials',
     );
   });
 
   it('rejects authenticated HTTP endpoints', () => {
     expect(() =>
-      parseEndpointConfigJson(
-        '[{"url":"http://127.0.0.1:9000","localDevelopmentEndpoint":true,"auth":{"header":"x-token","valueEnv":"MY_TOKEN"}}]',
+      parseTestnetRpcConfig(
+        [
+          {
+            url: 'http://127.0.0.1:9000',
+            localDevelopmentEndpoint: true,
+            auth: { header: 'x-token', valueEnv: 'MY_TOKEN' },
+          },
+        ],
         (name) => (name === 'MY_TOKEN' ? 'secret' : undefined),
       ),
     ).toThrow('HTTP RPC endpoints');
@@ -501,65 +571,71 @@ describe('parseEndpointConfigJson', () => {
 
   it('rejects HTTP endpoints with static metadata', () => {
     expect(() =>
-      parseEndpointConfigJson(
-        '[{"url":"http://127.0.0.1:9000","localDevelopmentEndpoint":true,"meta":{"x-token":"secret"}}]',
-      ),
+      parseTestnetRpcConfig([
+        {
+          url: 'http://127.0.0.1:9000',
+          localDevelopmentEndpoint: true,
+          meta: { 'x-token': 'secret' },
+        },
+      ]),
     ).toThrow('HTTP RPC endpoints');
   });
 
   it('rejects non-local HTTP endpoints even when local mode is explicit', () => {
     expect(() =>
-      parseEndpointConfigJson('[{"url":"http://provider.example","localDevelopmentEndpoint":true}]'),
+      parseTestnetRpcConfig([
+        { url: 'http://provider.example', localDevelopmentEndpoint: true },
+      ]),
     ).toThrow('localhost');
   });
 
   it('rejects HTTP endpoints unless local mode is explicit', () => {
-    expect(() => parseEndpointConfigJson('[{"url":"http://127.0.0.1:9000"}]')).toThrow(
+    expect(() => parseTestnetRpcConfig([{ url: 'http://127.0.0.1:9000' }])).toThrow(
       'localDevelopmentEndpoint',
     );
   });
 
   it('accepts unauthenticated local HTTP only when local mode is explicit', () => {
-    const result = parseEndpointConfigJson(
-      '[{"url":"http://127.0.0.1:9000","localDevelopmentEndpoint":true}]',
-    );
+    const result = parseTestnetRpcConfig([
+      { url: 'http://127.0.0.1:9000', localDevelopmentEndpoint: true },
+    ]);
     expect(result).toEqual([{ url: 'http://127.0.0.1:9000' }]);
   });
 
   it('throws on null array element', () => {
-    expect(() => parseEndpointConfigJson('[null]')).toThrow('must be a non-null object');
+    expect(() => parseTestnetRpcConfig([null])).toThrow('must be a non-null object');
   });
 
   it('throws on primitive array element', () => {
-    expect(() => parseEndpointConfigJson('[42]')).toThrow('must be a non-null object');
+    expect(() => parseTestnetRpcConfig([42])).toThrow('must be a non-null object');
   });
 
   it('throws on string array element', () => {
-    expect(() => parseEndpointConfigJson('["https://a.com"]')).toThrow('must be a non-null object');
+    expect(() => parseTestnetRpcConfig(['https://a.com'])).toThrow('must be a non-null object');
   });
 
   it('throws on non-string meta value', () => {
-    expect(() => parseEndpointConfigJson('[{"url":"https://a.com","meta":{"x-num":42}}]')).toThrow(
+    expect(() => parseTestnetRpcConfig([{ url: 'https://a.com', meta: { 'x-num': 42 } }])).toThrow(
       'meta["x-num"]',
     );
   });
 
   it('throws on fetchInit with headers (forbidden)', () => {
     expect(() =>
-      parseEndpointConfigJson('[{"url":"https://a.com","fetchInit":{"headers":{"x":"y"}}}]'),
+      parseTestnetRpcConfig([{ url: 'https://a.com', fetchInit: { headers: { x: 'y' } } }]),
     ).toThrow('fetchInit.headers');
   });
 
   it('throws on fetchInit with body (forbidden)', () => {
     expect(() =>
-      parseEndpointConfigJson('[{"url":"https://a.com","fetchInit":{"body":"data"}}]'),
+      parseTestnetRpcConfig([{ url: 'https://a.com', fetchInit: { body: 'data' } }]),
     ).toThrow('fetchInit.body');
   });
 
   it('accepts valid fetchInit (credentials)', () => {
-    const result = parseEndpointConfigJson(
-      '[{"url":"https://a.com","fetchInit":{"credentials":"include"}}]',
-    );
+    const result = parseTestnetRpcConfig([
+      { url: 'https://a.com', fetchInit: { credentials: 'include' } },
+    ]);
     expect(result[0].fetchInit).toEqual({ credentials: 'include' });
   });
 });

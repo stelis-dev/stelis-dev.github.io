@@ -2,7 +2,7 @@
  * [app-api] settlementSwapPathRegistry unit tests.
  *
  * Covers:
- *   - parseSettlementSwapPathRegistryJson: JSON array -> registry entries
+ *   - parseSettlementSwapPathRegistryJson: network-keyed JSON -> registry entries
  *   - validateSettlementSwapPathRegistry: duplicate-token rejection, empty-registry rejection
  *   - determinePaymentToken: settle.move baseForQuote direction enforcement
  */
@@ -49,45 +49,90 @@ const USDC_TYPE = '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217
 const POOL_ID = '0xpool';
 const DEEPBOOK_PACKAGE_ID = '0xdeepbook';
 
+function settlementSwapPathRegistryJson(testnet: unknown, mainnet: unknown = []) {
+  return { testnet, mainnet };
+}
+
 // ─────────────────────────────────────────────
 // parseSettlementSwapPathRegistryJson
 // ─────────────────────────────────────────────
 
 describe('parseSettlementSwapPathRegistryJson', () => {
   it('parses a single 1-hop settlement swap path', () => {
-    const result = parseSettlementSwapPathRegistryJson(['0xabc123']);
+    const result = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson(['0xabc123']),
+      'testnet',
+    );
     expect(result).toEqual([{ poolId: '0xabc123' }]);
   });
 
   it('parses multiple 1-hop settlement swap paths', () => {
-    const result = parseSettlementSwapPathRegistryJson(['0xabc', '0xdef']);
+    const result = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson(['0xabc', '0xdef']),
+      'testnet',
+    );
     expect(result).toEqual([{ poolId: '0xabc' }, { poolId: '0xdef' }]);
   });
 
-  it('throws on non-array input', () => {
-    expect(() => parseSettlementSwapPathRegistryJson('not-an-array')).toThrow('must be an array');
+  it('parses only the selected network section', () => {
+    const result = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson(['0xtestnet'], ['0xmainnet']),
+      'mainnet',
+    );
+    expect(result).toEqual([{ poolId: '0xmainnet' }]);
   });
 
-  it('throws on empty array', () => {
-    expect(() => parseSettlementSwapPathRegistryJson([])).toThrow('At least one pool ID');
+  it('throws on old flat-array input', () => {
+    expect(() => parseSettlementSwapPathRegistryJson(['0xabc123'], 'testnet')).toThrow(
+      'object',
+    );
+  });
+
+  it('throws on missing network section', () => {
+    expect(() =>
+      parseSettlementSwapPathRegistryJson({ mainnet: ['0xabc123'] }, 'testnet'),
+    ).toThrow('testnet');
+  });
+
+  it('throws on unsupported network section', () => {
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(
+        { testnet: ['0xabc123'], mainnet: [], devnet: ['0xdef456'] },
+        'testnet',
+      ),
+    ).toThrow('Unsupported network section');
+  });
+
+  it('throws on empty selected network section', () => {
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(settlementSwapPathRegistryJson([]), 'testnet'),
+    ).toThrow('At least one pool ID');
   });
 
   it('throws on invalid pool ID format (no 0x prefix)', () => {
-    expect(() => parseSettlementSwapPathRegistryJson(['abc123'])).toThrow('invalid pool ID');
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(settlementSwapPathRegistryJson(['abc123']), 'testnet'),
+    ).toThrow('invalid pool ID');
   });
 
   it('throws on pool ID too short (just 0x)', () => {
-    expect(() => parseSettlementSwapPathRegistryJson(['0x'])).toThrow('invalid pool ID');
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(settlementSwapPathRegistryJson(['0x']), 'testnet'),
+    ).toThrow('invalid pool ID');
   });
 
   it('rejects nested path-array format', () => {
-    expect(() => parseSettlementSwapPathRegistryJson([['0xa']])).toThrow(
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(settlementSwapPathRegistryJson([['0xa']]), 'testnet'),
+    ).toThrow(
       'flat array of DeepBook pool IDs',
     );
   });
 
   it('throws on non-string pool ID', () => {
-    expect(() => parseSettlementSwapPathRegistryJson([123])).toThrow('invalid pool ID');
+    expect(() =>
+      parseSettlementSwapPathRegistryJson(settlementSwapPathRegistryJson([123]), 'testnet'),
+    ).toThrow('invalid pool ID');
   });
 });
 
@@ -224,7 +269,7 @@ describe('loadSettlementSwapPathRegistry', () => {
   it('publishes fee-bearing settlement swap paths on Stelis input-fee basis', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'stelis-settlement-swap-path-registry-'));
     const jsonPath = join(dir, 'settlement-swap-paths.json');
-    await writeFile(jsonPath, JSON.stringify([POOL_ID]), 'utf-8');
+    await writeFile(jsonPath, JSON.stringify(settlementSwapPathRegistryJson([POOL_ID])), 'utf-8');
 
     const client = {
       getObject: vi.fn(async () => ({
@@ -263,6 +308,7 @@ describe('loadSettlementSwapPathRegistry', () => {
         client as never,
         DEEPBOOK_PACKAGE_ID,
         jsonPath,
+        'testnet',
       );
       expect(settlementSwapPaths).toHaveLength(1);
       expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(25);
@@ -275,7 +321,7 @@ describe('loadSettlementSwapPathRegistry', () => {
   it('uses deployed DeepBook fee constants instead of local literals', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'stelis-settlement-swap-path-registry-'));
     const jsonPath = join(dir, 'settlement-swap-paths.json');
-    await writeFile(jsonPath, JSON.stringify([POOL_ID]), 'utf-8');
+    await writeFile(jsonPath, JSON.stringify(settlementSwapPathRegistryJson([POOL_ID])), 'utf-8');
 
     const client = {
       getObject: vi.fn(async () => ({
@@ -312,6 +358,7 @@ describe('loadSettlementSwapPathRegistry', () => {
         client as never,
         DEEPBOOK_PACKAGE_ID,
         jsonPath,
+        'testnet',
       );
       expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(40);
       expect(settlementSwapPaths[0].hops[0].feeBps).toBe(40);

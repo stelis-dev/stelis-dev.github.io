@@ -6,7 +6,7 @@ This document describes current settlement swap path configuration and package b
 
 `@stelis/app-api` reads `packages/app-api/settlement-swap-paths.json` at boot.
 
-The file is a flat array of DeepBook pool IDs. For each pool ID, the host derives settlement swap path details from on-chain data. The server fails to start if the registry is empty, malformed, nested, duplicated by payment token, not SUI-adjacent, or cannot be verified.
+The file is a network-keyed object with `testnet` and `mainnet` sections. At boot, the host reads only the section selected by `NETWORK`. For each pool ID in that section, the host derives settlement swap path details from on-chain data. The server fails to start if the selected section is empty, malformed, nested, duplicated by payment token, not SUI-adjacent, or cannot be verified.
 
 The product contract is one active one-hop settlement swap path per `paymentTokenType`. Clients choose `paymentTokenType`; they do not send a pool ID, path ID, or multi-hop path. The host registry is the source of truth for the selected pool ID and swap direction.
 

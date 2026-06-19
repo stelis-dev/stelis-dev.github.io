@@ -8,7 +8,7 @@ The host package is `@stelis/app-api`.
 
 Required local files:
 
-- `packages/app-api/.env.local`
+- `packages/app-api/.env`
 - `packages/app-api/settlement-swap-paths.json`
 - `packages/app-api/rpc.json`
 
@@ -18,7 +18,7 @@ Ignored local runtime files must not be committed.
 
 RPC endpoints are configured in `packages/app-api/rpc.json`, not in environment variables.
 
-At boot, the host validates configured endpoints against the selected `NETWORK`, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If no usable endpoint remains, boot fails.
+The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the host reads only the section selected by `NETWORK`, validates those endpoints against the selected network, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If the selected section is empty or no usable endpoint remains, boot fails.
 
 ## Reverse Proxy and CORS
 
@@ -204,19 +204,24 @@ Boot validation requires `ADMIN_JWT_SECRET` to be at least 32 characters when it
 
 Settlement swap path support is controlled by `packages/app-api/settlement-swap-paths.json`.
 
-The file contains a flat JSON array of DeepBook pool IDs:
+The file is a network-keyed object with `testnet` and `mainnet` sections. The host reads only the section selected by `NETWORK`:
 
 ```json
-[
-  "0x..."
-]
+{
+  "testnet": [
+    "0x..."
+  ],
+  "mainnet": [
+    "0x..."
+  ]
+}
 ```
 
-At boot, the API host reads each pool ID and derives settlement swap path metadata from on-chain data. Each pool must be `Pool<Token, SUI>` or `Pool<SUI, Token>`, so every configured entry resolves to one payment-token-to-SUI settlement swap path.
+At boot, the API host reads each pool ID in the active network section and derives settlement swap path metadata from on-chain data. Each pool must be `Pool<Token, SUI>` or `Pool<SUI, Token>`, so every configured entry resolves to one payment-token-to-SUI settlement swap path.
 
 The product contract is one active 1-hop settlement swap path per `paymentTokenType`. `POST /relay/prepare` receives `paymentTokenType` and the host selects that token's registered path. Clients do not send a pool ID, path ID, or multi-hop path.
 
-If the file is missing, empty, malformed, nested, duplicated by payment token, not SUI-adjacent, or cannot be verified, the host fails to start.
+If the file is missing, the selected network section is empty, or an entry is malformed, nested, duplicated by payment token, not SUI-adjacent, or cannot be verified, the host fails to start.
 
 ## Observability
 

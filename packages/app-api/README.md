@@ -44,10 +44,11 @@ This README is an entry point for the package. It does not replace the route and
 From the repository root:
 
 ```bash
-cp packages/app-api/.env.local.example packages/app-api/.env.local
-cp packages/app-api/settlement-swap-paths.json.example packages/app-api/settlement-swap-paths.json
-cp packages/app-api/rpc.json.example packages/app-api/rpc.json
+cp packages/app-api/.env.example packages/app-api/.env
 ```
+
+`settlement-swap-paths.json` and `rpc.json` are tracked config files keyed by `testnet` and `mainnet`.
+The host reads only the section selected by `NETWORK`.
 
 Start this package:
 
@@ -55,7 +56,7 @@ Start this package:
 npm run dev:app-api
 ```
 
-The root `dev:app-api` command loads `packages/app-api/.env.local`, starts an isolated Redis
+The root `dev:app-api` command loads `packages/app-api/.env`, starts an isolated Redis
 memory server through `redis-memory-server`, sets `REDIS_URL` for the child process, and then
 starts this package. Local development does not use Docker Redis or an external Redis service.
 
@@ -76,7 +77,7 @@ npm run build -w @stelis/app-api
 npm run start -w @stelis/app-api
 ```
 
-The package `start` command runs `node dist/index.js`. It does not load `.env.local` and does not start Redis. The runtime environment must provide a real Redis `REDIS_URL` and the other required environment variables.
+The package `start` command runs `node dist/index.js`. It does not load `.env` and does not start Redis. The runtime environment must provide a real Redis `REDIS_URL` and the other required environment variables.
 
 This repository currently has no Vercel, Cloud Run, Dockerfile, or other platform deployment entrypoint. Platform deployment commands belong in the platform configuration that deploys this package.
 

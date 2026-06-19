@@ -28,7 +28,7 @@ npm run dev:app-web
 
 ## Environment variables
 
-Create a `.env` file (or `.env.local`) in this package directory:
+Create a `.env` file in this package directory:
 
 ```env
 # Required: relayer endpoint for the SDK (must end with /relay)
@@ -87,10 +87,10 @@ The output is a static SPA suitable for static hosting such as GitHub Pages or a
 Copy the example file and fill in values:
 
 ```bash
-cp .env.local.example .env.local
+cp .env.example .env
 ```
 
-See [`.env.local.example`](./.env.local.example) for all available variables.
+See [`.env.example`](./.env.example) for all available variables.
 
 ## Static Deployment
 

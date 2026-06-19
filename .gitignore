@@ -14,9 +14,12 @@ packages/*/dist/
 coverage/
 
 # Local environment files.
+**/.env
+**/.env.*
+**/.ENV
+**/.ENV.*
+!**/.env.example
 **/.env.local
-packages/app-api/settlement-swap-paths.json
-packages/app-api/rpc.json
 
 # Move build and audit outputs.
 packages/contracts/move/build/

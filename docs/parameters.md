@@ -96,8 +96,8 @@ Prepare authorization request nonces are temporary replay guards for signed prep
 - `NETWORK`
 - `RELAYER_RECIPIENT_ADDRESS`
 - `SPONSOR_LEASE_HMAC_SECRET`
-- `packages/app-api/settlement-swap-paths.json`
-- `packages/app-api/rpc.json`
+- `packages/app-api/settlement-swap-paths.json`, with a non-empty section for the selected `NETWORK`
+- `packages/app-api/rpc.json`, with a non-empty endpoint section for the selected `NETWORK`
 
 `SPONSOR_SECRET_KEY` configures sponsor slots. Each sponsor slot key signs sponsored transactions as `gasOwner`. The value accepts 1..256 comma-separated sponsor keys.
 

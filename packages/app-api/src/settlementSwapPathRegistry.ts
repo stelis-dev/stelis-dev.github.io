@@ -14,12 +14,12 @@
  *      DeepBook fee scaling constants)
  *
  * File format (`settlement-swap-paths.json`):
- *   [
- *     "0xPoolA",
- *     "0xPoolB"
- *   ]
- *   - each entry is one DeepBook pool ID
- *   - each entry resolves to exactly one supported 1-hop settlement swap path
+ *   {
+ *     "testnet": ["0xPoolA", "0xPoolB"],
+ *     "mainnet": ["0xPoolC"]
+ *   }
+ *   - each network section contains DeepBook pool IDs
+ *   - each pool ID resolves to exactly one supported 1-hop settlement swap path
  *
  * Shared references:
  *   - SingleHopSettlementSwapPath, DeepBookPoolHop: @stelis/contracts
@@ -28,8 +28,10 @@
  */
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
-import type { SingleHopSettlementSwapPath, DeepBookPoolHop } from '@stelis/contracts';
+import type { SingleHopSettlementSwapPath, DeepBookPoolHop, SuiNetwork } from '@stelis/contracts';
 import { SUI_TYPE, settlementSwapDirectionFromSwapDirections } from '@stelis/contracts';
+
+const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
 
 /** Zero-sender address for zero-gas simulate calls. */
 const ZERO_SENDER = '0x0000000000000000000000000000000000000000000000000000000000000000';
@@ -52,33 +54,28 @@ interface ParsedSettlementSwapPathRegistryEntry {
 /**
  * Parse settlement swap path registry JSON into registry entries.
  *
- * Format: flat array of pool IDs.
- *   ["0xPoolA"]           -> one 1-hop settlement swap path
- *   ["0xPoolA", "0xPoolB"] -> two 1-hop settlement swap paths
+ * Format: network-keyed object. The selected network section contains pool IDs.
+ *   { "testnet": ["0xPoolA"], "mainnet": ["0xPoolB"] }
+ *   -> one 1-hop settlement swap path on testnet
  *
- * @param json - Parsed JSON value (should be string[])
+ * @param json - Parsed JSON value
+ * @param network - Active app-api NETWORK value
  * @throws Error on invalid structure, empty registry, or bad pool ID
  */
 export function parseSettlementSwapPathRegistryJson(
   json: unknown,
+  network: SuiNetwork,
 ): ParsedSettlementSwapPathRegistryEntry[] {
-  if (!Array.isArray(json)) {
-    throw new Error('[SETTLEMENT_SWAP_PATHS_JSON] JSON must be an array of pool IDs.');
-  }
-  if (json.length === 0) {
-    throw new Error(
-      '[SETTLEMENT_SWAP_PATHS_JSON] Registry is empty. At least one pool ID is required.',
-    );
-  }
+  const poolIds = selectNetworkPoolIdSection(json, network);
 
   const entries: ParsedSettlementSwapPathRegistryEntry[] = [];
 
-  for (let i = 0; i < json.length; i++) {
-    const poolId = json[i];
+  for (let i = 0; i < poolIds.length; i++) {
+    const poolId = poolIds[i];
     if (Array.isArray(poolId)) {
       throw new Error(
         `[SETTLEMENT_SWAP_PATHS_JSON] Entry [${i}] must be a pool ID string, not a path array. ` +
-          'settlement-swap-paths.json expects a flat array of DeepBook pool IDs.',
+          'settlement-swap-paths.json expects each network section to be a flat array of DeepBook pool IDs.',
       );
     }
     if (typeof poolId !== 'string' || !poolId.startsWith('0x') || poolId.length < 3) {
@@ -90,6 +87,35 @@ export function parseSettlementSwapPathRegistryJson(
   }
 
   return entries;
+}
+
+function selectNetworkPoolIdSection(json: unknown, network: SuiNetwork): unknown[] {
+  if (json == null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error(
+      '[SETTLEMENT_SWAP_PATHS_JSON] JSON must be an object with "testnet" and "mainnet" pool ID arrays.',
+    );
+  }
+
+  const registry = json as Record<string, unknown>;
+  for (const key of Object.keys(registry)) {
+    if (!CONFIG_NETWORKS.includes(key as SuiNetwork)) {
+      throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] Unsupported network section "${key}".`);
+    }
+  }
+
+  for (const key of CONFIG_NETWORKS) {
+    if (!Array.isArray(registry[key])) {
+      throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] ${key} must be an array of pool IDs.`);
+    }
+  }
+
+  const selected = registry[network] as unknown[];
+  if (selected.length === 0) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] ${network} registry is empty. At least one pool ID is required.`,
+    );
+  }
+  return selected;
 }
 
 // ─────────────────────────────────────────────
@@ -582,6 +608,7 @@ export async function loadSettlementSwapPathRegistry(
   client: SuiGrpcClient,
   deepbookPkg: string,
   jsonFilePath: string,
+  network: SuiNetwork,
 ): Promise<SingleHopSettlementSwapPath[]> {
   // 1. Read and parse JSON file
   const { readFile } = await import('node:fs/promises');
@@ -603,7 +630,7 @@ export async function loadSettlementSwapPathRegistry(
     );
   }
 
-  const entries = parseSettlementSwapPathRegistryJson(json);
+  const entries = parseSettlementSwapPathRegistryJson(json, network);
   const feeParams = await queryDeepbookFeeParameters(client, deepbookPkg);
 
   // 2. Resolve each settlement swap path from on-chain data

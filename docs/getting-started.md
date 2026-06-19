@@ -55,15 +55,13 @@ npm run check:prepare-stage-schema
 
 ## Run the API Host
 
-Create local config files:
+Create the local env file:
 
 ```bash
-cp packages/app-api/.env.local.example packages/app-api/.env.local
-cp packages/app-api/settlement-swap-paths.json.example packages/app-api/settlement-swap-paths.json
-cp packages/app-api/rpc.json.example packages/app-api/rpc.json
+cp packages/app-api/.env.example packages/app-api/.env
 ```
 
-Fill in real values in `.env.local`, `settlement-swap-paths.json`, and `rpc.json`.
+Fill in real values in `.env`. `packages/app-api/settlement-swap-paths.json` and `packages/app-api/rpc.json` are tracked config files; confirm the section selected by `NETWORK` has the pool IDs and RPC endpoints for that network.
 
 Start the API host:
 
@@ -71,7 +69,7 @@ Start the API host:
 npm run dev:app-api
 ```
 
-The root `dev:app-api` command loads `packages/app-api/.env.local`, starts an isolated Redis
+The root `dev:app-api` command loads `packages/app-api/.env`, starts an isolated Redis
 memory server through `redis-memory-server`, sets `REDIS_URL` for the child process, and then
 starts the API host. Local development does not use Docker Redis or an external Redis service.
 
@@ -80,8 +78,8 @@ starts the API host. Local development does not use Docker Redis or an external 
 Create local config files:
 
 ```bash
-cp packages/app-web/.env.local.example packages/app-web/.env.local
-cp packages/app-admin/.env.local.example packages/app-admin/.env.local
+cp packages/app-web/.env.example packages/app-web/.env
+cp packages/app-admin/.env.example packages/app-admin/.env
 ```
 
 Use values that point at the local API host.

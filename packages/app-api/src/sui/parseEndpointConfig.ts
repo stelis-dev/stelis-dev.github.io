@@ -1,5 +1,5 @@
 /**
- * RPC endpoint config parser — parses JSON array of endpoint descriptors.
+ * RPC endpoint config parser — parses a network-keyed JSON object of endpoint descriptors.
  *
  * Used by `loadRpcConfig()` to parse `packages/app-api/rpc.json`.
  *
@@ -13,8 +13,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import type { RpcMetadata } from '@protobuf-ts/runtime-rpc';
+import type { SuiNetwork } from '@stelis/contracts';
 import type { SuiRpcEndpointConfig } from './failoverTransport.js';
 import { redactUrl } from './redactUrl.js';
+
+const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
 
 // ─────────────────────────────────────────────
 // Raw config types (before env resolution)
@@ -52,6 +55,7 @@ export interface SuiRpcEndpointRawConfig {
  * Parse rpc.json content into resolved endpoint configs.
  *
  * @param json     Raw JSON string (rpc.json file content)
+ * @param network  Active app-api NETWORK value
  * @param envLookup  Function to resolve env vars (default: process.env lookup).
  *                   Injected for testability.
  * @returns        Non-empty array of resolved endpoint configs
@@ -59,6 +63,7 @@ export interface SuiRpcEndpointRawConfig {
  */
 export function parseEndpointConfigJson(
   json: string,
+  network: SuiNetwork,
   envLookup: (name: string) => string | undefined = (name) => process.env[name],
 ): SuiRpcEndpointConfig[] {
   const trimmed = json.trim();
@@ -75,25 +80,24 @@ export function parseEndpointConfigJson(
     );
   }
 
-  if (!Array.isArray(raw)) {
-    throw new Error('rpc.json must contain a JSON array');
-  }
-  if (raw.length === 0) {
-    throw new Error('rpc.json must contain at least one endpoint');
-  }
+  const rawEndpoints = selectNetworkEndpointSection(raw, network);
 
   const results: SuiRpcEndpointConfig[] = [];
 
-  for (let i = 0; i < raw.length; i++) {
+  for (let i = 0; i < rawEndpoints.length; i++) {
     const pos = `endpoint[${i}]`;
 
     // Each element must be a non-null object
-    if (raw[i] == null || typeof raw[i] !== 'object' || Array.isArray(raw[i])) {
+    if (
+      rawEndpoints[i] == null ||
+      typeof rawEndpoints[i] !== 'object' ||
+      Array.isArray(rawEndpoints[i])
+    ) {
       throw new Error(
-        `${pos}: must be a non-null object, got ${raw[i] === null ? 'null' : typeof raw[i]}`,
+        `${pos}: must be a non-null object, got ${rawEndpoints[i] === null ? 'null' : typeof rawEndpoints[i]}`,
       );
     }
-    const entry = raw[i] as Record<string, unknown>;
+    const entry = rawEndpoints[i] as Record<string, unknown>;
 
     // Validate url
     if (typeof entry.url !== 'string' || entry.url.trim() === '') {
@@ -229,6 +233,31 @@ export function parseEndpointConfigJson(
   return results;
 }
 
+function selectNetworkEndpointSection(raw: unknown, network: SuiNetwork): unknown[] {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('rpc.json must contain an object with "testnet" and "mainnet" endpoint arrays');
+  }
+
+  const config = raw as Record<string, unknown>;
+  for (const key of Object.keys(config)) {
+    if (!CONFIG_NETWORKS.includes(key as SuiNetwork)) {
+      throw new Error(`rpc.json contains unsupported network section "${key}"`);
+    }
+  }
+
+  for (const key of CONFIG_NETWORKS) {
+    if (!Array.isArray(config[key])) {
+      throw new Error(`rpc.json.${key} must contain a JSON array`);
+    }
+  }
+
+  const selected = config[network] as unknown[];
+  if (selected.length === 0) {
+    throw new Error(`rpc.json.${network} must contain at least one endpoint`);
+  }
+  return selected;
+}
+
 function isLocalDevelopmentHost(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   return (
@@ -240,7 +269,7 @@ function isLocalDevelopmentHost(hostname: string): boolean {
 }
 
 /**
- * Load RPC endpoint config from packages/app-api/rpc.json.
+ * Load RPC endpoint config from packages/app-api/rpc.json for the active network.
  *
  * This parser defines the app-api RPC fleet configuration format.
  * Auth secrets are resolved from env vars referenced by auth.valueEnv.
@@ -250,6 +279,7 @@ function isLocalDevelopmentHost(hostname: string): boolean {
  * @returns          Non-empty array of resolved endpoint configs
  */
 export function loadRpcConfig(
+  network: SuiNetwork,
   filePath?: string,
   envLookup: (name: string) => string | undefined = (name) => process.env[name],
 ): SuiRpcEndpointConfig[] {
@@ -262,11 +292,11 @@ export function loadRpcConfig(
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
       `[app-api] Cannot read rpc.json at "${resolvedPath}": ${msg}. ` +
-        `Create it from packages/app-api/rpc.json.example.`,
+        `Restore the tracked packages/app-api/rpc.json config file.`,
     );
   }
 
-  return parseEndpointConfigJson(raw, envLookup);
+  return parseEndpointConfigJson(raw, network, envLookup);
 }
 
 /**
