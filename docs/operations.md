@@ -95,6 +95,8 @@ This policy matches current Redis key usage. Prepare store consumption uses Lua 
 
 Sponsor operation state is checked before prepare and sponsor routes continue.
 
+Sponsor SUI ownership, refill transitions, sponsor slot gas use, and Sponsor Refill Account withdrawal are defined in [`Sponsor Pools`](./architecture/sponsor-pools.md#sponsor-sui-state).
+
 The prepare in-flight limiter is Redis-backed and shared across all `app-api` instances that use the same Redis write authority. It limits concurrent expensive
 prepare work after cheap request validation and before build/simulation work completes.
 When `PREPARE_INFLIGHT_CAPACITY` is not set, the host uses `sponsor slot count * 2`.
@@ -160,7 +162,7 @@ Optional refill variables:
 
 Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
 
-Refill workers use Redis locks for cross-instance coordination. `stelis:app-api:sponsor-operations:refill-lock:<slotAddress>` protects one sponsor slot refill lifecycle. `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` protects refill transaction dispatch for one sponsor refill account, so multiple API instances do not use the same refill account signer concurrently.
+Refill workers use Redis locks for cross-instance coordination. `stelis:app-api:sponsor-operations:refill-lock:<slotAddress>` protects one sponsor slot refill lifecycle. `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` protects refill transaction dispatch for one Sponsor Refill Account, so multiple API instances do not use the same Sponsor Refill Account signer concurrently.
 
 State writers use Redis server time for `lastObservedAtMs` and a per-entity `writeSeq`. This keeps cross-instance ordering independent of local host clock skew.
 

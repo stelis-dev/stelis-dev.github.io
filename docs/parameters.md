@@ -99,7 +99,11 @@ Prepare authorization request nonces are temporary replay guards for signed prep
 - `packages/app-api/settlement-swap-paths.json`
 - `packages/app-api/rpc.json`
 
-`SPONSOR_SECRET_KEY` accepts 1..256 comma-separated sponsor keys.
+`SPONSOR_SECRET_KEY` configures sponsor slots. Each sponsor slot key signs sponsored transactions as `gasOwner`. The value accepts 1..256 comma-separated sponsor keys.
+
+`SPONSOR_REFILL_ACCOUNT_SECRET_KEY` configures the Sponsor Refill Account. That key signs sponsor slot refill transactions and Sponsor Refill Account admin withdrawal transactions. It is separate from sponsor slot keys.
+
+The Sponsor Refill Account and sponsor slot SUI policy is defined in [`Sponsor Pools`](./architecture/sponsor-pools.md#sponsor-sui-state).
 
 Sponsor operation timeouts are also required:
 

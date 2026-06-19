@@ -7,7 +7,7 @@ This document summarizes the current security boundaries that are visible in the
 | Boundary | Current rule |
 | --- | --- |
 | User assets | User vault assets are owned on-chain by the user. |
-| Sponsor gas | User commands must not reference `GasCoin`. |
+| Sponsor gas | User commands must not reference `GasCoin` or use `FundsWithdrawal(Sponsor)`. |
 | User TransactionKind | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most `MAX_COMMANDS = 16` commands. |
 | Final relayer-built transaction | The host-built transaction must contain exactly one allowed settlement call. |
 | Payment-token funding | The host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
@@ -31,6 +31,18 @@ Relay validation adds off-chain checks before the sponsor signs:
 - non-loss math
 - policy-hash binding
 - gas-owner and sponsor checks
+
+## Sponsor SUI Security
+
+Sponsor SUI state and transitions are defined in [`Sponsor Pools`](./architecture/sponsor-pools.md#sponsor-sui-state).
+
+The sponsor slot is the `gasOwner` for sponsored transactions. User-supplied commands cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`. This protects both sponsor gas coin objects and sponsor address-balance gas.
+
+Final settlement validation rejects a `relayer_recipient` that does not match the configured Relayer recipient. This prevents a user-supplied transaction from redirecting settlement payout, including deployments where the Relayer recipient is also the Sponsor Refill Account.
+
+Failed sponsored execution can spend sponsor gas without producing settlement payout. The host uses preflight simulation, sponsor failure abuse recording, and blocked request checks to limit failed-execution gas griefing.
+
+Sponsor Refill Account withdrawal is privileged. The withdrawal route requires admin session validation, a signed single-use withdrawal nonce, admin-operation rate limiting, operation logging, dry-run, and runway guard checks.
 
 ## Web2 Security Policy (API and Infrastructure)
 
