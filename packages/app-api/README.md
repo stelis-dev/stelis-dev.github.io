@@ -79,7 +79,22 @@ npm run start -w @stelis/app-api
 
 The package `start` command runs `node dist/index.js`. It does not load `.env` and does not start Redis. The runtime environment must provide a real Redis `REDIS_URL` and the other required environment variables.
 
-This repository currently has no Vercel, Cloud Run, Dockerfile, or other platform deployment entrypoint. Platform deployment commands belong in the platform configuration that deploys this package.
+For deployed Node hosts, build this package and its internal package dependencies from the repository root:
+
+```bash
+npm run build:app-api:deploy
+npm run start -w @stelis/app-api
+```
+
+The standard deployment model is a long-running Node process or OCI container that runs the package `start` command. Use that model for stable deployments.
+
+## Temporary Vercel Demo Adapter
+
+This repository also includes a temporary root `index.js` entry point for Vercel testnet demos. It re-exports the compiled Hono app from `packages/app-api/dist/vercel.js`.
+
+Vercel runs that entry point as a function, not as the long-running Node server used by `npm run start -w @stelis/app-api`. Background behavior such as sponsor refill work is not guaranteed to stay active between requests.
+
+Use Vercel only as a temporary demo path. Move stable API hosting to Cloud Run or another long-running Node/OCI host, then remove the root `index.js` file and `packages/app-api/src/vercel.ts`.
 
 For a full local self-hosted bring-up, follow [docs/getting-started.md](../../docs/getting-started.md).
 For operator policy, sponsor management, Studio mode, and incident handling, use [docs/operations.md](../../docs/operations.md).
