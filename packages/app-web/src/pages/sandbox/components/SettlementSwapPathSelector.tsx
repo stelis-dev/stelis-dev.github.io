@@ -7,7 +7,7 @@ interface SettlementSwapPathSelectorProps {
 
 /**
  * Settlement swap path selector. It is only rendered when the connected host
- * supports multiple payment token paths. Single-path hosts skip it entirely.
+ * supports multiple settlement token paths. Single-path hosts skip it entirely.
  */
 export function SettlementSwapPathSelector({
   settlementSwapPathIndex,
@@ -21,7 +21,7 @@ export function SettlementSwapPathSelector({
   return (
     <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
       <label htmlFor="settlement-swap-path-selector" style={{ fontSize: 13, fontWeight: 500 }}>
-        Payment Token:
+        Settlement Token:
       </label>
       <select
         id="settlement-swap-path-selector"
@@ -38,8 +38,8 @@ export function SettlementSwapPathSelector({
         style={{ fontSize: 13, padding: '2px 6px' }}
       >
         {settlementSwapPaths.map((settlementSwapPath, i) => (
-          <option key={settlementSwapPath.paymentTokenType} value={i}>
-            {settlementSwapPath.paymentTokenSymbol}
+          <option key={settlementSwapPath.settlementTokenType} value={i}>
+            {settlementSwapPath.settlementTokenSymbol}
           </option>
         ))}
       </select>

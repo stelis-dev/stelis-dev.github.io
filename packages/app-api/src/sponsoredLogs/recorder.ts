@@ -5,7 +5,7 @@
  * `@stelis/core-api`) into a `SponsoredExecutionLogEntry`
  * and writes it via the configured `SponsoredLogsStoreAdapter`.
  *
- * Outcome filter: only outcomes that the relayer paid (or could have
+ * Outcome filter: only outcomes that the Host paid (or could have
  * paid) gas for go into `Sponsored Executions`. The recorded set is
  * `success`, `onchain_revert`, plus the narrow `internal_error` subset
  * whose `economics.failureReason` starts with `submit_infra_unknown`.
@@ -21,7 +21,7 @@
  * belong to other audit views.
  *
  * Numeric honesty: every field on an `unknown`-economics row is `null`,
- * including `relayerFeeMist`. The recorder MUST NOT coerce an unknown
+ * including `hostFeeMist`. The recorder MUST NOT coerce an unknown
  * fee to `"0"` — that would manufacture a value the sponsor result path could
  * not prove.
  *
@@ -96,7 +96,7 @@ export interface SponsoredLogsRecorderDeps {
 
 /**
  * Build the host-side recorder callback. Pass the returned function to
- * `RelayerApiConfig.onSponsorResult` (alongside other sponsor result
+ * `HostRuntimeConfig.onSponsorResult` (alongside other sponsor result
  * callbacks via a fan-out wrapper if multiple are needed).
  */
 export function createSponsoredLogsRecorder(
@@ -167,10 +167,10 @@ function buildLogEntry(
       promotionId: metadata.promotionId,
       userId: metadata.userId,
       recoveredGasMist: econ.recoveredGasMist,
-      relayerPaidGasMist: econ.relayerPaidGasMist,
-      relayerFeeMist: econ.relayerFeeMist,
+      hostPaidGasMist: econ.hostPaidGasMist,
+      hostFeeMist: econ.hostFeeMist,
       protocolFeeMist: econ.protocolFeeMist,
-      relayerNetMist: econ.relayerNetMist,
+      hostNetMist: econ.hostNetMist,
       grossGasMist: econ.grossGasMist,
       storageRebateMist: econ.storageRebateMist,
       economicsStatus: 'known',
@@ -192,10 +192,10 @@ function buildLogEntry(
     promotionId: metadata.promotionId,
     userId: metadata.userId,
     recoveredGasMist: null,
-    relayerPaidGasMist: null,
-    relayerFeeMist: null,
+    hostPaidGasMist: null,
+    hostFeeMist: null,
     protocolFeeMist: null,
-    relayerNetMist: null,
+    hostNetMist: null,
     grossGasMist: null,
     storageRebateMist: null,
     economicsStatus: 'unknown',
@@ -217,7 +217,7 @@ function buildLogEntry(
  *
  * Used by the host to combine the sponsor operations state callback with the
  * sponsored-execution recorder under the single
- * `RelayerApiConfig.onSponsorResult` slot.
+ * `HostRuntimeConfig.onSponsorResult` slot.
  */
 export function fanOutSponsorResult(
   ...callbacks: readonly SponsorResultCallback[]

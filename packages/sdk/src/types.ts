@@ -5,7 +5,7 @@ import { SuiGrpcClient } from '@mysten/sui/grpc';
 // ─────────────────────────────────────────────
 
 export interface StelisClientConfig {
-  /** Relayer API base URL (e.g. "http://localhost:3200/relay") */
+  /** Relay API base URL (e.g. "http://localhost:3200/relay") */
   endpoint: string;
   /**
    * Optional per-operation HTTP timeout overrides in milliseconds.
@@ -54,8 +54,8 @@ export interface PrepareParams {
   txKindBytes: string;
   /** Sender address */
   senderAddress: string;
-  /** Payment token type from supportedSettlementSwapPaths. Selects the host's single active settlement swap path for that token. */
-  paymentTokenType: string;
+  /** Settlement token type from supportedSettlementSwapPaths. Selects the host's single active settlement swap path for that token. */
+  settlementTokenType: string;
   /** Slippage tolerance in basis points (optional) */
   slippageBps?: number;
   /** Gas margin in basis points (optional) */
@@ -87,12 +87,12 @@ export interface PrepareResponse {
     gasVarianceFixedMist: string;
     /** Slippage buffer: 0 for credit-only settle (MIST) */
     slippageBufferMist: string;
-    /** Relayer-quoted fee per TX (MIST) */
-    quotedRelayerFee: string;
+    /** Host-quoted fee per TX (MIST) */
+    quotedHostFee: string;
     /** Protocol flat fee (MIST) */
     protocolFee: string;
     /** Gas-recovery claim in settlement arguments: simGas + gasVarianceFixedMist + slippageBufferMist (MIST). */
-    relayerClaim: string;
+    executionCostClaim: string;
     /** grossGas = computation + storage before rebate (MIST) */
     grossGas: string;
   };
@@ -125,7 +125,7 @@ export interface SponsorResponse {
   /** Transaction effects (raw) */
   effects: unknown;
   /** Transaction-derived gas-recovery claim in MIST. */
-  relayerClaim: string;
+  executionCostClaim: string;
   /** Echoed orderId if provided during /prepare. */
   orderId?: string;
 }
@@ -146,21 +146,21 @@ export interface StelisApiError {
 export type { DeepBookPoolHop, SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 
-/** Static relayer config served via GET /relay/config */
-export interface RelayerConfig {
+/** Static Relay config response served via GET /relay/config */
+export interface RelayConfigResponse {
   network: 'testnet' | 'mainnet';
   /**
-   * Relayer-advertised packageId (from /relay/config response).
+   * Host-advertised packageId (from /relay/config response).
    * SDK verifies this matches the expected package ID from @stelis/contracts.
    * Not used for construction; SDK reads contract IDs from @stelis/contracts.
    */
   packageId: string;
-  /** Settlement payout recipient address for relayerClaim plus quotedRelayerFeeMist. */
-  relayerRecipient: string;
-  /** One active settlement swap path per paymentTokenType. */
+  /** Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist. */
+  settlementPayoutRecipient: string;
+  /** One active settlement swap path per settlementTokenType. */
   supportedSettlementSwapPaths: SingleHopSettlementSwapPath[];
-  /** Relayer-quoted fee per TX in MIST (from RELAYER_FEE_MIST env). */
-  quotedRelayerFeeMist: string;
+  /** Host-quoted fee per TX in MIST (from HOST_FEE_MIST env). */
+  quotedHostFeeMist: string;
   /** Protocol flat fee in MIST (from on-chain Config). */
   protocolFlatFeeMist: string;
   /** S-16: Integrity policy version for client-side PTB verification handshake. Integer >= 1. */
@@ -175,9 +175,9 @@ export interface RelayerConfig {
 export interface StelisConnectOptions {
   /**
    * S-16: Known-good package ID. If set, SDK verifies at connect time:
-   *   1. Relayer-advertised packageId matches @stelis/contracts
+   *   1. Host-advertised packageId matches @stelis/contracts
    *   2. pinnedPackageId matches @stelis/contracts
-   * Rejects the relayer if either check fails.
+   * Rejects the Host if either check fails.
    */
   pinnedPackageId?: string;
   /**
@@ -198,8 +198,8 @@ export interface StelisConnectOptions {
 // executeSponsored options
 // ─────────────────────────────────────────────
 
-/** Payment token configuration for sponsored settlement. */
-export interface PaymentToken {
+/** Settlement token configuration for sponsored settlement. */
+export interface SettlementToken {
   /** Full coin type string from supportedSettlementSwapPaths. */
   type: string;
   /**
@@ -217,8 +217,8 @@ export interface PrepareSponsoredOptions {
   addr: string;
   /** Wallet personal-message sign function for the prepare authorization message. */
   prepareAuthorizationSigner: (messageBytes: Uint8Array) => Promise<string>;
-  /** Payment token to swap to SUI internally. Required. */
-  paymentToken: PaymentToken;
+  /** Settlement token to swap to SUI internally. Required. */
+  settlementToken: SettlementToken;
   /** Intended gas budget in MIST. Default: `DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST`. */
   intentGasBudget?: number;
   /** Slippage tolerance in basis points. Default: `DEFAULT_SLIPPAGE_BPS`. */
@@ -226,7 +226,7 @@ export interface PrepareSponsoredOptions {
   /**
    * Extra margin added to the auto-calculated gas amount, in basis points.
    * Default: `DEFAULT_GAS_MARGIN_BPS`.
-   * Only applies when paymentToken.amount is not explicitly set.
+   * Only applies when settlementToken.amount is not explicitly set.
    * Covers price movement between quote time and swap execution.
    */
   gasMarginBps?: number;
@@ -236,7 +236,7 @@ export interface PrepareSponsoredOptions {
    * Called after gas cost is determined from /prepare response, before signing.
    * Use to show the user the total cost.
    *
-   * @param amount - Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee)
+   * @param amount - Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee)
    * @param amountHuman - Total cost in SUI, human-readable (e.g. '0.005370000')
    * @param symbol - Always 'SUI' (native unit)
    */
@@ -259,7 +259,7 @@ export interface ExecuteSponsoredResult {
   cost: PrepareResponse['cost'];
   /** Vault object ID if user has one, null if new user */
   vaultId: string | null;
-  /** Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee) */
+  /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */
   totalCostSui: string;
@@ -289,7 +289,7 @@ export interface PrepareSponsoredResult {
   profile: SettleProfile;
   /** Vault object ID if user has one (null = new user, vault will be created on-chain) */
   vaultId: string | null;
-  /** Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee) */
+  /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */
   totalCostSui: string;
@@ -330,7 +330,7 @@ export interface GasEstimateResult {
  * `path` is for debug/tracing only — the caller need not branch on it.
  */
 export interface ExecuteSuiFirstResult {
-  /** 'sui' = executed directly with user SUI | 'sponsored' = Stelis relayer path */
+  /** 'sui' = executed directly with user SUI | 'sponsored' = Stelis Host-sponsored path */
   path: 'sui' | 'sponsored';
   /** Transaction digest */
   digest: string;

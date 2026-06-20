@@ -11,7 +11,7 @@ import {
   ADDR_PKG,
   ADDR_PAYMENT_COIN,
   ADDR_REGISTRY,
-  ADDR_RELAYER,
+  ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
   ADDR_SENDER,
   ADDR_USABLE_COIN,
   ADDR_VAULT,
@@ -121,7 +121,7 @@ describe('single-coin R-9 usability proof — compiler/PTB behavior', () => {
 
     const tx = new Transaction();
     const [prefixSplitResult] = tx.splitCoins(tx.object(ADDR_PAYMENT_COIN), [PREFIX_SPLIT_AMOUNT]);
-    tx.transferObjects([prefixSplitResult], ADDR_RELAYER);
+    tx.transferObjects([prefixSplitResult], ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
     await compileSwapSettlement(
       tx,

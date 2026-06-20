@@ -19,7 +19,7 @@ module stelis::settle_tests {
     // Test addresses
     const ADDR_ADMIN: address = @0xA;
     const ADDR_USER: address = @0xB;
-    const ADDR_RELAYER: address = @0xC;
+    const ADDR_SETTLEMENT_PAYOUT_RECIPIENT: address = @0xC;
 
     // Errors
     const EPaused: u64 = 100;
@@ -31,14 +31,14 @@ module stelis::settle_tests {
     // L2 tamper-detection error codes — defined in settle.move and mirrored here for test assertions
     const EConfigVersionMismatch: u64 = 106;
     const EProtocolFeeMismatch: u64 = 107;
-    const ERelayerFeeCapExceeded: u64 = 108;
+    const EHostFeeCapExceeded: u64 = 108;
 
     // Config Errors
     const EInvalidMaxClaim: u64 = 2;
     const ENotAdmin: u64 = 3;
     const EInvalidMinSettle: u64 = 4;
     const ENoPendingAdmin: u64 = 6;
-    const EInvalidRelayerFeeCap: u64 = 7;
+    const EInvalidHostFeeCap: u64 = 7;
     const EInvalidSpreadBps: u64 = 8;
     const EPendingAdminExists: u64 = 9;
     const EPendingConfigExists: u64 = 10;
@@ -118,13 +118,13 @@ module stelis::settle_tests {
             let total_in_amt = 1_000_000_000; 
             let coin_in = coin::mint_for_testing<SUI>(total_in_amt, ctx);
             
-            // 1 SUI input, quoted_relayer_fee_mist=0 (default), protocol_flat_fee=0
-            // relayer_claim=10M, fee=0, protocol_fee=0
+            // 1 SUI input, quoted_host_fee_mist=0 (default), protocol_flat_fee=0
+            // execution_cost_claim_mist=10M, fee=0, protocol_fee=0
             // Payout = 10_000_000, Surplus = 990_000_000
             let claim = 10_000_000;
 
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, claim, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, claim, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
 
@@ -140,11 +140,11 @@ module stelis::settle_tests {
             test_scenario::return_to_sender(&scenario, vault);
         };
 
-        // 3. Verify Relayer Receipt
-        test_scenario::next_tx(&mut scenario, ADDR_RELAYER);
+        // 3. Verify settlement payout receipt
+        test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
-            assert!(coin::value(&coin) == 10_000_000, 2); // Claim only (quoted_relayer_fee_mist=0)
+            assert!(coin::value(&coin) == 10_000_000, 2); // Claim only (quoted_host_fee_mist=0)
             test_scenario::return_to_sender(&scenario, coin);
         };
         clock::destroy_for_testing(clock);
@@ -167,7 +167,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -186,7 +186,7 @@ module stelis::settle_tests {
             
             // Settle with vault, no credit usage
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
 
@@ -218,7 +218,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -238,13 +238,13 @@ module stelis::settle_tests {
             let use_credit = 100_000_000;
             
             // total_in = 100M + 100M credit = 200M
-            // claim = 5M, quoted_relayer_fee_mist = 0, protocol_flat_fee = 0
+            // claim = 5M, quoted_host_fee_mist = 0, protocol_flat_fee = 0
             // payout = 5M
             // surplus = 195M
             // vault balance = 990M - 100M (used) + 195M (surplus) = 1_085_000_000
             
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], use_credit, ctx
             );
 
@@ -274,7 +274,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             // 10M input, 0 claim → fee = 50K, surplus ≈ 9.95M
             let coin_in = coin::mint_for_testing<SUI>(10_000_000, ctx);
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -290,7 +290,7 @@ module stelis::settle_tests {
             // Vault has ~9.95M. Try to use 100M → EInsufficientBalance
             let coin_in = coin::mint_for_testing<SUI>(1_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 100_000_000, ctx
             );
 
@@ -317,7 +317,7 @@ module stelis::settle_tests {
             let max_claim = config::max_claim_mist(&config);
             let min_settle = config::min_settle_mist(&config);
             
-            // max_relayer_fee_mist=5_000_000, protocol_flat_fee_mist=10_000_000
+            // max_host_fee_mist=5_000_000, protocol_flat_fee_mist=10_000_000
             config::update_config(
                 &mut config, 
                 5_000_000,
@@ -329,7 +329,7 @@ module stelis::settle_tests {
             );
             test_scenario::return_shared(config);
         };
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         // 2. User Settle (new user path)
         test_scenario::next_tx(&mut scenario, ADDR_USER);
@@ -341,15 +341,15 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             let claim = 10_000_000;
 
-            // quoted_relayer_fee = 5_000_000 (on-chain max_relayer_fee)
+            // quoted_host_fee = 5_000_000 (on-chain max_host_fee)
             // expected_protocol_fee = 10_000_000 (on-chain protocol_fee)
-            // Payout = claim(10M) + quoted_relayer_fee(5M) = 15_000_000
+            // Payout = claim(10M) + quoted_host_fee(5M) = 15_000_000
             // Total deduction = 10M + 5M + 10M = 25_000_000
             // Surplus = 1_000M - 25M = 975_000_000
 
             let cv = config::config_version(&config);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, claim, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, claim, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 5_000_000, 10_000_000, cv, 0, vector[], vector[], ctx
             );
 
@@ -365,11 +365,11 @@ module stelis::settle_tests {
             test_scenario::return_to_sender(&scenario, vault);
         };
 
-        // 4. Verify Relayer Receipt
-        test_scenario::next_tx(&mut scenario, ADDR_RELAYER);
+        // 4. Verify settlement payout receipt
+        test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
-            assert!(coin::value(&coin) == 15_000_000, 6); // Claim + quoted relayer fee
+            assert!(coin::value(&coin) == 15_000_000, 6); // Claim + quoted host fee
             test_scenario::return_to_sender(&scenario, coin);
         };
 
@@ -400,7 +400,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
             // claim=0 → all goes to surplus after fees
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -423,7 +423,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             
             let coin = vault::withdraw(&mut vault, ctx);
-            // claim=0, quoted_relayer_fee_mist=0 → all goes to surplus
+            // claim=0, quoted_host_fee_mist=0 → all goes to surplus
             // surplus ≈ 100_000_000
             assert!(coin::value(&coin) == 100_000_000, 7);
             
@@ -460,7 +460,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000, ctx);
 
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 10, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 10, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -485,7 +485,7 @@ module stelis::settle_tests {
             let mut registry = test_scenario::take_shared<VaultRegistry>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -508,7 +508,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000, ctx);
 
-            settle::settle_with_vault_for_testing(&config, &registry, &clock, &mut vault, coin_in, 10, ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx);
+            settle::settle_with_vault_for_testing(&config, &registry, &clock, &mut vault, coin_in, 10, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx);
             
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -535,7 +535,7 @@ module stelis::settle_tests {
             let high_claim = config::max_claim_mist(&config) + 1; // Above current max_claim
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, high_claim, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, high_claim, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -559,15 +559,15 @@ module stelis::settle_tests {
             
             // Fee 0, so need at least claim amount
             // coin_in = 10M = claim → total_in=10M, need 10M+0+0 = 10M → just enough
-            // But test_settle_fail_insufficient_funds: coin_in < claim+quoted_relayer_fee_mist+protocol_fee
-            // With quoted_relayer_fee_mist=0: need total_in >= claim. coin_in=claim exactly → passes.
-            // To trigger EInsufficientFunds, enable quoted_relayer_fee_mist so that claim+fee>total_in
-            // Here we rely on the fact that quoted_relayer_fee_mist comes from config (default=0).
+            // But test_settle_fail_insufficient_funds: coin_in < claim+quoted_host_fee_mist+protocol_fee
+            // With quoted_host_fee_mist=0: need total_in >= claim. coin_in=claim exactly → passes.
+            // To trigger EInsufficientFunds, enable quoted_host_fee_mist so that claim+fee>total_in
+            // Here we rely on the fact that quoted_host_fee_mist comes from config (default=0).
             // For a proper insufficient funds test, use coin_in strictly < claim:
             let claim = 10_000_000;
             let coin_in = coin::mint_for_testing<SUI>(claim - 1, ctx); // 1 short
 
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, claim, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, claim, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -592,7 +592,7 @@ module stelis::settle_tests {
             config::update_config(&mut config, 0, 0, max_claim, 1_000_000, 500, ctx);
             test_scenario::return_shared(config);
         };
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_USER);
         {
@@ -603,7 +603,7 @@ module stelis::settle_tests {
             // Input 100 MIST vs Min 1_000_000 MIST
             let coin_in = coin::mint_for_testing<SUI>(100, ctx);
 
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -627,7 +627,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
             let bad_hash = vector[1, 2, 3]; // Invalid length
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, bad_hash, vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, bad_hash, vector[], ctx);
             
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -652,7 +652,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
             let bad_pid = vector[1, 2, 3]; // Invalid length (not 0 or 32)
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, bad_pid, 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, bad_pid, 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -680,7 +680,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
             let bad_oid = vector[1, 2, 3]; // Invalid length (not 0 or 32)
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], bad_oid, ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], bad_oid, ctx);
 
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -718,9 +718,9 @@ module stelis::settle_tests {
             let wrong_version = 99;
             settle::settle_for_testing(
                 &config, &mut registry, &clock, coin_in,
-                0, ADDR_RELAYER, vector[], 1,
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1,
                 0, 0, 0,
-                0, // quoted_relayer_fee_mist
+                0, // quoted_host_fee_mist
                 0, // expected_protocol_fee_mist (matches current 0)
                 wrong_version, // expected_config_version — drift!
                 0, vector[], vector[],
@@ -748,11 +748,11 @@ module stelis::settle_tests {
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
-            // update_config(max_relayer_fee, protocol_flat_fee, max_claim, min_settle, max_spread_bps)
+            // update_config(max_host_fee, protocol_flat_fee, max_claim, min_settle, max_spread_bps)
             config::update_config(&mut config, 0, 1000, 50_000_000, 100_000, 500, ctx);
             test_scenario::return_shared(config);
         };
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         // User submits settle with stale expected_protocol_fee_mist = 500 (expects old fee),
         // but chain actually charges 1000. Drift must be rejected.
@@ -765,9 +765,9 @@ module stelis::settle_tests {
 
             settle::settle_for_testing(
                 &config, &mut registry, &clock, coin_in,
-                0, ADDR_RELAYER, vector[], 1,
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1,
                 0, 0, 0,
-                0,   // quoted_relayer_fee_mist (within 0 cap)
+                0,   // quoted_host_fee_mist (within 0 cap)
                 500, // expected_protocol_fee_mist — drift! (actual is 1000)
                 1,   // expected_config_version matches current (1)
                 0, vector[], vector[],
@@ -780,11 +780,11 @@ module stelis::settle_tests {
         test_scenario::end(scenario);
     }
 
-    // relayer fee cap drift: PTB carries a quoted_relayer_fee_mist exceeding
-    // config.max_relayer_fee_mist → ERelayerFeeCapExceeded (108).
+    // host fee cap drift: PTB carries a quoted_host_fee_mist exceeding
+    // config.max_host_fee_mist → EHostFeeCapExceeded (108).
     #[test]
-    #[expected_failure(abort_code = ERelayerFeeCapExceeded, location = stelis::settle)]
-    fun test_settle_fail_relayer_fee_cap_exceeded() {
+    #[expected_failure(abort_code = EHostFeeCapExceeded, location = stelis::settle)]
+    fun test_settle_fail_host_fee_cap_exceeded() {
         let mut scenario = test_scenario::begin(ADDR_ADMIN);
         setup_test(&mut scenario);
         let mut clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
@@ -797,12 +797,12 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
-            // Config initial max_relayer_fee_mist is 0; PTB claims 100 (> cap).
+            // Config initial max_host_fee_mist is 0; PTB claims 100 (> cap).
             settle::settle_for_testing(
                 &config, &mut registry, &clock, coin_in,
-                0, ADDR_RELAYER, vector[], 1,
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1,
                 0, 0, 0,
-                100, // quoted_relayer_fee_mist — exceeds current cap of 0!
+                100, // quoted_host_fee_mist — exceeds current cap of 0!
                 0,   // expected_protocol_fee_mist
                 0,   // expected_config_version
                 0, vector[], vector[],
@@ -827,7 +827,7 @@ module stelis::settle_tests {
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
-            // max_relayer_fee_mist has no upper cap — test with max_claim exceeding the package hard cap
+            // max_host_fee_mist has no upper cap — test with max_claim exceeding the package hard cap
             config::update_config(&mut config, 0, 0, config::get_max_claim_mist() + 1, 0, 500, ctx);
             test_scenario::return_shared(config);
         };
@@ -975,7 +975,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -991,7 +991,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -1019,7 +1019,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 5, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -1035,7 +1035,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 3, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -1062,7 +1062,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -1078,7 +1078,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 5, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -1095,7 +1095,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 100, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -1122,7 +1122,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -1138,7 +1138,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -1167,7 +1167,7 @@ module stelis::settle_tests {
             let mut registry = test_scenario::take_shared<VaultRegistry>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -1179,7 +1179,7 @@ module stelis::settle_tests {
             let mut registry = test_scenario::take_shared<VaultRegistry>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -1235,7 +1235,7 @@ module stelis::settle_tests {
         };
 
         // 2. Non-admin tries to cancel → ENotAdmin
-        test_scenario::next_tx(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1281,24 +1281,24 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        // 2. Admin proposes ADDR_RELAYER while pending_admin already set → EPendingAdminExists
+        // 2. Admin proposes ADDR_SETTLEMENT_PAYOUT_RECIPIENT while pending_admin already set → EPendingAdminExists
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
-            config::propose_admin(&mut config, ADDR_RELAYER, ctx);
+            config::propose_admin(&mut config, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, ctx);
             test_scenario::return_shared(config);
         };
 
         test_scenario::end(scenario);
     }
 
-    // === Fee Cap Tests (EInvalidRelayerFeeCap) ===
+    // === Fee Cap Tests (EInvalidHostFeeCap) ===
 
-    // max_relayer_fee_mist + protocol_flat_fee_mist > max_claim_mist → EInvalidRelayerFeeCap.
+    // max_host_fee_mist + protocol_flat_fee_mist > max_claim_mist → EInvalidHostFeeCap.
     // u128 cast in config.move prevents ARITHMETIC_ERROR on u64 overflow.
     #[test]
-    #[expected_failure(abort_code = EInvalidRelayerFeeCap, location = stelis::config)]
+    #[expected_failure(abort_code = EInvalidHostFeeCap, location = stelis::config)]
     fun test_update_config_fee_cap_exceeded() {
         let mut scenario = test_scenario::begin(ADDR_ADMIN);
         setup_test(&mut scenario);
@@ -1310,7 +1310,7 @@ module stelis::settle_tests {
             let max_claim = config::max_claim_mist(&config);
             let min_settle = config::min_settle_mist(&config);
             let excessive_fee = (max_claim / 2) + 1;
-            // relayer fee cap + protocol fee must not exceed max_claim.
+            // host fee cap + protocol fee must not exceed max_claim.
             config::update_config(&mut config, excessive_fee, excessive_fee, max_claim, min_settle, 500, ctx);
             test_scenario::return_shared(config);
         };
@@ -1344,7 +1344,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
@@ -1376,7 +1376,7 @@ module stelis::settle_tests {
         };
 
         test_scenario::next_epoch(&mut scenario, ADDR_ADMIN);
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1389,8 +1389,8 @@ module stelis::settle_tests {
             assert!(stelis::events::config_evt_old_max_spread_bps(evt) == 500, 12);
             assert!(stelis::events::config_evt_new_max_spread_bps(evt) == 300, 13);
             assert!(stelis::events::config_evt_new_config_version(evt) == 1, 14);
-            assert!(stelis::events::config_evt_old_max_relayer_fee(evt) == 0, 15);
-            assert!(stelis::events::config_evt_new_max_relayer_fee(evt) == 0, 16);
+            assert!(stelis::events::config_evt_old_max_host_fee(evt) == 0, 15);
+            assert!(stelis::events::config_evt_new_max_host_fee(evt) == 0, 16);
 
             test_scenario::return_shared(config);
         };
@@ -1413,7 +1413,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1470,7 +1470,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
@@ -1492,14 +1492,14 @@ module stelis::settle_tests {
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
-            let max_relayer_fee = config::max_relayer_fee_mist(&config);
+            let max_host_fee = config::max_host_fee_mist(&config);
             let protocol_fee = config::protocol_flat_fee_mist(&config);
             let max_claim = config::max_claim_mist(&config);
             let min_settle = config::min_settle_mist(&config);
             let max_spread = config::max_spread_bps(&config);
             config::update_config(
                 &mut config,
-                max_relayer_fee,
+                max_host_fee,
                 protocol_fee,
                 max_claim,
                 min_settle,
@@ -1510,8 +1510,8 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1536,7 +1536,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        advance_two_epochs_and_apply_treasury(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_treasury(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
@@ -1563,7 +1563,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1590,8 +1590,8 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1645,7 +1645,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        advance_two_epochs_and_apply_pause(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_pause(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
@@ -1680,7 +1680,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1744,8 +1744,8 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
-        test_scenario::next_epoch(&mut scenario, ADDR_RELAYER);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
+        test_scenario::next_epoch(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -1943,7 +1943,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -1985,7 +1985,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 10_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2023,7 +2023,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(10_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2060,7 +2060,7 @@ module stelis::settle_tests {
             let mut registry = test_scenario::take_shared<VaultRegistry>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
-            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
+            settle::settle_for_testing(&config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx);
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
         };
@@ -2085,7 +2085,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
 
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut rogue, coin_in, 0, ADDR_RELAYER,
+                &config, &registry, &clock, &mut rogue, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
 
@@ -2171,8 +2171,8 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        // 2. ADDR_RELAYER (not the pending admin) tries to accept → ENotPendingAdmin
-        test_scenario::next_tx(&mut scenario, ADDR_RELAYER);
+        // 2. ADDR_SETTLEMENT_PAYOUT_RECIPIENT (not the pending admin) tries to accept → ENotPendingAdmin
+        test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let mut config = test_scenario::take_shared<Config>(&scenario);
             let ctx = test_scenario::ctx(&mut scenario);
@@ -2201,7 +2201,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2221,8 +2221,8 @@ module stelis::settle_tests {
             settle::settle_with_credit(
                 &config, &registry, &clock, &mut vault,
                 5_000_000,   // use_credit_amount
-                2_000_000,   // relayer_claim
-                ADDR_RELAYER,
+                2_000_000,   // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
 
@@ -2250,7 +2250,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2268,7 +2268,7 @@ module stelis::settle_tests {
                 &config, &registry, &clock, &mut vault,
                 500, // below default min_settle_mist
                 100,
-                ADDR_RELAYER,
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
 
@@ -2283,7 +2283,7 @@ module stelis::settle_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = ERelayerFeeCapExceeded, location = stelis::settle)]
+    #[expected_failure(abort_code = EHostFeeCapExceeded, location = stelis::settle)]
     fun test_settle_with_credit_fee_cap_rejection() {
         let mut scenario = test_scenario::begin(ADDR_ADMIN);
         setup_test(&mut scenario);
@@ -2297,7 +2297,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2314,9 +2314,9 @@ module stelis::settle_tests {
                 &config, &registry, &clock, &mut vault,
                 1_000_000,
                 100,
-                ADDR_RELAYER,
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0,
-                1, // quoted_relayer_fee_mist exceeds default cap 0
+                1, // quoted_host_fee_mist exceeds default cap 0
                 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2343,7 +2343,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2360,7 +2360,7 @@ module stelis::settle_tests {
                 &config, &registry, &clock, &mut vault,
                 1_000_000,
                 100,
-                ADDR_RELAYER,
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0,
                 99, // stale or forged expected_config_version
                 0, vector[], vector[], ctx
@@ -2389,7 +2389,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2404,7 +2404,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             settle::settle_with_credit(
                 &config, &registry, &clock, &mut vault,
-                1_000_000, 100, ADDR_RELAYER,
+                1_000_000, 100, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2420,7 +2420,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             settle::settle_with_credit(
                 &config, &registry, &clock, &mut vault,
-                1_000_000, 100, ADDR_RELAYER,
+                1_000_000, 100, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2449,7 +2449,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2467,7 +2467,7 @@ module stelis::settle_tests {
                 &config, &registry, &clock, &mut vault,
                 10_000_000, // way more than vault balance
                 2_000_000,
-                ADDR_RELAYER,
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2498,7 +2498,7 @@ module stelis::settle_tests {
             // Use exactly min_settle (100_000 MIST), claim all of it → surplus = 0
             let coin_in = coin::mint_for_testing<SUI>(100_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 100_000, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 100_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2547,7 +2547,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             settle::settle_with_credit(
                 &config, &registry, &clock, &mut rogue,
-                1_000_000, 500_000, ADDR_RELAYER,
+                1_000_000, 500_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2579,7 +2579,7 @@ module stelis::settle_tests {
             config::update_config(&mut config, 0, 0, max_claim, 1_000_000, 500, ctx);
             test_scenario::return_shared(config);
         };
-        advance_two_epochs_and_apply_config(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_config(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         // 2. Create vault
         test_scenario::next_tx(&mut scenario, ADDR_USER);
@@ -2591,7 +2591,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(5_000_000, ctx);
             let cv = config::config_version(&config);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, cv, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2607,7 +2607,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100, ctx); // Below min_settle
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
@@ -2636,7 +2636,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2655,7 +2655,7 @@ module stelis::settle_tests {
             settle::settle_with_vault_for_testing(
                 &config, &registry, &clock, &mut vault, coin_in,
                 high_claim, // Over max_claim
-                ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -2683,7 +2683,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2699,7 +2699,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(200_000_000, ctx);
             settle::settle_with_vault_for_testing(
-                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_RELAYER,
+                &config, &registry, &clock, &mut vault, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[1, 2, 3], // invalid length (not 0 or 32)
                 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], 0, ctx
             );
@@ -2748,7 +2748,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(config);
         };
 
-        advance_two_epochs_and_apply_treasury(&mut scenario, ADDR_RELAYER);
+        advance_two_epochs_and_apply_treasury(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
 
         test_scenario::next_tx(&mut scenario, ADDR_ADMIN);
         {
@@ -2780,7 +2780,7 @@ module stelis::settle_tests {
             let sui_coin = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::swap_and_settle_new_user_for_testing(
                 &config, &mut registry, &clock, sui_coin,
-                5_000_000, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -2813,7 +2813,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(1_000_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2830,7 +2830,7 @@ module stelis::settle_tests {
             let sui_coin = coin::mint_for_testing<SUI>(200_000_000, ctx);
             settle::swap_and_settle_with_vault_for_testing(
                 &config, &registry, &clock, &mut vault, sui_coin,
-                5_000_000, ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             // vault: 1_000M + (200M - 5M) = 1_195_000_000
             assert!(vault::balance(&vault) == 1_195_000_000, 61);
@@ -2859,7 +2859,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2879,8 +2879,8 @@ module stelis::settle_tests {
             settle::swap_and_settle_with_vault_credit_for_testing(
                 &config, &registry, &clock, &mut vault, sui_coin,
                 50_000_000, // use_credit_amount
-                5_000_000,  // relayer_claim
-                ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                5_000_000,  // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             assert!(vault::balance(&vault) == 595_000_000, 62);
             test_scenario::return_shared(config);
@@ -2916,7 +2916,7 @@ module stelis::settle_tests {
             let sui_coin = coin::mint_for_testing<SUI>(400_000_000, ctx);
             settle::swap_and_settle_new_user_for_testing(
                 &config, &mut registry, &clock, sui_coin,
-                3_000_000, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                3_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(registry);
@@ -2949,7 +2949,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(100_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -2967,7 +2967,7 @@ module stelis::settle_tests {
             let sui_coin = coin::mint_for_testing<SUI>(300_000_000, ctx);
             settle::swap_and_settle_with_vault_for_testing(
                 &config, &registry, &clock, &mut vault, sui_coin,
-                4_000_000, ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                4_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             assert!(vault::balance(&vault) == 396_000_000, 71);
             test_scenario::return_shared(config);
@@ -2995,7 +2995,7 @@ module stelis::settle_tests {
             let ctx = test_scenario::ctx(&mut scenario);
             let coin_in = coin::mint_for_testing<SUI>(150_000_000, ctx);
             settle::settle_for_testing(
-                &config, &mut registry, &clock, coin_in, 0, ADDR_RELAYER,
+                &config, &mut registry, &clock, coin_in, 0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
@@ -3014,8 +3014,8 @@ module stelis::settle_tests {
             settle::swap_and_settle_with_vault_credit_for_testing(
                 &config, &registry, &clock, &mut vault, sui_coin,
                 30_000_000, // use_credit_amount
-                5_000_000,  // relayer_claim
-                ADDR_RELAYER, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                5_000_000,  // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             assert!(vault::balance(&vault) == 195_000_000, 72);
             test_scenario::return_shared(config);
@@ -3158,8 +3158,8 @@ module stelis::settle_tests {
                 payment_coin,
                 3_000_000_000, // swap_amount (3 DEEP)
                 1_000_000_000, // min_sui_out (1 SUI minimum)
-                5_000_000,     // relayer_claim (0.005 SUI, within current max_claim_mist)
-                ADDR_RELAYER,
+                5_000_000,     // execution_cost_claim_mist (0.005 SUI, within current max_claim_mist)
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[],      // receipt_id
                 1,             // nonce
                 0, 0, 0, 0, 0, 0, 0, // sim_gas, gas_variance, slippage, quoted_fee, protocol_fee, config_version, quote_ts
@@ -3179,7 +3179,7 @@ module stelis::settle_tests {
         {
             let vault = test_scenario::take_from_sender<UserVault>(&scenario);
             // At price 1.5 DEEP/SUI, 3 DEEP → ~2 SUI (2_000_000_000 MIST)
-            // minus relayer_claim 5_000_000 → surplus ~1_995_000_000
+            // minus execution_cost_claim_mist 5_000_000 → surplus ~1_995_000_000
             let balance = vault::balance(&vault);
             assert!(balance > 0, 80); // has surplus
             assert!(balance < 2_000_000_000, 81); // less than full swap output (claim deducted)
@@ -3206,7 +3206,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(200_000_000, ctx);
             settle::settle_for_testing(
                 &config, &mut vault_registry, &clock, coin_in,
-                0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(vault_registry);
@@ -3234,8 +3234,8 @@ module stelis::settle_tests {
                 payment_coin,
                 3_000_000_000, // swap_amount
                 1_000_000_000, // min_sui_out
-                5_000_000,     // relayer_claim
-                ADDR_RELAYER,
+                5_000_000,     // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[],
                 0, // use_credit_amount = 0
                 ctx,
@@ -3271,7 +3271,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(500_000_000, ctx);
             settle::settle_for_testing(
                 &config, &mut vault_registry, &clock, coin_in,
-                0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(vault_registry);
@@ -3299,8 +3299,8 @@ module stelis::settle_tests {
                 payment_coin,
                 3_000_000_000, // swap_amount
                 1_000_000_000, // min_sui_out
-                5_000_000,     // relayer_claim
-                ADDR_RELAYER,
+                5_000_000,     // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[],
                 50_000_000, // use_credit_amount = 50M MIST
                 ctx,
@@ -3425,8 +3425,8 @@ module stelis::settle_tests {
                 payment,
                 2_000_000_000, // swap_amount: 2 DEEP
                 500_000_000,   // min_sui_out: 0.5 SUI floor
-                5_000_000,     // relayer_claim
-                ADDR_RELAYER,
+                5_000_000,     // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[],
                 ctx,
             );
@@ -3437,7 +3437,7 @@ module stelis::settle_tests {
             test_scenario::return_shared(clk);
         };
 
-        // Verify vault was created with surplus (swap_output - relayer_claim - fees)
+        // Verify vault was created with surplus (swap_output - execution_cost_claim_mist - fees)
         test_scenario::next_tx(&mut scenario, ADDR_USER);
         {
             let vault = test_scenario::take_from_sender<UserVault>(&scenario);
@@ -3466,7 +3466,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(200_000_000, ctx);
             settle::settle_for_testing(
                 &config, &mut vault_registry, &clk, coin_in,
-                0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(vault_registry);
@@ -3494,8 +3494,8 @@ module stelis::settle_tests {
                 payment,
                 2_000_000_000, // swap_amount
                 500_000_000,   // min_sui_out
-                5_000_000,     // relayer_claim
-                ADDR_RELAYER,
+                5_000_000,     // execution_cost_claim_mist
+                ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[],
                 0,             // use_credit_amount = 0 (no credit drain)
                 ctx,
@@ -3530,7 +3530,7 @@ module stelis::settle_tests {
             let coin_in = coin::mint_for_testing<SUI>(300_000_000, ctx);
             settle::settle_for_testing(
                 &config, &mut vault_registry, &clk, coin_in,
-                0, ADDR_RELAYER, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
+                0, ADDR_SETTLEMENT_PAYOUT_RECIPIENT, vector[], 1, 0, 0, 0, 0, 0, 0, 0, vector[], vector[], ctx
             );
             test_scenario::return_shared(config);
             test_scenario::return_shared(vault_registry);
@@ -3555,7 +3555,7 @@ module stelis::settle_tests {
                 &mut vault,
                 &mut pool,
                 payment,
-                2_000_000_000, 500_000_000, 5_000_000, ADDR_RELAYER,
+                2_000_000_000, 500_000_000, 5_000_000, ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
                 vector[], 2, 0, 0, 0, 0, 0, 0, 0, vector[], vector[],
                 50_000_000,    // use_credit_amount = 50M
                 ctx,

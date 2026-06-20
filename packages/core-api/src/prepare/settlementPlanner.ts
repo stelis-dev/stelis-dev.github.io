@@ -25,7 +25,7 @@ import type { SwapPlan, SettlementPlan, SettlePlanAuditFields } from './settlePl
 /** Fee-only config values needed for planning decisions. */
 export interface PlannerConfig {
   readonly minSettleMist: bigint;
-  readonly quotedRelayerFeeMist: bigint;
+  readonly quotedHostFeeMist: bigint;
   readonly protocolFlatFeeMist: bigint;
 }
 
@@ -63,10 +63,10 @@ export interface FundingResolution {
 export function checkCreditOnlyEligibility(
   config: PlannerConfig,
   input: PlannerInput,
-  relayerClaim: bigint,
+  executionCostClaim: bigint,
 ): { useCreditAmount: bigint } | null {
   if (input.profile !== 'credit_general' || !input.vaultObjectId) return null;
-  const totalNeeded = relayerClaim + config.quotedRelayerFeeMist + config.protocolFlatFeeMist;
+  const totalNeeded = executionCostClaim + config.quotedHostFeeMist + config.protocolFlatFeeMist;
   const effectiveCredit = totalNeeded > config.minSettleMist ? totalNeeded : config.minSettleMist;
   if (input.creditMist >= effectiveCredit) {
     return { useCreditAmount: effectiveCredit };
@@ -82,15 +82,15 @@ export function checkCreditOnlyEligibility(
  * Calculate the SUI output target that a swap path must satisfy.
  *
  * Steps:
- *   1. requiredTotalIn = max(relayerClaim + fees, minSettleMist)
+ *   1. requiredTotalIn = max(executionCostClaim + fees, minSettleMist)
  *   2. Subtract existing vault credit (with_vault only)
  */
 export function calculateRequiredSwapOutput(
   config: PlannerConfig,
   input: PlannerInput,
-  relayerClaim: bigint,
+  executionCostClaim: bigint,
 ): bigint {
-  const totalNeeded = relayerClaim + config.quotedRelayerFeeMist + config.protocolFlatFeeMist;
+  const totalNeeded = executionCostClaim + config.quotedHostFeeMist + config.protocolFlatFeeMist;
   const requiredTotalIn = totalNeeded > config.minSettleMist ? totalNeeded : config.minSettleMist;
 
   const existingCredit =

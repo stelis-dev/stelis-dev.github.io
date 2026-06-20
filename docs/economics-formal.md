@@ -4,7 +4,7 @@ This document records the current formulas used by relay cost calculation and sp
 
 The implementation is in [`packages/core-relay/src/gasEstimate.ts`](../packages/core-relay/src/gasEstimate.ts) and [`packages/core-relay/src/validate/nonloss.ts`](../packages/core-relay/src/validate/nonloss.ts).
 
-## Relayer Cost Calculation
+## Gas Recovery Cost Calculation
 
 All values are in MIST.
 
@@ -12,25 +12,25 @@ All values are in MIST.
 simGas = max(0, computationCost + storageCost - storageRebate)
 grossGas = computationCost + storageCost
 gasVarianceFixedMist = 100000
-relayerClaim = simGas + gasVarianceFixedMist + slippageBufferMist
+executionCostClaim = simGas + gasVarianceFixedMist + slippageBufferMist
 ```
 
 `slippageBufferMist` is used for swap paths. Credit-only paths use zero.
 
-`relayerClaim` is the gas-recovery component embedded in the settlement arguments. It is not the full relayer payout.
-The settlement payout sent to the configured relayer recipient is:
+`executionCostClaim` is the gas-recovery component embedded in the settlement arguments. It is not the full settlement payout.
+The settlement payout sent to the configured settlement payout recipient is:
 
 ```text
-relayerPayout = relayerClaim + quotedRelayerFeeMist
+settlementPayout = executionCostClaim + quotedHostFeeMist
 ```
 
 ## Sponsor Approval Gate
 
-The sponsor must reject a transaction when the relayer claim is lower than the required claim:
+The sponsor must reject a transaction when the execution cost claim is lower than the required claim:
 
 ```text
 requiredClaim = simGas + gasVarianceFixedMist + slippageBufferMist
-relayerClaim >= requiredClaim
+executionCostClaim >= requiredClaim
 ```
 
 The sponsor also rejects when:
@@ -42,15 +42,15 @@ The sponsor also rejects when:
 
 Move settlement checks that:
 
-- `relayer_claim <= max_claim_mist`
+- `execution_cost_claim_mist <= max_claim_mist`
 - token-funded swap settlement input is at least `min_settle_mist`
 - credit-only settlement is exempt from `min_settle_mist`
-- settlement input covers relayer claim, quoted relayer fee, and protocol fee
-- quoted relayer fee is not above the on-chain relayer fee cap
+- settlement input covers execution cost claim, quoted host fee, and protocol fee
+- quoted host fee is not above the on-chain host fee cap
 - the expected config version matches the current on-chain config version
 - the vault nonce advances monotonically
 
-Move transfers `relayer_claim + quoted_relayer_fee_mist` to `relayer_recipient`.
+Move transfers `execution_cost_claim_mist + quoted_host_fee_mist` to `settlement_payout_recipient`.
 The protocol flat fee is transferred separately to the protocol treasury.
 
 ## Recorder Economics
@@ -59,10 +59,10 @@ Runtime logs and sponsored-execution summaries use a non-negative paid-gas value
 
 ```text
 paidGas = max(0, computationCost + storageCost - storageRebate)
-relayerNetMist = recoveredGasMist + relayerFeeMist - paidGas
+hostNetMist = recoveredGasMist + hostFeeMist - paidGas
 ```
 
-`protocolFeeMist` is recorded as context, but it is not included in `relayerNetMist`.
+`protocolFeeMist` is recorded as context, but it is not included in `hostNetMist`.
 
 ## Related Parameters
 

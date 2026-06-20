@@ -120,7 +120,7 @@ const RELAY_LOCK_PAIRS: LockPair[] = [
   },
   { schemaDef: 'sponsorRequest', sdkInterface: 'SponsorParams' },
   { schemaDef: 'sponsorResponse', sdkInterface: 'SponsorResponse' },
-  { schemaDef: 'relayConfigResponse', sdkInterface: 'RelayerConfig' },
+  { schemaDef: 'relayConfigResponse', sdkInterface: 'RelayConfigResponse' },
 ];
 
 const STUDIO_LOCK_PAIRS: LockPair[] = [

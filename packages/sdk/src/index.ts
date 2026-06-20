@@ -15,13 +15,13 @@ export type {
   // SDK initialization
   StelisConnectOptions,
   StelisRequestTimeouts,
-  PaymentToken,
+  SettlementToken,
   ExecuteSponsoredOptions,
   ExecuteSponsoredResult,
   GasEstimateResult,
   ExecuteSuiFirstResult,
-  // Relayer config & responses
-  RelayerConfig,
+  // Relay config response & responses
+  RelayConfigResponse,
   PrepareResponse,
   SponsorResponse,
   SettleProfile,

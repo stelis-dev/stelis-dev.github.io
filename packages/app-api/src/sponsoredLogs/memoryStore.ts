@@ -22,7 +22,7 @@ import {
 interface MutableAggregate {
   sponsoredExecutions: bigint;
   lossCount: bigint;
-  cumulativeRelayerNetMist: bigint;
+  cumulativeHostNetMist: bigint;
   cumulativeLossMist: bigint;
 }
 
@@ -30,7 +30,7 @@ function emptyAggregate(): MutableAggregate {
   return {
     sponsoredExecutions: 0n,
     lossCount: 0n,
-    cumulativeRelayerNetMist: 0n,
+    cumulativeHostNetMist: 0n,
     cumulativeLossMist: 0n,
   };
 }
@@ -43,7 +43,7 @@ function freezeAggregate(
     mode,
     sponsoredExecutions: agg.sponsoredExecutions.toString(),
     lossCount: agg.lossCount.toString(),
-    cumulativeRelayerNetMist: agg.cumulativeRelayerNetMist.toString(),
+    cumulativeHostNetMist: agg.cumulativeHostNetMist.toString(),
     cumulativeLossMist: agg.cumulativeLossMist.toString(),
   };
 }
@@ -91,12 +91,12 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
     // idempotency set, otherwise a later well-formed retry of the same
     // (mode, receiptId, outcome) would no-op silently. Mirrors the
     // Redis adapter, which validates before invoking the Lua script.
-    let relayerNet: bigint | null = null;
+    let hostNet: bigint | null = null;
     if (entry.economicsStatus === 'known') {
-      if (entry.relayerNetMist === null) {
-        throw new Error('sponsoredLogs.memoryStore: known economics entry missing relayerNetMist');
+      if (entry.hostNetMist === null) {
+        throw new Error('sponsoredLogs.memoryStore: known economics entry missing hostNetMist');
       }
-      relayerNet = parseSignedMistString(entry.relayerNetMist, 'relayerNetMist');
+      hostNet = parseSignedMistString(entry.hostNetMist, 'hostNetMist');
     }
 
     // Validation passed — claim the idempotency key now (adapter
@@ -108,10 +108,10 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
     for (const scope of scopes) {
       const agg = this.aggregates.get(scope)!;
       agg.sponsoredExecutions += 1n;
-      if (relayerNet !== null) {
-        agg.cumulativeRelayerNetMist += relayerNet;
-        if (relayerNet < 0n) {
-          agg.cumulativeLossMist += relayerNet;
+      if (hostNet !== null) {
+        agg.cumulativeHostNetMist += hostNet;
+        if (hostNet < 0n) {
+          agg.cumulativeLossMist += hostNet;
           agg.lossCount += 1n;
         }
       }

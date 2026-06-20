@@ -48,7 +48,7 @@ vi.mock('@mysten/sui/transactions', () => {
 
 const mockBuildSwapAndSettlePtb = vi.fn();
 const mockBuildSettleWithCreditPtb = vi.fn();
-const mockComputeRelayerCosts = vi.fn();
+const mockComputeExecutionCostClaim = vi.fn();
 const mockBatchGetHopMidPrices = vi.fn().mockResolvedValue([27_000_000_000n]);
 const mockResolvePaymentSource = vi.fn().mockResolvedValue({
   source: 'coin_object',
@@ -82,7 +82,7 @@ vi.mock('@stelis/core-relay', () => {
   return {
     buildSwapAndSettlePtb: (...args: unknown[]) => mockBuildSwapAndSettlePtb(...args),
     buildSettleWithCreditPtb: (...args: unknown[]) => mockBuildSettleWithCreditPtb(...args),
-    computeRelayerCosts: (...args: unknown[]) => mockComputeRelayerCosts(...args),
+    computeExecutionCostClaim: (...args: unknown[]) => mockComputeExecutionCostClaim(...args),
     batchGetHopMidPrices: (...args: unknown[]) => mockBatchGetHopMidPrices(...args),
     SlippageQueryError,
     CONVERGENCE_TOLERANCE_BPS: 500,
@@ -109,7 +109,7 @@ vi.mock('@stelis/core-relay', () => {
       EInvalidPolicyHash: 105,
       EConfigVersionMismatch: 106,
       EProtocolFeeMismatch: 107,
-      ERelayerFeeCapExceeded: 108,
+      EHostFeeCapExceeded: 108,
       EInvalidOrderIdHash: 109,
       ESpreadTooWide: 110,
     },
@@ -256,10 +256,10 @@ function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
     configId: '0xCFG',
     vaultRegistryId: '0xREG',
     deepbookPackageId: '0xabc',
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     maxClaimMist: 50_000_000n,
     minSettleMist: 100_000n,
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
     ...overrides,
@@ -282,18 +282,18 @@ function makeInput(
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1n,
       minSize: 1n,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote',
     } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
     descriptor: {
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote',
       hops: [
@@ -352,7 +352,7 @@ function resetBuildMocks(): void {
   vi.clearAllMocks();
   mockBuild.mockReset();
   mockBuild.mockResolvedValue(new Uint8Array([1, 2, 3]));
-  mockComputeRelayerCosts.mockReset();
+  mockComputeExecutionCostClaim.mockReset();
   mockBatchGetHopMidPrices.mockReset();
   mockBatchGetHopMidPrices.mockResolvedValue([27_000_000_000n]);
   mockResolvePaymentSource.mockReset();
@@ -369,12 +369,12 @@ function resetBuildMocks(): void {
   mockSolveExecutableSwap.mockResolvedValue(makeExecutableQuote());
   mockExtractPrefixWithdrawals.mockReset();
   mockExtractPrefixWithdrawals.mockReturnValue({ total: 0n, unaccountable: false });
-  mockComputeRelayerCosts.mockReturnValue({
+  mockComputeExecutionCostClaim.mockReturnValue({
     simGas: 2_000_000n,
     grossGas: 2_500_000n,
     gasVarianceFixedMist: 100_000n,
     slippageBufferMist: 0n,
-    relayerClaim: 3_000_000n,
+    executionCostClaim: 3_000_000n,
   });
   mockQueuedRpcStats.length = 0;
   mockCreateCacheCalls.count = 0;
@@ -398,15 +398,15 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     mockResolvePaymentSource.mockRejectedValue(
       new PrepareValidationError(
         'INSUFFICIENT_BALANCE',
-        'Payment-token funding should not be required for a measured credit-only path',
+        'Settlement-token funding should not be required for a measured credit-only path',
       ),
     );
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -417,7 +417,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
     expect(result.profile).toBe('credit_general');
     expect(result.paymentInputSource).toBe('none_credit_only');
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.slippageBufferMist).toBe(0n);
     expect(result.swapAmountSmallest).toBe(0n);
   });
@@ -458,20 +458,20 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           actualOutputMist: 26_800_000n,
         }),
       );
-    mockComputeRelayerCosts
+    mockComputeExecutionCostClaim
       .mockReturnValueOnce({
         simGas: 3_000_000n,
         grossGas: 3_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 4_000_000n,
+        executionCostClaim: 4_000_000n,
       })
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       })
       .mockImplementation((_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
@@ -480,7 +480,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       });
 
@@ -490,7 +490,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(mockBuildSwapAndSettlePtb).toHaveBeenCalledTimes(2);
     expect(result.profile).toBe('with_vault');
     expect(result.paymentInputSource).toBe('coin_object');
-    expect(result.relayerClaim).toBe(3_200_000n);
+    expect(result.executionCostClaim).toBe(3_200_000n);
     expect(result.slippageBufferMist).toBe(200_000n);
     expect(result.swapAmountSmallest).toBe(1_000_000n);
   });
@@ -498,12 +498,12 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
   it('pre-swap credit measurement replaces the max-claim swap probe when measured credit is covered', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' }); // 5M < 50M maxClaimMist
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n, // 3M < 5M credit → success
+      executionCostClaim: 3_000_000n, // 3M < 5M credit → success
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -511,15 +511,15 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
     const preSwapCreditCall = mockBuildSettleWithCreditPtb.mock.calls[0] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
     const pass2CreditCall = mockBuildSettleWithCreditPtb.mock.calls[1] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
-    expect(preSwapCreditCall[1].relayerClaim).toBe(5_000_000n);
-    expect(pass2CreditCall[1].relayerClaim).toBe(3_000_000n);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(preSwapCreditCall[1].executionCostClaim).toBe(5_000_000n);
+    expect(pass2CreditCall[1].executionCostClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.profile).toBe('credit_general');
   });
 
@@ -527,37 +527,37 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' }); // 5M < maxClaim, but covers base claim
 
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 4_000_000n,
       grossGas: 4_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 5_000_000n,
+      executionCostClaim: 5_000_000n,
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
     expect(mockSolveExecutableSwap).not.toHaveBeenCalled();
     expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(1);
-    expect(mockComputeRelayerCosts).toHaveBeenCalledTimes(1);
+    expect(mockComputeExecutionCostClaim).toHaveBeenCalledTimes(1);
     expect(mockBuildSwapAndSettlePtb).not.toHaveBeenCalled();
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
     const provisionalCreditCall = mockBuildSettleWithCreditPtb.mock.calls[0] as [
       unknown,
-      { relayerClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint },
+      { executionCostClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint },
     ];
     const pass2CreditCall = mockBuildSettleWithCreditPtb.mock.calls[1] as [
       unknown,
-      { relayerClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint },
+      { executionCostClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint },
     ];
-    expect(provisionalCreditCall[1].relayerClaim).toBe(5_000_000n);
-    expect(pass2CreditCall[1].relayerClaim).toBe(5_000_000n);
+    expect(provisionalCreditCall[1].executionCostClaim).toBe(5_000_000n);
+    expect(pass2CreditCall[1].executionCostClaim).toBe(5_000_000n);
     expect(pass2CreditCall[1].slippageBufferMist).toBe(0n);
     expect(pass2CreditCall[1].useCreditAmount).toBe(5_000_000n);
     expect(result.profile).toBe('credit_general');
     expect(result.paymentInputSource).toBe('none_credit_only');
     expect(result.simGas).toBe(4_000_000n);
-    expect(result.relayerClaim).toBe(5_000_000n);
+    expect(result.executionCostClaim).toBe(5_000_000n);
     expect(result.slippageBufferMist).toBe(0n);
     expect(result.swapAmountSmallest).toBe(0n);
   });
@@ -566,7 +566,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '3500000' }); // Covers 3M base, not 3.6M inflated
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -574,19 +574,19 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
-    expect(mockComputeRelayerCosts).toHaveBeenCalledTimes(1);
+    expect(mockComputeExecutionCostClaim).toHaveBeenCalledTimes(1);
     expect(mockSolveExecutableSwap).not.toHaveBeenCalled();
     expect(mockBuildSwapAndSettlePtb).not.toHaveBeenCalled();
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
     expect(result.profile).toBe('credit_general');
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.slippageBufferMist).toBe(0n);
   });
 
@@ -613,20 +613,20 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           actualOutputMist: 26_300_000n,
         }),
       );
-    mockComputeRelayerCosts
+    mockComputeExecutionCostClaim
       .mockReturnValueOnce({
         simGas: 3_000_000n,
         grossGas: 3_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 4_000_000n,
+        executionCostClaim: 4_000_000n,
       })
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       })
       .mockImplementation((_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
@@ -635,20 +635,20 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
     expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(2);
-    expect(mockComputeRelayerCosts).toHaveBeenCalledTimes(3);
+    expect(mockComputeExecutionCostClaim).toHaveBeenCalledTimes(3);
     expect(mockSolveExecutableSwap).toHaveBeenCalledTimes(3);
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(1);
     expect(mockBuildSwapAndSettlePtb).toHaveBeenCalledTimes(2);
     expect(result.profile).toBe('with_vault');
     expect(result.paymentInputSource).toBe('coin_object');
-    expect(result.relayerClaim).toBe(3_700_000n);
+    expect(result.executionCostClaim).toBe(3_700_000n);
     expect(result.slippageBufferMist).toBe(700_000n);
   });
 
@@ -656,12 +656,12 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const ctx = makeCtx({ maxClaimMist: 50_000_000n });
     const input = makeInput({ credit: '55000000' }); // Covers pass1 max claim, not the measured 60M claim.
 
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 59_000_000n,
       grossGas: 59_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 60_000_000n,
+      executionCostClaim: 60_000_000n,
     });
 
     await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
@@ -674,7 +674,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
 
   it('uses the zero-buffer credit total even when credit also covers an inflated swap-buffer total', async () => {
     const ctx = makeCtx({
-      quotedRelayerFeeMist: 1_000_000n,
+      quotedHostFeeMist: 1_000_000n,
       protocolFlatFeeMist: 500_000n,
     });
     const input = makeInput({ credit: '10000000' });
@@ -685,7 +685,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
         actualOutputMist: 26_400_000n,
       }),
     );
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -693,7 +693,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -702,11 +702,11 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
 
     const pass2CreditCall = mockBuildSettleWithCreditPtb.mock.calls[
       mockBuildSettleWithCreditPtb.mock.calls.length - 1
-    ] as [unknown, { relayerClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint }];
-    expect(pass2CreditCall[1].relayerClaim).toBe(3_000_000n);
+    ] as [unknown, { executionCostClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint }];
+    expect(pass2CreditCall[1].executionCostClaim).toBe(3_000_000n);
     expect(pass2CreditCall[1].slippageBufferMist).toBe(0n);
     expect(pass2CreditCall[1].useCreditAmount).toBe(4_500_000n);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.slippageBufferMist).toBe(0n);
   });
 
@@ -719,15 +719,15 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
     const preSwapCreditCall = mockBuildSettleWithCreditPtb.mock.calls[0] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
     const pass2CreditCall = mockBuildSettleWithCreditPtb.mock.calls[1] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
-    expect(preSwapCreditCall[1].relayerClaim).toBe(50_000_000n);
-    expect(pass2CreditCall[1].relayerClaim).toBe(3_000_000n);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(preSwapCreditCall[1].executionCostClaim).toBe(50_000_000n);
+    expect(pass2CreditCall[1].executionCostClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
   });
 
   it('new_user probes with maxClaimMist and remains on swap path', async () => {
@@ -743,33 +743,33 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(mockBuildSettleWithCreditPtb).not.toHaveBeenCalled();
     const pass1SwapCall = mockBuildSwapAndSettlePtb.mock.calls[0] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
     const pass2SwapCall = mockBuildSwapAndSettlePtb.mock.calls[1] as [
       unknown,
-      { relayerClaim: bigint },
+      { executionCostClaim: bigint },
     ];
-    expect(pass1SwapCall[1].relayerClaim).toBe(50_000_000n);
-    expect(pass2SwapCall[1].relayerClaim).toBe(3_000_000n);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(pass1SwapCall[1].executionCostClaim).toBe(50_000_000n);
+    expect(pass2SwapCall[1].executionCostClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
   });
 
   // ── Credit-insufficient → swap fallback ─────────────────────────────────
 
-  it('falls through to swap path when relayerClaim > credit for credit_general', async () => {
+  it('falls through to swap path when executionCostClaim > credit for credit_general', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '2000000' }); // 2M credit
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n, // 3M > 2M credit → swap fallback
+      executionCostClaim: 3_000_000n, // 3M > 2M credit → swap fallback
     });
 
     // Should NOT throw — falls through to a with_vault swap entry
     const result = await runGenericPrepareBuildPipeline(ctx, input);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     // credit insufficient → falls through to a with_vault swap entry
     expect(result.profile).toBe('with_vault');
   });
@@ -777,16 +777,16 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
   it('uses credit-only settle when credit covers the effective zero-fee requirement', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' }); // 5M credit
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n, // zero fees and minSettle below claim: 3M <= 5M → credit-only
+      executionCostClaim: 3_000_000n, // zero fees and minSettle below claim: 3M <= 5M → credit-only
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
   });
 
   it('new_user with zero credit uses swap path without error', async () => {
@@ -796,16 +796,16 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       vaultObjectId: null,
       credit: '0',
     });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 10_000_000n,
       grossGas: 12_000_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 15_000_000n,
+      executionCostClaim: 15_000_000n,
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
-    expect(result.relayerClaim).toBe(15_000_000n);
+    expect(result.executionCostClaim).toBe(15_000_000n);
   });
 
   // ── gasBudget cap ─────────────────────────────────────────────────────
@@ -818,12 +818,12 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       credit: '0',
       gasMarginBps: 1000,
     });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 4_000_000n,
       grossGas: 4_500_000n, // × 1.1 = 4_950_000 < 5M → under cap
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 4_500_000n,
+      executionCostClaim: 4_500_000n,
     });
 
     await runGenericPrepareBuildPipeline(ctx, input);
@@ -839,12 +839,12 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       credit: '0',
       gasMarginBps: 1000,
     });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 4_000_000n,
       grossGas: 4_500_000n, // × 1.1 = 4,950,000 > 3M → capped
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     await runGenericPrepareBuildPipeline(ctx, input);
@@ -864,7 +864,7 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       },
       gasUsed: {
         computationCost: '2000000',
@@ -885,9 +885,9 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 123_000n,
-      relayerClaim: 3_123_000n,
+      executionCostClaim: 3_123_000n,
     };
-    mockComputeRelayerCosts.mockReturnValueOnce(measuredCosts);
+    mockComputeExecutionCostClaim.mockReturnValueOnce(measuredCosts);
 
     const result = await __testingGenericPrepareBuildStages.measureSwapExecutionGap(
       ctx,
@@ -923,7 +923,7 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     expect(mockSetGasBudget).toHaveBeenCalledWith(ctx.maxClaimMist);
     expect(mockBuild).toHaveBeenCalledTimes(1);
     expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(1);
-    expect(result.baseCosts.relayerClaim).toBe(3_000_000n);
+    expect(result.baseCosts.executionCostClaim).toBe(3_000_000n);
     expect(result.pass1MidPrices).toEqual([27_000_000_000n]);
   });
 
@@ -936,7 +936,7 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     };
 
     const result = await __testingGenericPrepareBuildStages.buildFinalGenericPrepareResult(
@@ -956,7 +956,7 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     expect(mockBuild).toHaveBeenCalledTimes(1);
     expect(ctx.sui.simulateTransaction).not.toHaveBeenCalled();
     expect(result.txBytes).toEqual(new Uint8Array([1, 2, 3]));
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.simGas).toBe(2_000_000n);
   });
 });
@@ -1073,7 +1073,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   // ── safeBuild: address balance overflow → INSUFFICIENT_BALANCE ────────
   // This captures the underlying runtime failure when user prefix and
-  // relayer suffix both request address-balance withdrawal and the combined amount exceeds the
+  // Host suffix both request address-balance withdrawal and the combined amount exceeds the
   // available balance, Sui runtime rejects with "Available amount in
   // account for object id ... is less than requested: X < Y".
   // safeBuild must catch this and classify as INSUFFICIENT_BALANCE.
@@ -1264,12 +1264,12 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   it('profile: credit_general when vault credit covers the effective requirement', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' }); // 5M credit, settleProfile='credit_general'
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n, // zero fees and minSettle below claim: 3M <= 5M → credit path
+      executionCostClaim: 3_000_000n, // zero fees and minSettle below claim: 3M <= 5M → credit path
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -1279,12 +1279,12 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   it('profile: with_vault when vault credit cannot cover the effective requirement', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '1000000' }); // 1M credit, settleProfile='credit_general'
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n, // 3M > 1M → swap fallback, vault exists
+      executionCostClaim: 3_000_000n, // 3M > 1M → swap fallback, vault exists
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -1294,12 +1294,12 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   it('profile: new_user when vaultObjectId is null', async () => {
     const ctx = makeCtx();
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -1313,12 +1313,12 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     const ctx = makeCtx();
     // Defensive: build.ts treats profile as authoritative regardless of vaultObjectId presence
     const input = makeInput({ profile: 'new_user', vaultObjectId: 'vault-id-123', credit: '0' });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -1326,15 +1326,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     expect(result.profile).toBe('new_user');
   });
 
-  // ── credit >= relayerClaim but < minSettleMist → swap path ────────────
+  // ── credit >= executionCostClaim but < minSettleMist → swap path ────────────
 
-  it('credit >= relayerClaim but < minSettleMist → falls through to swap (with_vault)', async () => {
-    // relayerClaim=3M (from default mock), credit=5M >= relayerClaim but < minSettle=20M
+  it('credit >= executionCostClaim but < minSettleMist → falls through to swap (with_vault)', async () => {
+    // executionCostClaim=3M (from default mock), credit=5M >= executionCostClaim but < minSettle=20M
     const ctx = makeCtx({ minSettleMist: 20_000_000n });
     const input = makeInput({
       profile: 'credit_general',
       vaultObjectId: '0xVAULT',
-      credit: '5000000', // 5M MIST — above relayerClaim(3M), below minSettle(20M)
+      credit: '5000000', // 5M MIST — above executionCostClaim(3M), below minSettle(20M)
     });
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
@@ -1351,15 +1351,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   });
 
   // ── non-zero fees affect credit viability ─────────────────────────────
-  // total credit needed is max(relayerClaim + quoted + protocol, minSettle)
+  // total credit needed is max(executionCostClaim + quoted + protocol, minSettle)
   // because settle.move deducts
-  // relayer_claim + quoted_relayer_fee_mist + protocol_fee.
+  // execution_cost_claim_mist + quoted_host_fee_mist + protocol_fee.
 
-  it('credit >= relayerClaim but < relayerClaim+fees → falls through to swap', async () => {
-    // relayerClaim=3M, quoted=1M, protocol=500K → totalNeeded=4.5M
-    // credit=4M > relayerClaim(3M) but < totalNeeded(4.5M) → swap
+  it('credit >= executionCostClaim but < executionCostClaim+fees → falls through to swap', async () => {
+    // executionCostClaim=3M, quoted=1M, protocol=500K → totalNeeded=4.5M
+    // credit=4M > executionCostClaim(3M) but < totalNeeded(4.5M) → swap
     const ctx = makeCtx({
-      quotedRelayerFeeMist: 1_000_000n,
+      quotedHostFeeMist: 1_000_000n,
       protocolFlatFeeMist: 500_000n,
     });
     const input = makeInput({
@@ -1375,16 +1375,16 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     expect(result.profile).toBe('with_vault');
   });
 
-  it('credit >= relayerClaim+fees → credit path with correct useCreditAmount', async () => {
-    // relayerClaim=3M, quoted=1M, protocol=500K → totalNeeded=4.5M
+  it('credit >= executionCostClaim+fees → credit path with correct useCreditAmount', async () => {
+    // executionCostClaim=3M, quoted=1M, protocol=500K → totalNeeded=4.5M
     // credit=5M >= totalNeeded(4.5M) → measured credit path
     // effectiveCredit = max(4.5M, 100K minSettle) = 4.5M
     //
     // Note: the pre-swap credit probe uses a credit-safe seed, then pass2
-    // rebuilds with the measured relayerClaim=3M. Both credit builders are
+    // rebuilds with the measured executionCostClaim=3M. Both credit builders are
     // called because measurement and final assembly are separate PTBs.
     const ctx = makeCtx({
-      quotedRelayerFeeMist: 1_000_000n,
+      quotedHostFeeMist: 1_000_000n,
       protocolFlatFeeMist: 500_000n,
     });
     const input = makeInput({
@@ -1395,7 +1395,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
-    // Pass2 result: credit path wins because actual relayerClaim+fees=4.5M <= 5M credit
+    // Pass2 result: credit path wins because actual executionCostClaim+fees=4.5M <= 5M credit
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalled();
     expect(result.profile).toBe('credit_general');
     // useCreditAmount = effectiveCredit = max(3M+1M+0.5M, 100K) = 4.5M
@@ -1607,12 +1607,12 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
       credit: '1000000000',
     });
 
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 50_000_000n,
       grossGas: 50_100_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 50_100_000n,
+      executionCostClaim: 50_100_000n,
     });
 
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
@@ -2235,21 +2235,21 @@ describe('runGenericPrepareBuildPipeline — slippage error paths', () => {
         executionGapBps: 0n,
       });
 
-    // Force swapFinal > swap0 via computeRelayerCosts returning higher claim on second call
-    mockComputeRelayerCosts
+    // Force swapFinal > swap0 via computeExecutionCostClaim returning higher claim on second call
+    mockComputeExecutionCostClaim
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       })
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 4_000_000n, // higher → swapFinal > swap0
+        executionCostClaim: 4_000_000n, // higher → swapFinal > swap0
       });
 
     await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toThrow(
@@ -2298,20 +2298,20 @@ describe('runGenericPrepareBuildPipeline — slippage error paths', () => {
         executionGapBps: 0n,
       });
 
-    mockComputeRelayerCosts
+    mockComputeExecutionCostClaim
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       })
       .mockReturnValueOnce({
         simGas: 2_000_000n,
         grossGas: 2_500_000n,
         gasVarianceFixedMist: 100_000n,
         slippageBufferMist: 0n,
-        relayerClaim: 3_000_000n,
+        executionCostClaim: 3_000_000n,
       });
 
     await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toThrow(
@@ -2364,12 +2364,12 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
   it('credit-only path emits per-pass + aggregate quote-RPC fields with zero values', async () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     const events = captureStageEvents();
@@ -2396,7 +2396,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 0n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }));
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -2404,7 +2404,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -2447,7 +2447,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }));
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -2455,7 +2455,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -2518,7 +2518,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }));
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -2526,7 +2526,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -2592,7 +2592,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }));
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -2600,7 +2600,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -2641,7 +2641,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }))
       .mockResolvedValueOnce(makeExecutableQuote({ executionGapMist: 1_000n }));
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -2649,7 +2649,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -2677,12 +2677,12 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       vaultObjectId: '0xVAULT',
       credit: '100000000',
     });
-    mockComputeRelayerCosts.mockReturnValue({
+    mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 3_000_000n,
+      executionCostClaim: 3_000_000n,
     });
 
     await runGenericPrepareBuildPipeline(ctx, input);
@@ -2744,7 +2744,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_quantity_out_verify_logical_calls).toBe(3);
     expect(failed!.payload.quote_cache_hits).toBe(0);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // The planner's economic target is captured even though the solver
     // threw before any quote object existed. Without this field, an
     // operator triaging a failed quote cannot recover the target the
@@ -2801,7 +2801,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_rpc_max_ms).toBe(60);
     expect(failed!.payload.quote_rpc_stats_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // pass1 emit succeeded before the failure; aggregate did not.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeDefined();
     expect(events.find((e) => e.stage === 'two_pass_complete')).toBeUndefined();
@@ -2863,7 +2863,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(2);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
     expect(aborted!.payload.pool_id).toBe('0xPOOL');
-    expect(aborted!.payload.payment_token_symbol).toBe('DEEP');
+    expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Caller never absorbed pass1 stats → no per-pass emit, no aggregate.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeUndefined();
     expect(events.find((e) => e.stage === 'two_pass_complete')).toBeUndefined();
@@ -2919,7 +2919,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(1);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
     expect(aborted!.payload.pool_id).toBe('0xPOOL');
-    expect(aborted!.payload.payment_token_symbol).toBe('DEEP');
+    expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Funding emit happened (resolvePaymentSource succeeded), but pass1 emit
     // never did because compile threw before caller absorption.
     expect(events.find((e) => e.stage === 'run_prepare_pass_funding_resolved')).toBeDefined();
@@ -3022,7 +3022,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     );
 
     // Funding resolution rejects the raised swap input. This is the
-    // expected fail-closed branch when the user holds enough payment-token
+    // expected fail-closed branch when the user holds enough settlement-token
     // for the economic target but not for the floor-raised amount.
     mockResolvePaymentSource.mockRejectedValueOnce(
       new PrepareValidationError(
@@ -3071,7 +3071,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       .mockResolvedValueOnce(raisedQuote)
       .mockResolvedValueOnce(raisedQuote);
 
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -3079,7 +3079,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -3126,18 +3126,18 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
             feeBps: 0,
           },
         ],
-        paymentTokenType: '0xUSDC::usdc::USDC',
-        paymentTokenSymbol: 'USDC',
-        paymentTokenDecimals: 6,
+        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenSymbol: 'USDC',
+        settlementTokenDecimals: 6,
         lotSize: 1_000n,
         minSize: 1_000_000_000n,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'quoteForBase',
       } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
       descriptor: {
-        paymentTokenType: '0xUSDC::usdc::USDC',
-        paymentTokenSymbol: 'USDC',
-        paymentTokenDecimals: 6,
+        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenSymbol: 'USDC',
+        settlementTokenDecimals: 6,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'quoteForBase',
         hops: [
@@ -3172,7 +3172,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     // default reset returns slippageBufferMist=0n unconditionally and the
     // raised-target fixture trips SLIPPAGE_CONVERGENCE_FAILED on the
     // buffer0==0 && residual>0 branch.
-    mockComputeRelayerCosts.mockImplementation(
+    mockComputeExecutionCostClaim.mockImplementation(
       (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
         const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
         return {
@@ -3180,7 +3180,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
           grossGas: 2_500_000n,
           gasVarianceFixedMist: 100_000n,
           slippageBufferMist,
-          relayerClaim: 3_000_000n + slippageBufferMist,
+          executionCostClaim: 3_000_000n + slippageBufferMist,
         };
       },
     );
@@ -3220,7 +3220,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(typeof failed!.payload.mid_price_total_ms).toBe('number');
     expect(failed!.payload.mid_price_stats_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Mid-price failure is upstream of any solve work — neither solve-time
     // nor post-solve emits should fire.
     expect(events.find((e) => e.stage === 'quote_rpc_failed')).toBeUndefined();
@@ -3281,7 +3281,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.pass).toBe('credit_preswap');
     expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     expect(failed!.payload.phase_complete).toBe(false);
     // Quote-stats schema: credit_preswap path is upstream of any quote solve,
     // so all 8 quote-stat fields are zero and the marker is `false` because
@@ -3336,7 +3336,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.error_code).toBe('UNKNOWN');
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema: pass1 dry-run runs AFTER pass1 quote-solve has
     // already accumulated, so the failure emit MUST carry forward the injected
     // non-zero pass1 stats. Marker is `false` because pass1.5 / pass2 quote
@@ -3400,7 +3400,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.completed_stage_emitted).toBe(true);
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema with non-zero forward-carry — same lock as
     // `dryrun_simulate_failed`. Pass1 stats already accumulated by the time
     // dry-run runs; the dual-emit (simulated + extract_failed) does not
@@ -3441,7 +3441,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Final safeBuild fails after all quote work has completed, so this
     // lifecycle failure still carries a complete request-level quote-stats
     // payload. The default mock path has one mid-price RPC and no quote-port

@@ -1,14 +1,14 @@
 /**
- * DashboardPage — pool stats, RPC fleet, service accounts, withdrawal.
+ * DashboardPage — sponsor operations status, RPC fleet, service accounts, withdrawal.
  */
 import { useEffect, useState, useCallback } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
-  getPool,
+  getSponsorOperations,
   getSponsorRefillAccountWithdrawNonce,
   executeSponsorRefillAccountWithdraw,
   getSponsoredLogsSummary,
-  type PoolAdminStatus,
+  type SponsorOperationsStatus,
   type SponsoredExecutionAggregate,
 } from '../api/client';
 import { SponsoredLogsKpi } from '../components/SponsoredLogsKpi';
@@ -110,7 +110,7 @@ function resolveWithdrawSigner(adminAddress: string): WithdrawSignerResolution {
   };
 }
 
-type RpcFleet = NonNullable<PoolAdminStatus['rpcFleet']>;
+type RpcFleet = NonNullable<SponsorOperationsStatus['rpcFleet']>;
 
 function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
   return (
@@ -296,7 +296,7 @@ function WithdrawSection({
 
 export function DashboardPage() {
   const { session } = useOutletContext<AuthContext>();
-  const [data, setData] = useState<PoolAdminStatus | null>(null);
+  const [data, setData] = useState<SponsorOperationsStatus | null>(null);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
@@ -307,12 +307,12 @@ export function DashboardPage() {
 
   const poll = useCallback(async () => {
     try {
-      const poolJson = await getPool();
-      setData(poolJson);
+      const sponsorOperationsJson = await getSponsorOperations();
+      setData(sponsorOperationsJson);
       setLastUpdated(new Date());
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch pool data');
+      setError(err instanceof Error ? err.message : 'Failed to fetch sponsor operations data');
     }
   }, []);
 
@@ -347,7 +347,7 @@ export function DashboardPage() {
         <p className="admin-page-sub">Loading…</p>
         {error && <p style={{ color: '#f87171' }}>{error}</p>}
         <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          {['Server Mode', 'Network', 'Sponsor Pool'].map((label) => (
+          {['Server Mode', 'Network', 'Sponsor Slots'].map((label) => (
             <div className="admin-stat" key={label}>
               <div className="admin-stat-label">{label}</div>
               <div
@@ -361,7 +361,7 @@ export function DashboardPage() {
     );
   }
 
-  // `/api/pool` always returns a concrete sponsor operations payload. Boot
+  // `/api/sponsor-operations` always returns a concrete sponsor operations payload. Boot
   // sync populates sponsor operations state before requests, and the admin
   // route probes the sponsor refill account before it reads the shared state.
   const sponsorOperations = data.sponsorOperations;
@@ -442,7 +442,7 @@ export function DashboardPage() {
           </div>
         </div>
         <div className="admin-stat">
-          <div className="admin-stat-label">Sponsor Pool</div>
+          <div className="admin-stat-label">Sponsor Slots</div>
           <div className="admin-stat-value" style={{ display: 'grid', gap: 4, fontSize: 13 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
               <span style={{ color: '#64748b' }}>Healthy</span>
@@ -502,14 +502,14 @@ export function DashboardPage() {
           </thead>
           <tbody>
             <tr>
-              <td>Relayer Recipient</td>
+              <td>Settlement Payout Recipient</td>
               <td
                 style={{ fontFamily: 'monospace', fontSize: 13 }}
-                title={data.relayerRecipientAddress}
+                title={data.settlementPayoutRecipientAddress}
               >
-                {data.relayerRecipientAddress ? truncateAddress(data.relayerRecipientAddress) : '—'}{' '}
-                {data.relayerRecipientAddress && (
-                  <CopyButton value={data.relayerRecipientAddress} />
+                {data.settlementPayoutRecipientAddress ? truncateAddress(data.settlementPayoutRecipientAddress) : '—'}{' '}
+                {data.settlementPayoutRecipientAddress && (
+                  <CopyButton value={data.settlementPayoutRecipientAddress} />
                 )}
               </td>
               <td style={{ color: '#64748b', fontStyle: 'italic' }}>n/a</td>

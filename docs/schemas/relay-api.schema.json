@@ -50,9 +50,9 @@
       "additionalProperties": false,
       "required": [
         "hops",
-        "paymentTokenType",
-        "paymentTokenSymbol",
-        "paymentTokenDecimals",
+        "settlementTokenType",
+        "settlementTokenSymbol",
+        "settlementTokenDecimals",
         "lotSize",
         "minSize",
         "effectiveFeeRateBps",
@@ -67,14 +67,14 @@
             "$ref": "#/$defs/deepBookPoolHop"
           }
         },
-        "paymentTokenType": {
+        "settlementTokenType": {
           "type": "string",
-          "description": "Payment token coin type. Each paymentTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
+          "description": "Settlement token coin type. Each settlementTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
         },
-        "paymentTokenSymbol": {
+        "settlementTokenSymbol": {
           "type": "string"
         },
-        "paymentTokenDecimals": {
+        "settlementTokenDecimals": {
           "type": "integer",
           "minimum": 0
         },
@@ -107,9 +107,9 @@
       "required": [
         "network",
         "packageId",
-        "relayerRecipient",
+        "settlementPayoutRecipient",
         "supportedSettlementSwapPaths",
-        "quotedRelayerFeeMist",
+        "quotedHostFeeMist",
         "protocolFlatFeeMist",
         "integrityPolicyVersion"
       ],
@@ -120,18 +120,18 @@
         "packageId": {
           "$ref": "#/$defs/hexString"
         },
-        "relayerRecipient": {
+        "settlementPayoutRecipient": {
           "$ref": "#/$defs/hexString",
-          "description": "Settlement payout recipient address for relayerClaim plus quotedRelayerFeeMist."
+          "description": "Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist."
         },
         "supportedSettlementSwapPaths": {
           "type": "array",
-          "description": "Host-supported payment tokens and their active one-hop settlement swap paths. Each paymentTokenType appears once.",
+          "description": "Host-supported settlement tokens and their active one-hop settlement swap paths. Each settlementTokenType appears once.",
           "items": {
             "$ref": "#/$defs/singleHopSettlementSwapPath"
           }
         },
-        "quotedRelayerFeeMist": {
+        "quotedHostFeeMist": {
           "$ref": "#/$defs/mistString"
         },
         "protocolFlatFeeMist": {
@@ -149,7 +149,7 @@
       "required": [
         "txKindBytes",
         "senderAddress",
-        "paymentTokenType",
+        "settlementTokenType",
         "txKindBytesHash",
         "prepareAuthorizationTimestampMs",
         "prepareAuthorizationRequestNonce",
@@ -163,9 +163,9 @@
         "senderAddress": {
           "$ref": "#/$defs/hexString"
         },
-        "paymentTokenType": {
+        "settlementTokenType": {
           "type": "string",
-          "description": "Payment token coin type string from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for this token."
+          "description": "Settlement token coin type string from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for this token."
         },
         "txKindBytesHash": {
           "type": "string",
@@ -214,9 +214,9 @@
         "simGas",
         "gasVarianceFixedMist",
         "slippageBufferMist",
-        "quotedRelayerFee",
+        "quotedHostFee",
         "protocolFee",
-        "relayerClaim",
+        "executionCostClaim",
         "grossGas"
       ],
       "properties": {
@@ -229,15 +229,15 @@
         "slippageBufferMist": {
           "$ref": "#/$defs/mistString"
         },
-        "quotedRelayerFee": {
+        "quotedHostFee": {
           "$ref": "#/$defs/mistString"
         },
         "protocolFee": {
           "$ref": "#/$defs/mistString"
         },
-        "relayerClaim": {
+        "executionCostClaim": {
           "$ref": "#/$defs/mistString",
-          "description": "Gas-recovery claim in settlement arguments. The full relayer payout is relayerClaim plus quotedRelayerFeeMist."
+          "description": "Gas-recovery claim in settlement arguments. The full settlement payout is executionCostClaim plus quotedHostFeeMist."
         },
         "grossGas": {
           "$ref": "#/$defs/mistString"
@@ -309,7 +309,7 @@
     "sponsorResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["digest", "effects", "relayerClaim"],
+      "required": ["digest", "effects", "executionCostClaim"],
       "properties": {
         "digest": {
           "type": "string"
@@ -317,7 +317,7 @@
         "effects": {
           "type": "object"
         },
-        "relayerClaim": {
+        "executionCostClaim": {
           "$ref": "#/$defs/mistString",
           "description": "Transaction-derived gas-recovery claim from the settlement arguments."
         },
@@ -383,7 +383,7 @@
         "P1_UNAUTHORIZED_STELIS_CALL",
         "P1_FORBIDDEN_COMMAND",
         "P1_SPONSOR_WITHDRAWAL_FORBIDDEN",
-        "UNSUPPORTED_PAYMENT_TOKEN",
+        "UNSUPPORTED_SETTLEMENT_TOKEN",
         "INVALID_ORDER_ID",
         "INSUFFICIENT_BALANCE",
         "CLAIM_WOULD_EXCEED_MAX",
@@ -407,7 +407,7 @@
         "L2_WRONG_REGISTRY",
         "L2_WRONG_RECIPIENT",
         "L2_EXCESSIVE_CLAIM",
-        "L2_RELAYER_FEE_CAP",
+        "L2_HOST_FEE_CAP",
         "L2_PROTOCOL_FEE_MISMATCH",
         "L2_CONFIG_VERSION_MISMATCH",
         "L2_CREDIT_SLIPPAGE_NONZERO",
@@ -798,7 +798,7 @@
     },
     "knownPromotionSponsorErrorCode": {
       "type": "string",
-      "description": "Promotion sponsor error codes. `FundsWithdrawal(Sponsor)` rejection is a prepare-only companion guard — see `knownPromotionPrepareErrorCode` for `SPONSOR_WITHDRAWAL_FORBIDDEN`. Sponsor preconsume does not emit that code because the hash-bound consume already proves the submitted bytes match the prepare commit.",
+      "description": "Promotion sponsor error codes. `FundsWithdrawal(Sponsor)` rejection is a prepare-only companion guard — see `knownPromotionPrepareErrorCode` for `SPONSOR_WITHDRAWAL_FORBIDDEN`. Sponsor preconsume does not emit that code because the stored-hash-verified consume already proves the submitted bytes match the prepare commit.",
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",

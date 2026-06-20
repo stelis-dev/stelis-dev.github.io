@@ -18,7 +18,7 @@ Pure TypeScript relay validation and quote library - framework-independent.
 
 ## Purpose
 
-Performs validation for user-supplied transaction-kind bytes and the final relayer-built
+Performs validation for user-supplied transaction-kind bytes and the final Host-built
 Programmable Transaction Block (PTB):
 
 ```mermaid
@@ -27,7 +27,7 @@ flowchart TB
     L2 --> L3[L3: Non-loss Math]
     L1 -.-> L1d[exactly 1 settle call, no Publish/Upgrade]
     L2 -.-> L2d[config, registry, claim, policyHash]
-    L3 -.-> L3d["relayerClaim ≥ simGas + gasVarianceFixedMist + slippageBufferMist"]
+    L3 -.-> L3d["executionCostClaim ≥ simGas + gasVarianceFixedMist + slippageBufferMist"]
 ```
 
 > For full validation mapping, see [security.md](../../docs/security.md).  
@@ -88,14 +88,14 @@ const l3 = validateNonlossSponsor(sponsorNonlossContext, onchainConfig);
 ### Gas Estimation
 
 ```typescript
-import { computeRelayerCosts } from '@stelis/core-relay';
+import { computeExecutionCostClaim } from '@stelis/core-relay';
 
-const estimate = computeRelayerCosts({
+const estimate = computeExecutionCostClaim({
   computationCost: '8000000',
   storageCost: '2000000',
   storageRebate: '1000000',
 });
-// → { simGas, grossGas, gasVarianceFixedMist, slippageBufferMist, relayerClaim }
+// → { simGas, grossGas, gasVarianceFixedMist, slippageBufferMist, executionCostClaim }
 ```
 
 ### Constants
@@ -122,7 +122,7 @@ SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.quoteForBase.withVault; // 'swap_and_settle_
 
 ## L1 Validation Policy
 
-For user-supplied transaction-kind bytes, see [User TransactionKind rules](../../docs/api.md#user-transactionkind-rules). The P1 rules reject settlement calls before the host appends one. The L1 rules below validate the final relayer-built transaction, which must contain exactly one allowed settlement call.
+For user-supplied transaction-kind bytes, see [User TransactionKind rules](../../docs/api.md#user-transactionkind-rules). The P1 rules reject settlement calls before the Host appends one. The L1 rules below validate the final Host-built transaction, which must contain exactly one allowed settlement call.
 
 | Command                                         | Policy                                      |
 | ----------------------------------------------- | ------------------------------------------- |
@@ -155,17 +155,17 @@ For user-supplied transaction-kind bytes, see [User TransactionKind rules](../..
 | L1    | `L1_GASCOIN_FORBIDDEN`        | Command references GasCoin (S-15)                                 |
 | L2    | `L2_WRONG_CONFIG`             | Config object ID mismatch                                         |
 | L2    | `L2_WRONG_REGISTRY`           | VaultRegistry object ID mismatch                                  |
-| L2    | `L2_WRONG_RECIPIENT`          | Relayer address mismatch                                          |
-| L2    | `L2_EXCESSIVE_CLAIM`          | relayerClaim > maxClaimMist                                       |
-| L2    | `L2_RELAYER_FEE_CAP`          | quotedRelayerFeeMist > config.maxRelayerFeeMist                   |
+| L2    | `L2_WRONG_RECIPIENT`          | settlement payout recipient address mismatch                               |
+| L2    | `L2_EXCESSIVE_CLAIM`          | executionCostClaim > maxClaimMist                                       |
+| L2    | `L2_HOST_FEE_CAP`          | quotedHostFeeMist > config.maxHostFeeMist                   |
 | L2    | `L2_PROTOCOL_FEE_MISMATCH`    | expected_protocol_fee_mist does not match config                  |
 | L2    | `L2_CONFIG_VERSION_MISMATCH`  | expected_config_version does not match config                     |
 | L2    | `L2_SETTLEMENT_SWAP_PATH_INTEGRITY`          | Settlement swap path metadata is malformed                        |
 | L2    | `L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED`     | No configured settlement swap paths are available                 |
 | L2    | `L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH`       | Requested settlement swap path is not configured                  |
-| L2    | `L2_POLICY_HASH_MISMATCH`     | Submitted policy hash does not match host policy                  |
+| L2    | `L2_POLICY_HASH_MISMATCH`     | Submitted policy hash does not match Host policy                  |
 | L2    | `L2_ORDER_ID_HASH_MISMATCH`   | Submitted order ID hash does not match expected hash              |
-| L3    | `L3_NONLOSS_VIOLATION`        | relayerClaim < simGas + gasVarianceFixedMist + slippageBufferMist |
+| L3    | `L3_NONLOSS_VIOLATION`        | executionCostClaim < simGas + gasVarianceFixedMist + slippageBufferMist |
 | L3    | `L3_GAS_BUDGET_EXCEEDED`      | gasBudget > maxClaimMist                                          |
 | L3    | `L3_SIM_GAS_OUT_OF_RANGE`     | simGas > maxClaimMist                                             |
 
@@ -180,7 +180,7 @@ npm run test --workspace=@stelis/core-relay
 
 ## Typical Consumers
 
-This package is meant to sit below host applications.
+This package is meant to sit below Host applications.
 
 Typical consumers:
 

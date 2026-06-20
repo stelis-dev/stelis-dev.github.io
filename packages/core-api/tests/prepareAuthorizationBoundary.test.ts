@@ -30,7 +30,7 @@ async function makeSignedParams(overrides: Partial<PrepareParams> = {}): Promise
     {
       txKindBytes: await makeValidTxKindBytes(),
       senderAddress: TEST_PREPARE_AUTH_SENDER,
-      paymentTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: '0xDEEP::deep::DEEP',
       clientIp: '127.0.0.1',
       ...inputOverrides,
     },
@@ -73,7 +73,7 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
       reserveNonce: vi.fn(),
       releaseReservation: vi.fn(),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     getConfig: vi.fn(),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue(null),
@@ -95,9 +95,9 @@ function makeExtraCfg(): PrepareHandlerConfig {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -106,7 +106,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
   ];
   return {
     deepbookPackageId: '0xDEEPBOOK',
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',
@@ -143,7 +143,7 @@ describe('prepare authorization boundary', () => {
       {
         txKindBytes: await makeValidTxKindBytes(),
         senderAddress: TEST_PREPARE_AUTH_SENDER,
-        paymentTokenType: '0xDEEP::deep::DEEP',
+        settlementTokenType: '0xDEEP::deep::DEEP',
         clientIp: '127.0.0.1',
       },
       { keypair: wrongKeypair },

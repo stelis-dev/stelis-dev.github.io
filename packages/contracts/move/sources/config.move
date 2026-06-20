@@ -17,8 +17,8 @@ module stelis::config {
     const EInvalidMinSettle: u64 = 4;
     const ENotPendingAdmin: u64 = 5; // only pending admin can accept
     const ENoPendingAdmin: u64 = 6;
-    /// max_relayer_fee_mist + protocol_flat_fee_mist would exceed max_claim_mist.
-    const EInvalidRelayerFeeCap: u64 = 7;
+    /// max_host_fee_mist + protocol_flat_fee_mist would exceed max_claim_mist.
+    const EInvalidHostFeeCap: u64 = 7;
     /// max_spread_bps must be positive and at or below the full-BPS ceiling.
     const EInvalidSpreadBps: u64 = 8;
     /// propose_admin called while pending_admin is already set.
@@ -34,7 +34,7 @@ module stelis::config {
     const EPauseUpdateNotReady: u64 = 18;
 
     public struct PendingConfigUpdate has copy, drop, store {
-        max_relayer_fee_mist: u64,
+        max_host_fee_mist: u64,
         protocol_flat_fee_mist: u64,
         max_claim_mist: u64,
         min_settle_mist: u64,
@@ -61,9 +61,9 @@ module stelis::config {
         id: UID,
         admin: address,
         pending_admin: Option<address>, // 2-step admin transfer
-        /// On-chain cap for the relayer service fee per TX (MIST).
-        /// The relayer operator quotes any value <= this cap via RELAYER_FEE_MIST.
-        max_relayer_fee_mist: u64,
+        /// On-chain cap for the Host service fee per TX (MIST).
+        /// The Host operator quotes any value <= this cap via HOST_FEE_MIST.
+        max_host_fee_mist: u64,
         /// Flat protocol fee per TX (MIST). Paid to protocol_treasury.
         protocol_flat_fee_mist: u64,
         protocol_treasury: address,
@@ -91,7 +91,7 @@ module stelis::config {
             id: object::new(ctx),
             admin: deployer,
             pending_admin: option::none(),
-            max_relayer_fee_mist: 0,      // Set via update_config
+            max_host_fee_mist: 0,      // Set via update_config
             protocol_flat_fee_mist: 0,    // Default protocol fee
             protocol_treasury: deployer,
             max_claim_mist: INITIAL_MAX_CLAIM_MIST,
@@ -214,7 +214,7 @@ module stelis::config {
 
     public fun update_config(
         config: &mut Config,
-        new_max_relayer_fee_mist: u64,
+        new_max_host_fee_mist: u64,
         new_protocol_flat_fee_mist: u64,
         new_max_claim_mist: u64,
         new_min_settle_mist: u64,
@@ -229,18 +229,18 @@ module stelis::config {
         // E-8: min_settle <= max_claim, and min_settle >= MIN_SETTLE_MIST
         assert!(new_min_settle_mist >= MIN_SETTLE_MIST, EInvalidMinSettle);
         assert!(new_min_settle_mist <= new_max_claim_mist, EInvalidMinSettle);
-        // Fee cap: relayer fee cap + protocol fee must not exceed max_claim_mist.
+        // Fee cap: host fee cap + protocol fee must not exceed max_claim_mist.
         // Cast to u128 before addition to prevent ARITHMETIC_ERROR on u64 overflow,
-        // ensuring EInvalidRelayerFeeCap is raised instead of an uncatchable abort.
+        // ensuring EInvalidHostFeeCap is raised instead of an uncatchable abort.
         assert!(
-            (new_max_relayer_fee_mist as u128) + (new_protocol_flat_fee_mist as u128) <= (new_max_claim_mist as u128),
-            EInvalidRelayerFeeCap,
+            (new_max_host_fee_mist as u128) + (new_protocol_flat_fee_mist as u128) <= (new_max_claim_mist as u128),
+            EInvalidHostFeeCap,
         );
         // Spread cap must be positive and at or below the full-BPS ceiling.
         assert!(new_max_spread_bps > 0 && new_max_spread_bps <= 10_000, EInvalidSpreadBps);
 
         if (
-            config.max_relayer_fee_mist == new_max_relayer_fee_mist &&
+            config.max_host_fee_mist == new_max_host_fee_mist &&
             config.protocol_flat_fee_mist == new_protocol_flat_fee_mist &&
             config.max_claim_mist == new_max_claim_mist &&
             config.min_settle_mist == new_min_settle_mist &&
@@ -251,7 +251,7 @@ module stelis::config {
 
         let queued_epoch = ctx.epoch();
         config.pending_config_update = option::some(PendingConfigUpdate {
-            max_relayer_fee_mist: new_max_relayer_fee_mist,
+            max_host_fee_mist: new_max_host_fee_mist,
             protocol_flat_fee_mist: new_protocol_flat_fee_mist,
             max_claim_mist: new_max_claim_mist,
             min_settle_mist: new_min_settle_mist,
@@ -267,13 +267,13 @@ module stelis::config {
         assert!(ctx.epoch() >= pending.apply_epoch, EConfigUpdateNotReady);
         option::extract(&mut config.pending_config_update);
 
-        let old_max_relayer_fee = config.max_relayer_fee_mist;
+        let old_max_host_fee = config.max_host_fee_mist;
         let old_proto_fee = config.protocol_flat_fee_mist;
         let old_max = config.max_claim_mist;
         let old_min = config.min_settle_mist;
         let old_spread = config.max_spread_bps;
 
-        config.max_relayer_fee_mist = pending.max_relayer_fee_mist;
+        config.max_host_fee_mist = pending.max_host_fee_mist;
         config.protocol_flat_fee_mist = pending.protocol_flat_fee_mist;
         config.max_claim_mist = pending.max_claim_mist;
         config.min_settle_mist = pending.min_settle_mist;
@@ -281,8 +281,8 @@ module stelis::config {
         config.config_version = config.config_version + 1;
 
         events::emit_config_updated_event(
-            old_max_relayer_fee,
-            pending.max_relayer_fee_mist,
+            old_max_host_fee,
+            pending.max_host_fee_mist,
             old_proto_fee,
             pending.protocol_flat_fee_mist,
             old_max,
@@ -305,7 +305,7 @@ module stelis::config {
 
     // --- Getter functions ---
 
-    public fun max_relayer_fee_mist(c: &Config): u64 { c.max_relayer_fee_mist }
+    public fun max_host_fee_mist(c: &Config): u64 { c.max_host_fee_mist }
     public fun protocol_flat_fee_mist(c: &Config): u64 { c.protocol_flat_fee_mist }
     public fun protocol_treasury(c: &Config): address { c.protocol_treasury }
     public fun max_claim_mist(c: &Config): u64 { c.max_claim_mist }

@@ -162,9 +162,9 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
           promotion_not_active: PROMOTION_ABUSE_CODES.NOT_ACTIVE,
         };
         const abuseCode = abuseCodeMap[result.reason];
-        if (abuseCode && ctx.relay.abuseBlocker) {
+        if (abuseCode && ctx.host.abuseBlocker) {
           await recordPromotionAbuseEvent(
-            ctx.relay.abuseBlocker,
+            ctx.host.abuseBlocker,
             ip,
             { kind: 'studio_user', userId: identity.userId },
             abuseCode,
@@ -215,7 +215,7 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
 
       const [sponsorOperationsState, slotLeases] = await Promise.all([
         ctx.sponsorOperations.readState(),
-        ctx.relay.sponsorPool.leaseStatus(),
+        ctx.host.sponsorPool.leaseStatus(),
       ]);
       const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, {
         requireFreeSponsorSlot: true,
@@ -246,13 +246,13 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       const prepareCtx: PromotionPrepareContext = {
-        sui: ctx.relay.sui,
+        sui: ctx.host.sui,
         promotionStore: ctx.promotionStore,
         executionLedger: ctx.executionLedger,
-        sponsorPool: ctx.relay.sponsorPool,
-        prepareStore: ctx.relay.prepareStore,
-        prepareInflightLimiter: ctx.relay.prepareInflightLimiter,
-        getConfig: ctx.relay.getConfig.bind(ctx.relay),
+        sponsorPool: ctx.host.sponsorPool,
+        prepareStore: ctx.host.prepareStore,
+        prepareInflightLimiter: ctx.host.prepareInflightLimiter,
+        getConfig: ctx.host.getConfig.bind(ctx.host),
         globalTargetHashes: ctx.studioGlobalTargetHashes,
       };
 
@@ -330,21 +330,21 @@ export function createStudioRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       const sponsorCtx: PromotionSponsorContext = {
-        sui: ctx.relay.sui,
+        sui: ctx.host.sui,
         // Trusted package IDs for sponsor-time abort classification.
-        // Same package IDs (`RelayerContext.{packageId, deepbookPackageId}`) as
+        // Same package IDs (`HostContext.{packageId, deepbookPackageId}`) as
         // the generic /relay/sponsor route — bound at app-api boot via
         // `DEEPBOOK_IDS[network].packageId`.
-        packageId: ctx.relay.packageId,
-        deepbookPackageId: ctx.relay.deepbookPackageId,
+        packageId: ctx.host.packageId,
+        deepbookPackageId: ctx.host.deepbookPackageId,
         promotionStore: ctx.promotionStore,
         executionLedger: ctx.executionLedger,
-        sponsorPool: ctx.relay.sponsorPool,
-        prepareStore: ctx.relay.prepareStore,
-        abuseBlocker: ctx.relay.abuseBlocker,
+        sponsorPool: ctx.host.sponsorPool,
+        prepareStore: ctx.host.prepareStore,
+        abuseBlocker: ctx.host.abuseBlocker,
         usageStore: ctx.usageStore ?? null,
         globalTargetHashes: ctx.studioGlobalTargetHashes,
-        onSponsorResult: ctx.relay.onSponsorResult,
+        onSponsorResult: ctx.host.onSponsorResult,
       };
 
       // The post-terminal host callback writes slot and sponsor refill account state through

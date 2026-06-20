@@ -5,7 +5,7 @@
  *   - sdk/src/sdk.ts                (client-side, gas estimation + sponsored flow)
  *   - sdk/src/credit.ts             (re-exports queryUserCredit for SDK public API)
  *   - core-api/src/session/sponsoredExecution/genericExecutionPolicy.ts
- *     (server-side prepare snapshot + sponsor new-user vault drift check)
+ *     (server-side prepare snapshot + sponsor new-user User Vault drift check)
  *
  * Both SDK and core-api import this to guarantee identical vault/credit
  * resolution for the same on-chain state.

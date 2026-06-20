@@ -3,7 +3,7 @@
  * temporary Vercel demo adapter.
  *
  * Runtime model:
- *   - Generic relay path: always active
+ *   - Generic Relay API path: always active
  *   - Studio path: active only when studio env set is complete
  *
  * Session policy:

@@ -1,7 +1,7 @@
 import type { Transaction } from '@mysten/sui/transactions';
 import { containsSponsorWithdrawal, extractPrefixWithdrawals } from '../classifyPrefixCoins.js';
 import { convertSdkCommands } from '../convert.js';
-import type { RelayerEnv, ValidationResult } from '../types.js';
+import type { HostValidationEnv, ValidationResult } from '../types.js';
 import { fail, ok } from '../types.js';
 import { validatePtbStructure, validateUserCommands } from './static.js';
 
@@ -14,8 +14,8 @@ import { validatePtbStructure, validateUserCommands } from './static.js';
  */
 export function validateGenericUserTransactionKind(
   tx: Transaction,
-  env: RelayerEnv,
-  paymentTokenType: string,
+  env: HostValidationEnv,
+  settlementTokenType: string,
 ): ValidationResult {
   const data = tx.getData();
   const commandResult = validateUserCommands(convertSdkCommands(data.commands as unknown[]), env);
@@ -28,7 +28,7 @@ export function validateGenericUserTransactionKind(
     );
   }
 
-  const withdrawalResult = extractPrefixWithdrawals(tx, paymentTokenType);
+  const withdrawalResult = extractPrefixWithdrawals(tx, settlementTokenType);
   if (withdrawalResult.unaccountable) {
     return fail(
       'UNACCOUNTABLE_WITHDRAWAL',
@@ -40,15 +40,15 @@ export function validateGenericUserTransactionKind(
 }
 
 /**
- * Validate a relayer-built generic settlement transaction after settlement is appended.
+ * Validate a Host-built generic settlement transaction after settlement is appended.
  *
  * This is deliberately separate from user TransactionKind validation. The final
- * transaction may contain relayer-created FundsWithdrawal(Sender) inputs for
+ * transaction may contain Host-created FundsWithdrawal(Sender) inputs for
  * settlement funding, so prepare-time withdrawal accounting is not repeated here.
  */
 export function validateGenericSettlementTransaction(
   tx: Transaction,
-  env: RelayerEnv,
+  env: HostValidationEnv,
 ): ValidationResult {
   const data = tx.getData();
   return validatePtbStructure(convertSdkCommands(data.commands as unknown[]), env);

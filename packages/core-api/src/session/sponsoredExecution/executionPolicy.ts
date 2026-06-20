@@ -146,7 +146,7 @@ export type PrepareChainSnapshot<D extends PolicyDiscriminator = PolicyDiscrimin
  * Read-only state supplied to sponsor-side hooks that fire BEFORE the
  * atomic consume succeeds (`DecodeSponsorSubmission`,
  * `UserSignatureValidation`, `Consume`). At this point the prepared
- * entry has not been hash-bound to the submitted `txBytes` yet, so no
+ * entry has not been stored-hash-verified to the submitted `txBytes` yet, so no
  * phase-local reservation handles can be reconstructed — `txSender` is still
  * attacker-choosable and the slot identity is not yet authoritative.
  *
@@ -282,7 +282,7 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
   readonly DecodeSponsorSubmission: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
   readonly UserSignatureValidation: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
   // The `Consume` hook is observability-only by contract: the runner
-  // delegates the atomic hash-bind to `runSponsorConsumePhase`
+  // delegates the atomic stored-hash match to `runSponsorConsumePhase`
   // (`sponsorLifecycle.ts`) using the route-supplied
   // `SponsorConsumePolicyAdapter`. The hook fires only after the
   // sub-runner returns success.
@@ -300,7 +300,7 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
     ctx: PostConsumeSponsorContext,
   ) => MaybePromise<SharedPostconsumeReconstruction>;
   // `PolicyPostconsumeChecks` performs route-specific verification
-  // (new-user vault drift for generic; promotion ledger lookup
+  // (new-user User Vault drift for generic; promotion ledger lookup
   // verification for Studio). It returns optional reconstruction inputs
   // so the runner can mint `LedgerReservationHandle` after Studio's
   // ledger read model verifies the active reservation matches the

@@ -23,12 +23,12 @@ export function ConnectionPanel({
     <div className="promo-panel">
       <h3 className="promo-panel-title">🔗 Studio Endpoint</h3>
       <p className="promo-panel-desc">
-        Connect to a studio-mode relayer. The SDK will use <code>studioEndpoint: true</code> for
+        Connect to a Studio-enabled Host. The SDK will use <code>studioEndpoint: true</code> for
         developer JWT support.
       </p>
 
       <div className="promo-input-group">
-        <label className="promo-label">Relay URL</label>
+        <label className="promo-label">Host Relay API URL</label>
         <input
           type="url"
           value={inputUrl}

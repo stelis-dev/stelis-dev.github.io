@@ -1,5 +1,5 @@
 /**
- * [app-api] Admin routes — /api/blocklist, /api/logs, /api/pool,
+ * [app-api] Admin routes — /api/blocklist, /api/logs, /api/sponsor-operations,
  * /api/sponsor-refill-account/withdraw, /api/settlement-swap-paths, /api/studio, /api/promotions*
  *
  * All routes are protected by requireAdminSession (JWT + not_before).
@@ -378,27 +378,27 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
     }
   });
 
-  // ── GET /api/pool ─────────────────────────────────────────────────
+  // ── GET /api/sponsor-operations ─────────────────────────────────────────────────
   // Admin view. Sponsor operations fields are read from the shared Redis state
   // store. An awaited bounded sponsor refill account probe runs before the read so the
   // returned sponsor refill account balance is "fresh at return time" rather than
   // last-known-cache.
   // If that awaited sponsor refill account update cannot be committed, this route fails
   // closed instead of serialising stale sponsor refill account data as if it were fresh.
-  // `feeConfig` uses `relay.getConfig()` which is already TTL-cached in
+  // `feeConfig` uses `host.getConfig()` which is already TTL-cached in
   // core-api. Other fields are boot-derived constants.
-  app.get('/pool', async (c) => {
+  app.get('/sponsor-operations', async (c) => {
     try {
       const ctx = await getCtx();
-      const relay = ctx.relay;
+      const host = ctx.host;
 
       // Await the bounded sponsor refill account probe here. Admin is not a hot path,
       // and awaiting keeps the returned sponsor refill account fields honest.
-      await ctx.sponsorOperations.probeSponsorRefillAccount('admin_pool');
+      await ctx.sponsorOperations.probeSponsorRefillAccount('admin_sponsor_operations');
 
       const [stateView, slotLeases] = await Promise.all([
         ctx.sponsorOperations.readState(),
-        relay.sponsorPool.leaseStatus(),
+        host.sponsorPool.leaseStatus(),
       ]);
       const aggregates = deriveSponsorAvailabilitySummary(stateView);
       const sponsorOperations: SponsorOperationsStatus = {
@@ -439,9 +439,9 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       // packages/core-api/src/context.ts).
       let feeConfig: Record<string, string> | null = null;
       try {
-        const cfg = await relay.getConfig();
+        const cfg = await host.getConfig();
         feeConfig = {
-          maxRelayerFeeMist: cfg.maxRelayerFeeMist.toString(),
+          maxHostFeeMist: cfg.maxHostFeeMist.toString(),
           protocolFlatFeeMist: cfg.protocolFlatFeeMist.toString(),
           maxClaimMist: cfg.maxClaimMist.toString(),
           minSettleMist: cfg.minSettleMist.toString(),
@@ -462,19 +462,19 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
 
       return c.json({
         sponsorOperations,
-        primaryAddress: relay.sponsorPool.primaryAddress,
-        relayerRecipientAddress: relay.relayerRecipientAddress,
-        network: relay.network,
+        primaryAddress: host.sponsorPool.primaryAddress,
+        settlementPayoutRecipientAddress: host.settlementPayoutRecipientAddress,
+        network: host.network,
         sponsorBalanceWarnMist: warnMist.toString(),
         sponsorBalanceRefillTargetMist: refillTargetMist.toString(),
         refillEnabled: process.env.SPONSOR_OPERATIONS_REFILL_ENABLED === 'true',
-        quotedRelayerFeeMist: ctx.prepareConfig.quotedRelayerFeeMist.toString(),
+        quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         feeConfig,
         supportedSettlementSwapPaths,
         onChainIds: {
-          packageId: relay.packageId,
-          configId: relay.configId,
-          vaultRegistryId: relay.vaultRegistryId,
+          packageId: host.packageId,
+          configId: host.configId,
+          vaultRegistryId: host.vaultRegistryId,
           deepbookPackageId: ctx.prepareConfig.deepbookPackageId,
         },
         studioEnabled: ctx.studio !== null,
@@ -605,9 +605,9 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
             process.env.SPONSOR_BALANCE_REFILL_TARGET_MIST,
           ) ?? SPONSOR_BALANCE_REFILL_TARGET_MIST;
         if (refillTargetMist > 0n) {
-          const poolSize = BigInt(ctx.relay.sponsorPool.size);
+          const poolSize = BigInt(ctx.host.sponsorPool.size);
           const minRunwayMist = refillTargetMist * poolSize;
-          const sponsorRefillAccountBalance = await ctx.relay.sui.getBalance({
+          const sponsorRefillAccountBalance = await ctx.host.sui.getBalance({
             owner: sponsorRefillAccountAddress,
           });
           const sponsorRefillAccountBalanceMist = parseChainBalanceMist(
@@ -652,8 +652,8 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       ptb.setSender(sponsorRefillAccountAddress);
-      const dryRunBytes = await ptb.build({ client: ctx.relay.sui });
-      const simResult = await ctx.relay.sui.simulateTransaction({
+      const dryRunBytes = await ptb.build({ client: ctx.host.sui });
+      const simResult = await ctx.host.sui.simulateTransaction({
         transaction: dryRunBytes,
         include: { effects: true },
       });
@@ -672,7 +672,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
 
       const result = await sponsorRefillAccountKeypair.signAndExecuteTransaction({
         transaction: ptb,
-        client: ctx.relay.sui,
+        client: ctx.host.sui,
       });
 
       const txResult = result.Transaction;
@@ -685,7 +685,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       // Fetch remaining sponsor refill account balance
       let remainingBalanceMist: string | null = null;
       try {
-        const bal = await ctx.relay.sui.getBalance({ owner: sponsorRefillAccountAddress });
+        const bal = await ctx.host.sui.getBalance({ owner: sponsorRefillAccountAddress });
         remainingBalanceMist = parseChainBalanceMist(
           bal.balance.balance,
           'Sponsor refill account balance',
@@ -743,9 +743,9 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       return c.json({
         count: settlementSwapPaths.length,
         settlementSwapPaths: settlementSwapPaths.map((p) => ({
-          paymentTokenType: p.paymentTokenType,
-          paymentTokenSymbol: p.paymentTokenSymbol,
-          paymentTokenDecimals: p.paymentTokenDecimals,
+          settlementTokenType: p.settlementTokenType,
+          settlementTokenSymbol: p.settlementTokenSymbol,
+          settlementTokenDecimals: p.settlementTokenDecimals,
           lotSize: safeBigintToNumber(p.lotSize, 'lotSize'),
           minSize: safeBigintToNumber(p.minSize, 'minSize'),
           effectiveFeeRateBps: p.effectiveFeeRateBps,

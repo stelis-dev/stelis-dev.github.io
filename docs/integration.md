@@ -2,17 +2,17 @@
 
 This document describes the generic sponsored transaction flow.
 
-## Generic Relay Flow
+## Generic Relay API Flow
 
 1. Call `GET /relay/config`.
-2. Choose a payment token from `supportedSettlementSwapPaths`.
+2. Choose a settlement token from `supportedSettlementSwapPaths`.
 3. Build transaction-kind bytes.
 4. Hash `txKindBytes` and ask the sender to sign the prepare authorization personal message.
-5. Call `POST /relay/prepare` with `txKindBytes`, `senderAddress`, `paymentTokenType`, `txKindBytesHash`, `prepareAuthorizationTimestampMs`, `prepareAuthorizationRequestNonce`, and `prepareAuthorizationSignature`.
+5. Call `POST /relay/prepare` with `txKindBytes`, `senderAddress`, `settlementTokenType`, `txKindBytesHash`, `prepareAuthorizationTimestampMs`, `prepareAuthorizationRequestNonce`, and `prepareAuthorizationSignature`.
 6. Ask the user wallet or signer to sign returned `txBytes`.
 7. Call `POST /relay/sponsor` with `txBytes`, `userSignature`, and `receiptId`.
 
-The `txKindBytes` value must satisfy the [`User TransactionKind rules`](./api.md#user-transactionkind-rules). The short rule is: user-supplied transaction-kind bytes contain the user's action and no Stelis settlement call; the host appends the settlement call later.
+The `txKindBytes` value must satisfy the [`User TransactionKind rules`](./api.md#user-transactionkind-rules). The short rule is: user-supplied transaction-kind bytes contain the user's action and no Stelis settlement call; the Host appends the settlement call later.
 
 ```mermaid
 sequenceDiagram
@@ -57,6 +57,6 @@ Required expected fields are:
 - `user`
 - exactly one of `orderId` or `orderIdHash`
 
-Amount-sensitive backends should also pass expected `relayerClaimMist`, `quotedRelayerFeeMist`, and `protocolFeeMist`.
+Amount-sensitive backends should also pass expected `executionCostClaimMist`, `quotedHostFeeMist`, and `protocolFeeMist`.
 
 Use `extractSettleEvents` only for reconciliation scans. It decodes matching events but does not prove application payment completion by itself.

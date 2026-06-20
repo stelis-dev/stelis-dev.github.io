@@ -256,7 +256,7 @@ export async function runPreflight(
 // ─────────────────────────────────────────────
 
 /**
- * Sponsor-sign and submit a transaction on-chain.
+ * Add the sponsor signature and submit a transaction on-chain.
  * Returns a normalized ExecResult.
  *
  * Infrastructure-level network errors (not on-chain reverts) are re-thrown.

@@ -205,9 +205,9 @@ export interface StelisContractIds {
  */
 export const STELIS_CONTRACT_IDS: Record<SuiNetwork, StelisContractIds | null> = {
   testnet: {
-    packageId: '0xf5e47d8c1f7c842b3369ef77ea4bab19eafa71780a118e3fe3eaef9e76885d64',
-    configId: '0x73793aa89f04420355738213b0a98d2a41a568588a42927e33a69f885b22fdb1',
-    vaultRegistryId: '0x63ce68518baf0988418e9c49d147b349bb9d683f012ba100530980fd68e31e36',
+    packageId: '0x70443a6eec189037f310bb764e21717d78bb47ace8a1d9aba291c0f72ad15738',
+    configId: '0xb727aa48b94e4710c13d527963460e44e3ab0973e341c4892fed8559e29d015c',
+    vaultRegistryId: '0x2eb04cf3625fb68d2d6c452952b24989f1aa8be4a1f72235c1d791267197459f',
   },
   mainnet: null,
 };
@@ -224,7 +224,7 @@ export const STELIS_CONTRACT_IDS: Record<SuiNetwork, StelisContractIds | null> =
  * — this is intentional to prevent hardcoded or intermediate values from
  * bypassing the shared contract constants.
  *
- * Data-adjacent pure lookup: no Node-only or browser-only side effects,
+ * Pure lookup: no Node-only or browser-only side effects,
  * no runtime state, tightly coupled to STELIS_CONTRACT_IDS / DEEPBOOK_IDS
  * above.
  *

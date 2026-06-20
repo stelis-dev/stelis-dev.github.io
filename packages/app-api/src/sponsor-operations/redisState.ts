@@ -202,7 +202,7 @@ export interface RedisSponsorOperationsState {
    * the same order as `deps.slotAddresses`. Missing slot keys yield an
    * entry with `state === null` etc.; missing sponsor refill account key yields `null`
    * fields. This is the hot-path read used by the request gate and the
-   * admin `/api/pool` endpoint.
+   * admin `/api/sponsor-operations` endpoint.
    */
   readAll(): Promise<{
     readonly slots: readonly SlotRead[];

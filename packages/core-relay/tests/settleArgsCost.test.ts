@@ -16,7 +16,7 @@
  *   P-4: wrong packageId → null return
  *   P-5: unrelated TX (no settle call) → null return
  *
- * Only 1-hop routes are supported.
+ * Only one-hop settlement swap paths are supported.
  */
 import { describe, it, expect } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
@@ -36,21 +36,21 @@ const VAULT = '0x' + '7'.repeat(64);
 const RECIPIENT = '0x' + 'b'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 
-const QUOTED_RELAYER_FEE = 100_000n;
+const QUOTED_HOST_FEE = 100_000n;
 const EXPECTED_PROTOCOL_FEE = 20_000n;
 
 const COMMON_SETTLE_PARAMS = {
   packageId: PKG,
   configId: CONFIG,
   vaultRegistryId: REGISTRY,
-  relayerClaim: 5_000_000n,
-  relayerRecipient: RECIPIENT,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   simGasReported: 5_000_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 50_000n,
   nonce: 1n,
-  quotedRelayerFeeMist: QUOTED_RELAYER_FEE,
+  quotedHostFeeMist: QUOTED_HOST_FEE,
   expectedProtocolFeeMist: EXPECTED_PROTOCOL_FEE,
   expectedConfigVersion: 1n,
   quoteTimestampMs: 1741680000000,
@@ -84,7 +84,7 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
         variant: 'new_user',
         ...COMMON_SETTLE_PARAMS,
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: DEEP_TYPE,
+        settlementTokenType: DEEP_TYPE,
         poolId: POOL,
         paymentCoinId: PAYMENT_COIN,
         swapAmount: 1_000_000n,
@@ -94,8 +94,8 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
 
     const result = extractCostFromTxData(commands, inputs, PKG);
     expect(result).not.toBeNull();
-    expect(result!.relayerClaimMist).toBe(COMMON_SETTLE_PARAMS.relayerClaim);
-    expect(result!.quotedRelayerFeeMist).toBe(QUOTED_RELAYER_FEE);
+    expect(result!.executionCostClaimMist).toBe(COMMON_SETTLE_PARAMS.executionCostClaim);
+    expect(result!.quotedHostFeeMist).toBe(QUOTED_HOST_FEE);
     expect(result!.expectedProtocolFeeMist).toBe(EXPECTED_PROTOCOL_FEE);
   });
 
@@ -106,7 +106,7 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
         variant: 'with_vault',
         ...COMMON_SETTLE_PARAMS,
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: DEEP_TYPE,
+        settlementTokenType: DEEP_TYPE,
         poolId: POOL,
         paymentCoinId: PAYMENT_COIN,
         swapAmount: 1_000_000n,
@@ -118,8 +118,8 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
 
     const result = extractCostFromTxData(commands, inputs, PKG);
     expect(result).not.toBeNull();
-    expect(result!.relayerClaimMist).toBe(COMMON_SETTLE_PARAMS.relayerClaim);
-    expect(result!.quotedRelayerFeeMist).toBe(QUOTED_RELAYER_FEE);
+    expect(result!.executionCostClaimMist).toBe(COMMON_SETTLE_PARAMS.executionCostClaim);
+    expect(result!.quotedHostFeeMist).toBe(QUOTED_HOST_FEE);
     expect(result!.expectedProtocolFeeMist).toBe(EXPECTED_PROTOCOL_FEE);
   });
 
@@ -136,8 +136,8 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
 
     const result = extractCostFromTxData(commands, inputs, PKG);
     expect(result).not.toBeNull();
-    expect(result!.relayerClaimMist).toBe(COMMON_SETTLE_PARAMS.relayerClaim);
-    expect(result!.quotedRelayerFeeMist).toBe(QUOTED_RELAYER_FEE);
+    expect(result!.executionCostClaimMist).toBe(COMMON_SETTLE_PARAMS.executionCostClaim);
+    expect(result!.quotedHostFeeMist).toBe(QUOTED_HOST_FEE);
     expect(result!.expectedProtocolFeeMist).toBe(EXPECTED_PROTOCOL_FEE);
   });
 
@@ -148,7 +148,7 @@ describe('extractCostFromTxData — real PTB command/input structures', () => {
         variant: 'new_user',
         ...COMMON_SETTLE_PARAMS,
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: DEEP_TYPE,
+        settlementTokenType: DEEP_TYPE,
         poolId: POOL,
         paymentCoinId: PAYMENT_COIN,
         swapAmount: 1_000_000n,

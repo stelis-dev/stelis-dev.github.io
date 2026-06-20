@@ -1,5 +1,5 @@
 /**
- * Relayer configuration loading and parsing.
+ * Relay config responseuration loading and parsing.
  *
  * Standalone helpers used by StelisSDK.connect().
  * No StelisSDK state required — pure I/O and validation.
@@ -8,7 +8,7 @@ import {
   SETTLEMENT_SWAP_DIRECTION_VECTORS,
   VALID_SETTLEMENT_SWAP_DIRECTIONS,
 } from '@stelis/contracts';
-import type { RelayerConfig, SingleHopSettlementSwapPath, StelisRequestTimeouts } from './types.js';
+import type { RelayConfigResponse, SingleHopSettlementSwapPath, StelisRequestTimeouts } from './types.js';
 
 const DEFAULT_RELAY_CONFIG_TIMEOUT_MS = 5_000;
 const MIST_STRING_RE = /^(?:0|[1-9]\d*)$/;
@@ -37,10 +37,10 @@ function resolveConfigTimeoutMs(timeoutMs: number | undefined): number {
 }
 
 /**
- * Validate /relay/config response shape and narrow to `RelayerConfig`.
+ * Validate /relay/config response shape and narrow to `RelayConfigResponse`.
  * Throws a descriptive error if required fields are missing.
  */
-export function parseRelayerConfig(data: unknown): RelayerConfig {
+export function parseRelayConfigResponse(data: unknown): RelayConfigResponse {
   if (typeof data !== 'object' || data === null) {
     throw new Error(`Invalid /relay/config response: expected object, got ${JSON.stringify(data)}`);
   }
@@ -58,9 +58,9 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
     throw new Error('Invalid /relay/config response: packageId must be a non-empty string');
   }
 
-  const relayerRecipient = raw.relayerRecipient;
-  if (typeof relayerRecipient !== 'string' || relayerRecipient.length === 0) {
-    throw new Error('Invalid /relay/config response: relayerRecipient must be a non-empty string');
+  const settlementPayoutRecipient = raw.settlementPayoutRecipient;
+  if (typeof settlementPayoutRecipient !== 'string' || settlementPayoutRecipient.length === 0) {
+    throw new Error('Invalid /relay/config response: settlementPayoutRecipient must be a non-empty string');
   }
 
   const supportedSettlementSwapPaths = raw.supportedSettlementSwapPaths;
@@ -70,10 +70,10 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
     );
   }
 
-  const quotedRelayerFeeMist = raw.quotedRelayerFeeMist;
-  if (typeof quotedRelayerFeeMist !== 'string' || !MIST_STRING_RE.test(quotedRelayerFeeMist)) {
+  const quotedHostFeeMist = raw.quotedHostFeeMist;
+  if (typeof quotedHostFeeMist !== 'string' || !MIST_STRING_RE.test(quotedHostFeeMist)) {
     throw new Error(
-      'Invalid /relay/config response: quotedRelayerFeeMist must be a non-negative integer string',
+      'Invalid /relay/config response: quotedHostFeeMist must be a non-negative integer string',
     );
   }
   const protocolFlatFeeMist = raw.protocolFlatFeeMist;
@@ -124,14 +124,14 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
       minSize: BigInt(p.minSize),
     };
   }) as SingleHopSettlementSwapPath[];
-  validateUniquePaymentTokenTypes(parsedSettlementSwapPaths);
+  validateUniqueSettlementTokenTypes(parsedSettlementSwapPaths);
 
   return {
     network,
     packageId,
-    relayerRecipient,
+    settlementPayoutRecipient,
     supportedSettlementSwapPaths: parsedSettlementSwapPaths,
-    quotedRelayerFeeMist,
+    quotedHostFeeMist,
     protocolFlatFeeMist,
     integrityPolicyVersion,
   };
@@ -218,14 +218,14 @@ function validateSettlementSwapPathIntegrity(p: Record<string, unknown>, idx: nu
   }
 }
 
-function validateUniquePaymentTokenTypes(paths: readonly SingleHopSettlementSwapPath[]): void {
+function validateUniqueSettlementTokenTypes(paths: readonly SingleHopSettlementSwapPath[]): void {
   const seen = new Set<string>();
   for (const path of paths) {
-    if (seen.has(path.paymentTokenType)) {
+    if (seen.has(path.settlementTokenType)) {
       throw new Error(
-        `Invalid /relay/config response: duplicate paymentTokenType in supportedSettlementSwapPaths: ${path.paymentTokenType}`,
+        `Invalid /relay/config response: duplicate settlementTokenType in supportedSettlementSwapPaths: ${path.settlementTokenType}`,
       );
     }
-    seen.add(path.paymentTokenType);
+    seen.add(path.settlementTokenType);
   }
 }

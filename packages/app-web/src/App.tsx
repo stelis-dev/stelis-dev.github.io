@@ -61,7 +61,7 @@ function ConfigGate({ children }: { children: React.ReactNode }) {
       >
         <div style={spinnerStyle} />
         <span style={{ fontSize: 13, color: 'var(--text-secondary, #888)' }}>
-          Connecting to relayer...
+          Connecting to Host...
         </span>
       </div>
     );

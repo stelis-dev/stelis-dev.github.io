@@ -106,7 +106,7 @@ export function subjectCounterFamily(code: string): SubjectCounterFamily {
  * Members:
  *   - `PAUSED` — `settle::EPaused`. Operator-driven pause.
  *   - `VAULT_ALREADY_REGISTERED` — `vault::EVaultAlreadyRegistered`.
- *     New-user vault race; benign duplicate registration.
+ *     New-user User Vault race; benign duplicate registration.
  *   - `REPLAY_NONCE` — `vault::EReplayNonce`. S-14 monotonic gap from
  *     out-of-order land; benign retry.
  *
@@ -159,7 +159,7 @@ export function shouldCarveOutNonIpCounter(meta?: SponsorFailureMeta): boolean {
 // ─────────────────────────────────────────────
 
 /**
- * Sponsor-time new-user vault re-query result pairs emitted via
+ * Sponsor-time new-user User Vault re-query result pairs emitted via
  * `SPONSOR_DRIFT_OBSERVED`. `VAULT_STATE_INCONSISTENT` is a dual-use
  * literal — it is also a public prepare-time transport error code. The
  * transport reference remains in `errorCode.ts` / `docs/schemas/relay-api.schema.json`;
@@ -202,7 +202,7 @@ interface SponsorDriftBaseContext {
   stage: string;
   /** Original failure subcode propagated for operator triage. */
   subcode: string;
-  /** Prepared-entry receiptId; hash-bound, safe to include in logs. */
+  /** Prepared-entry receiptId; stored-hash-verified, safe to include in logs. */
   receiptId: string;
   /** Tx-derived sender; proven equal to prepare-time commit post-consume. */
   sender: string;
@@ -224,7 +224,7 @@ export type SponsorDriftContext =
 
 /**
  * Emit `SPONSOR_DRIFT_OBSERVED`. Used by both sponsor lifecycles when a
- * post-consume hash-bound drift is observed. Default level is `info`;
+ * post-consume stored-hash-verified drift is observed. Default level is `info`;
  * `L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED` is escalated to `warn` because it indicates
  * operator misconfiguration rather than a transient per-request
  * condition.

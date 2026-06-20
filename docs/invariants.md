@@ -18,9 +18,9 @@ The IDs are used in code comments, tests, and package README files. They are sho
 
 | ID | Rule | Enforced by |
 | --- | --- | --- |
-| S-2 | `relayer_claim` must not exceed `max_claim_mist`. | Move and relay validation |
+| S-2 | `execution_cost_claim_mist` must not exceed `max_claim_mist`. | Move and relay validation |
 | S-3 | Token-funded swap settlement input must be at least `min_settle_mist`. Credit-only settlement is exempt from `min_settle_mist` and must satisfy exact sufficiency, fee cap, config version, and nonce checks. | Move |
-| S-4 | Settlement input must cover relayer claim, quoted relayer fee, and protocol fee. | Move |
+| S-4 | Settlement input must cover execution cost claim, quoted host fee, and protocol fee. | Move |
 | S-9 | Surplus is joined into vault balance; no extra surplus coin is created. | Move |
 | S-10 | `receipt_id` is empty or 32 bytes. | Move |
 | S-11 | `policy_hash` is empty or 32 bytes. | Move |
@@ -40,9 +40,9 @@ The IDs are used in code comments, tests, and package README files. They are sho
 
 | ID | Rule | Enforced by |
 | --- | --- | --- |
-| E-1 | `relayerClaim >= simGas + gasVarianceFixedMist + slippageBufferMist`. | Relay validation |
+| E-1 | `executionCostClaim >= simGas + gasVarianceFixedMist + slippageBufferMist`. | Relay validation |
 | E-2 | Simulated gas must not exceed `max_claim_mist`. | Relay validation |
-| E-4 | Relayer claim must not exceed `max_claim_mist`. | Move and relay validation |
+| E-4 | execution cost claim must not exceed `max_claim_mist`. | Move and relay validation |
 | E-7 | `max_claim_mist` must be greater than zero. | Move |
 | E-8 | `min_settle_mist` must be within the allowed range and no greater than `max_claim_mist`. | Move |
 | E-9 | The sponsor approval gate must preserve the non-loss condition for successful transactions. | Relay validation |
@@ -62,7 +62,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | A-1 | Admin transfer proposals, admin transfers, and applied protocol state changes emit events. | Move |
 | A-2 | Only admin can propose or cancel protocol treasury changes. A queued treasury change applies only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
 | A-3 | Only admin can propose or cancel protocol flat fee changes. Queued economic changes apply only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
-| A-4 | Only admin can propose or cancel relayer fee cap and spread cap changes. Queued economic changes apply only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
+| A-4 | Only admin can propose or cancel host fee cap and spread cap changes. Queued economic changes apply only at or after `queued_epoch + ADMIN_UPDATE_DELAY_EPOCHS`. | Move |
 | A-5 | Emergency pause to `true` is immediate and admin-only. Unpause is a delayed pending change. | Move |
 | A-6 | Applying a matured pending config, treasury, or pause change is permissionless and can only execute exact queued values. `config_version` increments when the pending change is applied. | Move |
 
@@ -70,12 +70,12 @@ The IDs are used in code comments, tests, and package README files. They are sho
 
 | ID | Rule | Enforced by |
 | --- | --- | --- |
-| R-1 | A final relayer-built transaction must contain exactly one allowed settlement call. | Relay validation |
+| R-1 | A final Host-built transaction must contain exactly one allowed settlement call. | Relay validation |
 | R-2 | Sponsored transactions must not contain publish or upgrade commands. | Relay validation |
-| R-3 | The relayer recipient address in settlement arguments must match host configuration. | Relay validation |
-| R-7 | Settlement swap path identity must be present in the host's allowed settlement swap path list. | Relay validation |
+| R-3 | The settlement payout recipient address in settlement arguments must match Host configuration. | Relay validation |
+| R-7 | Settlement swap path identity must be present in the Host's allowed settlement swap path list. | Relay validation |
 | R-8 | Settlement swap path hop order must match the allowed settlement swap path exactly. | Relay validation |
-| R-9 | Payment-token funding must combine coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. It must not double-count the same funds inside one transaction. | Relay validation |
+| R-9 | Settlement-token funding must combine coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. It must not double-count the same funds inside one transaction. | Relay validation |
 | R-10 | Promotion-sponsored Move calls must match `STUDIO_ALLOWED_TARGETS`. | Promotion validation |
 | R-11 | A user-supplied generic `User TransactionKind` must contain zero settlement calls. | Relay validation |
 | R-12 | A user-supplied generic `User TransactionKind` must contain at most `MAX_COMMANDS = 16` commands. | Relay validation |
@@ -83,7 +83,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | R-14 | A user-supplied generic `User TransactionKind` must not include `FundsWithdrawal(Sponsor)`. | Relay validation |
 | R-15 | A malformed same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is rejected with `UNACCOUNTABLE_WITHDRAWAL`. | Relay validation |
 | R-16 | A bounded same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is allowed and subtracted from address-balance funding. | Relay validation |
-| R-17 | Each supported `paymentTokenType` maps to one host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
+| R-17 | Each supported `settlementTokenType` maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
 
 ## Code References
 

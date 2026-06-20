@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { StelisSDK, STELIS_CONTRACT_IDS } from '@stelis/sdk';
-import { RELAYER_BASE } from '../../../relayerEndpoint';
+import { RELAY_API_BASE } from '../../../relayApiEndpoint';
 import { useAppConfig, type AppWebNetwork } from '../../../AppConfigContext';
 
 /**
@@ -21,7 +21,7 @@ function getSDKPromise(network: AppWebNetwork): Promise<StelisSDK> {
   if (existing) return existing;
 
   const pinnedPackageId = STELIS_CONTRACT_IDS[network]?.packageId;
-  const promise = StelisSDK.connect(RELAYER_BASE, { pinnedPackageId }).catch((err) => {
+  const promise = StelisSDK.connect(RELAY_API_BASE, { pinnedPackageId }).catch((err) => {
     sdkCache.delete(network); // allow retry on failure
     throw err;
   });

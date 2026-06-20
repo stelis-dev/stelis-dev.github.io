@@ -33,7 +33,7 @@ const endpoints: EndpointOverview[] = [
     path: '/relay/status',
     desc: 'Health check',
     detail:
-      'Use this to verify that the relay host is responsive before attempting integration or sandbox flows.',
+      'Use this to verify that the Host is responsive before attempting integration or sandbox flows.',
     highlights: [
       'Minimal success payload: { ok: true }',
       'Good first probe for CI smoke checks and operational dashboards',
@@ -47,7 +47,7 @@ const endpoints: EndpointOverview[] = [
     detail:
       'The SDK calls this during connect() to fetch network metadata, settlement swap path support, and integrity-handshake fields.',
     highlights: [
-      'Returns packageId, relayerRecipient payout address, supportedSettlementSwapPaths, quoted fee fields, and integrityPolicyVersion',
+      'Returns packageId, settlementPayoutRecipient payout address, supportedSettlementSwapPaths, quoted fee fields, and integrityPolicyVersion',
       'Use this before constructing production client assumptions',
     ],
     docHref: `${API_DOC_URL}#get-relay-config`,
@@ -59,7 +59,7 @@ const endpoints: EndpointOverview[] = [
     detail:
       'Prepare performs dry-run pricing, issues a one-time receiptId and monotonic nonce, and returns the txBytes that the user must sign.',
     highlights: [
-      'Required body: txKindBytes, senderAddress, paymentTokenType',
+      'Required body: txKindBytes, senderAddress, settlementTokenType',
       'Optional body: slippageBps, gasMarginBps, orderId',
       'Dry-run rejections return 422 domain codes such as DRY_RUN_FAILED and DRY_RUN_NO_GAS',
     ],
@@ -68,9 +68,9 @@ const endpoints: EndpointOverview[] = [
   {
     method: 'POST',
     path: '/relay/sponsor',
-    desc: 'Validate, sponsor-sign, and submit',
+    desc: 'Validate, sign as sponsor, and submit',
     detail:
-      'Sponsor consumes the prepared receipt, hash-binds txBytes, re-validates the transaction, adds the sponsor signature, and submits it on-chain.',
+      'Sponsor consumes the prepared receipt, checks that txBytes match it, re-validates the transaction, adds the sponsor signature, and submits it on-chain.',
     highlights: [
       'Required body: txBytes, userSignature, receiptId',
       'Post-consume drift returns REPREPARE_REQUIRED instead of exposing generic L2_* codes',
@@ -102,11 +102,11 @@ const integrationSteps = [
     desc: 'The SDK handles config resolution, sponsored PTB construction, and the full prepare/sponsor flow.',
   },
   {
-    title: '2. Connect to the relay host',
+    title: '2. Connect to the Host',
     code: `import { StelisSDK } from '@stelis/sdk';
 
-// connect() auto-detects network from the relay host.
-const sdk = await StelisSDK.connect('https://your-relayer/relay');
+// connect() auto-detects network from the Host.
+const sdk = await StelisSDK.connect('https://your-host/relay');
 
 // sdk.network exposes 'testnet' | 'mainnet'.
 console.log(sdk.network);`,
@@ -118,7 +118,7 @@ console.log(sdk.network);`,
 
 const tx = new Transaction();
 // Add only your business logic Move calls here.
-// The SDK appends the settlement step and runs the relay flow.`,
+// The SDK appends the settlement step and runs the Relay API flow.`,
     desc: 'Keep the PTB focused on business intent. Gas abstraction and sponsor flow stay in the SDK layer.',
   },
   {
@@ -126,7 +126,7 @@ const tx = new Transaction();
     code: `const result = await sdk.executeSponsored(tx, {
   client,
   addr: userAddress,
-  paymentToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
+  settlementToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
   prepareAuthorizationSigner: async (messageBytes) => {
     const { signature } = await wallet.signPersonalMessage({ message: messageBytes });
     return signature;
@@ -172,8 +172,8 @@ export function DocsPage() {
             marginBottom: 20,
           }}
         >
-          Definitions of <code>Hosted relay</code>, <code>Studio</code>, <code>Host</code>,{' '}
-          <code>relay host</code>, and <code>relayer</code> live in{' '}
+          Definitions of <code>Host</code>, <code>Relay API</code>, <code>Admin app</code>, and{' '}
+          <code>Studio</code> live in{' '}
           {PAYMENT_PLATFORM_DOC_URL ? (
             <a href={PAYMENT_PLATFORM_DOC_URL} target="_blank" rel="noreferrer">
               docs/payment-platform.md → Product Family Terms
@@ -193,21 +193,21 @@ export function DocsPage() {
     participant W as Wallet
     participant App
     participant SDK
-    participant R as Relayer
+    participant H as Host
 
     App->>SDK: connect(endpoint)
-    SDK->>R: /relay/status -> /relay/config
+    SDK->>H: /relay/status -> /relay/config
     App->>App: Build PTB
     App->>SDK: executeSponsored()
-    SDK->>R: POST /relay/prepare
-    R-->>SDK: txBytes, receiptId, nonce, cost
+    SDK->>H: POST /relay/prepare
+    H-->>SDK: txBytes, receiptId, nonce, cost
     SDK->>App: request signature
     App->>W: Sign txBytes
     W-->>App: signature
     App-->>SDK: signature
-    SDK->>R: POST /relay/sponsor
-    Note over R: consume/hash-bind + fresh L1/L2 + gasOwner + new-user vault check + L4/L3 + sponsor-sign
-    R-->>SDK: digest, effects
+    SDK->>H: POST /relay/sponsor
+    Note over H: Verify receipt, sponsor gas, submit final transaction
+    H-->>SDK: digest, effects
 `}
         />
 
@@ -220,11 +220,11 @@ export function DocsPage() {
     A[computation + storage - rebate] --> B[simGas]
     C[GAS_VARIANCE_FIXED_MIST] --> D[gasVarianceFixedMist]
     E[measured slippage buffer] --> F[slippageBufferMist]
-    B --> G[relayerClaim]
+    B --> G[executionCostClaim]
     D --> G
     F --> G
-    G --> H[relayer_payout]
-    I[quotedRelayerFeeMist] --> H
+    G --> H[settlement_payout]
+    I[quotedHostFeeMist] --> H
     H --> J[total_deduction]
     K[protocol_fee] --> J
 `}
@@ -364,7 +364,7 @@ export function DocsPage() {
           {'{ "error": "<message>", "code": "<ERROR_CODE>" }'}
         </code>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          All relay endpoints use this shape. See <code>docs/api.md</code> for the full error code
+          All Relay API endpoints use this shape. See <code>docs/api.md</code> for the full error code
           reference.
         </span>
       </div>

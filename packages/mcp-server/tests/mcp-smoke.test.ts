@@ -19,7 +19,7 @@ describe('MCP stdio server', () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        STELIS_RELAY_URL: 'https://host.example/relay',
+        STELIS_RELAY_API_URL: 'https://host.example/relay',
       },
       stderr: 'pipe',
     });
@@ -30,7 +30,7 @@ describe('MCP stdio server', () => {
 
     expect(names).toEqual(
       expect.arrayContaining([
-        'stelis_get_relay_config',
+        'stelis_get_relay_api_config',
         'stelis_prepare_sponsored_transaction',
         'stelis_submit_signed_transaction',
         'stelis_list_promotions',

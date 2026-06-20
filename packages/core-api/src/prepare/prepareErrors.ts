@@ -35,8 +35,8 @@
  *   `pool::swap_exact_quantity`) and the same numeric code do not
  *   classify, and free-floating numeric tokens like `command N`,
  *   `5th command`, or `(instruction N)` cannot impersonate the abort
- *   code. Trusted IDs come from `RelayerContext.packageId` /
- *   `RelayerContext.deepbookPackageId` (sponsor-time) and
+ *   code. Trusted IDs come from `HostContext.packageId` /
+ *   `HostContext.deepbookPackageId` (sponsor-time) and
  *   `BuildContext.packageId` / `BuildContext.deepbookPackageId`
  *   (prepare-time); host wiring is verified by
  *   `packages/app-api/src/context.ts`.
@@ -239,7 +239,7 @@ function classifyKnownPrepareFailure(
   if (subcode === 'CLAIM_WOULD_EXCEED_MAX') {
     return new PrepareValidationError(
       'CLAIM_WOULD_EXCEED_MAX',
-      `Computed relayer claim exceeds configured max: ${reason}`,
+      `Computed execution cost claim exceeds configured max: ${reason}`,
       meta,
     );
   }
@@ -311,7 +311,7 @@ export function classifyDryRunFailure(
  *
  * Move-abort classifications inside this wrapper are package-bound;
  * pass the trusted Stelis and DeepBook package IDs from the
- * surrounding `BuildContext` / `RelayerContext`.
+ * surrounding `BuildContext` / `HostContext`.
  */
 export async function safeBuild(
   tx: Transaction,
@@ -345,16 +345,16 @@ export async function safeBuild(
 
 /**
  * Build diagnostic meta for INSUFFICIENT_SETTLE_INPUT and related errors.
- * @param isEstimate true = pass1 (relayerClaim not yet confirmed), false = pass2 (confirmed)
+ * @param isEstimate true = pass1 (executionCostClaim not yet confirmed), false = pass2 (confirmed)
  */
 export function buildSettleMeta(
   minSettleMist: bigint,
-  quotedRelayerFeeMist: bigint,
+  quotedHostFeeMist: bigint,
   protocolFlatFeeMist: bigint,
   claimEstimate: bigint,
   isEstimate: boolean,
 ): Record<string, string> {
-  const totalNeeded = claimEstimate + quotedRelayerFeeMist + protocolFlatFeeMist;
+  const totalNeeded = claimEstimate + quotedHostFeeMist + protocolFlatFeeMist;
   const required = minSettleMist > totalNeeded ? minSettleMist : totalNeeded;
   return {
     minSettleMist: minSettleMist.toString(),

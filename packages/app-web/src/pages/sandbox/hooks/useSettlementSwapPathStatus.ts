@@ -24,7 +24,7 @@ export function useSettlementSwapPathStatus(settlementSwapPathIndex = 0): Settle
     setLoading(true);
     try {
       const settlementSwapPath = getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex);
-      const result = await sdk.getExchangeRate(client, settlementSwapPath.paymentTokenType);
+      const result = await sdk.getExchangeRate(client, settlementSwapPath.settlementTokenType);
       setMidPrice(result.rate);
       setHasLiquidity(result.hasLiquidity);
       setRateDisplay(result.rateDisplay);

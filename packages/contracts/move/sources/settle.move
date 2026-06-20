@@ -16,7 +16,7 @@ module stelis::settle {
     // L2 tamper-detection errors (fingerprint bypass / inconsistent PTB)
     const EConfigVersionMismatch: u64 = 106;
     const EProtocolFeeMismatch: u64 = 107;
-    const ERelayerFeeCapExceeded: u64 = 108;
+    const EHostFeeCapExceeded: u64 = 108;
     const EInvalidOrderIdHash: u64 = 109;
     /// Spread guard: bid-ask spread exceeds Config.max_spread_bps, or book is
     /// empty / one-sided / crossed.  Only enforced on swap entrypoints.
@@ -200,14 +200,14 @@ module stelis::settle {
         config: &Config,
         clock: &Clock,
         mut coin_in: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         enforce_min_settle_mist: bool,
@@ -228,7 +228,7 @@ module stelis::settle {
         assert!(oid_len == 0 || oid_len == 32, EInvalidOrderIdHash);
 
         // S-2: Claim upper bound
-        assert!(relayer_claim <= config::max_claim_mist(config), EClaimTooHigh);
+        assert!(execution_cost_claim_mist <= config::max_claim_mist(config), EClaimTooHigh);
 
         // S-3: Total in lower bound
         let total_in = coin::value(&coin_in);
@@ -243,22 +243,22 @@ module stelis::settle {
         let protocol_fee = config::protocol_flat_fee_mist(config);
         assert!(protocol_fee == expected_protocol_fee_mist, EProtocolFeeMismatch);
 
-        // L2: Relayer fee cap enforcement (quoted fee must not exceed on-chain cap)
-        assert!(quoted_relayer_fee_mist <= config::max_relayer_fee_mist(config), ERelayerFeeCapExceeded);
+        // L2: Host fee cap enforcement (quoted fee must not exceed on-chain cap)
+        assert!(quoted_host_fee_mist <= config::max_host_fee_mist(config), EHostFeeCapExceeded);
 
         // S-4: Check sufficiency (E-9 non-loss invariant)
         // u128 defense-in-depth: prevents overflow if MAX_CLAIM_MIST is ever raised.
-        let total_deduction = (relayer_claim as u128) + (quoted_relayer_fee_mist as u128) + (protocol_fee as u128);
+        let total_deduction = (execution_cost_claim_mist as u128) + (quoted_host_fee_mist as u128) + (protocol_fee as u128);
         assert!((total_in as u128) >= total_deduction, EInsufficientFunds);
 
         // Compute surplus — safe: config.move cap guarantees payout fits u64,
         // and the u128 assert above proves total_in >= total_deduction.
-        let payout = relayer_claim + quoted_relayer_fee_mist;
+        let payout = execution_cost_claim_mist + quoted_host_fee_mist;
         let surplus = total_in - (total_deduction as u64);
 
-        // S-9: Transfer payout coin to relayer
+        // S-9: Transfer payout coin to the settlement payout recipient
         let payout_coin = coin::split(&mut coin_in, payout, ctx);
-        transfer::public_transfer(payout_coin, relayer_recipient);
+        transfer::public_transfer(payout_coin, settlement_payout_recipient);
 
         // Protocol fee handling
         let protocol_treasury = config::protocol_treasury(config);
@@ -278,8 +278,8 @@ module stelis::settle {
             sim_gas_reported,
             gas_variance_fixed_mist,
             slippage_buffer_mist,
-            relayer_claim,
-            quoted_relayer_fee_mist,
+            execution_cost_claim_mist,
+            quoted_host_fee_mist,
             protocol_fee,
             protocol_treasury,
             payout,
@@ -287,7 +287,7 @@ module stelis::settle {
             surplus,
             expected_config_version,
             ctx.sender(),
-            relayer_recipient,
+            settlement_payout_recipient,
             order_id_hash,
         );
 
@@ -304,14 +304,14 @@ module stelis::settle {
         clock: &Clock,
         user_vault: &mut UserVault,
         coin_in: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         enforce_min_settle_mist: bool,
@@ -325,9 +325,9 @@ module stelis::settle {
 
         let surplus_coin = settle_core(
             config, clock, coin_in,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             enforce_min_settle_mist, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -353,14 +353,14 @@ module stelis::settle {
         mut payment_coin: sui::coin::Coin<BaseType>,
         swap_amount: u64,
         min_sui_out: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -399,9 +399,9 @@ module stelis::settle {
 
         settle_internal(
             config, clock, &mut user_vault, sui_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -423,14 +423,14 @@ module stelis::settle {
         mut payment_coin: sui::coin::Coin<BaseType>,
         swap_amount: u64,
         min_sui_out: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -469,9 +469,9 @@ module stelis::settle {
             coin::destroy_zero(deep_leftover);
             settle_internal(
                 config, clock, user_vault, sui_coin,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
@@ -493,9 +493,9 @@ module stelis::settle {
             coin::destroy_zero(deep_leftover);
             settle_internal(
                 config, clock, user_vault, sui_coin,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
@@ -515,14 +515,14 @@ module stelis::settle {
         mut payment_coin: sui::coin::Coin<QuoteType>,
         swap_amount: u64,
         min_sui_out: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -560,9 +560,9 @@ module stelis::settle {
 
         settle_internal(
             config, clock, &mut user_vault, sui_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -584,14 +584,14 @@ module stelis::settle {
         mut payment_coin: sui::coin::Coin<QuoteType>,
         swap_amount: u64,
         min_sui_out: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -631,9 +631,9 @@ module stelis::settle {
             coin::destroy_zero(deep_leftover);
             settle_internal(
                 config, clock, user_vault, sui_coin,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
@@ -656,9 +656,9 @@ module stelis::settle {
             coin::destroy_zero(deep_leftover);
             settle_internal(
                 config, clock, user_vault, sui_coin,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
@@ -675,14 +675,14 @@ module stelis::settle {
         clock: &Clock,
         user_vault: &mut UserVault,
         use_credit_amount: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -694,9 +694,9 @@ module stelis::settle {
         let credit_coin = vault::use_credit(user_vault, use_credit_amount, ctx);
         settle_internal(
             config, clock, user_vault, credit_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             false, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -712,14 +712,14 @@ module stelis::settle {
         registry: &mut VaultRegistry,
         clock: &Clock,
         coin_in: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -731,9 +731,9 @@ module stelis::settle {
         vault::register_vault(registry, ctx.sender(), vault::vault_id(&user_vault));
         settle_internal(
             config, clock, &mut user_vault, coin_in,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -747,14 +747,14 @@ module stelis::settle {
         clock: &Clock,
         user_vault: &mut UserVault,
         coin_in: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -770,18 +770,18 @@ module stelis::settle {
             coin::join(&mut merged, credit_coin);
             settle_internal(
                 config, clock, user_vault, merged,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
         } else {
             settle_internal(
                 config, clock, user_vault, coin_in,
-                relayer_claim, relayer_recipient, receipt_id, nonce,
+                execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
                 sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-                quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+                quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
                 true, quote_timestamp_ms, policy_hash, order_id_hash,
                 ctx,
             );
@@ -794,14 +794,14 @@ module stelis::settle {
         clock: &Clock,
         user_vault: &mut UserVault,
         coin_in: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -811,9 +811,9 @@ module stelis::settle {
     ) {
         settle_internal(
             config, clock, user_vault, coin_in,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -833,14 +833,14 @@ module stelis::settle {
         registry: &mut VaultRegistry,
         clock: &Clock,
         sui_coin: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -852,9 +852,9 @@ module stelis::settle {
         vault::register_vault(registry, ctx.sender(), vault::vault_id(&user_vault));
         settle_internal(
             config, clock, &mut user_vault, sui_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -869,14 +869,14 @@ module stelis::settle {
         clock: &Clock,
         user_vault: &mut UserVault,
         sui_coin: Coin<SUI>,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -887,9 +887,9 @@ module stelis::settle {
         vault::validate_vault(registry, ctx.sender(), vault::vault_id(user_vault));
         settle_internal(
             config, clock, user_vault, sui_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );
@@ -904,14 +904,14 @@ module stelis::settle {
         user_vault: &mut UserVault,
         mut sui_coin: Coin<SUI>,
         use_credit_amount: u64,
-        relayer_claim: u64,
-        relayer_recipient: address,
+        execution_cost_claim_mist: u64,
+        settlement_payout_recipient: address,
         receipt_id: vector<u8>,
         nonce: u64,
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        quoted_relayer_fee_mist: u64,
+        quoted_host_fee_mist: u64,
         expected_protocol_fee_mist: u64,
         expected_config_version: u64,
         quote_timestamp_ms: u64,
@@ -926,9 +926,9 @@ module stelis::settle {
         };
         settle_internal(
             config, clock, user_vault, sui_coin,
-            relayer_claim, relayer_recipient, receipt_id, nonce,
+            execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
             sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
-            quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version,
+            quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version,
             true, quote_timestamp_ms, policy_hash, order_id_hash,
             ctx,
         );

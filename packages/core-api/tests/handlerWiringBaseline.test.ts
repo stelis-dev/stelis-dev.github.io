@@ -8,7 +8,7 @@
  *
  * What this file CAN catch:
  *   - effective profile propagation (GenericPrepareBuildOutput.profile → store → response)
- *   - relayerClaim propagation (GenericPrepareBuildOutput → store → response)
+ *   - executionCostClaim propagation (GenericPrepareBuildOutput → store → response)
  *   - nonce propagation (reserveNonce → store → response)
  *   - cost response shape (exact 7-field key set)
  *   - prepared-commit projection wiring (no extra/missing fields)
@@ -98,7 +98,7 @@ const ONCHAIN_CONFIG = {
   configId: '0xCONFIG',
   maxClaimMist: 50_000_000n,
   minSettleMist: 0n,
-  maxRelayerFeeMist: 500_000n,
+  maxHostFeeMist: 500_000n,
   protocolFlatFeeMist: 10_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
@@ -107,7 +107,7 @@ const ONCHAIN_CONFIG = {
 const NEW_USER_BUILD_RESULT = {
   txBytes: FAKE_TX_BYTES,
   txBytesHash: FAKE_TX_BYTES_HASH,
-  relayerClaim: 1_800_000n,
+  executionCostClaim: 1_800_000n,
   simGas: 1_300_000n,
   gasVarianceFixedMist: 350_000n,
   slippageBufferMist: 150_000n,
@@ -165,9 +165,9 @@ const SUPPORTED_POOL = {
       feeBps: 0,
     },
   ],
-  paymentTokenType: '0xDEEP::deep::DEEP',
-  paymentTokenSymbol: 'DEEP',
-  paymentTokenDecimals: 6,
+  settlementTokenType: '0xDEEP::deep::DEEP',
+  settlementTokenSymbol: 'DEEP',
+  settlementTokenDecimals: 6,
   lotSize: 1n,
   minSize: 1n,
   effectiveFeeRateBps: 0,
@@ -176,11 +176,11 @@ const SUPPORTED_POOL = {
 
 const SETTLEMENT_SWAP_PATH_DESCRIPTORS: StaticSettlementSwapPathDescriptorMap = new Map([
   [
-    SUPPORTED_POOL.paymentTokenType,
+    SUPPORTED_POOL.settlementTokenType,
     {
-      paymentTokenType: SUPPORTED_POOL.paymentTokenType,
-      paymentTokenSymbol: SUPPORTED_POOL.paymentTokenSymbol,
-      paymentTokenDecimals: SUPPORTED_POOL.paymentTokenDecimals,
+      settlementTokenType: SUPPORTED_POOL.settlementTokenType,
+      settlementTokenSymbol: SUPPORTED_POOL.settlementTokenSymbol,
+      settlementTokenDecimals: SUPPORTED_POOL.settlementTokenDecimals,
       effectiveFeeRateBps: SUPPORTED_POOL.effectiveFeeRateBps,
       settlementSwapDirection: SUPPORTED_POOL.settlementSwapDirection,
       hops: SUPPORTED_POOL.hops,
@@ -223,7 +223,7 @@ function makeMockContext() {
       reserveNonce: vi.fn().mockResolvedValue(7n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -245,7 +245,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: 50_000n,
+    quotedHostFeeMist: 50_000n,
   };
 }
 
@@ -259,7 +259,7 @@ async function makeValidTxKindBytes(): Promise<string> {
 function policyHashBytes(): Uint8Array {
   const hex = computePolicyHash({
     maxClaimMist: ONCHAIN_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: ONCHAIN_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: ONCHAIN_CONFIG.maxHostFeeMist,
     protocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -274,11 +274,11 @@ function mockSettleArgs(paymentInputTrace: unknown) {
   vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
     configObjectId: '0xCONFIG',
     registryObjectId: '0xREGISTRY',
-    relayerRecipient: '0xRELAYER',
-    relayerClaim: 1_800_000n,
+    settlementPayoutRecipient: '0xPAYOUT',
+    executionCostClaim: 1_800_000n,
     policyHash: policyHashBytes(),
     orderIdHash: new Uint8Array(0),
-    quotedRelayerFeeMist: 50_000n,
+    quotedHostFeeMist: 50_000n,
     expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
     expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
     nonce: 7n,
@@ -290,7 +290,7 @@ function mockSettleArgs(paymentInputTrace: unknown) {
     extractedSettlementSwapPath: isCreditOnly
       ? undefined
       : {
-          tokenType: SUPPORTED_POOL.paymentTokenType,
+          tokenType: SUPPORTED_POOL.settlementTokenType,
           hops: [SUPPORTED_POOL.hops[0].poolId],
           settlementSwapDirection: SUPPORTED_POOL.settlementSwapDirection,
         },
@@ -303,7 +303,7 @@ const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>
   withPrepareAuthorization({
     txKindBytes,
     senderAddress: TEST_PREPARE_AUTH_SENDER,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '10.0.0.1',
   });
 
@@ -332,8 +332,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
 
     // Effective profile in response
     expect(result.profile).toBe('new_user');
-    // relayerClaim in response
-    expect(result.cost.relayerClaim).toBe('1800000');
+    // executionCostClaim in response
+    expect(result.cost.executionCostClaim).toBe('1800000');
     // nonce assigned by reserveNonce mock
     expect(result.nonce).toBe('7');
 
@@ -347,14 +347,14 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(buildInput.vaultObjectId).toBeNull();
 
     // Store entry persists coordination fields only. Settle copies
-    // (`profile` / `relayerClaim` etc.) are read from
+    // (`profile` / `executionCostClaim` etc.) are read from
     // `parseSettleArgs(txBytes)` at sponsor time, so this test locks
     // `nonce` (a true coordination field) plus the negative shape of
     // the settle copies that must not be persisted.
     const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(storedEntry.nonce).toBe(7n);
     expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('relayerClaim');
+    expect(storedEntry).not.toHaveProperty('executionCostClaim');
     expect(storedEntry).not.toHaveProperty('paymentInputSource');
   });
 
@@ -375,7 +375,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
     expect(result.profile).toBe('with_vault');
-    expect(result.cost.relayerClaim).toBe('1800000');
+    expect(result.cost.executionCostClaim).toBe('1800000');
     expect(result.nonce).toBe('7');
 
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
@@ -387,13 +387,13 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(settleArgsCall.paymentInputTrace.source).toBe('address_balance');
 
     // Store entry: nonce coordination retained, settle copies not
-    // persisted. Result.profile / result.cost.relayerClaim above already
+    // persisted. Result.profile / result.cost.executionCostClaim above already
     // verify the values flow from GenericPrepareBuildOutput through the response; the
     // store entry is not the assertion site for them.
     const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(storedEntry.nonce).toBe(7n);
     expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('relayerClaim');
+    expect(storedEntry).not.toHaveProperty('executionCostClaim');
   });
 
   // ── Case 3: credit_general, none_credit_only ──
@@ -413,7 +413,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
     expect(result.profile).toBe('credit_general');
-    expect(result.cost.relayerClaim).toBe('1800000');
+    expect(result.cost.executionCostClaim).toBe('1800000');
     expect(result.cost.slippageBufferMist).toBe('0');
     expect(result.nonce).toBe('7');
 
@@ -457,7 +457,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     // The 9 settle observability copies are not persisted. Sponsor reads
     // each value from `parseSettleArgs(txBytes)`; the store entry is not
     // their carrier. GenericPrepareBuildOutput-only fields are also never persisted.
-    expect(storedEntry).not.toHaveProperty('relayerClaim');
+    expect(storedEntry).not.toHaveProperty('executionCostClaim');
     expect(storedEntry).not.toHaveProperty('simGas');
     expect(storedEntry).not.toHaveProperty('gasVarianceFixedMist');
     expect(storedEntry).not.toHaveProperty('slippageBufferMist');
@@ -465,7 +465,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(storedEntry).not.toHaveProperty('profile');
     expect(storedEntry).not.toHaveProperty('quoteTimestampMs');
     expect(storedEntry).not.toHaveProperty('policyHash');
-    expect(storedEntry).not.toHaveProperty('quotedRelayerFeeMist');
+    expect(storedEntry).not.toHaveProperty('quotedHostFeeMist');
     expect(storedEntry).not.toHaveProperty('paymentInputSource');
     expect(storedEntry).not.toHaveProperty('swapAmountSmallest');
   });
@@ -487,11 +487,11 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
     expect(Object.keys(result.cost).sort()).toEqual([
+      'executionCostClaim',
       'gasVarianceFixedMist',
       'grossGas',
       'protocolFee',
-      'quotedRelayerFee',
-      'relayerClaim',
+      'quotedHostFee',
       'simGas',
       'slippageBufferMist',
     ]);

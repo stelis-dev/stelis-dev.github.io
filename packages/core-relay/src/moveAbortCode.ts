@@ -33,7 +33,7 @@ export const SETTLE_ABORT = {
   EInvalidPolicyHash: 105,
   EConfigVersionMismatch: 106,
   EProtocolFeeMismatch: 107,
-  ERelayerFeeCapExceeded: 108,
+  EHostFeeCapExceeded: 108,
   EInvalidOrderIdHash: 109,
   ESpreadTooWide: 110,
 } as const satisfies Record<string, number>;
@@ -64,7 +64,7 @@ export const CONFIG_ABORT = {
   EInvalidMinSettle: 4,
   ENotPendingAdmin: 5,
   ENoPendingAdmin: 6,
-  EInvalidRelayerFeeCap: 7,
+  EInvalidHostFeeCap: 7,
   EInvalidSpreadBps: 8,
   EPendingAdminExists: 9,
   EPendingConfigExists: 10,

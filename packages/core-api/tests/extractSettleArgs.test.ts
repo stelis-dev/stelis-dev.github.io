@@ -64,7 +64,7 @@ describe('ARG_INDEX_MAP locking tests', () => {
   // New-user base-for-quote settlement:
   //   [config(0), registry(1), clock(2), pool(3), payment(4), swapAmt(5), minSuiOut(6),
   //    claim(7), recipient(8), receiptId(9), nonce(10), simGas(11),
-  //    gasVariance(12), slippage(13), quotedRelayer(14), expectedProtocol(15), expectedConfig(16),
+  //    gasVariance(12), slippage(13), quotedHostFee(14), expectedProtocol(15), expectedConfig(16),
   //    quoteTs(17), policyHash(18), orderIdHash(19)]
   it('new-user base-for-quote settlement: claim=7, recipient=8, pools=[3], nonce=10, policyHash=18, orderIdHash=19', () => {
     const m = ARG_INDEX_MAP[SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser]!;
@@ -78,7 +78,7 @@ describe('ARG_INDEX_MAP locking tests', () => {
 
   // Vault-backed base-for-quote settlement:
   //   [config(0), registry(1), clock(2), vault(3), pool(4), payment(5), swapAmt(6), minSuiOut(7),
-  //    claim(8), recipient(9), receiptId(10), nonce(11), ..., quotedRelayer(15), ..., policyHash(19), orderIdHash(20)]
+  //    claim(8), recipient(9), receiptId(10), nonce(11), ..., quotedHostFee(15), ..., policyHash(19), orderIdHash(20)]
   it('vault-backed base-for-quote settlement: claim=8, recipient=9, pools=[4], nonce=11, policyHash=19, orderIdHash=20', () => {
     const m = ARG_INDEX_MAP[SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.withVault]!;
     expect(m.claim).toBe(8);
@@ -92,7 +92,7 @@ describe('ARG_INDEX_MAP locking tests', () => {
   // Credit-only settlement:
   //   [config(0), registry(1), clock(2), vault(3), useCredit(4),
   //    claim(5), recipient(6), receiptId(7), nonce(8), simGas(9),
-  //    gasVariance(10), slippage(11), quotedRelayer(12), expectedProtocol(13), expectedConfig(14),
+  //    gasVariance(10), slippage(11), quotedHostFee(12), expectedProtocol(13), expectedConfig(14),
   //    quoteTs(15), policyHash(16), orderIdHash(17)]
   it('credit-only settlement: claim=5, recipient=6, pools=[], nonce=8, policyHash=16, orderIdHash=17', () => {
     const m = ARG_INDEX_MAP[SETTLE_WITH_CREDIT_FUNCTION]!;
@@ -113,7 +113,7 @@ import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.j
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { toBase64 } from '@mysten/sui/utils';
 import type { PtbCommand } from '@stelis/contracts';
-import type { RelayerEnv } from '@stelis/core-relay';
+import type { HostValidationEnv } from '@stelis/core-relay';
 
 /** Encode a u64 as base64 BCS (8-byte little-endian). */
 function encodeU64(value: bigint): string {
@@ -176,9 +176,9 @@ function makePureVectorU8Input(data: Uint8Array) {
   return { $kind: 'Pure', Pure: { bytes: encodePureVectorU8(data) } };
 }
 
-const DUMMY_ENV: RelayerEnv = {
+const DUMMY_ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
   packageId: '0x' + '11'.repeat(32),
@@ -213,7 +213,7 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
     // Credit-only args:
     // [config(0), registry(1), clock(2), vault(3), useCreditAmount(4),
     //  claim(5), recipient(6), receiptId(7), nonce(8), simGas(9),
-    //  gasVariance(10), slippage(11), quotedRelayer(12), expectedProtocol(13), expectedConfig(14),
+    //  gasVariance(10), slippage(11), quotedHostFee(12), expectedProtocol(13), expectedConfig(14),
     //  quoteTs(15), policyHash(16), orderIdHash(17)]
     const policyHashData = new Uint8Array(32).fill(0xdd);
     const inputs: unknown[] = [
@@ -222,14 +222,14 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
       makeObjectInput('0xCLOCK'), // 2: clock
       makeObjectInput('0xVAULT'), // 3: vault
       makePureU64Input(1000n), // 4: useCreditAmount
-      makePureU64Input(5_000_000n), // 5: relayerClaim
-      makePureAddressInput('0x' + 'aa'.repeat(32)), // 6: relayerRecipient
+      makePureU64Input(5_000_000n), // 5: executionCostClaim
+      makePureAddressInput('0x' + 'aa'.repeat(32)), // 6: settlementPayoutRecipient
       makePureVectorU8Input(new Uint8Array(0)), // 7: receiptId (empty)
       makePureU64Input(1n), // 8: nonce
       makePureU64Input(1_000_000n), // 9: simGasReported
       makePureU64Input(100_000n), // 10: gasVarianceFixedMist
       makePureU64Input(0n), // 11: slippageBufferMist
-      makePureU64Input(500_000n), // 12: quotedRelayerFeeMist
+      makePureU64Input(500_000n), // 12: quotedHostFeeMist
       makePureU64Input(100_000n), // 13: expectedProtocolFeeMist
       makePureU64Input(1n), // 14: expectedConfigVersion
       makePureU64Input(BigInt(Date.now())), // 15: quoteTimestampMs
@@ -249,7 +249,7 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
 
     const result = extractSettleArgsFromBuiltTx(commands, inputs, DUMMY_ENV);
     expect(result.extractedSettlementSwapPath).toBeUndefined();
-    expect(result.relayerClaim).toBe(5_000_000n);
+    expect(result.executionCostClaim).toBe(5_000_000n);
     expect(result.configObjectId).toBe('0xCONFIG');
     expect(result.registryObjectId).toBe('0xREGISTRY');
     expect(result.policyHash).toEqual(policyHashData);
@@ -264,7 +264,7 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
   it('new-user base-for-quote settlement: extracts settlement swap path with tokenType, hops, settlementSwapDirection', () => {
     // [config(0), registry(1), clock(2), pool(3), payment(4),
     //  swapAmt(5), minSuiOut(6), claim(7), recipient(8), receiptId(9), nonce(10), simGas(11),
-    //  gasVariance(12), slippage(13), quotedRelayer(14), expectedProtocol(15), expectedConfig(16),
+    //  gasVariance(12), slippage(13), quotedHostFee(14), expectedProtocol(15), expectedConfig(16),
     //  quoteTs(17), policyHash(18), orderIdHash(19)]
     const policyHashData = new Uint8Array(32).fill(0xee);
     const inputs: unknown[] = [
@@ -275,14 +275,14 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
       makeObjectInput('0xCOIN'), // 4: paymentCoin
       makePureU64Input(1000n), // 5: swapAmount
       makePureU64Input(500n), // 6: minSuiOut
-      makePureU64Input(3_000_000n), // 7: relayerClaim
-      makePureAddressInput('0x' + 'bb'.repeat(32)), // 8: relayerRecipient
+      makePureU64Input(3_000_000n), // 7: executionCostClaim
+      makePureAddressInput('0x' + 'bb'.repeat(32)), // 8: settlementPayoutRecipient
       makePureVectorU8Input(new Uint8Array(32).fill(0x01)), // 9: receiptId
       makePureU64Input(1n), // 10: nonce
       makePureU64Input(1_000_000n), // 11: simGasReported
       makePureU64Input(100_000n), // 12: gasVarianceFixedMist
       makePureU64Input(50_000n), // 13: slippageBufferMist
-      makePureU64Input(500_000n), // 14: quotedRelayerFeeMist
+      makePureU64Input(500_000n), // 14: quotedHostFeeMist
       makePureU64Input(100_000n), // 15: expectedProtocolFeeMist
       makePureU64Input(1n), // 16: expectedConfigVersion
       makePureU64Input(BigInt(Date.now())), // 17: quoteTimestampMs
@@ -305,7 +305,7 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
     expect(result.extractedSettlementSwapPath!.tokenType).toBe('0xDEEP::deep::DEEP');
     expect(result.extractedSettlementSwapPath!.hops).toEqual(['0xPOOL1']);
     expect(result.extractedSettlementSwapPath!.settlementSwapDirection).toBe('baseForQuote');
-    expect(result.relayerClaim).toBe(3_000_000n);
+    expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.policyHash).toEqual(policyHashData);
     // 5 tx-derived fields:
     expect(result.receiptId).toEqual(new Uint8Array(32).fill(0x01));
@@ -317,7 +317,7 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
 });
 
 // ─────────────────────────────────────────────
-// isNewUserSettleMoveCall — new-user vault drift discriminator
+// isNewUserSettleMoveCall — new-user User Vault drift discriminator
 // ─────────────────────────────────────────────
 
 import { isNewUserSettleMoveCall } from '../src/prepare/extractSettleArgs.js';

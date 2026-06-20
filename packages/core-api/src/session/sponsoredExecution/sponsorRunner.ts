@@ -22,7 +22,7 @@
  * signatures.
  *
  * Current sponsor-runner rules:
- *   - `Consume` is the single authoritative hash-bind; reconstruction
+ *   - `Consume` is the single authoritative stored-hash match; reconstruction
  *     starts only after this boundary clears.
  *   - the shared runner owns finally slot checkin.
  *   - sponsor-phase reservation handles is reconstructed from durable inputs after
@@ -276,7 +276,7 @@ export async function runSponsorStateMachine<TResult>(
     await callHook(policy.hooks.UserSignatureValidation, preCtx);
 
     // ── State 3: Consume ──────────────────────────────────────────────
-    // Atomic hash-bind delegated to the existing shared sub-runner.
+    // Atomic stored-hash match delegated to the existing shared sub-runner.
     // Consume errors (not_found / expired / hash_mismatch / corrupt)
     // propagate as adapter-classified errors — the runner does NOT
     // re-classify them. Per Q1, the sub-runner is reused as-is.
@@ -328,7 +328,7 @@ export async function runSponsorStateMachine<TResult>(
     }
 
     // ── State 5: PolicyPostconsumeChecks ──────────────────────────────
-    // Hook performs route-specific verification (new-user vault drift
+    // Hook performs route-specific verification (new-user User Vault drift
     // for generic; promotion ledger lookup verification for Studio)
     // and may return `LedgerReservationReconstructionInputs` which the
     // runner mints into a live `LedgerReservationHandle`.

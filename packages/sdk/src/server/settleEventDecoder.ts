@@ -36,8 +36,8 @@ export const SettleEventBcs = bcs.struct('SettleEvent', {
   sim_gas_reported: bcs.u64(),
   gas_variance_fixed_mist: bcs.u64(),
   slippage_buffer_mist: bcs.u64(),
-  relayer_claim: bcs.u64(),
-  quoted_relayer_fee_mist: bcs.u64(),
+  execution_cost_claim_mist: bcs.u64(),
+  quoted_host_fee_mist: bcs.u64(),
   protocol_fee: bcs.u64(),
   protocol_treasury: bcs.Address,
   payout: bcs.u64(),
@@ -45,7 +45,7 @@ export const SettleEventBcs = bcs.struct('SettleEvent', {
   surplus_credited: bcs.u64(),
   config_version: bcs.u64(),
   user: bcs.Address,
-  relayer_recipient: bcs.Address,
+  settlement_payout_recipient: bcs.Address,
   order_id_hash: bytesVector,
 });
 
@@ -60,8 +60,8 @@ export interface DecodedSettleEvent {
   nonce: string;
   orderIdHash: string;
   user: string;
-  relayerClaim: string;
-  quotedRelayerFeeMist: string;
+  executionCostClaim: string;
+  quotedHostFeeMist: string;
   protocolFee: string;
   payout: string;
   totalIn: string;
@@ -87,8 +87,8 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
     nonce: String(decoded.nonce),
     orderIdHash: toHex(decoded.order_id_hash),
     user: decoded.user,
-    relayerClaim: String(decoded.relayer_claim),
-    quotedRelayerFeeMist: String(decoded.quoted_relayer_fee_mist),
+    executionCostClaim: String(decoded.execution_cost_claim_mist),
+    quotedHostFeeMist: String(decoded.quoted_host_fee_mist),
     protocolFee: String(decoded.protocol_fee),
     payout: String(decoded.payout),
     totalIn: String(decoded.total_in),

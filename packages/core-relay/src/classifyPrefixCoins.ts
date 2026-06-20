@@ -59,7 +59,7 @@ const DECIMAL_U64_RE = /^(?:0|[1-9]\d*)$/;
  *   - `mutated` is the broad SplitCoins-source set.
  *   - `reusableSplitSources` is a narrower additive subset of direct-input
  *     SplitCoins sources that survive precedence pruning and remain candidates
- *     for the current payment-token safe-reuse policy.
+ *     for the current settlement-token safe-reuse policy.
  */
 export function classifyUserTxCoins(tx: Transaction): {
   survivors: Set<string>;
@@ -69,7 +69,7 @@ export function classifyUserTxCoins(tx: Transaction): {
   mutated: Set<string>;
   /**
    * Additive subset of direct-input SplitCoins sources that remain structurally
-   * eligible for the narrow payment-token safe-reuse policy after precedence
+   * eligible for the narrow settlement-token safe-reuse policy after precedence
    * pruning. Conservative callers may still exclude the broader `mutated` set.
    */
   reusableSplitSources: Set<string>;
@@ -340,7 +340,7 @@ function resolveWithdrawFrom(
 
 /**
  * Extract the total address-balance consumption from user prefix FundsWithdrawal
- * inputs that match the payment token type.
+ * inputs that match the settlement token type.
  *
  * FundsWithdrawal inputs represent Sui address-balance withdrawals (`tx.withdrawal()`).
  * The classifier (`classifyUserTxCoins`) tracks object provenance only and does not
@@ -364,10 +364,10 @@ function resolveWithdrawFrom(
  */
 export function extractPrefixWithdrawals(
   tx: Transaction,
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): { total: bigint; unaccountable: boolean } {
   const inputs = tx.getData().inputs as Record<string, unknown>[];
-  const normalizedPaymentType = normalizeStructTag(paymentTokenType);
+  const normalizedPaymentType = normalizeStructTag(settlementTokenType);
   let total = 0n;
   let unaccountable = false;
 
@@ -437,7 +437,7 @@ export function extractPrefixWithdrawals(
  *
  * A FundsWithdrawal with `withdrawFrom.Sponsor` would cause the Sui runtime
  * to deduct from the gas payer's (sponsor's) address balance. In a sponsored
- * transaction, the sponsor is the relayer — allowing this input would let
+ * transaction, the sponsor is controlled by the Host — allowing this input would let
  * a malicious user drain sponsor funds.
  *
  * This guard runs on raw inputs (not commands) and complements the existing

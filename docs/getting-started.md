@@ -33,7 +33,7 @@ npm install
 ## Build
 
 ```bash
-VITE_STELIS_RELAYER_URL=http://localhost:3200/relay \
+VITE_STELIS_RELAY_API_URL=http://localhost:3200/relay \
 VITE_STELIS_API_URL=http://localhost:3200 \
 npm run build
 ```
@@ -62,7 +62,7 @@ cp packages/app-api/.env.example packages/app-api/.env
 
 Fill in real values in `.env`. `packages/app-api/settlement-swap-paths.json` and `packages/app-api/rpc.json` are tracked config files; confirm the section selected by `NETWORK` has the pool IDs and RPC endpoints for that network.
 
-Start the API host:
+Start the Host:
 
 ```bash
 npm run dev:app-api
@@ -70,7 +70,7 @@ npm run dev:app-api
 
 The root `dev:app-api` command loads `packages/app-api/.env`, starts an isolated Redis
 memory server through `redis-memory-server`, sets `REDIS_URL` for the child process, and then
-starts the API host. Local development does not use Docker Redis or an external Redis service.
+starts the Host. Local development does not use Docker Redis or an external Redis service.
 
 ## Run Web Apps
 
@@ -81,7 +81,7 @@ cp packages/app-web/.env.example packages/app-web/.env
 cp packages/app-admin/.env.example packages/app-admin/.env
 ```
 
-Use values that point at the local API host.
+Use values that point at the local Host.
 
 ```bash
 npm run dev:app-web

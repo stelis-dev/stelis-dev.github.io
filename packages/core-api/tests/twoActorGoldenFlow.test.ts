@@ -78,7 +78,7 @@ import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { SponsorPool } from '../src/context.js';
-import type { RelayerContext } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import {
   handlePromotionPrepare,
@@ -116,16 +116,16 @@ const GENERIC_MOCK_CONFIG = {
   packageId: '0x' + '11'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
-  maxRelayerFeeMist: 100_000n,
+  maxHostFeeMist: 100_000n,
   protocolFlatFeeMist: 50_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
 } as const;
 
-const GENERIC_QUOTED_RELAYER_FEE = GENERIC_MOCK_CONFIG.maxRelayerFeeMist;
+const GENERIC_QUOTED_HOST_FEE = GENERIC_MOCK_CONFIG.maxHostFeeMist;
 
 /**
  * Build a real, BCS-valid credit-only settlement transaction with sender +
@@ -175,14 +175,14 @@ async function buildCreditTx(opts: {
       objRef('0x6'), // 2: clock
       objRef('0x' + '04'.repeat(32)), // 3: vault
       tx.pure(bcs.u64().serialize(1_000n)), // 4: useCreditAmount
-      tx.pure(bcs.u64().serialize(5_250_000n)), // 5: relayerClaim
-      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.relayerAddress)), // 6: relayerRecipient
+      tx.pure(bcs.u64().serialize(5_250_000n)), // 5: executionCostClaim
+      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress)), // 6: settlementPayoutRecipient
       tx.pure(bcs.vector(bcs.u8()).serialize([])), // 7: receiptId (empty for fixture)
       tx.pure(bcs.u64().serialize(opts.nonce ?? 1n)), // 8: nonce
       tx.pure(bcs.u64().serialize(5_000_000n)), // 9: simGasReported
       tx.pure(bcs.u64().serialize(GAS_VARIANCE_FIXED_MIST)), // 10: gasVarianceFixedMist
       tx.pure(bcs.u64().serialize(0n)), // 11: slippageBufferMist
-      tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.maxRelayerFeeMist)), // 12: quotedRelayerFeeMist
+      tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.maxHostFeeMist)), // 12: quotedHostFeeMist
       tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.protocolFlatFeeMist)), // 13: expectedProtocolFeeMist
       tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.configVersion)), // 14: expectedConfigVersion
       tx.pure(bcs.u64().serialize(BigInt(opts.quoteTimestampMs))), // 15: quoteTimestampMs
@@ -233,7 +233,7 @@ function genericMockSui() {
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist.toString(),
+          max_host_fee_mist: GENERIC_MOCK_CONFIG.maxHostFeeMist.toString(),
           protocol_flat_fee_mist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist.toString(),
           max_claim_mist: GENERIC_MOCK_CONFIG.maxClaimMist.toString(),
           min_settle_mist: GENERIC_MOCK_CONFIG.minSettleMist.toString(),
@@ -246,7 +246,7 @@ function genericMockSui() {
 }
 
 interface GenericHarness {
-  ctx: RelayerContext;
+  ctx: HostContext;
   prepareStore: MemoryPrepareStore;
   sponsorPool: SponsorPool;
   abuseBlocker: MemoryAbuseBlocker;
@@ -274,9 +274,9 @@ function makeGenericHarness(): GenericHarness {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -290,32 +290,32 @@ function makeGenericHarness(): GenericHarness {
       supportedSettlementSwapPaths,
     ),
     allowedSettlementSwapPaths: [],
-    quotedRelayerFeeMist: GENERIC_QUOTED_RELAYER_FEE,
+    quotedHostFeeMist: GENERIC_QUOTED_HOST_FEE,
   };
 
-  const ctx: RelayerContext = {
+  const ctx: HostContext = {
     network: 'testnet',
-    sui: sui as unknown as RelayerContext['sui'],
+    sui: sui as unknown as HostContext['sui'],
     sponsorPool,
     packageId: GENERIC_MOCK_CONFIG.packageId,
     configId: GENERIC_MOCK_CONFIG.configId,
     vaultRegistryId: GENERIC_MOCK_CONFIG.vaultRegistryId,
     deepbookPackageId: extraCfg.deepbookPackageId,
-    rateLimiter: {} as RelayerContext['rateLimiter'],
+    rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker,
     prepareStore,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
     prepareInflightLimiter: prepareInflight,
-    relayerRecipientAddress: GENERIC_MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: GENERIC_MOCK_CONFIG.packageId,
       configId: GENERIC_MOCK_CONFIG.configId,
       maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
       minSettleMist: GENERIC_MOCK_CONFIG.minSettleMist,
-      maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
       protocolFlatFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
       configVersion: GENERIC_MOCK_CONFIG.configVersion,
       maxSpreadBps: GENERIC_MOCK_CONFIG.maxSpreadBps,
@@ -342,7 +342,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
 }> {
   const policyHashHex = computePolicyHash({
     maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
     protocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -360,7 +360,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
   mockPrepareBuildPipeline.mockResolvedValueOnce({
     txBytes: built.txBytes,
     txBytesHash: built.txBytesHash,
-    relayerClaim: 5_250_000n,
+    executionCostClaim: 5_250_000n,
     simGas: 5_000_000n,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
     slippageBufferMist: 0n,
@@ -371,16 +371,16 @@ async function drivePrepare(harness: GenericHarness): Promise<{
   });
 
   // Sticky mock — the sponsor side also re-extracts args from the same
-  // hash-bound bytes via `revalidateGenericSponsorPolicy`. Both requests
+  // stored-hash-verified bytes via `revalidateGenericSponsorPolicy`. Both requests
   // must observe the identical canonical settle args.
   vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
     configObjectId: GENERIC_MOCK_CONFIG.configId,
     registryObjectId: GENERIC_MOCK_CONFIG.vaultRegistryId,
-    relayerRecipient: GENERIC_MOCK_CONFIG.relayerAddress,
-    relayerClaim: 5_250_000n,
+    settlementPayoutRecipient: GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress,
+    executionCostClaim: 5_250_000n,
     policyHash: policyHashBytes,
     orderIdHash: new Uint8Array(0),
-    quotedRelayerFeeMist: GENERIC_QUOTED_RELAYER_FEE,
+    quotedHostFeeMist: GENERIC_QUOTED_HOST_FEE,
     expectedProtocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
     expectedConfigVersion: GENERIC_MOCK_CONFIG.configVersion,
     nonce: 1n,
@@ -402,7 +402,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
       {
         txKindBytes: await makeEmptyUserTxKindBytes(),
         senderAddress: USER_ADDR,
-        paymentTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
+        settlementTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
         clientIp: CLIENT_IP,
       },
       { keypair: USER_KP, packageId: GENERIC_MOCK_CONFIG.packageId },
@@ -461,7 +461,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     // filler is enough to change the BCS encoding.
     const policyHashHex = computePolicyHash({
       maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
-      maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
       protocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
       quoteTtlMs: PREPARE_TTL_MS,
       gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -656,7 +656,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
       minSettleMist: 0n,
-      maxRelayerFeeMist: 0n,
+      maxHostFeeMist: 0n,
       protocolFlatFeeMist: 0n,
       configVersion: 1n,
       maxSpreadBps: 500n,
@@ -797,7 +797,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('TAMPERING_DETECTED');
 
-    // Hash-bound consume() hash_mismatch is destructive — the entry is
+    // Stored-hash-verified consume() hash_mismatch is destructive — the entry is
     // gone and the ledger reservation has been released.
     expect(await h.prepareStore.peek(prepareResult.receiptId)).toBeNull();
     const ent = await h.executionLedger.getEntitlement(h.promoId, STUDIO_USER_ID);

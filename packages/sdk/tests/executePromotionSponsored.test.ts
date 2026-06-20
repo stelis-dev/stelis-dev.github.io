@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayerConfig } from '../src/types.js';
+import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── Mock: integrity (skip S-16 and promotion integrity) ─────────────────────
@@ -76,10 +76,10 @@ const ADDR = '0x' + 'a'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 
-const RELAYER_CONFIG: RelayerConfig = {
+const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipient: '0x' + 'b'.repeat(64),
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -91,16 +91,16 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -113,12 +113,12 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAYER_CONFIG), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
   return StelisSDK.connect('http://studio.local/relay', { studioEndpoint: true });
 }
 
 async function createNonStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAYER_CONFIG), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
   return StelisSDK.connect('http://relay.local/relay');
 }
 

@@ -33,7 +33,7 @@ export function PromotionPage() {
     <div className="page">
       <h1 className="page-title">Studio Promotion</h1>
       <p className="page-subtitle">
-        End-to-end test page for promotion-sponsored execution. Connect to a studio-mode relayer,
+        End-to-end test page for promotion-sponsored execution. Connect to a Studio-enabled Host,
         configure your JWT and promotion ID, and execute a promotion-sponsored transaction.
       </p>
 

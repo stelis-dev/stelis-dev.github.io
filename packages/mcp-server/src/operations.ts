@@ -8,17 +8,17 @@ import type {
   SponsorRequest,
 } from './types.js';
 
-interface RelayScopedInput {
-  relayUrl?: string;
+interface RelayApiScopedInput {
+  relayApiUrl?: string;
   timeoutMs?: number;
 }
 
-export async function getRelayConfig(
+export async function getRelayApiConfig(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput,
+  input: RelayApiScopedInput,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     path: '/config',
   });
@@ -26,36 +26,36 @@ export async function getRelayConfig(
 
 export async function prepareSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & PrepareRequest,
+  input: RelayApiScopedInput & PrepareRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     method: 'POST',
     path: '/prepare',
-    body: omitRelayFields(input),
+    body: omitRelayApiFields(input),
   });
 }
 
 export async function submitSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & SponsorRequest,
+  input: RelayApiScopedInput & SponsorRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     method: 'POST',
     path: '/sponsor',
-    body: omitRelayFields(input),
+    body: omitRelayApiFields(input),
   });
 }
 
 export async function listPromotions(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & { developerJwt: string },
+  input: RelayApiScopedInput & { developerJwt: string },
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     base: 'studio',
     path: '/studio/promotions',
@@ -65,10 +65,10 @@ export async function listPromotions(
 
 export async function getPromotionDetail(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & { developerJwt: string; promotionId: string },
+  input: RelayApiScopedInput & { developerJwt: string; promotionId: string },
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     base: 'studio',
     path: `/studio/promotions/${encodeURIComponent(input.promotionId)}`,
@@ -78,10 +78,10 @@ export async function getPromotionDetail(
 
 export async function claimPromotion(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & { developerJwt: string; promotionId: string },
+  input: RelayApiScopedInput & { developerJwt: string; promotionId: string },
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     base: 'studio',
     method: 'POST',
@@ -93,10 +93,10 @@ export async function claimPromotion(
 
 export async function preparePromotionSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & { developerJwt: string; promotionId: string } & PromotionPrepareRequest,
+  input: RelayApiScopedInput & { developerJwt: string; promotionId: string } & PromotionPrepareRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     base: 'studio',
     method: 'POST',
@@ -111,10 +111,10 @@ export async function preparePromotionSponsoredTransaction(
 
 export async function submitPromotionSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayScopedInput & { developerJwt: string; promotionId: string } & PromotionSponsorRequest,
+  input: RelayApiScopedInput & { developerJwt: string; promotionId: string } & PromotionSponsorRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
-    relayUrl: input.relayUrl,
+    relayApiUrl: input.relayApiUrl,
     timeoutMs: input.timeoutMs,
     base: 'studio',
     method: 'POST',
@@ -132,7 +132,9 @@ function bearerHeader(developerJwt: string): Record<string, string> {
   return { Authorization: `Bearer ${developerJwt}` };
 }
 
-function omitRelayFields<T extends RelayScopedInput>(input: T): Omit<T, keyof RelayScopedInput> {
-  const { relayUrl: _relayUrl, timeoutMs: _timeoutMs, ...rest } = input;
+function omitRelayApiFields<T extends RelayApiScopedInput>(
+  input: T,
+): Omit<T, keyof RelayApiScopedInput> {
+  const { relayApiUrl: _relayApiUrl, timeoutMs: _timeoutMs, ...rest } = input;
   return rest;
 }

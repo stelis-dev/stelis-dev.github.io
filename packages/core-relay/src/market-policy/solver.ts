@@ -116,7 +116,7 @@ export async function solveExecutableSwap(
   const { descriptor, rawMidPrices } = request;
   if (descriptor.hops.length !== 1) {
     throw new MarketQuoteUnavailableError(
-      `Unsupported hop count ${descriptor.hops.length} (only 1-hop routes are supported)`,
+      `Unsupported hop count ${descriptor.hops.length} (only one-hop settlement swap paths are supported)`,
     );
   }
   if (rawMidPrices.length !== descriptor.hops.length) {

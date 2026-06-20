@@ -4,7 +4,7 @@
  * Tests validate:
  *   - P0: txKindBytes size check
  *   - P1: pre-settle validation (settle command rejection)
- *   - Unsupported payment token rejection
+ *   - Unsupported settlement token rejection
  *   - Slot checkout failure → NO_SPONSOR_SLOT
  *   - Slot release on post-checkout failure (await checkin)
  *   - No slot release for pre-checkout errors (P0, orderId, queryUserCredit)
@@ -26,7 +26,7 @@ import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAut
 /** Valid-format test address (64-hex) for use in tests that reach BCS serialize. */
 const TEST_SENDER_ADDR = TEST_PREPARE_AUTH_SENDER;
 
-// ─── Mock RelayerContext factory ────────────────────────────────────────────
+// ─── Mock HostContext factory ────────────────────────────────────────────
 
 function makeMockContext(overrides?: {
   checkoutResult?: { slotId: string; sponsorAddress: string } | null;
@@ -36,7 +36,7 @@ function makeMockContext(overrides?: {
     configId: '0xCONFIG',
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
-    maxRelayerFeeMist: 50_000n,
+    maxHostFeeMist: 50_000n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
   };
@@ -102,7 +102,7 @@ function makeMockContext(overrides?: {
         inflight: 0,
         capacity: 10,
       },
-      relayerRecipientAddress: '0xRELAYER',
+      settlementPayoutRecipientAddress: '0xPAYOUT',
       getConfig: vi.fn().mockResolvedValue(onchainConfig),
     } as unknown as Parameters<typeof handlePrepare>[0],
     onchainConfig,
@@ -121,9 +121,9 @@ function makeExtraCfg(): PrepareHandlerConfig {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -132,7 +132,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
   ];
   return {
     deepbookPackageId: '0xDEEPBOOK',
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',
@@ -159,7 +159,7 @@ async function makeParams(overrides?: Partial<PrepareParams>): Promise<PreparePa
   return withPrepareAuthorization({
     txKindBytes: '',
     senderAddress: TEST_SENDER_ADDR,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '127.0.0.1',
     ...overrides,
   });
@@ -254,17 +254,17 @@ describe('handlePrepare', () => {
     expect(ctx.prepareStore.store).not.toHaveBeenCalled();
   });
 
-  // ── Unsupported payment token ────────────────────────────────────────────────
+  // ── Unsupported settlement token ────────────────────────────────────────────────
 
-  it('rejects unsupported payment token', async () => {
+  it('rejects unsupported settlement token', async () => {
     const { ctx } = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({
       txKindBytes,
-      paymentTokenType: '0xUNSUPPORTED::token::TOKEN',
+      settlementTokenType: '0xUNSUPPORTED::token::TOKEN',
     });
 
-    await expectPrepareError(ctx, params, makeExtraCfg(), 'UNSUPPORTED_PAYMENT_TOKEN');
+    await expectPrepareError(ctx, params, makeExtraCfg(), 'UNSUPPORTED_SETTLEMENT_TOKEN');
   });
 
   // ── Slot checkout failure ────────────────────────────────────────────────

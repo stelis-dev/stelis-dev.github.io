@@ -20,7 +20,7 @@ The docs are kept small on purpose. A document is added only when its content ha
 | --- | --- |
 | [`@stelis/sdk`](../packages/sdk/README.md) | TypeScript SDK for app and service developers |
 | [`@stelis/mcp-server`](../packages/mcp-server/README.md) | Model Context Protocol (MCP) server for agent clients |
-| [`@stelis/app-api`](../packages/app-api/README.md) | API host for relay, auth, admin, and promotion routes |
+| [`@stelis/app-api`](../packages/app-api/README.md) | Host runtime for Relay API, auth, admin, and promotion HTTP APIs |
 | [`@stelis/app-web`](../packages/app-web/README.md) | Public static web app |
 | [`@stelis/app-admin`](../packages/app-admin/README.md) | Admin static web app |
 | [`packages/contracts/move`](../packages/contracts/move/README.md) | On-chain Move package |

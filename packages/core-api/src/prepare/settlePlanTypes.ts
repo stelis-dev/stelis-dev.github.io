@@ -43,14 +43,14 @@ export interface PrefixUsage {
   /** Result-backed objects (opaque, may not be coins). */
   readonly opaqueInUse: Set<string>;
   /**
-   * All SplitCoins source coins after precedence pruning. Payment-token
+   * All SplitCoins source coins after precedence pruning. Settlement-token
    * selection may admit the narrower `reusableSplitSources` subset, while
    * conservative paths may still exclude the whole set.
    */
   readonly mutated: Set<string>;
   /**
    * Narrow additive subset of direct-input SplitCoins sources that remain
-   * structurally eligible for the narrow payment-token safe-reuse policy.
+   * structurally eligible for the narrow settlement-token safe-reuse policy.
    */
   readonly reusableSplitSources: Set<string>;
   /** MergeCoins destination → source IDs mapping for merge credit calculation. */
@@ -94,7 +94,7 @@ export interface FundingPlan {
  * For credit-only paths, swapAmountSmallest is 0n and guards are unused.
  */
 export interface SwapPlan {
-  /** Exact payment token amount to swap (after direction-aware DeepBook min/lot constraints). */
+  /** Exact settlement token amount to swap (after direction-aware DeepBook min/lot constraints). */
   readonly swapAmountSmallest: bigint;
   /** Minimum SUI output (slippage guard). */
   readonly minSuiOut: bigint;
@@ -142,18 +142,18 @@ export interface SettlementPlan {
  * Audit fields embedded in the settle PTB.
  *
  * These are the 13 fields from SETTLE_FIELD_SCHEMA, plus the
- * relayer recipient address. All values are determined at plan time
+ * settlement payout recipient address. All values are determined at plan time
  * and passed through to the PTB compiler without modification.
  */
 export interface SettlePlanAuditFields {
-  readonly relayerClaim: bigint;
-  readonly relayerRecipient: string;
+  readonly executionCostClaim: bigint;
+  readonly settlementPayoutRecipient: string;
   readonly receiptId: Uint8Array;
   readonly nonce: bigint;
   readonly simGasReported: bigint;
   readonly gasVarianceFixedMist: bigint;
   readonly slippageBufferMist: bigint;
-  readonly quotedRelayerFeeMist: bigint;
+  readonly quotedHostFeeMist: bigint;
   readonly expectedProtocolFeeMist: bigint;
   readonly expectedConfigVersion: bigint;
   readonly quoteTimestampMs: number;

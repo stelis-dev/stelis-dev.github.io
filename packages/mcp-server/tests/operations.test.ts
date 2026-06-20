@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FetchLike, StelisMcpServerConfig } from '../src/config.js';
-import { resolveRelayUrl } from '../src/http.js';
+import { resolveRelayApiUrl } from '../src/http.js';
 import {
-  getRelayConfig,
+  getRelayApiConfig,
   listPromotions,
   prepareSponsoredTransaction,
   submitPromotionSponsoredTransaction,
@@ -10,7 +10,7 @@ import {
 
 function createConfig(fetchFn: FetchLike): StelisMcpServerConfig {
   return {
-    defaultRelayUrl: 'https://host.example/relay',
+    defaultRelayApiUrl: 'https://host.example/relay',
     defaultTimeoutMs: 1000,
     fetchFn,
   };
@@ -23,28 +23,28 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe('resolveRelayUrl', () => {
-  it('normalizes a relay URL and strips query/hash/trailing slash', () => {
+describe('resolveRelayApiUrl', () => {
+  it('normalizes a Relay API URL and strips query/hash/trailing slash', () => {
     const config: StelisMcpServerConfig = {
-      defaultRelayUrl: 'https://host.example/relay/?x=1#frag',
+      defaultRelayApiUrl: 'https://host.example/relay/?x=1#frag',
       defaultTimeoutMs: 1000,
     };
-    expect(resolveRelayUrl(config)).toBe('https://host.example/relay');
+    expect(resolveRelayApiUrl(config)).toBe('https://host.example/relay');
   });
 
-  it('rejects non-relay base URLs', () => {
+  it('rejects non-Relay API base URLs', () => {
     const config: StelisMcpServerConfig = {
-      defaultRelayUrl: 'https://host.example',
+      defaultRelayApiUrl: 'https://host.example',
       defaultTimeoutMs: 1000,
     };
-    expect(() => resolveRelayUrl(config)).toThrow(/ending in \/relay/);
+    expect(() => resolveRelayApiUrl(config)).toThrow(/ending in \/relay/);
   });
 });
 
 describe('Stelis MCP operations', () => {
-  it('reads relay config from GET /relay/config', async () => {
+  it('reads Relay API config from GET /relay/config', async () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse({ network: 'testnet' }));
-    const result = await getRelayConfig(createConfig(fetchFn), {});
+    const result = await getRelayApiConfig(createConfig(fetchFn), {});
 
     expect(result).toEqual({ network: 'testnet' });
     expect(fetchFn).toHaveBeenCalledWith(
@@ -62,11 +62,11 @@ describe('Stelis MCP operations', () => {
     );
 
     await prepareSponsoredTransaction(createConfig(fetchFn), {
-      relayUrl: 'https://override.example/relay',
+      relayApiUrl: 'https://override.example/relay',
       timeoutMs: 500,
       txKindBytes: 'kind',
       senderAddress: '0x1234',
-      paymentTokenType: '0x2::sui::SUI',
+      settlementTokenType: '0x2::sui::SUI',
       slippageBps: 25,
       txKindBytesHash: '0x' + '11'.repeat(32),
       prepareAuthorizationTimestampMs: 1_700_000_000_000,
@@ -80,7 +80,7 @@ describe('Stelis MCP operations', () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       txKindBytes: 'kind',
       senderAddress: '0x1234',
-      paymentTokenType: '0x2::sui::SUI',
+      settlementTokenType: '0x2::sui::SUI',
       slippageBps: 25,
       txKindBytesHash: '0x' + '11'.repeat(32),
       prepareAuthorizationTimestampMs: 1_700_000_000_000,

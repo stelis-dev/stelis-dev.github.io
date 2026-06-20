@@ -11,9 +11,9 @@
  * In particular, for every supported SettlementSwapDirection × variant (4 combos),
  * we verify:
  *
- *   1. MoveCall typeArguments contain exactly the payment token, matching
+ *   1. MoveCall typeArguments contain exactly the settlement token, matching
  *      the on-chain entry's generic params.
- *   2. parseSettleArgs().extractedSettlementSwapPath.tokenType equals the payment token
+ *   2. parseSettleArgs().extractedSettlementSwapPath.tokenType equals the settlement token
  *      (not SUI, not a pool type arg).
  *   3. extractedSettlementSwapPath.settlementSwapDirection matches the input settlementSwapDirection.
  *   4. extractedSettlementSwapPath.hops matches the input poolId.
@@ -34,7 +34,7 @@ import {
   SETTLE_WITH_CREDIT_FUNCTION,
   type SettlementSwapDirection,
 } from '@stelis/contracts';
-import type { OnchainConfig, RelayerEnv } from '../src/types.js';
+import type { OnchainConfig, HostValidationEnv } from '../src/types.js';
 
 // ─────────────────────────────────────────────
 // Fixtures
@@ -56,15 +56,15 @@ const ONCHAIN_CONFIG: OnchainConfig = {
   configId: CONFIG,
   maxClaimMist: 50_000_000n,
   minSettleMist: 100_000n,
-  maxRelayerFeeMist: 500_000n,
+  maxHostFeeMist: 500_000n,
   protocolFlatFeeMist: 20_004n,
   configVersion: 5n,
   maxSpreadBps: 500n,
 };
 
-const RELAYER_ENV: RelayerEnv = {
+const HOST_VALIDATION_ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: ROUNDTRIP_RECIPIENT,
+  settlementPayoutRecipientAddress: ROUNDTRIP_RECIPIENT,
   configId: CONFIG,
   vaultRegistryId: REGISTRY,
   packageId: PKG,
@@ -89,14 +89,14 @@ const SHARED_PARAMS = {
   paymentCoinId: PAYMENT_COIN,
   swapAmount: 1_000_000n,
   minSuiOut: 0n,
-  relayerClaim: 5_000_000n,
-  relayerRecipient: RECIPIENT,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 1n,
   simGasReported: 5_000_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 50_000n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 1n,
   quoteTimestampMs: 1741680000000,
@@ -161,12 +161,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
     expectedWithVaultFunction,
   } of cases) {
     describe(`${settlementSwapDirection}`, () => {
-      it(`new_user → Move call type args start with paymentTokenType`, () => {
+      it(`new_user → Move call type args start with settlementTokenType`, () => {
         const { rawCommands } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'new_user',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             ...SHARED_PARAMS,
           });
@@ -177,12 +177,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
         expect(call.typeArguments).toEqual([PAYMENT_TYPE]);
       });
 
-      it(`with_vault → Move call type args start with paymentTokenType`, () => {
+      it(`with_vault → Move call type args start with settlementTokenType`, () => {
         const { rawCommands } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'with_vault',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             vaultId: VAULT,
             useCreditAmount: 0n,
@@ -195,12 +195,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
         expect(call.typeArguments).toEqual([PAYMENT_TYPE]);
       });
 
-      it(`parseSettleArgs extractedSettlementSwapPath reports paymentTokenType + settlementSwapDirection + hops`, () => {
+      it(`parseSettleArgs extractedSettlementSwapPath reports settlementTokenType + settlementSwapDirection + hops`, () => {
         const { normalizedCommands, inputs } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'new_user',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             ...SHARED_PARAMS,
           });
@@ -227,14 +227,14 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
 
 /** Distinct values for all 13 settle fields. Each bigint is unique. */
 const ROUNDTRIP_VALUES = {
-  relayerClaim: 7_777_777n,
-  relayerRecipient: ROUNDTRIP_RECIPIENT,
+  executionCostClaim: 7_777_777n,
+  settlementPayoutRecipient: ROUNDTRIP_RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xdd),
   nonce: 42n,
   simGasReported: 3_000_000n,
   gasVarianceFixedMist: 200_001n,
   slippageBufferMist: 50_002n,
-  quotedRelayerFeeMist: 100_003n,
+  quotedHostFeeMist: 100_003n,
   expectedProtocolFeeMist: 20_004n,
   expectedConfigVersion: 5n,
   quoteTimestampMs: 1741680099000,
@@ -258,14 +258,14 @@ describe('builder → parser settle field roundtrip', () => {
     parsed: ReturnType<typeof parseSettleArgs>,
     expected = ROUNDTRIP_VALUES,
   ): void {
-    expect(parsed.relayerClaim).toBe(expected.relayerClaim);
-    expect(parsed.relayerRecipient).toBe(expected.relayerRecipient);
+    expect(parsed.executionCostClaim).toBe(expected.executionCostClaim);
+    expect(parsed.settlementPayoutRecipient).toBe(expected.settlementPayoutRecipient);
     expect(parsed.receiptId).toEqual(expected.receiptId);
     expect(parsed.nonce).toBe(expected.nonce);
     expect(parsed.simGasReported).toBe(expected.simGasReported);
     expect(parsed.gasVarianceFixedMist).toBe(expected.gasVarianceFixedMist);
     expect(parsed.slippageBufferMist).toBe(expected.slippageBufferMist);
-    expect(parsed.quotedRelayerFeeMist).toBe(expected.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(expected.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(expected.expectedProtocolFeeMist);
     expect(parsed.expectedConfigVersion).toBe(expected.expectedConfigVersion);
     expect(parsed.quoteTimestampMs).toBe(BigInt(expected.quoteTimestampMs));
@@ -278,7 +278,7 @@ describe('builder → parser settle field roundtrip', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'new_user',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         packageId: PKG,
         configId: CONFIG,
@@ -338,7 +338,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'new_user',
           settlementSwapDirection: 'baseForQuote',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           packageId: PKG,
           configId: CONFIG,
@@ -355,7 +355,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'new_user',
           settlementSwapDirection: 'quoteForBase',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           packageId: PKG,
           configId: CONFIG,
@@ -372,7 +372,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'with_vault',
           settlementSwapDirection: 'baseForQuote',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           vaultId: VAULT,
           useCreditAmount: 0n,
@@ -391,7 +391,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'with_vault',
           settlementSwapDirection: 'quoteForBase',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           vaultId: VAULT,
           useCreditAmount: 0n,
@@ -428,9 +428,9 @@ describe('builder, parser, and static validation share every current settlement 
       const call = findMoveCall(rawCommands);
       expect(call.function).toBe(entry.functionName);
 
-      expect(validatePtbStructure(normalizedCommands, RELAYER_ENV)).toEqual({ ok: true });
+      expect(validatePtbStructure(normalizedCommands, HOST_VALIDATION_ENV)).toEqual({ ok: true });
       const parsed = parseSettleArgs(normalizedCommands, inputs, PKG);
-      expect(validateSettleArgs(parsed, ONCHAIN_CONFIG, RELAYER_ENV)).toEqual({ ok: true });
+      expect(validateSettleArgs(parsed, ONCHAIN_CONFIG, HOST_VALIDATION_ENV)).toEqual({ ok: true });
     });
   }
 });

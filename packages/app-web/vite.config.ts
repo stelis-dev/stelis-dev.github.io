@@ -36,18 +36,18 @@ function loadEnvFile() {
 export default defineConfig(({ mode }) => {
   loadEnvFile();
   const env = loadEnv(mode, false, 'VITE_');
-  const relayerUrl = (env.VITE_STELIS_RELAYER_URL || '').trim();
-  if (!relayerUrl) {
+  const relayApiUrl = (env.VITE_STELIS_RELAY_API_URL || '').trim();
+  if (!relayApiUrl) {
     throw new Error(
-      '[app-web] Missing required env VITE_STELIS_RELAYER_URL. Set packages/app-web/.env (see .env.example).',
+      '[app-web] Missing required env VITE_STELIS_RELAY_API_URL. Set packages/app-web/.env (see .env.example).',
     );
   }
-  if (!/\/relay\/?$/.test(relayerUrl)) {
-    throw new Error('[app-web] VITE_STELIS_RELAYER_URL must end with /relay.');
+  if (!/\/relay\/?$/.test(relayApiUrl)) {
+    throw new Error('[app-web] VITE_STELIS_RELAY_API_URL must end with /relay.');
   }
 
   // Strip /relay suffix to get the origin for proxy target
-  const proxyTarget = relayerUrl.replace(/\/relay\/?$/, '');
+  const proxyTarget = relayApiUrl.replace(/\/relay\/?$/, '');
 
   return {
     // Relative asset URLs let the static bundle run from GitHub Pages project paths.
@@ -56,8 +56,8 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       proxy: {
-        // Proxy /relay requests to the relayer during local dev.
-        // This avoids CORS issues regardless of whether relayer is local or remote.
+        // Proxy /relay requests to the Host during local dev.
+        // This avoids CORS issues regardless of whether the Host is local or remote.
         '/relay': {
           target: proxyTarget,
           changeOrigin: true,

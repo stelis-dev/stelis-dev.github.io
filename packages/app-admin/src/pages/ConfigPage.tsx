@@ -3,14 +3,19 @@
  *
  * Section order (by operator priority):
  * §1: Sponsor Operations — refill controls and thresholds
- * §2: Fee Config — relayer + on-chain fee parameters
+ * §2: Fee Config — host + on-chain fee parameters
  * §3: Studio Settings — JWT/API key config status (studio-only)
- * §4: Supported Settlement Swap Paths — payment token settlement
+ * §4: Supported Settlement Swap Paths — settlement token settlement
  * §5: On-chain IDs — contract reference (rarely changes)
  *
  */
 import { useEffect, useState } from 'react';
-import { getPool, getStudio, type PoolAdminStatus, type StudioData } from '../api/client';
+import {
+  getSponsorOperations,
+  getStudio,
+  type SponsorOperationsStatus,
+  type StudioStatusResponse,
+} from '../api/client';
 import { mistToSui, truncateId, CopyButton } from '../utils';
 
 function SuiAmount({ mist }: { mist: string }) {
@@ -30,16 +35,19 @@ function formatBpsPercent(bps: number): string {
 }
 
 export function ConfigPage() {
-  const [data, setData] = useState<PoolAdminStatus | null>(null);
-  const [studioData, setStudioData] = useState<StudioData | null>(null);
+  const [data, setData] = useState<SponsorOperationsStatus | null>(null);
+  const [studioStatus, setStudioStatus] = useState<StudioStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   async function poll() {
     try {
-      const [poolJson, studioJson] = await Promise.all([getPool(), getStudio()]);
-      setData(poolJson);
-      setStudioData(studioJson);
+      const [sponsorOperationsJson, studioJson] = await Promise.all([
+        getSponsorOperations(),
+        getStudio(),
+      ]);
+      setData(sponsorOperationsJson);
+      setStudioStatus(studioJson);
       setLastUpdated(new Date());
       setError(null);
     } catch (e) {
@@ -153,18 +161,18 @@ export function ConfigPage() {
                     letterSpacing: '0.05em',
                   }}
                 >
-                  Relayer Settings
+                  Host Fee Settings
                 </td>
               </tr>
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Fee charged by the relayer per sponsored transaction. Added to user's payment token cost (env: RELAYER_FEE_MIST)"
+                  title="Fee charged by the Host per sponsored transaction. Added to user's settlement token cost (env: HOST_FEE_MIST)"
                 >
-                  Relayer Fee
+                  Host Fee
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.quotedRelayerFeeMist ?? '0'} />
+                  <SuiAmount mist={data.quotedHostFeeMist ?? '0'} />
                 </td>
               </tr>
               <tr>
@@ -185,12 +193,12 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="On-chain maximum relayer fee. Transactions exceeding this cap are rejected by the contract"
+                  title="On-chain maximum host fee. Transactions exceeding this cap are rejected by the contract"
                 >
-                  Relayer Fee Cap
+                  Host Fee Cap
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.feeConfig.maxRelayerFeeMist} />
+                  <SuiAmount mist={data.feeConfig.maxHostFeeMist} />
                 </td>
               </tr>
               <tr>
@@ -232,7 +240,7 @@ export function ConfigPage() {
       )}
 
       {/* ═══════════════ §3: Studio Settings (conditional) ═══════════════ */}
-      {studioData?.enabled && (
+      {studioStatus?.enabled && (
         <>
           <div
             style={{
@@ -258,7 +266,7 @@ export function ConfigPage() {
             </h2>
           </div>
 
-          {studioData.config && (
+          {studioStatus.config && (
             <div className="admin-card">
               <div className="admin-card-title">Studio Config</div>
               <table className="admin-table">
@@ -273,13 +281,13 @@ export function ConfigPage() {
                     <td>
                       <span
                         style={{
-                          color: studioData.config.developerJwtTrustConfigured
+                          color: studioStatus.config.developerJwtTrustConfigured
                             ? '#22c55e'
                             : '#f87171',
                           fontWeight: 600,
                         }}
                       >
-                        {studioData.config.developerJwtTrustConfigured
+                        {studioStatus.config.developerJwtTrustConfigured
                           ? '● Configured'
                           : '● Missing'}
                       </span>
@@ -295,13 +303,13 @@ export function ConfigPage() {
                     <td>
                       <span
                         style={{
-                          color: studioData.config.developerJwtVerifyUrlConfigured
+                          color: studioStatus.config.developerJwtVerifyUrlConfigured
                             ? '#22c55e'
                             : '#64748b',
                           fontWeight: 600,
                         }}
                       >
-                        {studioData.config.developerJwtVerifyUrlConfigured
+                        {studioStatus.config.developerJwtVerifyUrlConfigured
                           ? '● Configured'
                           : '○ Not set (optional)'}
                       </span>
@@ -321,7 +329,7 @@ export function ConfigPage() {
           <table className="admin-table">
             <thead>
               <tr>
-                <th title="Payment token symbol">Token</th>
+                <th title="Settlement token symbol">Token</th>
                 <th title="Settlement swap path through DeepBook pools to convert to SUI">Path</th>
                 <th title="Stelis input-fee basis for DeepBook execution. 0% = whitelisted pool (no fee)">
                   DeepBook Fee
@@ -333,7 +341,7 @@ export function ConfigPage() {
             </thead>
             <tbody>
               {data.supportedSettlementSwapPaths.map((p) => {
-                const symbol = p.paymentTokenSymbol;
+                const symbol = p.settlementTokenSymbol;
                 const hopCount = p.hops.length;
                 const midSymbol =
                   hopCount >= 2
@@ -347,7 +355,7 @@ export function ConfigPage() {
                 const swapPath =
                   hopCount === 1 ? `${symbol} → SUI` : `${symbol} → ${midSymbol} → SUI`;
                 return (
-                  <tr key={p.paymentTokenType}>
+                  <tr key={p.settlementTokenType}>
                     <td style={{ fontWeight: 600 }}>{symbol}</td>
                     <td style={{ color: '#94a3b8' }}>{swapPath}</td>
                     <td
@@ -367,15 +375,15 @@ export function ConfigPage() {
                         color: '#64748b',
                         textAlign: 'right',
                       }}
-                      title={p.paymentTokenType}
+                      title={p.settlementTokenType}
                     >
                       {(() => {
-                        const parts = p.paymentTokenType.split('::');
+                        const parts = p.settlementTokenType.split('::');
                         if (parts.length >= 3) {
                           const pkg = parts[0];
                           return `${pkg.length > 14 ? `${pkg.slice(0, 8)}…${pkg.slice(-4)}` : pkg}::${parts.slice(1).join('::')}`;
                         }
-                        return p.paymentTokenType;
+                        return p.settlementTokenType;
                       })()}
                     </td>
                   </tr>

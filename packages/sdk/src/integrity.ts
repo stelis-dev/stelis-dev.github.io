@@ -1,7 +1,7 @@
 /**
  * S-16: Client-side PTB integrity verification (defense-in-depth).
  *
- * Verifies that relayer-returned txBytes preserve the user's original commands
+ * Verifies that Host-returned txBytes preserve the user's original commands
  * as a prefix and append only allowed settle-related commands.
  *
  * This is NOT a substitute for server L0-L4 or on-chain validation.
@@ -54,7 +54,7 @@ export class StelisIntegrityError extends Error {
 // ─────────────────────────────────────────────
 
 /**
- * Verify that relayer-returned txBytes preserve user commands as prefix
+ * Verify that Host-returned txBytes preserve user commands as prefix
  * and append only allowed settle commands as suffix.
  *
  * @throws StelisIntegrityError if verification fails
@@ -119,7 +119,7 @@ export function normalizeInput(input: Record<string, unknown>): string {
     return `Object:${normalizeSuiAddress(objectId)}`;
   }
 
-  // FundsWithdrawal: relayer-appended input for address balance redemption.
+  // FundsWithdrawal: Host-appended input for address balance redemption.
   // These appear as suffix inputs (index > original.length) so they never
   // conflict with prefix verification. Normalize by kind + type + amount +
   // withdrawFrom for full semantic equivalence.
@@ -138,7 +138,7 @@ export function normalizeInput(input: Record<string, unknown>): string {
 
 /**
  * Verify that returned inputs preserve all original inputs as prefix.
- * Suffix inputs (added by relayer for settle commands) are allowed.
+ * Suffix inputs (added by Host for settle commands) are allowed.
  */
 export function verifyInputs(
   originalInputs: Record<string, unknown>[],
@@ -264,7 +264,7 @@ export function verifySuffix(suffix: PtbCommand[], packageId: string): void {
 
       // SUI stdlib coin::redeem_funds (address-balance / mixed-topup materialization).
       // `coin::zero` is intentionally NOT in the allowlist: under the
-      // zero_deep_fee_only ABI no relayer suffix path emits `coin::zero<DEEP>`,
+      // zero_deep_fee_only ABI no Host suffix path emits `coin::zero<DEEP>`,
       // because the Move swap entrypoint creates the zero coin internally.
       // The integrity gate therefore rejects any externally-supplied
       // `coin::zero` MoveCall to keep the allowlist minimal.

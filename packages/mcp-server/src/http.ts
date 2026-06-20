@@ -13,7 +13,7 @@ export class StelisMcpHttpError extends Error {
 }
 
 export interface RequestJsonOptions {
-  relayUrl?: string;
+  relayApiUrl?: string;
   path: string;
   method?: 'GET' | 'POST';
   base?: 'relay' | 'studio';
@@ -54,34 +54,34 @@ export async function requestJson<T>(
   }
 }
 
-export function resolveRelayUrl(config: StelisMcpServerConfig, relayUrl?: string): string {
-  const raw = relayUrl?.trim() || config.defaultRelayUrl?.trim();
+export function resolveRelayApiUrl(config: StelisMcpServerConfig, relayApiUrl?: string): string {
+  const raw = relayApiUrl?.trim() || config.defaultRelayApiUrl?.trim();
   if (!raw) {
-    throw new Error('Missing relayUrl. Provide the tool argument or set STELIS_RELAY_URL.');
+    throw new Error('Missing relayApiUrl. Provide the tool argument or set STELIS_RELAY_API_URL.');
   }
 
   const url = new URL(raw);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('relayUrl must use http or https.');
+    throw new Error('relayApiUrl must use http or https.');
   }
 
   url.hash = '';
   url.search = '';
   url.pathname = stripTrailingSlashes(url.pathname);
   if (!url.pathname.endsWith('/relay')) {
-    throw new Error('relayUrl must point to a relay endpoint ending in /relay.');
+    throw new Error('relayApiUrl must point to a Relay API endpoint ending in /relay.');
   }
 
   return stripTrailingSlashes(url.toString());
 }
 
-export function deriveStudioBase(relayUrl: string): string {
-  return relayUrl.replace(/\/relay$/, '');
+export function deriveStudioBase(relayApiUrl: string): string {
+  return relayApiUrl.replace(/\/relay$/, '');
 }
 
 function buildRequestUrl(config: StelisMcpServerConfig, options: RequestJsonOptions): string {
-  const relayBase = resolveRelayUrl(config, options.relayUrl);
-  const base = options.base === 'studio' ? deriveStudioBase(relayBase) : relayBase;
+  const relayApiBase = resolveRelayApiUrl(config, options.relayApiUrl);
+  const base = options.base === 'studio' ? deriveStudioBase(relayApiBase) : relayApiBase;
   const path = options.path.startsWith('/') ? options.path : `/${options.path}`;
   return `${base}${path}`;
 }

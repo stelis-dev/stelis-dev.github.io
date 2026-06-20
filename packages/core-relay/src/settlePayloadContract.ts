@@ -29,14 +29,14 @@ import {
 
 /** Field name in the settle block. */
 export type SettleFieldName =
-  | 'relayerClaim'
-  | 'relayerRecipient'
+  | 'executionCostClaim'
+  | 'settlementPayoutRecipient'
   | 'receiptId'
   | 'nonce'
   | 'simGasReported'
   | 'gasVarianceFixedMist'
   | 'slippageBufferMist'
-  | 'quotedRelayerFeeMist'
+  | 'quotedHostFeeMist'
   | 'expectedProtocolFeeMist'
   | 'expectedConfigVersion'
   | 'quoteTimestampMs'
@@ -60,21 +60,21 @@ export interface SettleFieldDescriptor {
  * relative order within the settle block never changes.
  *
  * Matches settle.move settle_core() parameter order:
- *   relayer_claim, relayer_recipient, receipt_id, nonce,
+ *   execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce,
  *   sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist,
- *   quoted_relayer_fee_mist, expected_protocol_fee_mist,
+ *   quoted_host_fee_mist, expected_protocol_fee_mist,
  *   expected_config_version, quote_timestamp_ms,
  *   policy_hash, order_id_hash
  */
 export const SETTLE_FIELD_SCHEMA: readonly SettleFieldDescriptor[] = [
-  { name: 'relayerClaim', moveType: 'u64', offset: 0 },
-  { name: 'relayerRecipient', moveType: 'address', offset: 1 },
+  { name: 'executionCostClaim', moveType: 'u64', offset: 0 },
+  { name: 'settlementPayoutRecipient', moveType: 'address', offset: 1 },
   { name: 'receiptId', moveType: 'vector<u8>', offset: 2 },
   { name: 'nonce', moveType: 'u64', offset: 3 },
   { name: 'simGasReported', moveType: 'u64', offset: 4 },
   { name: 'gasVarianceFixedMist', moveType: 'u64', offset: 5 },
   { name: 'slippageBufferMist', moveType: 'u64', offset: 6 },
-  { name: 'quotedRelayerFeeMist', moveType: 'u64', offset: 7 },
+  { name: 'quotedHostFeeMist', moveType: 'u64', offset: 7 },
   { name: 'expectedProtocolFeeMist', moveType: 'u64', offset: 8 },
   { name: 'expectedConfigVersion', moveType: 'u64', offset: 9 },
   { name: 'quoteTimestampMs', moveType: 'u64', offset: 10 },
@@ -94,14 +94,14 @@ export const SETTLE_FIELD_COUNT = 13;
  * buildSettlePureArgs().
  */
 export interface SettleFieldValues {
-  relayerClaim: bigint;
-  relayerRecipient: string;
+  executionCostClaim: bigint;
+  settlementPayoutRecipient: string;
   receiptId: Uint8Array;
   nonce: bigint;
   simGasReported: bigint;
   gasVarianceFixedMist: bigint;
   slippageBufferMist: bigint;
-  quotedRelayerFeeMist: bigint;
+  quotedHostFeeMist: bigint;
   expectedProtocolFeeMist: bigint;
   expectedConfigVersion: bigint;
   quoteTimestampMs: number | bigint;

@@ -6,7 +6,7 @@
  * and fails closed when txBytes cannot be parsed.
  *
  * Covers:
- *   T-1: quotedRelayerFee mismatch → StelisSponsoredError (COST_MISMATCH)
+ *   T-1: quotedHostFee mismatch → StelisSponsoredError (COST_MISMATCH)
  *   T-2: protocolFee mismatch → StelisSponsoredError (COST_MISMATCH)
  *   T-3: txBytes parse failure → StelisSponsoredError (SETTLE_TX_PARSE_FAILED)
  */
@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK, StelisSponsoredError } from '../src/sdk.js';
-import type { RelayerConfig, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── vi.hoisted: must precede vi.mock calls (Vitest hoisting rule) ──────────────
@@ -83,10 +83,10 @@ const ADDR = '0x' + 'a'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 
-const RELAYER_CONFIG: RelayerConfig = {
+const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipient: '0x' + 'b'.repeat(64),
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -98,16 +98,16 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -120,9 +120,9 @@ const MOCK_PREPARE_RESPONSE: PrepareResponse = {
     simGas: '5000000',
     gasVarianceFixedMist: '200000',
     slippageBufferMist: '50000',
-    quotedRelayerFee: '100000',
+    quotedHostFee: '100000',
     protocolFee: '20000',
-    relayerClaim: '5250000',
+    executionCostClaim: '5250000',
     grossGas: '7000000',
   },
   profile: 'new_user',
@@ -138,7 +138,7 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAYER_CONFIG), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -147,7 +147,7 @@ const defaultOpts = () => ({
   prepareAuthorizationSigner: vi.fn().mockResolvedValue('prepare-sig-base64'),
   signer: vi.fn().mockResolvedValue('user-sig-base64'),
   addr: ADDR,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
 });
 
 // ─────────────────────────────────────────────
@@ -169,12 +169,12 @@ describe('StelisSDK — COST_MISMATCH cross-validation', () => {
     mockSponsor.mockResolvedValue({ digest: '0xDIGEST', effects: { status: { success: true } } });
   });
 
-  // T-1: quotedRelayerFee mismatch → COST_MISMATCH wrapped as StelisSponsoredError
-  it('throws when cost.quotedRelayerFee differs from txBytes settle args', async () => {
+  // T-1: quotedHostFee mismatch → COST_MISMATCH wrapped as StelisSponsoredError
+  it('throws when cost.quotedHostFee differs from txBytes settle args', async () => {
     mockValidateSettleFields.mockReturnValue({
       ok: false,
-      code: 'SETTLE_RELAYER_FEE_MISMATCH',
-      message: 'quotedRelayerFee mismatch',
+      code: 'SETTLE_HOST_FEE_MISMATCH',
+      message: 'quotedHostFee mismatch',
     });
 
     try {
@@ -182,7 +182,7 @@ describe('StelisSDK — COST_MISMATCH cross-validation', () => {
       expect.unreachable('Should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(StelisSponsoredError);
-      expect((err as StelisSponsoredError).message).toContain('quotedRelayerFee');
+      expect((err as StelisSponsoredError).message).toContain('quotedHostFee');
     }
   });
 
@@ -219,12 +219,12 @@ describe('StelisSDK — COST_MISMATCH cross-validation', () => {
     }
   });
 
-  // T-4: relayerClaim mismatch → COST_MISMATCH wrapped as StelisSponsoredError
-  it('throws when cost.relayerClaim differs from txBytes settle args', async () => {
+  // T-4: executionCostClaim mismatch → COST_MISMATCH wrapped as StelisSponsoredError
+  it('throws when cost.executionCostClaim differs from txBytes settle args', async () => {
     mockValidateSettleFields.mockReturnValue({
       ok: false,
-      code: 'SETTLE_RELAYER_CLAIM_MISMATCH',
-      message: 'relayerClaim mismatch',
+      code: 'SETTLE_EXECUTION_COST_CLAIM_MISMATCH',
+      message: 'executionCostClaim mismatch',
     });
 
     try {
@@ -232,7 +232,7 @@ describe('StelisSDK — COST_MISMATCH cross-validation', () => {
       expect.unreachable('Should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(StelisSponsoredError);
-      expect((err as StelisSponsoredError).message).toContain('relayerClaim');
+      expect((err as StelisSponsoredError).message).toContain('executionCostClaim');
     }
   });
 });

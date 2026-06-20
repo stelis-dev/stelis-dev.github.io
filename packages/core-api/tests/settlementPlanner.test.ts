@@ -153,7 +153,7 @@ describe('assembleSwapSettlementPlan', () => {
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.swap.swapAmountSmallest).toBe(1_916_668n);
     expect(plan.funding.source).toBe('coin_object');
-    expect(plan.audit.relayerClaim).toBe(BASE_AUDIT.relayerClaim);
+    expect(plan.audit.executionCostClaim).toBe(BASE_AUDIT.executionCostClaim);
     expect(plan.variant).toBe('with_vault');
   });
 

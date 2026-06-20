@@ -1,10 +1,10 @@
 /**
- * Settle PTB Builders — server-side (relayer) settle command construction.
+ * Settle PTB Builders — server-side Host settle command construction.
  *
- * The relayer builds settle commands server-side.
+ * The Host builds settle commands server-side.
  *
  * Functions:
- *   buildSwapAndSettlePtb()    — swap payment token → SUI + settle
+ *   buildSwapAndSettlePtb()    — swap settlement token → SUI + settle
  *   buildSettleWithCreditPtb() — vault credit only settlement
  *
  * buildWithdrawPtb() stays in sdk/src/ptb.ts — user operation.
@@ -30,7 +30,7 @@ function validateSettleInput(params: {
   receiptId: Uint8Array;
   policyHash: Uint8Array;
   orderIdHash: Uint8Array;
-  relayerClaim: bigint;
+  executionCostClaim: bigint;
 }): void {
   const pidLen = params.receiptId.length;
   if (pidLen !== 0 && pidLen !== 32) {
@@ -44,22 +44,22 @@ function validateSettleInput(params: {
   if (oidLen !== 0 && oidLen !== 32) {
     throw new Error(`orderIdHash must be 0 or 32 bytes, got ${oidLen}`);
   }
-  if (params.relayerClaim < 0n) {
-    throw new Error(`relayerClaim must be non-negative, got ${params.relayerClaim}`);
+  if (params.executionCostClaim < 0n) {
+    throw new Error(`executionCostClaim must be non-negative, got ${params.executionCostClaim}`);
   }
 }
 
 // ─────────────────────────────────────────────
 // buildSwapAndSettlePtb — single MoveCall
-//   Swap payment token → SUI → settle atomically.
+//   Swap settlement token → SUI → settle atomically.
 //   Enables arbitrary MoveCall commands in the same PTB.
 // ─────────────────────────────────────────────
 
 /** Single-hop settlement swap path fields. */
 export type SettlementSwapPathFields = {
   settlementSwapDirection: SettlementSwapDirection;
-  /** Move entry type parameter: payment token. */
-  paymentTokenType: string;
+  /** Move entry type parameter: settlement token. */
+  settlementTokenType: string;
   /** DeepBook pool shared object ID. */
   poolId: string;
 };
@@ -72,22 +72,22 @@ interface SwapAndSettleSharedParams {
   configId: string;
   vaultRegistryId: string;
 
-  /** Payment token coin object ID */
+  /** Settlement token coin object ID */
   paymentCoinId: string | TransactionObjectArgument;
   /** Exact base amount to swap (on-chain u64) */
   swapAmount: bigint;
   /** Minimum SUI output (0 = no slippage guard, on-chain u64) */
   minSuiOut: bigint;
-  relayerClaim: bigint;
-  relayerRecipient: string;
+  executionCostClaim: bigint;
+  settlementPayoutRecipient: string;
   receiptId: Uint8Array;
   /** S-14: monotonic nonce for on-chain replay prevention */
   nonce: bigint;
   simGasReported: bigint;
   gasVarianceFixedMist: bigint;
   slippageBufferMist: bigint;
-  /** Relayer-quoted fee (MIST) — exact value embedded in PTB. */
-  quotedRelayerFeeMist: bigint;
+  /** Host-quoted fee (MIST) — exact value embedded in PTB. */
+  quotedHostFeeMist: bigint;
   /** Expected on-chain protocol fee at quote time — tamper detection. */
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */
@@ -139,12 +139,12 @@ function buildSettlePureArgs(tx: Transaction, values: SettleFieldValues) {
 
 /**
  * Builds a single-MoveCall PTB that atomically:
- *   1. Swaps payment token → SUI via DeepBook
- *   2. Settles: validates vault, deducts relayer fees, deposits surplus
+ *   1. Swaps settlement token → SUI via DeepBook
+ *   2. Settles: validates vault, deducts host fees, deposits surplus
  *
  * settlementSwapDirection determines which Move function suffix to call
  * (`_bfq` for `baseForQuote`, `_qfb` for `quoteForBase`).
- * paymentTokenType becomes the Move entry's single type parameter.
+ * settlementTokenType becomes the Move entry's single type parameter.
  */
 export function buildSwapAndSettlePtb(tx: Transaction, params: SwapAndSettleParams): void {
   validateSettleInput(params);
@@ -162,7 +162,7 @@ export function buildSwapAndSettlePtb(tx: Transaction, params: SwapAndSettlePara
 
   const settleArgs = buildSettlePureArgs(tx, params);
 
-  const typeArguments = [params.paymentTokenType];
+  const typeArguments = [params.settlementTokenType];
 
   const swapArgs = [
     tx.object(params.poolId),
@@ -200,16 +200,16 @@ export interface SettleWithCreditPtbParams {
   vaultId: string;
   /** Amount of credit (MIST) to withdraw from vault for settlement (on-chain u64) */
   useCreditAmount: bigint;
-  relayerClaim: bigint;
-  relayerRecipient: string;
+  executionCostClaim: bigint;
+  settlementPayoutRecipient: string;
   receiptId: Uint8Array;
   /** S-14: monotonic nonce for on-chain replay prevention */
   nonce: bigint;
   simGasReported: bigint;
   gasVarianceFixedMist: bigint;
   slippageBufferMist: bigint;
-  /** Relayer-quoted fee (MIST) — exact value embedded in PTB. */
-  quotedRelayerFeeMist: bigint;
+  /** Host-quoted fee (MIST) — exact value embedded in PTB. */
+  quotedHostFeeMist: bigint;
   /** Expected on-chain protocol fee at quote time — tamper detection. */
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */

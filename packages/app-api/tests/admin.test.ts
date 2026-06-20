@@ -108,10 +108,10 @@ import type { AppApiContext } from '../src/context.js';
 
 function createMockCtx(): AppApiContext {
   return {
-    relay: {
+    host: {
       network: 'testnet',
       packageId: '0xPKG',
-      relayerRecipientAddress: '0xRECIPIENT',
+      settlementPayoutRecipientAddress: '0xRECIPIENT',
       sponsorPool: {
         addresses: () => ['0xSPONSOR1'],
         size: 1,
@@ -127,7 +127,7 @@ function createMockCtx(): AppApiContext {
         getTransaction: vi.fn().mockResolvedValue({ digest: 'mock-digest', effects: {} }),
       },
       getConfig: vi.fn().mockResolvedValue({
-        maxRelayerFeeMist: 1000n,
+        maxHostFeeMist: 1000n,
         protocolFlatFeeMist: 100n,
         maxClaimMist: 500n,
         minSettleMist: 50n,
@@ -136,12 +136,12 @@ function createMockCtx(): AppApiContext {
       dispose: vi.fn(),
     } as never,
     prepareConfig: {
-      quotedRelayerFeeMist: 500n,
+      quotedHostFeeMist: 500n,
       supportedSettlementSwapPaths: [
         {
-          paymentTokenType: '0xdeeb::deep::DEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xdeeb::deep::DEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,
@@ -217,7 +217,7 @@ function createMockCtx(): AppApiContext {
         mode: 'all',
         sponsoredExecutions: '0',
         lossCount: '0',
-        cumulativeRelayerNetMist: '0',
+        cumulativeHostNetMist: '0',
         cumulativeLossMist: '0',
       }),
       getRecent: vi.fn().mockResolvedValue([]),
@@ -355,7 +355,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '5',
         lossCount: '1',
-        cumulativeRelayerNetMist: '12345',
+        cumulativeHostNetMist: '12345',
         cumulativeLossMist: '-1000',
       };
       (mockCtx.sponsoredLogsStore.getSummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
@@ -386,7 +386,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '2',
         lossCount: '0',
-        cumulativeRelayerNetMist: '4000',
+        cumulativeHostNetMist: '4000',
         cumulativeLossMist: '0',
       };
       const entries = [
@@ -397,9 +397,9 @@ describe('admin routes', () => {
           outcome: 'success',
           receiptId: 'r1',
           economicsStatus: 'known',
-          relayerFeeMist: '1000',
+          hostFeeMist: '1000',
           protocolFeeMist: '50',
-          relayerNetMist: '4000',
+          hostNetMist: '4000',
         },
       ];
       (mockCtx.sponsoredLogsStore.getSummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
@@ -449,7 +449,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '2',
         lossCount: '1',
-        cumulativeRelayerNetMist: '-12345',
+        cumulativeHostNetMist: '-12345',
         cumulativeLossMist: '-12345',
       });
       (mockCtx.sponsoredLogsStore.getRecent as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
@@ -462,9 +462,9 @@ describe('admin routes', () => {
           economicsStatus: 'unknown',
           // unknown row: every numeric field is null (no zero coercion).
           recoveredGasMist: null,
-          relayerPaidGasMist: null,
-          relayerNetMist: null,
-          relayerFeeMist: null,
+          hostPaidGasMist: null,
+          hostNetMist: null,
+          hostFeeMist: null,
           protocolFeeMist: null,
           grossGasMist: null,
           storageRebateMist: null,
@@ -477,9 +477,9 @@ describe('admin routes', () => {
           outcome: 'success',
           receiptId: 'r-ledger',
           economicsStatus: 'known',
-          relayerFeeMist: '0',
+          hostFeeMist: '0',
           protocolFeeMist: '0',
-          relayerNetMist: '-12345',
+          hostNetMist: '-12345',
           failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED: budget_unavailable',
         },
       ]);
@@ -496,21 +496,21 @@ describe('admin routes', () => {
       );
 
       // Numeric honesty lock at the API response: an unknown row carries
-      // `relayerFeeMist: null` (no zero coercion); a known row carries
+      // `hostFeeMist: null` (no zero coercion); a known row carries
       // the exact MIST decimal string ("0" only when the fee is
       // explicitly zero). The two cases must round-trip through the
       // route without one being silently coerced into the other.
       expect(body.entries[0].economicsStatus).toBe('unknown');
-      expect(body.entries[0].relayerFeeMist).toBeNull();
+      expect(body.entries[0].hostFeeMist).toBeNull();
       expect(body.entries[0].protocolFeeMist).toBeNull();
       expect(body.entries[0].recoveredGasMist).toBeNull();
-      expect(body.entries[0].relayerPaidGasMist).toBeNull();
-      expect(body.entries[0].relayerNetMist).toBeNull();
+      expect(body.entries[0].hostPaidGasMist).toBeNull();
+      expect(body.entries[0].hostNetMist).toBeNull();
 
       expect(body.entries[1].economicsStatus).toBe('known');
-      expect(body.entries[1].relayerFeeMist).toBe('0');
+      expect(body.entries[1].hostFeeMist).toBe('0');
       expect(body.entries[1].protocolFeeMist).toBe('0');
-      expect(body.entries[1].relayerNetMist).toBe('-12345');
+      expect(body.entries[1].hostNetMist).toBe('-12345');
     });
   });
 
@@ -619,8 +619,8 @@ describe('admin routes', () => {
     it('returns 422 when dry-run simulation fails', async () => {
       // nonce consumed by DEL (default mock returns 1)
       // simulateTransaction returns failure status
-      (mockCtx.relay as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.relay.sui,
+      (mockCtx.host as unknown as Record<string, unknown>).sui = {
+        ...mockCtx.host.sui,
         getBalance: vi.fn().mockResolvedValue({ balance: { balance: '1000000000' } }),
         simulateTransaction: vi.fn().mockResolvedValue({
           Transaction: {
@@ -643,8 +643,8 @@ describe('admin routes', () => {
     it('returns 200 on successful withdrawal', async () => {
       // nonce consumed by DEL (default mock returns 1)
       // simulateTransaction returns success, signAndExecute returns digest
-      (mockCtx.relay as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.relay.sui,
+      (mockCtx.host as unknown as Record<string, unknown>).sui = {
+        ...mockCtx.host.sui,
         getBalance: vi.fn().mockResolvedValue({ balance: { balance: '500000000' } }),
         simulateTransaction: vi.fn().mockResolvedValue({
           Transaction: {
@@ -713,9 +713,9 @@ describe('admin routes', () => {
       const DEEP_TYPE = '0xdeeb::deep::DEEP';
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: DEEP_TYPE,
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: DEEP_TYPE,
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,
@@ -736,7 +736,7 @@ describe('admin routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.count).toBe(1);
-      expect(body.settlementSwapPaths[0].paymentTokenSymbol).toBe('DEEP');
+      expect(body.settlementSwapPaths[0].settlementTokenSymbol).toBe('DEEP');
       expect(body.settlementSwapPaths[0].hopCount).toBe(1);
       expect(body.settlementSwapPaths[0].hops[0].swapDirection).toBe('baseForQuote');
     });
@@ -744,9 +744,9 @@ describe('admin routes', () => {
     it('returns 500 when pool metadata exceeds safe integer range (fail-closed)', async () => {
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xTOKEN',
-          paymentTokenSymbol: 'TOKEN',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xTOKEN',
+          settlementTokenSymbol: 'TOKEN',
+          settlementTokenDecimals: 6,
           lotSize: 9007199254740993n,
           minSize: 1n,
           effectiveFeeRateBps: 0,
@@ -1742,24 +1742,24 @@ describe('admin routes', () => {
     });
   });
 
-  // ── GET /api/pool — RPC fleet snapshot ────────────────────────────
-  describe('GET /api/pool', () => {
+  // ── GET /api/sponsor-operations — RPC fleet snapshot ────────────────────────────
+  describe('GET /api/sponsor-operations', () => {
     it('returns 500 when pool metadata exceeds safe integer range (fail-closed)', async () => {
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xTOKEN',
+          settlementTokenType: '0xTOKEN',
           lotSize: 9007199254740993n,
           minSize: 1n,
         },
       ];
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(500);
       // Restore
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xdeeb::deep::DEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xdeeb::deep::DEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,
@@ -1778,7 +1778,7 @@ describe('admin routes', () => {
     });
 
     it('returns rpcFleet with safe fields (no auth/secret data)', async () => {
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
       const body = await res.json();
 
@@ -1804,14 +1804,14 @@ describe('admin routes', () => {
       }
     });
 
-    it('awaits probeSponsorRefillAccount before serialising /api/pool', async () => {
-      // Admin `/api/pool` runs a bounded sponsor-refill-account probe before the
+    it('awaits probeSponsorRefillAccount before serialising /api/sponsor-operations', async () => {
+      // Admin `/api/sponsor-operations` runs a bounded sponsor-refill-account probe before the
       // shared-state read so the returned payload is "fresh at return
       // time" rather than stale-then-next-read.
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
       expect(mockCtx.sponsorOperations.probeSponsorRefillAccount).toHaveBeenCalledWith(
-        'admin_pool',
+        'admin_sponsor_operations',
       );
     });
 
@@ -1820,7 +1820,7 @@ describe('admin routes', () => {
         mockCtx.sponsorOperations.probeSponsorRefillAccount as ReturnType<typeof vi.fn>
       ).mockRejectedValueOnce(new Error('redis sponsor refill account write failed'));
 
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
 
       expect(res.status).toBe(500);
     });
@@ -1828,7 +1828,7 @@ describe('admin routes', () => {
     it('serialises the shared-state sponsor operations payload (no null/stale/generation)', async () => {
       const observedAtMs = 1_700_000_000_000;
       (
-        mockCtx.relay.sponsorPool.leaseStatus as unknown as ReturnType<typeof vi.fn>
+        mockCtx.host.sponsorPool.leaseStatus as unknown as ReturnType<typeof vi.fn>
       ).mockResolvedValueOnce({
         leasedSlots: 1,
         freeSlots: 1,
@@ -1866,7 +1866,7 @@ describe('admin routes', () => {
         },
       });
 
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
       const body = await res.json();
 
@@ -1908,8 +1908,8 @@ describe('admin routes', () => {
       });
     });
 
-    it('omits top-level /api/pool flat fields (data lives under `sponsorOperations`)', async () => {
-      const res = await app.request('/api/pool');
+    it('omits top-level /api/sponsor-operations flat fields (data lives under `sponsorOperations`)', async () => {
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
       const body = await res.json();
 
@@ -1920,30 +1920,30 @@ describe('admin routes', () => {
       expect(body.sponsorRefillAccountAddress).toBeUndefined();
       expect(body.sponsorRefillAccountBalance).toBeUndefined();
       expect(body.sponsorRefillAccountRefillsRemaining).toBeUndefined();
-      // Relayer-recipient balance is not part of the response contract.
-      expect(body.relayerRecipientBalance).toBeUndefined();
+      // Settlement payout recipient balance is not part of the response contract.
+      expect(body.settlementPayoutRecipientBalance).toBeUndefined();
     });
 
     it('returns boot-derived configuration fields and the cached feeConfig', async () => {
-      const res = await app.request('/api/pool');
+      const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
       const body = await res.json();
 
       expect(body.network).toBe('testnet');
       expect(body.primaryAddress).toBe('0xSPONSOR1');
-      expect(body.relayerRecipientAddress).toBe('0xRECIPIENT');
+      expect(body.settlementPayoutRecipientAddress).toBe('0xRECIPIENT');
       expect(typeof body.sponsorBalanceWarnMist).toBe('string');
       expect(typeof body.sponsorBalanceRefillTargetMist).toBe('string');
       expect(typeof body.refillEnabled).toBe('boolean');
-      expect(typeof body.quotedRelayerFeeMist).toBe('string');
+      expect(typeof body.quotedHostFeeMist).toBe('string');
       expect(body.feeConfig).toMatchObject({
-        maxRelayerFeeMist: '1000',
+        maxHostFeeMist: '1000',
         protocolFlatFeeMist: '100',
         maxClaimMist: '500',
         minSettleMist: '50',
         configVersion: '1',
       });
-      expect(mockCtx.relay.getConfig).toHaveBeenCalled();
+      expect(mockCtx.host.getConfig).toHaveBeenCalled();
       expect(body.onChainIds).toBeDefined();
       expect(typeof body.studioEnabled).toBe('boolean');
     });

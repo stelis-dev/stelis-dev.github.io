@@ -243,7 +243,7 @@ describe('S-16: fromKind/from command serialization', () => {
     });
     const kindBytes = await tx.build({ onlyTransactionKind: true });
 
-    // Simulate relayer: fromKind → append settle → build full
+    // Simulate Host: fromKind → append settle → build full
     const retTx = Transaction.fromKind(kindBytes);
     retTx.moveCall({
       target: `${PKG}::${SETTLE_MODULE}::${BFQ_NEW_USER}`,
@@ -308,7 +308,7 @@ describe('S-16: fromKind/from command serialization', () => {
 
     const kindBytes = await tx.build({ onlyTransactionKind: true });
 
-    // Simulate relayer: fromKind → append settle → build full
+    // Simulate Host: fromKind → append settle → build full
     const retTx = Transaction.fromKind(kindBytes);
     retTx.moveCall({
       target: `${PKG}::${SETTLE_MODULE}::${BFQ_NEW_USER}`,

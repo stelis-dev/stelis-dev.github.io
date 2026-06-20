@@ -11,13 +11,13 @@
  *   - Idempotency key is `(mode, receiptId, outcome)`. Persistent stores
  *     must enforce this as a unique constraint so retries do not
  *     double-count.
- *   - Numeric fields are exact MIST decimal strings (`relayerNetMist`,
- *     `cumulativeRelayerNetMist`, and `cumulativeLossMist` are signed).
+ *   - Numeric fields are exact MIST decimal strings (`hostNetMist`,
+ *     `cumulativeHostNetMist`, and `cumulativeLossMist` are signed).
  *     Accounting paths must never coerce them to JS `number`.
  *   - All numeric fields are `null` when `economicsStatus === "unknown"`,
- *     including `relayerFeeMist` — the recorder MUST NOT coerce an
+ *     including `hostFeeMist` — the recorder MUST NOT coerce an
  *     unknown fee to `"0"` (numeric honesty: do not invent values).
- *     `relayerFeeMist` is `"0"` only on a known row that explicitly
+ *     `hostFeeMist` is `"0"` only on a known row that explicitly
  *     carries a zero fee; otherwise it is the exact MIST decimal string.
  */
 
@@ -60,19 +60,19 @@ export interface SponsoredExecutionLogEntry {
   /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
   readonly recoveredGasMist: string | null;
   /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
-  readonly relayerPaidGasMist: string | null;
+  readonly hostPaidGasMist: string | null;
   /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
-  readonly relayerNetMist: string | null;
+  readonly hostNetMist: string | null;
   /**
    * Unsigned decimal MIST string for known rows (`"0"` when fee is
    * explicitly zero). `null` when `economicsStatus === "unknown"` —
    * the recorder MUST NOT coerce an unknown fee to `"0"`.
    */
-  readonly relayerFeeMist: string | null;
+  readonly hostFeeMist: string | null;
   /**
    * Unsigned decimal MIST string for known rows (`"0"` when protocol fee is
    * explicitly zero). `null` when `economicsStatus === "unknown"`.
-   * Protocol fee is protocol revenue and does NOT enter `relayerNetMist`.
+   * Protocol fee is protocol revenue and does NOT enter `hostNetMist`.
    */
   readonly protocolFeeMist: string | null;
   readonly grossGasMist: string | null;
@@ -91,8 +91,8 @@ export interface SponsoredExecutionAggregate {
   readonly sponsoredExecutions: string;
   /** Unsigned cumulative `Loss Count`. */
   readonly lossCount: string;
-  /** Sum of known `relayerNetMist` values in MIST. */
-  readonly cumulativeRelayerNetMist: string;
-  /** Sum of negative known `relayerNetMist` values in MIST. */
+  /** Sum of known `hostNetMist` values in MIST. */
+  readonly cumulativeHostNetMist: string;
+  /** Sum of negative known `hostNetMist` values in MIST. */
   readonly cumulativeLossMist: string;
 }

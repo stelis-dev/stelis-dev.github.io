@@ -1,37 +1,37 @@
 # @stelis/sdk
 
-SDK for Sui apps that use sponsored transactions through a relay host.
+SDK for Sui apps that use sponsored transactions through a Host.
 
-- Built for: app developers, service developers, and integration agents using an existing relay host.
+- Built for: app developers, service developers, and integration agents using an existing Host.
 - Use for: `StelisSDK`, package-level TypeScript APIs, and links to integration, API, and demo docs.
-- Not for: full HTTP field definitions, host deployment procedures, host operations policy, or wallet custody.
+- Not for: full HTTP field definitions, Host deployment procedures, Host operations policy, or wallet custody.
 
 > [!NOTE]
 > Codes like `S-10` are invariant IDs defined in [invariants.md](../../docs/invariants.md)
-> `Hosted relay`, `Studio`, `Host`, `relay host`, `relayer`, and `host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
+> `Host`, `Relay API`, `Admin app`, `Studio`, `Host execution role`, and `Host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
 > PTB means Programmable Transaction Block, Sui's transaction-building format.
 
 ## Start Here
 
-Use this README when you are integrating against an existing Stelis relay host (with or without studio mode enabled) and do **not** want to operate your own relay host.
+Use this README when you are integrating against an existing Host (with or without Studio mode enabled) and do **not** want to operate your own Host.
 
 If your product lets users complete transactions without managing gas, this is the default entry path.
-Start with an existing relay host first, not a self-hosted deployment.
-If your selected host does not advertise the token your product needs, move to the `Studio` or `Host` path instead of treating another third-party host as the normal solution.
-Consume the shipped SDK as-is. Modifying the SDK, contracts, or host/core source is not part of the normal integrator path.
+Start by connecting to an existing Host.
+If your selected Host does not advertise the token your product needs, move to the `Studio` or `Host` path instead of treating another third-party Host as the normal solution.
+Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source is not part of the normal integrator path.
 
 - Problem fit:
   - your users execute without holding SUI
   - you want package-level integration instead of raw HTTP calls
-  - you want `connect()` to discover host capability through `supportedSettlementSwapPaths`
-  - you are building game actions, commerce checkout, or an agent wallet flow on top of a hosted relay
+  - you want `connect()` to discover Host capability through `supportedSettlementSwapPaths`
+  - you are building game actions, commerce checkout, or an agent wallet flow on top of a Host
 
-- Need to run your own relay host? Start with [docs/getting-started.md](../../docs/getting-started.md).
-- Need to call a deployed host directly without the SDK? Start with [docs/api.md](../../docs/api.md).
+- Need to run your own Host? Start with [docs/getting-started.md](../../docs/getting-started.md).
+- Need to call a deployed Host directly without the SDK? Start with [docs/api.md](../../docs/api.md).
 - Need the transaction constraints enforced before prepare? Start with [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
-- Integrating against the hosted Studio promotion flow? Pair this README with [docs/payment-platform.md](../../docs/payment-platform.md).
-- Operating a host with Studio mode enabled? Use [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations).
-- Need product-owned payment token support because your selected host is missing your token? Move to [docs/payment-platform.md](../../docs/payment-platform.md) and [docs/operations.md -> Payment Token Settlement Swap Path Onboarding Procedure](../../docs/operations.md#payment-token-settlement-swap-path-onboarding-procedure).
+- Integrating against the Studio promotion flow? Pair this README with [docs/payment-platform.md](../../docs/payment-platform.md).
+- Operating a Host with Studio mode enabled? Use [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations).
+- Need product-owned settlement token support because your selected Host is missing your token? Move to [docs/payment-platform.md](../../docs/payment-platform.md) and [docs/operations.md -> Settlement Token Onboarding Procedure](../../docs/operations.md#settlement-token-onboarding-procedure).
 - Need an interactive browser flow? Use [packages/app-web](../app-web/README.md).
 
 ## Responsibility Split
@@ -40,11 +40,11 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or host/core source
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | **You prepare**             | wallet bridge, prepare authorization signer, transaction signer, user-intent PTB, endpoint choice, and approval policy                          |
 | **Stelis provides**         | the shipped `StelisSDK`, runtime capability discovery through `supportedSettlementSwapPaths`, and prepare/sponsor orchestration helpers                      |
-| **Shared boundary**         | choose `paymentToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
+| **Shared boundary**         | choose `settlementToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
 | **Out of scope for Stelis** | wallet custody, MCP runtime, agent autonomy, and human approval UX                                                                             |
 
-> The SDK does not retry host errors. It returns host failures as `StelisApiException` or `StelisSponsoredError` with the host-provided code, and retry/backoff policy belongs on your side. Capacity codes include `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`, `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`. `ABUSE_BLOCKED` includes `retryAfterMs`; raw HTTP clients also receive `Retry-After` for `PREPARE_OVERLOADED`.
-> Missing token support is resolved by the host operator updating `packages/app-api/settlement-swap-paths.json` on a product-owned `Studio` or `Host` deployment, not by SDK customization.
+> The SDK does not retry Host errors. It returns Host failures as `StelisApiException` or `StelisSponsoredError` with the Host-provided code, and retry/backoff policy belongs on your side. Capacity codes include `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`, `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`. `ABUSE_BLOCKED` includes `retryAfterMs`; raw HTTP clients also receive `Retry-After` for `PREPARE_OVERLOADED`.
+> Missing token support is resolved by the Host operator updating `packages/app-api/settlement-swap-paths.json` on a product-owned `Studio` or `Host` deployment, not by SDK customization.
 
 ## Purpose
 
@@ -53,9 +53,9 @@ This package is the public dApp-facing integration layer for Stelis.
 Use it when you want to:
 
 - estimate sponsored cost for a user action
-- build and execute a sponsored flow through a relayer
+- build and execute a sponsored flow through a Host
 - compose external Move-based user flows and finish them with Stelis settlement
-- consume the relayer API without depending on monorepo-internal helpers
+- consume the Relay API without depending on monorepo-internal helpers
 
 ## Supported Entry Points
 
@@ -100,28 +100,28 @@ After this README, continue in this order:
 
 <!-- package-specific: SDK internal orchestration, not derived from docs/integration.md -->
 
-**Generic relay flow** (`executeSponsored`) — generic sponsored via `/relay/prepare` and `/relay/sponsor`:
+**Generic Relay API flow** (`executeSponsored`) — generic sponsored via `/relay/prepare` and `/relay/sponsor`:
 
 ```mermaid
 sequenceDiagram
     participant W as Wallet
     participant App
     participant SDK
-    participant R as Relayer
+    participant Host as Host
 
     App->>SDK: executeSponsored(tx, opts)
     SDK->>App: request prepare authorization signature
     App->>W: signPersonalMessage(prepare authorization)
     W-->>App: prepareAuthorizationSignature
     App-->>SDK: prepareAuthorizationSignature
-    SDK->>R: POST /relay/prepare
-    R-->>SDK: txBytes, cost, receiptId
+    SDK->>Host: POST /relay/prepare
+    Host-->>SDK: txBytes, cost, receiptId
     SDK->>App: request signature
     App->>W: signer(txBytes)
     W-->>App: userSignature
     App-->>SDK: userSignature
-    SDK->>R: POST /relay/sponsor
-    R-->>SDK: digest, effects
+    SDK->>Host: POST /relay/sponsor
+    Host-->>SDK: digest, effects
 ```
 
 **Studio promotion flow** (`executePromotionSponsored`) — promotion-budgeted via `/studio/promotions/:id/prepare` and `/sponsor`:
@@ -131,17 +131,17 @@ sequenceDiagram
     participant W as Wallet
     participant App
     participant SDK
-    participant R as Relayer
+    participant Host as Host
 
     App->>SDK: executePromotionSponsored(tx, opts)
-    SDK->>R: POST /studio/promotions/:id/prepare
-    R-->>SDK: txBytes, receiptId, estimatedGasMist
+    SDK->>Host: POST /studio/promotions/:id/prepare
+    Host-->>SDK: txBytes, receiptId, estimatedGasMist
     SDK->>App: request signature
     App->>W: signer(txBytes)
     W-->>App: userSignature
     App-->>SDK: userSignature
-    SDK->>R: POST /studio/promotions/:id/sponsor
-    R-->>SDK: digest, effects, actualGasMist
+    SDK->>Host: POST /studio/promotions/:id/sponsor
+    Host-->>SDK: digest, effects, actualGasMist
 ```
 
 ## Installation
@@ -154,16 +154,16 @@ npm install @stelis/sdk
 
 ## Quick Start — StelisSDK (Recommended)
 
-`StelisSDK.connect()` fetches relayer config (`network`, `packageId`, `relayerRecipient`,
+`StelisSDK.connect()` fetches Host config (`network`, `packageId`, `settlementPayoutRecipient`,
 `supportedSettlementSwapPaths`) from `/relay/config`, and resolves contract addresses (`configId`,
 `vaultRegistryId`, `deepbookPackageId`, `deepType`) from SDK built-in constants
 (bundled at build time from the shared internal contract package).
-`relayerRecipient` is the settlement payout recipient address for `relayerClaim` plus the quoted relayer fee.
+`settlementPayoutRecipient` is the settlement payout recipient address for `executionCostClaim` plus the quoted host fee.
 
-`supportedSettlementSwapPaths` contains one active settlement swap path per `paymentTokenType`.
-SDK calls choose a payment token with `paymentToken.type`; they do not send a pool ID or path ID.
-If a token is absent from `supportedSettlementSwapPaths`, the SDK treats it as unsupported on that host.
-The host operator can add new settlement swap paths via `packages/app-api/settlement-swap-paths.json` — see [operations.md -> Payment Token Settlement Swap Path Onboarding Procedure](../../docs/operations.md#payment-token-settlement-swap-path-onboarding-procedure).
+`supportedSettlementSwapPaths` contains one active settlement swap path per `settlementTokenType`.
+SDK calls choose a settlement token with `settlementToken.type`; they do not send a pool ID or path ID.
+If a token is absent from `supportedSettlementSwapPaths`, the SDK treats it as unsupported on that Host.
+The Host operator can add new settlement swap paths via `packages/app-api/settlement-swap-paths.json` — see [operations.md -> Settlement Token Onboarding Procedure](../../docs/operations.md#settlement-token-onboarding-procedure).
 
 ```typescript
 import { StelisSDK, STELIS_CONTRACT_IDS } from '@stelis/sdk';
@@ -172,7 +172,7 @@ import { SuiGrpcClient } from '@mysten/sui/grpc';
 // 0. Create your own SuiGrpcClient.
 const suiClient = new SuiGrpcClient({ network: 'testnet' });
 
-// 1. Connect to relayer with package pinning (required for integrity protection).
+// 1. Connect to a Host with package pinning (required for integrity protection).
 // Contract IDs are built into @stelis/sdk (bundled from the shared internal contract package).
 const sdk = await StelisSDK.connect('http://localhost:3200/relay', {
   pinnedPackageId: STELIS_CONTRACT_IDS.testnet?.packageId, // fail-closed if null
@@ -183,7 +183,7 @@ const sdk = await StelisSDK.connect('http://localhost:3200/relay', {
 });
 
 console.log(sdk.network); // 'mainnet' | 'testnet'
-console.log(sdk.config.packageId); // built-in constant bundled into @stelis/sdk (verified against relayer-advertised packageId at connect)
+console.log(sdk.config.packageId); // built-in constant bundled into @stelis/sdk (verified against Host-advertised packageId at connect)
 
 const prepareAuthorizationSigner = async (messageBytes: Uint8Array) => {
   const { signature } = await wallet.signPersonalMessage({ message: messageBytes });
@@ -195,11 +195,11 @@ const prepareAuthorizationSigner = async (messageBytes: Uint8Array) => {
 
 Use this shortcut before you connect product-specific flows:
 
-1. `connect('https://your-relayer/relay')` or call `GET /relay/config`.
+1. `connect('https://your-host.example.com/relay')` or call `GET /relay/config`.
 2. If your token appears once in `supportedSettlementSwapPaths`, continue with `executeSponsored()`.
-3. If your token is missing, treat that host as unsupported right now.
-4. Then move to the `Studio` or `Host` path for product-owned payment token support, or ask that host operator to update `packages/app-api/settlement-swap-paths.json` and restart.
-5. If the host returns `LEASE_EXPIRED`, re-run `/relay/prepare`; if it returns `ABUSE_BLOCKED`, back off on your side.
+3. If your token is missing, treat that Host as unsupported right now.
+4. Then move to the `Studio` or `Host` path for product-owned settlement token support, or ask that Host operator to update `packages/app-api/settlement-swap-paths.json` and restart.
+5. If the Host returns `LEASE_EXPIRED`, re-run `/relay/prepare`; if it returns `ABUSE_BLOCKED`, back off on your side.
 
 ---
 
@@ -221,7 +221,7 @@ const result = await sdk.executeSponsored(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE }, // amount auto-calculated from prepare cost + exchange rate
+  settlementToken: { type: DEEP_TYPE }, // amount auto-calculated from prepare cost + exchange rate
   orderId: 'invoice-2026-001', // optional: external reference for payment tracking
 });
 console.log(result.digest);
@@ -238,7 +238,7 @@ const result = await sdk.executeSponsored(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
   onGasEstimate: (amount, amountHuman, symbol) => {
     showToast(`Gas cost: ${amountHuman} ${symbol}`);
   },
@@ -250,7 +250,7 @@ const result = await sdk.executeSponsored(tx, {
 ```typescript
 const est = await sdk.estimateGas(suiClient, {
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
 });
 // est.amountHuman   → '3.120000' (display unit amount)
 // est.displayUnit   → 'DEEP' or 'SUI' (depends on profile)
@@ -259,7 +259,7 @@ const est = await sdk.estimateGas(suiClient, {
 // est.canSkipLiquidity → true when credit_general (no swap needed)
 ```
 
-`paymentToken` is required.
+`settlementToken` is required.
 
 ### Programmatic Signer (Server or Agent Runtime)
 
@@ -275,7 +275,7 @@ const USDC_TYPE = '0x...::usdc::USDC';
 const result = await sdk.executeSponsored(tx, {
   client: suiClient,
   addr: keypair.toSuiAddress(),
-  paymentToken: { type: USDC_TYPE },
+  settlementToken: { type: USDC_TYPE },
   prepareAuthorizationSigner: async (messageBytes: Uint8Array) => {
     const { signature } = await keypair.signPersonalMessage(messageBytes);
     return signature;
@@ -310,7 +310,7 @@ const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
 
 For promotion-specific flows, use `executePromotionSponsored()`. This uses dedicated
 `/studio/promotions/:id/prepare` and `/studio/promotions/:id/sponsor` endpoints instead
-of the generic relay path. No `paymentToken` is needed — the promotion budget covers gas.
+of the generic sponsored path. No `settlementToken` is needed — the promotion budget covers gas.
 
 ```typescript
 const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
@@ -403,8 +403,8 @@ const settlement = await verifySettleEventAgainstExpected(
     receiptId,
     user: userAddress,
     orderId: 'invoice-2026-001',
-    relayerClaimMist: prepared.cost.relayerClaim,
-    quotedRelayerFeeMist: prepared.cost.quotedRelayerFee,
+    executionCostClaimMist: prepared.cost.executionCostClaim,
+    quotedHostFeeMist: prepared.cost.quotedHostFee,
     protocolFeeMist: prepared.cost.protocolFee,
   },
 );
@@ -421,7 +421,7 @@ Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans o
 Stelis is designed as a general gas abstraction layer for Sui PTBs.
 The `Transaction` you pass into `executeSponsored()` can already
 contain external Move calls. Stelis then appends the final settlement step, prices
-the sponsorship, and runs the relayer flow.
+the sponsorship, and runs the Host-sponsored flow.
 
 This means Stelis is not tied to a single payment protocol or app contract.
 Sui Payment Kit is one representative example of an external Move-based flow that
@@ -441,7 +441,7 @@ same `Transaction`.
 
 Recommended flow:
 
-1. determine the item price in the payment token
+1. determine the item price in the settlement token
 2. build Payment Kit payment commands first on the same `Transaction`
 3. call `stelisSdk.executeSponsored()` on that in-progress transaction
 4. the SDK internally prepares, signs, and sponsors the combined PTB
@@ -484,7 +484,7 @@ tx.add(
 const result = await stelis.executeSponsored(tx, {
   client,
   addr: userAddress,
-  paymentToken: { type: USDC_TYPE },
+  settlementToken: { type: USDC_TYPE },
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   onGasEstimate: (amount, amountHuman) => {
@@ -496,7 +496,7 @@ const result = await stelis.executeSponsored(tx, {
 console.log(`Digest: ${result.digest}`);
 ```
 
-For the simplest UX, use the same token for the item price and the Stelis payment token.
+For the simplest UX, use the same token for the item price and the Stelis settlement token.
 That keeps the user-facing breakdown straightforward:
 
 - `Item price: 100.00 USDC`
@@ -516,10 +516,10 @@ advanced flows.
 
 Important constraints still apply:
 
-- the transaction passed to `executeSponsored()` must not contain a Stelis settlement call; the SDK and host append exactly one settlement call later
+- the transaction passed to `executeSponsored()` must not contain a Stelis settlement call; the SDK and Host append exactly one settlement call later
 - `publish` and `upgrade` commands from any package are still forbidden in sponsored flows
 - user-controlled arguments must not reference `GasCoin`
-- `FundsWithdrawal(Sponsor)` is forbidden, and same-token `FundsWithdrawal(Sender)` is handled by the host's payment-token funding rules
+- `FundsWithdrawal(Sponsor)` is forbidden, and same-token `FundsWithdrawal(Sender)` is handled by the Host's settlement-token funding rules
 - do not modify PTB after SDK takes over execution
 
 For the complete constraint list, see [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
@@ -534,7 +534,7 @@ composed first, and Stelis can finish the same PTB with sponsored settlement.
 
 ### `executeSuiFirst()` — Use SUI if Sufficient, Else Sponsored
 
-If the user holds enough SUI to cover estimated gas, executes directly without the relayer.
+If the user holds enough SUI to cover estimated gas, executes directly without sponsored execution.
 Otherwise, automatically falls back to `executeSponsored()`.
 
 ```typescript
@@ -543,7 +543,7 @@ const result = await sdk.executeSuiFirst(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE }, // used only if sponsored fallback is triggered
+  settlementToken: { type: DEEP_TYPE }, // used only if sponsored execution is selected
 });
 
 console.log(result.path); // 'sui' | 'sponsored' (for debug/tracing)
@@ -591,7 +591,7 @@ import type {
   ExecuteSponsoredResult,
   GasEstimateResult,
   ExecuteSuiFirstResult,
-  RelayerConfig, // /relay/config response: network, packageId, relayerRecipient, supportedSettlementSwapPaths, quotedRelayerFeeMist, protocolFlatFeeMist, integrityPolicyVersion
+  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist, integrityPolicyVersion
   SingleHopSettlementSwapPath, // settlement swap path config (1-hop only)
   DeepBookPoolHop, // config for a single pool hop
   PrepareResponse,
@@ -644,14 +644,14 @@ Choose monorepo source helpers instead when:
 | Code | Constant                 | Description                                                                         |
 | ---- | ------------------------ | ----------------------------------------------------------------------------------- |
 | 100  | `EPaused`                | Settlement is paused by admin                                                       |
-| 101  | `EClaimTooHigh`          | Relayer claim exceeds maximum allowed                                               |
+| 101  | `EClaimTooHigh`          | execution cost claim exceeds maximum allowed                                               |
 | 102  | `ETotalInTooLow`         | SUI from swap below settlement minimum (swap amount too small or no pool liquidity) |
-| 103  | `EInsufficientFunds`     | Not enough funds for relayer claim + fees                                           |
+| 103  | `EInsufficientFunds`     | Not enough funds for execution cost claim + fees                                           |
 | 104  | `EInvalidReceiptId`      | Receipt ID invalid or malformed                                                     |
 | 105  | `EInvalidPolicyHash`     | Policy hash mismatch                                                                |
 | 106  | `EConfigVersionMismatch` | L2 tamper detection: config version mismatch                                        |
 | 107  | `EProtocolFeeMismatch`   | L2 tamper detection: protocol fee mismatch                                          |
-| 108  | `ERelayerFeeCapExceeded` | L2 tamper detection: relayer fee cap exceeded                                       |
+| 108  | `EHostFeeCapExceeded` | L2 tamper detection: host fee cap exceeded                                       |
 | 109  | `EInvalidOrderIdHash`    | L2 tamper detection: order ID hash invalid                                          |
 | 110  | `ESpreadTooWide`         | Spread guard: bid-ask spread exceeds max or book is empty/crossed                   |
 
@@ -669,9 +669,9 @@ Choose monorepo source helpers instead when:
 
 ### Gas Auto-Calculation
 
-When `paymentToken.amount` is omitted, the SDK auto-calculates swap amount:
+When `settlementToken.amount` is omitted, the SDK auto-calculates swap amount:
 
-1. **Needed SUI** = `relayerClaim + fee + protocolFee` (from relayer prepare)
+1. **Needed SUI** = `executionCostClaim + fee + protocolFee` (from the prepare response)
 2. **Payment amount** = `neededSuiMist × FLOAT_SCALING(1e9) / midPrice × margin`
    - `midPrice` is DeepBook's raw u64: `quote_smallest × 1e9 / base_smallest`
    - `baseForQuote` (e.g. DEEP→SUI): `microDEEP = neededMist × 1e9 / midPrice`

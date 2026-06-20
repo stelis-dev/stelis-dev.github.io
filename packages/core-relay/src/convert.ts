@@ -5,7 +5,7 @@
  * Transaction.getData().commands and normalizes to PtbCommand[].
  *
  * Used by:
- *   - core-api (server-side L1/L2 validation)
+ *   - core-api (server-side structure and settlement-argument validation)
  *   - SDK integrity.ts (client-side S-16 verification)
  */
 import type { PtbCommand } from '@stelis/contracts';

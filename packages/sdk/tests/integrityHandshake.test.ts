@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { StelisSDK } from '../src/sdk.js';
 import { StelisIntegrityError } from '../src/integrity.js';
-import type { RelayerConfig, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
@@ -56,11 +56,11 @@ vi.stubGlobal('fetch', mockFetch);
 // ── Constants ──────────────────────────────────────────────────────────────────
 const CANONICAL_PKG = STELIS_CONTRACT_IDS.testnet!.packageId;
 
-function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
+function makeConfig(overrides: Partial<RelayConfigResponse> = {}): RelayConfigResponse {
   return {
     network: 'testnet',
     packageId: CANONICAL_PKG,
-    relayerRecipient: '0x' + 'e'.repeat(64),
+    settlementPayoutRecipient: '0x' + 'e'.repeat(64),
     supportedSettlementSwapPaths: [
       {
         hops: [
@@ -72,16 +72,16 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
             feeBps: 0,
           },
         ],
-        paymentTokenType: `${CANONICAL_PKG}::deep::DEEP`,
-        paymentTokenSymbol: 'DEEP',
-        paymentTokenDecimals: 6,
+        settlementTokenType: `${CANONICAL_PKG}::deep::DEEP`,
+        settlementTokenSymbol: 'DEEP',
+        settlementTokenDecimals: 6,
         lotSize: 100,
         minSize: 1_000_000,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: '100000',
+    quotedHostFeeMist: '100000',
     protocolFlatFeeMist: '20000',
     integrityPolicyVersion: 1,
     ...overrides,
@@ -100,9 +100,9 @@ const MOCK_PREPARE_RESPONSE: PrepareResponse = {
     simGas: '5000000',
     gasVarianceFixedMist: '200000',
     slippageBufferMist: '50000',
-    quotedRelayerFee: '100000',
+    quotedHostFee: '100000',
     protocolFee: '20000',
-    relayerClaim: '5250000',
+    executionCostClaim: '5250000',
     grossGas: '7000000',
   },
   profile: 'new_user',
@@ -126,7 +126,7 @@ function callPrepareSponsored(sdk: StelisSDK) {
       listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
     } as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
     addr: '0x' + 'a'.repeat(64),
-    paymentToken: { type: `${CANONICAL_PKG}::deep::DEEP` },
+    settlementToken: { type: `${CANONICAL_PKG}::deep::DEEP` },
     prepareAuthorizationSigner: vi.fn().mockResolvedValue('prepare-signature'),
   });
 }

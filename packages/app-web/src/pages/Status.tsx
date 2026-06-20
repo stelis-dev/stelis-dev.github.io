@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import pkg from '../../package.json';
-import { RELAYER_BASE } from '../relayerEndpoint';
+import { RELAY_API_BASE } from '../relayApiEndpoint';
 
 const APP_VERSION = pkg.version;
 const STATUS_PROBE_TIMEOUT_MS = 5_000;
@@ -11,15 +11,15 @@ const STATUS_PROBE_INTERVAL_MS = 30_000;
 
 type ServiceStatus = 'operational' | 'degraded' | 'outage' | 'loading';
 
-interface SettlementSwapPathInfo {
-  paymentTokenSymbol: string;
-  paymentTokenType: string;
+interface SettlementSwapPathSummary {
+  settlementTokenSymbol: string;
+  settlementTokenType: string;
   effectiveFeeRateBps: number;
 }
 
-interface RelayerConfig {
+interface RelayConfigResponse {
   network: string;
-  supportedSettlementSwapPaths: SettlementSwapPathInfo[];
+  supportedSettlementSwapPaths: SettlementSwapPathSummary[];
 }
 
 interface Incident {
@@ -44,17 +44,17 @@ function formatBpsPercent(bps: number): string {
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
-function useRelayerStatus() {
+function useHostStatus() {
   const [status, setStatus] = useState<ServiceStatus>('loading');
   const [avgLatencyMs, setAvgLatencyMs] = useState<number | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
-  const [config, setConfig] = useState<RelayerConfig | null>(null);
+  const [config, setConfig] = useState<RelayConfigResponse | null>(null);
 
-  // Fetch relayer config once (network + supported settlement swap paths)
+  // Fetch Relay config response once (network + supported settlement swap paths)
   useEffect(() => {
-    fetch(`${RELAYER_BASE}/config`)
+    fetch(`${RELAY_API_BASE}/config`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: RelayerConfig | null) => {
+      .then((data: RelayConfigResponse | null) => {
         if (data) setConfig(data);
       })
       .catch(() => null);
@@ -67,7 +67,7 @@ function useRelayerStatus() {
     async function probe() {
       try {
         const start = Date.now();
-        const res = await fetch(`${RELAYER_BASE}/status`, {
+        const res = await fetch(`${RELAY_API_BASE}/status`, {
           signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS),
         });
         const latency = Date.now() - start;
@@ -141,7 +141,7 @@ function SettlementSwapPathRow({
   settlementSwapPath,
   network,
 }: {
-  settlementSwapPath: SettlementSwapPathInfo;
+  settlementSwapPath: SettlementSwapPathSummary;
   network: string;
 }) {
   const feeLabel =
@@ -151,7 +151,7 @@ function SettlementSwapPathRow({
   return (
     <div className="token-row">
       <div className="token-info">
-        <span className="token-symbol">{settlementSwapPath.paymentTokenSymbol}</span>
+        <span className="token-symbol">{settlementSwapPath.settlementTokenSymbol}</span>
         <span className="token-network">
           {network} · {feeLabel}
         </span>
@@ -164,7 +164,7 @@ function SettlementSwapPathRow({
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export function StatusPage() {
-  const { status, avgLatencyMs, lastChecked, config } = useRelayerStatus();
+  const { status, avgLatencyMs, lastChecked, config } = useHostStatus();
 
   const fmtLatency = avgLatencyMs !== null ? `${avgLatencyMs}` : null;
   const fmtChecked = lastChecked
@@ -180,9 +180,9 @@ export function StatusPage() {
     <main className="status-page">
       {/* Header */}
       <div className="status-header">
-        <h1 className="status-title">Stelis Relayer Status</h1>
+        <h1 className="status-title">Stelis Host Status</h1>
         <p className="status-subtitle">
-          Live status of this Stelis relayer instance (single endpoint probe).
+          Live status of this Stelis Host (single endpoint probe).
         </p>
         <StatusBadge status={status} />
         {fmtChecked && <p className="last-checked">Last checked: {fmtChecked}</p>}
@@ -245,7 +245,7 @@ export function StatusPage() {
             { path: 'GET /relay/status', desc: 'Health check' },
             {
               path: 'GET /relay/config',
-              desc: 'Relayer config (settlement swap paths, network)',
+              desc: 'Relay config response (settlement swap paths, network)',
             },
             {
               path: 'POST /relay/prepare',
@@ -293,7 +293,7 @@ export function StatusPage() {
       {/* Footer */}
       <footer className="status-footer">
         <p>
-          Shared Settlement Network — Stelis Relayer v{APP_VERSION} · {networkLabel} ·{' '}
+          Shared Settlement Network — Stelis Host v{APP_VERSION} · {networkLabel} ·{' '}
           <Link to="/docs">API Docs</Link> · <Link to="/playground">Playground</Link>
         </p>
         <p className="footer-note">

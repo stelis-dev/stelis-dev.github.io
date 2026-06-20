@@ -98,7 +98,7 @@ const FAKE_TX_BYTES_HASH = '3cf654795a1c99c8e41f69aaeb3ad9e03f1b64cb14efb3b9b3b4
 const MOCK_BUILD_RESULT = {
   txBytes: FAKE_TX_BYTES,
   txBytesHash: FAKE_TX_BYTES_HASH,
-  relayerClaim: 1_800_000n, // simGas(1_300_000) + gasVariance(350K) + slippage(150K)
+  executionCostClaim: 1_800_000n, // simGas(1_300_000) + gasVariance(350K) + slippage(150K)
   simGas: 1_300_000n,
   gasVarianceFixedMist: 350_000n, // fixed gas variance buffer
   slippageBufferMist: 150_000n, // slippage buffer (for swap)
@@ -129,7 +129,7 @@ const ONCHAIN_CONFIG = {
   configId: '0xCONFIG',
   maxClaimMist: 50_000_000n,
   minSettleMist: 0n,
-  maxRelayerFeeMist: 500_000n,
+  maxHostFeeMist: 500_000n,
   protocolFlatFeeMist: 10_000n,
   configVersion: 1n,
 };
@@ -167,7 +167,7 @@ function makeMockContext() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -189,9 +189,9 @@ function makeExtraCfg(): PrepareHandlerConfig {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -211,7 +211,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: 50_000n,
+    quotedHostFeeMist: 50_000n,
   };
 }
 
@@ -230,7 +230,7 @@ async function makeParams(
   return withPrepareAuthorization({
     txKindBytes,
     senderAddress: TEST_PREPARE_AUTH_SENDER,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '127.0.0.1',
     ...overrides,
   });
@@ -249,7 +249,7 @@ describe('handlePrepare — success path', () => {
     // is automatically reflected here — no hardcoded byte arrays.
     const policyHashHex = computePolicyHash({
       maxClaimMist: ONCHAIN_CONFIG.maxClaimMist,
-      maxRelayerFeeMist: ONCHAIN_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: ONCHAIN_CONFIG.maxHostFeeMist,
       protocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       quoteTtlMs: PREPARE_TTL_MS,
       gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -260,11 +260,11 @@ describe('handlePrepare — success path', () => {
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
       configObjectId: '0xCONFIG',
       registryObjectId: '0xREGISTRY',
-      relayerRecipient: '0xRELAYER',
-      relayerClaim: 1_800_000n,
+      settlementPayoutRecipient: '0xPAYOUT',
+      executionCostClaim: 1_800_000n,
       policyHash: policyHashBytes,
       orderIdHash: new Uint8Array(0),
-      quotedRelayerFeeMist: 50_000n,
+      quotedHostFeeMist: 50_000n,
       expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
       paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
@@ -289,9 +289,9 @@ describe('handlePrepare — success path', () => {
       simGas: '1300000',
       gasVarianceFixedMist: '350000',
       slippageBufferMist: '150000',
-      quotedRelayerFee: '50000',
+      quotedHostFee: '50000',
       protocolFee: '10000',
-      relayerClaim: '1800000',
+      executionCostClaim: '1800000',
       grossGas: '1500000',
     });
   });
@@ -325,7 +325,7 @@ describe('handlePrepare — success path', () => {
     // every settle value from `parseSettleArgs(txBytes)` — store copies
     // would invite drift bugs without adding authority. GenericPrepareBuildOutput-only
     // fields are also never persisted.
-    expect(storedEntry).not.toHaveProperty('relayerClaim');
+    expect(storedEntry).not.toHaveProperty('executionCostClaim');
     expect(storedEntry).not.toHaveProperty('simGas');
     expect(storedEntry).not.toHaveProperty('gasVarianceFixedMist');
     expect(storedEntry).not.toHaveProperty('slippageBufferMist');
@@ -333,7 +333,7 @@ describe('handlePrepare — success path', () => {
     expect(storedEntry).not.toHaveProperty('profile');
     expect(storedEntry).not.toHaveProperty('quoteTimestampMs');
     expect(storedEntry).not.toHaveProperty('policyHash');
-    expect(storedEntry).not.toHaveProperty('quotedRelayerFeeMist');
+    expect(storedEntry).not.toHaveProperty('quotedHostFeeMist');
     expect(storedEntry).not.toHaveProperty('paymentInputSource');
   });
 
@@ -419,7 +419,7 @@ describe('handlePrepare — success path', () => {
     // Re-setup extractSettleArgs mock with orderIdHash matching the orderId
     const policyHashHex = computePolicyHash({
       maxClaimMist: ONCHAIN_CONFIG.maxClaimMist,
-      maxRelayerFeeMist: ONCHAIN_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: ONCHAIN_CONFIG.maxHostFeeMist,
       protocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       quoteTtlMs: PREPARE_TTL_MS,
       gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -430,11 +430,11 @@ describe('handlePrepare — success path', () => {
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
       configObjectId: '0xCONFIG',
       registryObjectId: '0xREGISTRY',
-      relayerRecipient: '0xRELAYER',
-      relayerClaim: 1_800_000n,
+      settlementPayoutRecipient: '0xPAYOUT',
+      executionCostClaim: 1_800_000n,
       policyHash: policyHashBytes,
       orderIdHash,
-      quotedRelayerFeeMist: 50_000n,
+      quotedHostFeeMist: 50_000n,
       expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
       paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
@@ -467,7 +467,7 @@ describe('handlePrepare — success path', () => {
     // Re-setup extractSettleArgs mock with orderIdHash matching the orderId
     const policyHashHex = computePolicyHash({
       maxClaimMist: ONCHAIN_CONFIG.maxClaimMist,
-      maxRelayerFeeMist: ONCHAIN_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: ONCHAIN_CONFIG.maxHostFeeMist,
       protocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       quoteTtlMs: PREPARE_TTL_MS,
       gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -478,11 +478,11 @@ describe('handlePrepare — success path', () => {
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
       configObjectId: '0xCONFIG',
       registryObjectId: '0xREGISTRY',
-      relayerRecipient: '0xRELAYER',
-      relayerClaim: 1_800_000n,
+      settlementPayoutRecipient: '0xPAYOUT',
+      executionCostClaim: 1_800_000n,
       policyHash: policyHashBytes,
       orderIdHash,
-      quotedRelayerFeeMist: 50_000n,
+      quotedHostFeeMist: 50_000n,
       expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
       paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
@@ -519,11 +519,11 @@ describe('handlePrepare — success path', () => {
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
       configObjectId: '0xCONFIG',
       registryObjectId: '0xREGISTRY',
-      relayerRecipient: '0xRELAYER',
-      relayerClaim: 1_800_000n,
+      settlementPayoutRecipient: '0xPAYOUT',
+      executionCostClaim: 1_800_000n,
       policyHash: new Uint8Array(32).fill(0x11),
       orderIdHash: new Uint8Array(0),
-      quotedRelayerFeeMist: 50_000n,
+      quotedHostFeeMist: 50_000n,
       expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
       expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
       paymentInputTrace: {

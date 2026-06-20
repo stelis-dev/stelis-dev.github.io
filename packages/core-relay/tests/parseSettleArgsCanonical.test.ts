@@ -18,14 +18,14 @@ const SETTLE_PARAMS = {
   vaultRegistryId: REGISTRY,
   vaultId: VAULT,
   useCreditAmount: 1_000_000n,
-  relayerClaim: 5_000_000n,
-  relayerRecipient: RECIPIENT,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 7n,
   simGasReported: 4_800_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 0n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 3n,
   quoteTimestampMs: 1_761_007_200_000,
@@ -81,7 +81,7 @@ describe('parseSettleArgs canonical BCS input checks', () => {
     const patchedInputs = patchPureInputBytes(
       commands,
       inputs,
-      indexMap.quotedRelayerFee,
+      indexMap.quotedHostFee,
       new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0]),
     );
 

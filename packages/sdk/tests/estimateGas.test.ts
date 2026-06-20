@@ -2,14 +2,14 @@
  * estimateGas — unit tests for StelisSDK.estimateGas()
  *
  * Tests verify:
- *   1. Budget-based gas estimation using computeRelayerCosts + fees
+ *   1. Budget-based gas estimation using computeExecutionCostClaim + fees
  *   2. Three profile branches (no vault / credit sufficient / credit insufficient)
  *   3. canSkipLiquidity logic (credit_general only)
- *   4. paymentToken is required for estimateGas()
+ *   4. settlementToken is required for estimateGas()
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayerConfig, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
@@ -60,16 +60,16 @@ vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
-const RELAYER = '0x' + 'b'.repeat(64);
+const SETTLEMENT_PAYOUT_RECIPIENT = '0x' + 'b'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const POOL = '0x' + '4'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 const SUI_TYPE = '0x2::sui::SUI';
 
-const BASE_CONFIG: RelayerConfig = {
+const BASE_CONFIG: RelayConfigResponse = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: RELAYER,
+  settlementPayoutRecipient: SETTLEMENT_PAYOUT_RECIPIENT,
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -81,16 +81,16 @@ const BASE_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -99,7 +99,7 @@ function makeSuiClient(): SuiGrpcClient {
   return { getReferenceGasPrice: vi.fn().mockResolvedValue(1000n) } as unknown as SuiGrpcClient;
 }
 
-async function createSDK(configOverrides?: Partial<RelayerConfig>): Promise<StelisSDK> {
+async function createSDK(configOverrides?: Partial<RelayConfigResponse>): Promise<StelisSDK> {
   const config = { ...BASE_CONFIG, ...configOverrides };
   mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(config), { status: 200 }));
   return StelisSDK.connect('http://mock.local/api');
@@ -116,32 +116,32 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     _midPrice = 27_000_000_000n;
   });
 
-  // ── 1: Budget-based estimation uses computeRelayerCosts + fees ──────
+  // ── 1: Budget-based estimation uses computeExecutionCostClaim + fees ──────
 
-  it('computes totalCost using computeRelayerCosts + quotedRelayerFee + protocolFee', async () => {
+  it('computes totalCost using computeExecutionCostClaim + quotedHostFee + protocolFee', async () => {
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
     });
 
     // Default budget = 5_000_000
-    // computeRelayerCosts({ computationCost: '5000000', storageCost: '0', storageRebate: '0' })
-    // → relayerClaim depends on the formula, but suiAmountHuman should be non-zero
+    // computeExecutionCostClaim({ computationCost: '5000000', storageCost: '0', storageRebate: '0' })
+    // → executionCostClaim depends on the formula, but suiAmountHuman should be non-zero
     expect(result.suiAmountHuman).not.toBe('0');
-    expect(result.displayUnit).toBe('DEEP'); // no vault → new_user → payment token
+    expect(result.displayUnit).toBe('DEEP'); // no vault → new_user → settlement token
     expect(result.profile).toBe('new_user');
     expect(result.canSkipLiquidity).toBe(false);
   });
 
-  // ── 2: No vault → new_user profile, display in payment token ────────
+  // ── 2: No vault → new_user profile, display in settlement token ────────
 
   it('returns new_user profile when user has no vault', async () => {
     _creditResult = { vaultObjectId: null, credit: '0', needsCreate: false };
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
     });
 
     expect(result.profile).toBe('new_user');
@@ -157,7 +157,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
     });
 
     expect(result.profile).toBe('credit_general');
@@ -172,7 +172,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
     });
 
     expect(result.profile).toBe('with_vault');
@@ -187,22 +187,22 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
     });
 
     expect(result.hasLiquidity).toBe(false);
     expect(result.amountHuman).toBe('0');
   });
-  // ── 6: paymentToken is required ────────────────────────────────────────
+  // ── 6: settlementToken is required ────────────────────────────────────────
 
-  it('throws when paymentToken is omitted', async () => {
+  it('throws when settlementToken is omitted', async () => {
     const sdk = await createSDK();
     await expect(
       sdk.estimateGas(makeSuiClient(), {
         addr: ADDR,
-        // paymentToken intentionally omitted
+        // settlementToken intentionally omitted
       } as Parameters<typeof sdk.estimateGas>[1]),
-    ).rejects.toThrow('paymentToken is required');
+    ).rejects.toThrow('settlementToken is required');
   });
 
   // ── 7: CreditQueryInconsistentStateError propagates to caller ─────
@@ -215,15 +215,15 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     );
     const sdk = await createSDK();
     await expect(
-      sdk.estimateGas(makeSuiClient(), { addr: ADDR, paymentToken: { type: DEEP_TYPE } }),
+      sdk.estimateGas(makeSuiClient(), { addr: ADDR, settlementToken: { type: DEEP_TYPE } }),
     ).rejects.toThrow(CreditQueryInconsistentStateError);
   });
 
   // ── 8: 1-hop qfb settlement swap path uses inverted rate composition ─────
 
-  it('returns payment token estimate for a 1-hop qfb settlement swap path', async () => {
+  it('returns settlement token estimate for a 1-hop qfb settlement swap path', async () => {
     const ALPHA_TYPE = `${PKG}::alpha::ALPHA`;
-    const qfbConfig: RelayerConfig = {
+    const qfbConfig: RelayConfigResponse = {
       ...BASE_CONFIG,
       supportedSettlementSwapPaths: [
         {
@@ -236,9 +236,9 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
               feeBps: 0,
             },
           ],
-          paymentTokenType: ALPHA_TYPE,
-          paymentTokenSymbol: 'ALPHA',
-          paymentTokenDecimals: 6,
+          settlementTokenType: ALPHA_TYPE,
+          settlementTokenSymbol: 'ALPHA',
+          settlementTokenDecimals: 6,
           lotSize: 100,
           minSize: 1_000_000,
           effectiveFeeRateBps: 0,
@@ -256,7 +256,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     const sdk = await createSDK(qfbConfig);
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: ALPHA_TYPE },
+      settlementToken: { type: ALPHA_TYPE },
     });
 
     expect(result.profile).toBe('new_user');
@@ -268,7 +268,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
 
   it('qfb: keeps estimate as a non-authoritative UX preview without executable min-size policy', async () => {
     const ALPHA_TYPE = `${PKG}::alpha::ALPHA`;
-    const qfbConfig: RelayerConfig = {
+    const qfbConfig: RelayConfigResponse = {
       ...BASE_CONFIG,
       supportedSettlementSwapPaths: [
         {
@@ -281,9 +281,9 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
               feeBps: 0,
             },
           ],
-          paymentTokenType: ALPHA_TYPE,
-          paymentTokenSymbol: 'ALPHA',
-          paymentTokenDecimals: 6,
+          settlementTokenType: ALPHA_TYPE,
+          settlementTokenSymbol: 'ALPHA',
+          settlementTokenDecimals: 6,
           lotSize: 100,
           minSize: 1_000_000_000, // 1 SUI (base)
           effectiveFeeRateBps: 0,
@@ -300,7 +300,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     const sdk = await createSDK(qfbConfig);
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
-      paymentToken: { type: ALPHA_TYPE },
+      settlementToken: { type: ALPHA_TYPE },
     });
 
     expect(result.profile).toBe('new_user');

@@ -1,5 +1,5 @@
 /**
- * StelisClient — thin HTTP wrapper around the relayer API.
+ * StelisClient — thin HTTP wrapper around the Relay API.
  *
  * Usage:
  *   const client = new StelisClient({ endpoint: 'http://localhost:3200/relay' });
@@ -57,7 +57,7 @@ export class StelisClient {
   private readonly endpoint: string;
   /**
    * App root URL for /studio/* endpoints.
-   * Derived by stripping a terminal /relay path segment from the relay endpoint.
+   * Derived by stripping a terminal /relay path segment from the Relay API endpoint.
    * e.g. 'http://localhost:3200/relay' → 'http://localhost:3200'
    */
   private readonly studioBase: string;
@@ -232,13 +232,13 @@ export class StelisClient {
     }
 
     if (data === undefined) {
-      // Successful HTTP status with a non-JSON body indicates an invalid relayer response.
+      // Successful HTTP status with a non-JSON body indicates an invalid Relay API response.
       // Surface the raw body snippet instead of a JSON parser SyntaxError.
       const bodyHint = summarizeHttpBody(raw);
       throw new Error(
         bodyHint
-          ? `Invalid non-JSON response from relayer: ${bodyHint}`
-          : `Invalid empty response from relayer (HTTP ${res.status})`,
+          ? `Invalid non-JSON response from Relay API: ${bodyHint}`
+          : `Invalid empty response from Relay API (HTTP ${res.status})`,
       );
     }
 

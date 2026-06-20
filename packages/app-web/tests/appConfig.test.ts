@@ -13,8 +13,8 @@ import * as path from 'path';
 const ctxSrc = fs.readFileSync(path.resolve(__dirname, '../src/AppConfigContext.tsx'), 'utf-8');
 
 describe('AppConfigContext bootstrap contract', () => {
-  it('fetches from RELAYER_BASE/config', () => {
-    expect(ctxSrc).toContain('`${RELAYER_BASE}/config`');
+  it('fetches from RELAY_API_BASE/config', () => {
+    expect(ctxSrc).toContain('`${RELAY_API_BASE}/config`');
   });
 
   it('validates network against testnet and mainnet only', () => {
@@ -42,8 +42,8 @@ describe('AppConfigContext bootstrap contract', () => {
     expect(ctxSrc).toContain('AbortSignal.timeout(10_000)');
   });
 
-  it('imports from relayerEndpoint, not runtimeEnv', () => {
-    expect(ctxSrc).toContain("from './relayerEndpoint'");
+  it('imports from relayApiEndpoint, not runtimeEnv', () => {
+    expect(ctxSrc).toContain("from './relayApiEndpoint'");
     expect(ctxSrc).not.toContain("from './runtimeEnv'");
   });
 });
@@ -64,8 +64,8 @@ describe('runtimeEnv keeps network-derived values out of build env', () => {
     expect(runtimeSrc).not.toContain('VITE_SUI_RPC_URL');
   });
 
-  it('still exports APP_WEB_RELAYER_BASE', () => {
-    expect(runtimeSrc).toContain('export const APP_WEB_RELAYER_BASE');
+  it('still exports APP_WEB_RELAY_API_BASE', () => {
+    expect(runtimeSrc).toContain('export const APP_WEB_RELAY_API_BASE');
   });
 
   it('maps Sui RPC endpoints from the API-reported network', () => {
@@ -87,7 +87,7 @@ describe('NetworkBadge uses AppConfigContext, not independent fetch', () => {
 
   it('does NOT fetch /relay/config independently', () => {
     expect(badgeSrc).not.toContain('fetch(');
-    expect(badgeSrc).not.toContain('RELAYER_BASE');
+    expect(badgeSrc).not.toContain('RELAY_API_BASE');
   });
 });
 

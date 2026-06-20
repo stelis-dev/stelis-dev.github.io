@@ -29,17 +29,17 @@ export function ConnectCredit({
   const selectedSettlementSwapPath = sdk
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
-  const paymentTokenType = selectedSettlementSwapPath?.paymentTokenType ?? '';
-  const paymentTokenDecimals = selectedSettlementSwapPath?.paymentTokenDecimals ?? 6;
-  const paymentTokenSymbol = selectedSettlementSwapPath?.paymentTokenSymbol ?? 'TOKEN';
+  const settlementTokenType = selectedSettlementSwapPath?.settlementTokenType ?? '';
+  const settlementTokenDecimals = selectedSettlementSwapPath?.settlementTokenDecimals ?? 6;
+  const settlementTokenSymbol = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'TOKEN';
   const [creditRes, setCreditRes] = useState<CreditResult | null>(null);
   const [creditError, setCreditError] = useState<string | null>(null);
   const [withdrawing, setWithdrawing] = useState(false);
   const [suiBalance, setSuiBalance] = useState<string | null>(null);
-  const [paymentTokenBalance, setPaymentTokenBalance] = useState<string | null>(null);
+  const [settlementTokenBalance, setSettlementTokenBalance] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!account || !client || !paymentTokenType) return;
+    if (!account || !client || !settlementTokenType) return;
     let cancelled = false;
     (async () => {
       // ── SUI balance ──────────────────────────────────────────────
@@ -50,21 +50,21 @@ export function ConnectCredit({
         // SUI balance fetch failed — non-critical for sandbox display
       }
 
-      // ── Payment token balance (coin objects + address balance) ─
+      // ── Settlement token balance (coin objects + address balance) ─
       try {
         const bal = await client.getBalance({
           owner: account.address,
-          coinType: paymentTokenType,
+          coinType: settlementTokenType,
         });
-        if (!cancelled) setPaymentTokenBalance(bal.balance.balance);
+        if (!cancelled) setSettlementTokenBalance(bal.balance.balance);
       } catch {
-        // Payment token balance fetch failed — non-critical for sandbox display
+        // Settlement token balance fetch failed — non-critical for sandbox display
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [account, client, refreshKey, paymentTokenType]);
+  }, [account, client, refreshKey, settlementTokenType]);
 
   const fetchCredit = useCallback(async () => {
     if (!account || !client || !sdk) return;
@@ -136,7 +136,7 @@ export function ConnectCredit({
       {/* Settlement Swap Path Status */}
       <div style={{ fontSize: 13, color: 'var(--text-secondary, #aaa)', marginBottom: 8 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-          <span>{paymentTokenSymbol}/SUI Rate:</span>
+          <span>{settlementTokenSymbol}/SUI Rate:</span>
           <strong style={{ color: settlementSwapPathStatus.hasLiquidity ? '#4caf50' : '#f44336' }}>
             {settlementSwapPathStatus.loading ? '...' : settlementSwapPathStatus.rateDisplay}
           </strong>
@@ -168,16 +168,16 @@ export function ConnectCredit({
             </strong>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span>{paymentTokenSymbol}:</span>
+            <span>{settlementTokenSymbol}:</span>
             <strong>
-              {paymentTokenBalance
+              {settlementTokenBalance
                 ? formatSmallestUnitDecimal(
                     parseDecimalIntegerToBigInt(
-                      paymentTokenBalance,
-                      `${paymentTokenSymbol} balance`,
+                      settlementTokenBalance,
+                      `${settlementTokenSymbol} balance`,
                     ),
-                    paymentTokenDecimals,
-                    Math.min(2, paymentTokenDecimals),
+                    settlementTokenDecimals,
+                    Math.min(2, settlementTokenDecimals),
                   )
                 : '0.00'}
             </strong>

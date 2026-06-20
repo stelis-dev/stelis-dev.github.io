@@ -25,14 +25,14 @@ const SETTLE_PARAMS = {
   vaultRegistryId: REGISTRY,
   vaultId: VAULT,
   useCreditAmount: 1_000_000n,
-  relayerClaim: 5_000_000n,
-  relayerRecipient: RECIPIENT,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 7n,
   simGasReported: 4_800_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 0n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 3n,
   quoteTimestampMs: 1_761_007_200_000,
@@ -59,14 +59,14 @@ function buildResolvedCreditTransaction(): Transaction {
       sharedObject(SUI_CLOCK_OBJECT_ID),
       sharedObject(VAULT),
       tx.pure.u64(SETTLE_PARAMS.useCreditAmount),
-      tx.pure.u64(SETTLE_PARAMS.relayerClaim),
-      tx.pure.address(SETTLE_PARAMS.relayerRecipient),
+      tx.pure.u64(SETTLE_PARAMS.executionCostClaim),
+      tx.pure.address(SETTLE_PARAMS.settlementPayoutRecipient),
       tx.pure.vector('u8', Array.from(SETTLE_PARAMS.receiptId)),
       tx.pure.u64(SETTLE_PARAMS.nonce),
       tx.pure.u64(SETTLE_PARAMS.simGasReported),
       tx.pure.u64(SETTLE_PARAMS.gasVarianceFixedMist),
       tx.pure.u64(SETTLE_PARAMS.slippageBufferMist),
-      tx.pure.u64(SETTLE_PARAMS.quotedRelayerFeeMist),
+      tx.pure.u64(SETTLE_PARAMS.quotedHostFeeMist),
       tx.pure.u64(SETTLE_PARAMS.expectedProtocolFeeMist),
       tx.pure.u64(SETTLE_PARAMS.expectedConfigVersion),
       tx.pure.u64(SETTLE_PARAMS.quoteTimestampMs),
@@ -94,8 +94,8 @@ function getTxData(tx: Transaction): { commands: unknown[]; inputs: unknown[] } 
 
 function expectedFields(): ExpectedSettleTransactionFields {
   return {
-    relayerClaimMist: SETTLE_PARAMS.relayerClaim,
-    quotedRelayerFeeMist: SETTLE_PARAMS.quotedRelayerFeeMist,
+    executionCostClaimMist: SETTLE_PARAMS.executionCostClaim,
+    quotedHostFeeMist: SETTLE_PARAMS.quotedHostFeeMist,
     expectedProtocolFeeMist: SETTLE_PARAMS.expectedProtocolFeeMist,
     policyHash: SETTLE_PARAMS.policyHash,
     orderIdHash: SETTLE_PARAMS.orderIdHash,
@@ -134,8 +134,8 @@ describe('settle transaction fields', () => {
     const fields = extractSettleTransactionFieldsFromData(commands, inputs, PKG);
 
     expect(fields.settleFunction).toBe(SETTLE_WITH_CREDIT_FUNCTION);
-    expect(fields.relayerClaimMist).toBe(SETTLE_PARAMS.relayerClaim);
-    expect(fields.quotedRelayerFeeMist).toBe(SETTLE_PARAMS.quotedRelayerFeeMist);
+    expect(fields.executionCostClaimMist).toBe(SETTLE_PARAMS.executionCostClaim);
+    expect(fields.quotedHostFeeMist).toBe(SETTLE_PARAMS.quotedHostFeeMist);
     expect(fields.expectedProtocolFeeMist).toBe(SETTLE_PARAMS.expectedProtocolFeeMist);
     expect(fields.policyHash).toEqual(SETTLE_PARAMS.policyHash);
     expect(fields.orderIdHash).toEqual(SETTLE_PARAMS.orderIdHash);
@@ -159,14 +159,14 @@ describe('settle transaction fields', () => {
 
     const result = validateSettleTransactionFields(fields, {
       ...expectedFields(),
-      quotedRelayerFeeMist: SETTLE_PARAMS.quotedRelayerFeeMist + 1n,
+      quotedHostFeeMist: SETTLE_PARAMS.quotedHostFeeMist + 1n,
     });
 
     expect(result).toEqual({
       ok: false,
-      code: 'SETTLE_RELAYER_FEE_MISMATCH',
-      message: `quotedRelayerFeeMist ${SETTLE_PARAMS.quotedRelayerFeeMist} != expected ${
-        SETTLE_PARAMS.quotedRelayerFeeMist + 1n
+      code: 'SETTLE_HOST_FEE_MISMATCH',
+      message: `quotedHostFeeMist ${SETTLE_PARAMS.quotedHostFeeMist} != expected ${
+        SETTLE_PARAMS.quotedHostFeeMist + 1n
       }`,
     });
   });
@@ -203,7 +203,7 @@ describe('settle transaction fields', () => {
     const patchedInputs = patchPureInputBytes(
       commands,
       inputs,
-      indices.quotedRelayerFee,
+      indices.quotedHostFee,
       new Uint8Array([1, 2]),
     );
 

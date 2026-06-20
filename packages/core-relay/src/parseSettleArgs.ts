@@ -76,7 +76,7 @@ export interface ArgIndexMap {
   gasVarianceFixedMist: number;
   /** slippage_buffer_mist Pure u64 index (audit-trail, S-12) */
   slippageBufferMist: number;
-  quotedRelayerFee: number; // quoted_relayer_fee_mist Pure u64 index
+  quotedHostFee: number; // quoted_host_fee_mist Pure u64 index
   expectedProtocolFee: number; // expected_protocol_fee_mist Pure u64 index
   expectedConfigVersion: number; // expected_config_version Pure u64 index
   /** quote_timestamp_ms Pure u64 index */
@@ -100,15 +100,15 @@ function deriveArgIndexMap(vc: SettleVariantClass): ArgIndexMap {
   return {
     config: 0,
     registry: 1,
-    claim: s + FIELD_OFFSET.relayerClaim,
-    recipient: s + FIELD_OFFSET.relayerRecipient,
+    claim: s + FIELD_OFFSET.executionCostClaim,
+    recipient: s + FIELD_OFFSET.settlementPayoutRecipient,
     pools: [...poolIndices],
     receiptId: s + FIELD_OFFSET.receiptId,
     nonce: s + FIELD_OFFSET.nonce,
     simGasReported: s + FIELD_OFFSET.simGasReported,
     gasVarianceFixedMist: s + FIELD_OFFSET.gasVarianceFixedMist,
     slippageBufferMist: s + FIELD_OFFSET.slippageBufferMist,
-    quotedRelayerFee: s + FIELD_OFFSET.quotedRelayerFeeMist,
+    quotedHostFee: s + FIELD_OFFSET.quotedHostFeeMist,
     expectedProtocolFee: s + FIELD_OFFSET.expectedProtocolFeeMist,
     expectedConfigVersion: s + FIELD_OFFSET.expectedConfigVersion,
     quoteTimestampMs: s + FIELD_OFFSET.quoteTimestampMs,
@@ -354,8 +354,8 @@ export function parseSettleArgs(
     registryObjectId = resolveObjectId(args[indexMap.registry], inputs);
   }
 
-  const relayerClaim = decodePureU64(args[indexMap.claim], inputs);
-  const relayerRecipient = decodePureAddress(args[indexMap.recipient], inputs);
+  const executionCostClaim = decodePureU64(args[indexMap.claim], inputs);
+  const settlementPayoutRecipient = decodePureAddress(args[indexMap.recipient], inputs);
 
   let extractedSettlementSwapPath: SettleArgs['extractedSettlementSwapPath'] | undefined;
   if (fnName !== SETTLE_WITH_CREDIT_FUNCTION) {
@@ -376,12 +376,12 @@ export function parseSettleArgs(
   return {
     configObjectId,
     registryObjectId,
-    relayerRecipient,
-    relayerClaim,
+    settlementPayoutRecipient,
+    executionCostClaim,
     extractedSettlementSwapPath,
     policyHash: decodePureVectorU8(args[indexMap.policyHash], inputs),
     orderIdHash: decodePureVectorU8(args[indexMap.orderIdHash], inputs),
-    quotedRelayerFeeMist: decodePureU64(args[indexMap.quotedRelayerFee], inputs),
+    quotedHostFeeMist: decodePureU64(args[indexMap.quotedHostFee], inputs),
     expectedProtocolFeeMist: decodePureU64(args[indexMap.expectedProtocolFee], inputs),
     expectedConfigVersion: decodePureU64(args[indexMap.expectedConfigVersion], inputs),
     nonce: decodePureU64(args[indexMap.nonce], inputs),

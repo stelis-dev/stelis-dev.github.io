@@ -45,9 +45,9 @@ describe('StelisClient', () => {
               simGas: '1',
               gasVarianceFixedMist: '1',
               slippageBufferMist: '1',
-              quotedRelayerFee: '1',
+              quotedHostFee: '1',
               protocolFee: '1',
-              relayerClaim: '1',
+              executionCostClaim: '1',
               grossGas: '1',
             },
             profile: 'new_user',
@@ -65,7 +65,7 @@ describe('StelisClient', () => {
       await c.prepare({
         txKindBytes: 'k',
         senderAddress: '0x' + 'a'.repeat(64),
-        paymentTokenType: '0x2::sui::SUI',
+        settlementTokenType: '0x2::sui::SUI',
       });
       await c.sponsor({
         txBytes: 'b64',
@@ -119,9 +119,9 @@ describe('StelisClient', () => {
           simGas: '2000000',
           gasVarianceFixedMist: '200000',
           slippageBufferMist: '50000',
-          quotedRelayerFee: '100000',
+          quotedHostFee: '100000',
           protocolFee: '20000',
-          relayerClaim: '2120000',
+          executionCostClaim: '2120000',
           grossGas: '3000000',
         },
       };
@@ -131,7 +131,7 @@ describe('StelisClient', () => {
       const result = await client.prepare({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
       });
 
       expect(result.txBytes).toBe('base64txbytes');
@@ -143,7 +143,7 @@ describe('StelisClient', () => {
       expect(JSON.parse(init.body)).toEqual({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
       });
     });
 
@@ -155,9 +155,9 @@ describe('StelisClient', () => {
           simGas: '2000000',
           gasVarianceFixedMist: '200000',
           slippageBufferMist: '50000',
-          quotedRelayerFee: '100000',
+          quotedHostFee: '100000',
           protocolFee: '20000',
-          relayerClaim: '2120000',
+          executionCostClaim: '2120000',
           grossGas: '3000000',
         },
         orderId: 'test-123',
@@ -168,7 +168,7 @@ describe('StelisClient', () => {
       const result = await client.prepare({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
         orderId: 'test-123',
       });
 
@@ -283,7 +283,7 @@ describe('StelisClient', () => {
       );
 
       await expect(client.getStatus()).rejects.toThrow(
-        /Invalid non-JSON response from relayer: <html>ok<\/html>/,
+        /Invalid non-JSON response from Relay API: <html>ok<\/html>/,
       );
     });
   });

@@ -1,5 +1,5 @@
 /**
- * computePolicyHash — deterministic SHA-256 of relayer policy fields.
+ * computePolicyHash — deterministic SHA-256 of Host policy fields.
  *
  * Server-only owner of the S-16 policy hash. Both `/relay/prepare`
  * (issuance via `session/sponsoredExecution/genericExecutionPolicy.ts`) and
@@ -11,15 +11,15 @@
  * it through to the PTB. They do NOT need to compute it themselves and
  * the helper is intentionally not exposed on `@stelis/core-relay/browser`
  * or `@stelis/core-relay`. The Node `crypto.createHash` dependency is the
- * structural reason; the policy decision is that the relayer is the only
+ * structural reason; the policy decision is that the Host is the only
  * API allowed to compute the hash.
  */
 import { createHash } from 'crypto';
 
 export interface PolicyFields {
   maxClaimMist: bigint;
-  /** On-chain cap for relayer-quoted fee (max_relayer_fee_mist). Used in policyHash binding. */
-  maxRelayerFeeMist: bigint;
+  /** On-chain cap for host-quoted fee (max_host_fee_mist). Used in policyHash binding. */
+  maxHostFeeMist: bigint;
   protocolFeeMist: bigint;
   quoteTtlMs: number;
   gasVarianceFixedMist: bigint;
@@ -35,7 +35,7 @@ export interface PolicyFields {
  * @example
  * computePolicyHash({
  *   maxClaimMist: 50_000_000n,
- *   relayerFeeMist: 50_000n,
+ *   hostFeeMist: 50_000n,
  *   protocolFeeMist: 0n,
  *   quoteTtlMs: 60_000,
  *   gasVarianceFixedMist: 100_000n,
@@ -47,7 +47,7 @@ export function computePolicyHash(fields: PolicyFields): string {
   const raw: Record<string, string | number> = {
     gasVarianceFixedMist: fields.gasVarianceFixedMist.toString(),
     maxClaimMist: fields.maxClaimMist.toString(),
-    maxRelayerFeeMist: fields.maxRelayerFeeMist.toString(),
+    maxHostFeeMist: fields.maxHostFeeMist.toString(),
     protocolFeeMist: fields.protocolFeeMist.toString(),
     quoteTtlMs: fields.quoteTtlMs,
     slippageCapBps: fields.slippageCapBps,

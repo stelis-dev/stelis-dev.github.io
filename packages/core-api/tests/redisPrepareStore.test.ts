@@ -132,12 +132,12 @@ describe('RedisPrepareStore — Redis-specific', () => {
     expect(generic.nonce).toBe(1n);
     // Settle observability fields are not persisted — sponsor reads each
     // value from `parseSettleArgs(txBytes)`.
-    expect(generic).not.toHaveProperty('relayerClaim');
+    expect(generic).not.toHaveProperty('executionCostClaim');
     expect(generic).not.toHaveProperty('simGas');
     expect(generic).not.toHaveProperty('gasVarianceFixedMist');
     expect(generic).not.toHaveProperty('slippageBufferMist');
     expect(generic).not.toHaveProperty('grossGas');
-    expect(generic).not.toHaveProperty('quotedRelayerFeeMist');
+    expect(generic).not.toHaveProperty('quotedHostFeeMist');
     expect(generic).not.toHaveProperty('profile');
     expect(generic).not.toHaveProperty('quoteTimestampMs');
     expect(generic).not.toHaveProperty('policyHash');
@@ -489,12 +489,12 @@ describe('RedisPrepareStore — Redis-specific', () => {
     expect(consumed.userId).toBe('user-1');
     expect(consumed.reservedGasMist).toBe(1_850_000n);
     expect(consumed.nonce).toBe(0n);
-    expect('relayerClaim' in consumed).toBe(false);
+    expect('executionCostClaim' in consumed).toBe(false);
     expect('simGas' in consumed).toBe(false);
     expect('grossGas' in consumed).toBe(false);
     expect('gasVarianceFixedMist' in consumed).toBe(false);
     expect('slippageBufferMist' in consumed).toBe(false);
-    expect('quotedRelayerFeeMist' in consumed).toBe(false);
+    expect('quotedHostFeeMist' in consumed).toBe(false);
     expect('profile' in consumed).toBe(false);
     expect('policyHash' in consumed).toBe(false);
     expect('quoteTimestampMs' in consumed).toBe(false);

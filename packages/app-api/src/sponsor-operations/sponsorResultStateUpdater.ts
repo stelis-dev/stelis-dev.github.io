@@ -12,7 +12,7 @@
  *      `SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS`. Result is written to the
  *      slot HASH via `updateEntityLuaScript` (Redis authors ordering
  *      fields).
- *   2. When the sponsor refill account address equals `RELAYER_RECIPIENT_ADDRESS`
+ *   2. When the sponsor refill account address equals `SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS`
  *      and `outcome === 'success'`, run a bounded sponsor refill account
  *      `getBalance` probe and write the sponsor refill account HASH.
  *
@@ -56,8 +56,8 @@ export interface SponsorResultCallbackDeps {
   readonly state: RedisSponsorOperationsState;
   /** Sponsor refill account address for bounded sponsor refill account balance probes. */
   readonly sponsorRefillAccountAddress: string;
-  /** Relayer recipient address. Used to detect sponsor refill account-as-recipient mode. */
-  readonly relayerRecipientAddress: string;
+  /** Settlement payout recipient address. Used to detect sponsor refill account-as-recipient mode. */
+  readonly settlementPayoutRecipientAddress: string;
   /**
    * Slot balance probe upper bound (ms). Required — caller must justify
    * per `docs/parameters.md`. No default is supplied here.
@@ -92,15 +92,15 @@ export interface SponsorResultCallbackDeps {
 
 /**
  * Build the host-side post-sponsor result callback. The returned function is the
- * value you pass to `RelayerApiConfig.onSponsorResult` /
+ * value you pass to `HostRuntimeConfig.onSponsorResult` /
  * `PromotionSponsorContext.onSponsorResult`.
  */
 export function createSponsorResultStateUpdater(
   deps: SponsorResultCallbackDeps,
 ): SponsorResultCallback {
   const warnThresholdMist = deps.warnThresholdMist ?? SPONSOR_BALANCE_WARN_MIST;
-  const sponsorRefillAccountIsRelayerRecipient =
-    deps.sponsorRefillAccountAddress === deps.relayerRecipientAddress;
+  const sponsorRefillAccountIsSettlementPayoutRecipient =
+    deps.sponsorRefillAccountAddress === deps.settlementPayoutRecipientAddress;
 
   function classifySlot(balance: bigint): SponsorSlotState {
     return balance >= warnThresholdMist ? 'healthy' : 'low_balance';
@@ -196,7 +196,7 @@ export function createSponsorResultStateUpdater(
   return async function onSponsorResult(metadata: SponsorResultMetadata): Promise<void> {
     try {
       await probeAndWriteSlot(metadata.sponsorAddress);
-      if (sponsorRefillAccountIsRelayerRecipient && metadata.outcome === 'success') {
+      if (sponsorRefillAccountIsSettlementPayoutRecipient && metadata.outcome === 'success') {
         await probeAndWriteSponsorRefillAccount();
       }
     } catch (outerErr) {

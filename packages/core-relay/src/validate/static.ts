@@ -8,7 +8,7 @@
 import { MAX_COMMANDS } from '../constants.js';
 import { SETTLE_MODULE, SETTLE_FUNCTIONS, SETTLE_WITH_CREDIT_FUNCTION } from '@stelis/contracts';
 import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
-import type { OnchainConfig, RelayerEnv, SettleArgs, ValidationResult } from '../types.js';
+import type { OnchainConfig, HostValidationEnv, SettleArgs, ValidationResult } from '../types.js';
 import { ok, fail } from '../types.js';
 
 /** Type guard: narrows PtbCommand to MoveCallCommand */
@@ -71,7 +71,7 @@ export function containsGasCoinReference(args: unknown[]): boolean {
 // ─────────────────────────────────────────────
 
 /**
- * Validates that the PTB structure satisfies relayer policy.
+ * Validates that the PTB structure satisfies Host policy.
  *
  * Policy (swap_and_settle phase):
  *   - Stelis package: exactly 1 call in SETTLE_FUNCTIONS (1-hop variants)
@@ -80,7 +80,7 @@ export function containsGasCoinReference(args: unknown[]): boolean {
  *   - Publish/Upgrade: always rejected
  *   - Command count: <= MAX_COMMANDS
  */
-export function validatePtbStructure(commands: PtbCommand[], env: RelayerEnv): ValidationResult {
+export function validatePtbStructure(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'L1_TOO_MANY_COMMANDS',
@@ -139,11 +139,11 @@ export function validatePtbStructure(commands: PtbCommand[], env: RelayerEnv): V
 // ─────────────────────────────────────────────
 
 /**
- * Validates user-supplied commands before the relayer appends settle.
+ * Validates user-supplied commands before the Host appends settle.
  *
  * This is the `/prepare` counterpart of `validatePtbStructure()` (L1).
  * Identical policy EXCEPT:
- *   - Zero settle calls is expected (the relayer will add settle later)
+ *   - Zero settle calls is expected (the Host will add settle later)
  *   - Settle calls are actively rejected (user must not include them)
  *
  * Security checks inherited from L1:
@@ -153,7 +153,7 @@ export function validatePtbStructure(commands: PtbCommand[], env: RelayerEnv): V
  *   - Stelis package guard (only vault::withdraw allowed)
  *   - Publish/Upgrade implicitly blocked by non-MoveCall allowlist
  */
-export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): ValidationResult {
+export function validateUserCommands(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'P1_TOO_MANY_COMMANDS',
@@ -175,12 +175,12 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
       const isStelisPkg = cmd.packageId === env.packageId;
 
       if (isStelisPkg) {
-        // Settle calls in user commands → reject (relayer will add settle)
+        // Settle calls in user commands → reject (Host will add settle)
         const isSwapAndSettle = cmd.module === SETTLE_MODULE && SETTLE_FUNCTIONS.has(cmd.function);
         if (isSwapAndSettle) {
           return fail(
             'P1_USER_SETTLE_FORBIDDEN',
-            `User commands must not contain settle calls — relayer will append settle`,
+            `User commands must not contain settle calls — Host will append settle`,
           );
         }
 
@@ -207,14 +207,14 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
 // ─────────────────────────────────────────────
 
 /**
- * Validates that settle() call arguments match relayer policy.
+ * Validates that settle() call arguments match Host policy.
  *
  * Checks (in order):
  *   1. Config object ID == env.configId
  *   2. VaultRegistry object ID == env.vaultRegistryId
- *   3. relayer_recipient == env.relayerAddress
- *   4. relayer_claim <= config.maxClaimMist
- *   5. quoted_relayer_fee_mist <= config.maxRelayerFeeMist (L2_RELAYER_FEE_CAP)
+ *   3. settlement_payout_recipient == env.settlementPayoutRecipientAddress
+ *   4. execution_cost_claim_mist <= config.maxClaimMist
+ *   5. quoted_host_fee_mist <= config.maxHostFeeMist (L2_HOST_FEE_CAP)
  *   6. expected_protocol_fee_mist == config.protocolFlatFeeMist (L2_PROTOCOL_FEE_MISMATCH)
  *   7. expected_config_version == config.configVersion (L2_CONFIG_VERSION_MISMATCH)
  *   8. Settlement swap path validation (if extractedSettlementSwapPath is present):
@@ -232,7 +232,7 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
 export function validateSettleArgs(
   args: SettleArgs,
   config: OnchainConfig,
-  env: RelayerEnv,
+  env: HostValidationEnv,
   expectedPolicyHash?: Uint8Array,
   expectedOrderIdHash?: Uint8Array,
 ): ValidationResult {
@@ -254,27 +254,27 @@ export function validateSettleArgs(
     }
   }
 
-  // (3) Relayer recipient check
-  if (args.relayerRecipient !== env.relayerAddress) {
+  // (3) Settlement payout recipient check
+  if (args.settlementPayoutRecipient !== env.settlementPayoutRecipientAddress) {
     return fail(
       'L2_WRONG_RECIPIENT',
-      `Relayer recipient mismatch: got ${args.relayerRecipient}, expected ${env.relayerAddress}`,
+      `Settlement payout recipient mismatch: got ${args.settlementPayoutRecipient}, expected ${env.settlementPayoutRecipientAddress}`,
     );
   }
 
   // (4) Claim upper bound check
-  if (args.relayerClaim > config.maxClaimMist) {
+  if (args.executionCostClaim > config.maxClaimMist) {
     return fail(
       'L2_EXCESSIVE_CLAIM',
-      `relayer_claim ${args.relayerClaim} exceeds max_claim_mist ${config.maxClaimMist}`,
+      `execution_cost_claim_mist ${args.executionCostClaim} exceeds max_claim_mist ${config.maxClaimMist}`,
     );
   }
 
-  // (5) L2: Quoted relayer fee cap (mirrors on-chain ERelayerFeeCapExceeded)
-  if (args.quotedRelayerFeeMist > config.maxRelayerFeeMist) {
+  // (5) L2: Quoted host fee cap (mirrors on-chain EHostFeeCapExceeded)
+  if (args.quotedHostFeeMist > config.maxHostFeeMist) {
     return fail(
-      'L2_RELAYER_FEE_CAP',
-      `quoted_relayer_fee_mist ${args.quotedRelayerFeeMist} exceeds max_relayer_fee_mist ${config.maxRelayerFeeMist}`,
+      'L2_HOST_FEE_CAP',
+      `quoted_host_fee_mist ${args.quotedHostFeeMist} exceeds max_host_fee_mist ${config.maxHostFeeMist}`,
     );
   }
 

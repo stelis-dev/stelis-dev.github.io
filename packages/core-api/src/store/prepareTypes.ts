@@ -92,7 +92,7 @@ interface PreparedTxEntryBase {
  * Generic relay prepare entry — `/relay/prepare` → `/relay/sponsor`.
  *
  * Coordination-only at `/relay/sponsor`. Every execution-critical settle
- * value (relayerClaim, fee components, profile, policyHash,
+ * value (executionCostClaim, fee components, profile, policyHash,
  * quoteTimestampMs) is derived from the submitted `txBytes` via
  * `parseSettleArgs(...)` at sponsor time; `txBytesHash` consume() proves
  * byte-equality with the /prepare commit. The store therefore carries
@@ -101,9 +101,9 @@ interface PreparedTxEntryBase {
  * monotonic nonce compaction key, optional orderId echo for L2
  * reconstruction).
  *
- * Build-derived observability fields (`relayerClaim`, `simGas`,
+ * Build-derived observability fields (`executionCostClaim`, `simGas`,
  * `gasVarianceFixedMist`, `slippageBufferMist`, `grossGas`, `profile`,
- * `quoteTimestampMs`, `policyHash`, `quotedRelayerFeeMist`) are not
+ * `quoteTimestampMs`, `policyHash`, `quotedHostFeeMist`) are not
  * persisted — sponsor authority never reads them from the store, and
  * keeping copies would invite drift. See
  * architecture/prepare-sponsor-session.md for the full coordination-only
@@ -121,12 +121,12 @@ export interface GenericPreparedTxEntry extends PreparedTxEntryBase {
  *
  * Contains promotion-specific fields for ExecutionLedger reserve/consume/release.
  * Does NOT carry generic settle-specific fields (no settle PTB, no policy hash,
- * no relayer fee, no config drift detection, no GenericPrepareBuildOutput gas estimation fields).
+ * no host fee, no config drift detection, no GenericPrepareBuildOutput gas estimation fields).
  *
  * `reservedGasMist` is the amount passed to `ExecutionLedger.reserve()` at prepare
  * time and used as the ceiling for actual gas comparison in the Studio sponsor
  * SponsoredExecutionPolicy sponsor result accounting. It is the dry-run simGas +
- * GAS_VARIANCE_FIXED_MIST, not a "relayer claim" in the generic settle sense.
+ * GAS_VARIANCE_FIXED_MIST, not a "execution cost claim" in the generic settle sense.
  */
 export interface PromotionPreparedTxEntry extends PreparedTxEntryBase {
   mode: 'promotion';

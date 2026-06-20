@@ -4,7 +4,7 @@
  * All requests use `credentials: 'include'` for cookie-based auth.
  * In dev, Vite proxy forwards /auth, /api, /relay, /studio to app-api.
  * In prod, VITE_STELIS_API_URL provides the base URL (same pattern as
- * app-web's RELAYER_BASE in relayerEndpoint.ts).
+ * app-web's RELAY_API_BASE in relayApiEndpoint.ts).
  *
  * Cross-package contract types used by this file (sponsor operations admin
  * payload family + settlement swap path response data) come from
@@ -16,7 +16,7 @@
 
 import type {
   SingleHopSettlementSwapPathResponse,
-  SponsorOperationsStatus,
+  SponsorOperationsStatus as SponsorOperationsState,
 } from '@stelis/contracts';
 
 /**
@@ -94,30 +94,30 @@ export function logout(): Promise<void> {
   return apiFetch('/auth/logout', { method: 'POST' });
 }
 
-// ── Pool / Dashboard ───────────────────────────────────────────────────────
+// ── Sponsor Operations / Dashboard ─────────────────────────────────────────
 
 interface FeeConfig {
-  maxRelayerFeeMist: string;
+  maxHostFeeMist: string;
   protocolFlatFeeMist: string;
   maxClaimMist: string;
   minSettleMist: string;
   configVersion: string;
 }
 
-export interface PoolAdminStatus {
-  // `/api/pool` runs a bounded sponsor refill account probe and reads the shared Redis
+export interface SponsorOperationsStatus {
+  // `/api/sponsor-operations` runs a bounded sponsor refill account probe and reads the shared Redis
   // state on every request after boot-time sync. The field is always a
   // concrete payload.
-  sponsorOperations: SponsorOperationsStatus;
+  sponsorOperations: SponsorOperationsState;
   primaryAddress: string | null;
-  relayerRecipientAddress: string;
+  settlementPayoutRecipientAddress: string;
   network: string;
   sponsorBalanceWarnMist?: string;
   sponsorBalanceRefillTargetMist?: string;
   feeConfig: FeeConfig | null;
   /**
    * Subset of `SingleHopSettlementSwapPathResponse` consumed by admin pages. Fields
-   * `lotSize`, `minSize`, and `paymentTokenDecimals` are omitted because
+   * `lotSize`, `minSize`, and `settlementTokenDecimals` are omitted because
    * admin never reads them. The shared transport type lives in
    * `@stelis/contracts` (type-only import above); drift is prevented at
    * type-check time by deriving this subset from it directly.
@@ -125,15 +125,15 @@ export interface PoolAdminStatus {
   supportedSettlementSwapPaths: Array<
     Pick<
       SingleHopSettlementSwapPathResponse,
-      | 'paymentTokenSymbol'
-      | 'paymentTokenType'
+      | 'settlementTokenSymbol'
+      | 'settlementTokenType'
       | 'settlementSwapDirection'
       | 'hops'
       | 'effectiveFeeRateBps'
     >
   >;
-  // Config-page fields (also returned by /api/pool)
-  quotedRelayerFeeMist?: string;
+  // Config-page fields (also returned by /api/sponsor-operations)
+  quotedHostFeeMist?: string;
   onChainIds?: {
     packageId: string | null;
     configId: string | null;
@@ -154,8 +154,8 @@ export interface PoolAdminStatus {
   };
 }
 
-export function getPool(): Promise<PoolAdminStatus> {
-  return apiFetch<PoolAdminStatus>('/api/pool');
+export function getSponsorOperations(): Promise<SponsorOperationsStatus> {
+  return apiFetch<SponsorOperationsStatus>('/api/sponsor-operations');
 }
 
 // ── Audit Logs ─────────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ export function executeSponsorRefillAccountWithdraw(data: {
 
 // ── Studio ─────────────────────────────────────────────────────────────
 
-export interface StudioData {
+export interface StudioStatusResponse {
   enabled: boolean;
   config?: {
     developerJwtTrustConfigured: boolean;
@@ -212,8 +212,8 @@ export interface StudioData {
   };
 }
 
-export function getStudio(): Promise<StudioData> {
-  return apiFetch<StudioData>('/api/studio');
+export function getStudio(): Promise<StudioStatusResponse> {
+  return apiFetch<StudioStatusResponse>('/api/studio');
 }
 
 // ── Promotions ────────────────────────────────────────────────────────────
@@ -296,9 +296,9 @@ export interface SponsoredExecutionAggregate {
   sponsoredExecutions: string;
   /** Unsigned decimal count. */
   lossCount: string;
-  /** Sum of known relayer net rows. */
-  cumulativeRelayerNetMist: string;
-  /** Sum of negative known relayer net rows. */
+  /** Sum of known host net rows. */
+  cumulativeHostNetMist: string;
+  /** Sum of negative known host net rows. */
   cumulativeLossMist: string;
 }
 
@@ -320,15 +320,15 @@ export interface SponsoredExecutionLogEntry {
   promotionId: string | null;
   userId: string | null;
   recoveredGasMist: string | null;
-  relayerPaidGasMist: string | null;
-  relayerNetMist: string | null;
+  hostPaidGasMist: string | null;
+  hostNetMist: string | null;
   /**
    * Unsigned decimal MIST string for known rows (`"0"` when fee is
    * explicitly zero). `null` when `economicsStatus === "unknown"`.
    */
-  relayerFeeMist: string | null;
+  hostFeeMist: string | null;
   /**
-   * Protocol fee is protocol revenue and does not enter relayer net.
+   * Protocol fee is protocol revenue and does not enter host net.
    * Kept on the row for audit/debugging; not shown in the default log table.
    */
   protocolFeeMist: string | null;

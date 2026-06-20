@@ -193,7 +193,7 @@ export async function validatePromotionPreconsumePolicy(
     );
   }
 
-  // Parse the hash-bound `txBytes` into a Transaction. `decodeTxBytes` at the
+  // Parse the stored-hash-verified `txBytes` into a Transaction. `decodeTxBytes` at the
   // route boundary already validated base64; BCS deserialization can still
   // fail on malformed TransactionKind payloads. Classify that as `BAD_REQUEST`
   // / 400 so route-level 500 `SPONSOR_FAILED` cannot mask a client-visible

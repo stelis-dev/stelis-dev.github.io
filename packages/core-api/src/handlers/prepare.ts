@@ -15,7 +15,7 @@ import {
 } from '@stelis/contracts';
 import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
 import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
-import type { RelayerContext } from '../context.js';
+import type { HostContext } from '../context.js';
 import { checkBlockedRequest } from '../abuseBlocking.js';
 import { PREPARE_TTL_MS } from '../preparePolicy.js';
 import { PrepareValidationError } from '../prepare/replay.js';
@@ -49,8 +49,8 @@ export interface PrepareParams {
   txKindBytes: string;
   /** User wallet address */
   senderAddress: string;
-  /** Payment token type string (e.g. "0x...::deep::DEEP"). */
-  paymentTokenType: string;
+  /** Settlement token type string (e.g. "0x...::deep::DEEP"). */
+  settlementTokenType: string;
   /** Slippage tolerance in BPS. Default: `DEFAULT_SLIPPAGE_BPS`. */
   slippageBps?: number;
   /** Gas margin in BPS. Default: `DEFAULT_GAS_MARGIN_BPS`. */
@@ -77,11 +77,11 @@ export interface PrepareHandlerConfig {
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths: AllowedSettlementSwapPath[];
   /**
-   * Relayer-quoted fee per TX (MIST) — set from RELAYER_FEE_MIST env var.
-   * Embedded in the settle PTB as `quoted_relayer_fee_mist`.
-   * On-chain validates this <= max_relayer_fee_mist (ERelayerFeeCapExceeded).
+   * Host-quoted fee per TX (MIST) — set from HOST_FEE_MIST env var.
+   * Embedded in the settle PTB as `quoted_host_fee_mist`.
+   * On-chain validates this <= max_host_fee_mist (EHostFeeCapExceeded).
    */
-  quotedRelayerFeeMist: bigint;
+  quotedHostFeeMist: bigint;
 }
 
 export interface PrepareResult {
@@ -99,12 +99,12 @@ export interface PrepareResult {
     gasVarianceFixedMist: string;
     /** Slippage buffer MIST (0 for credit-only settle) */
     slippageBufferMist: string;
-    /** Relayer-quoted fee per TX (MIST) */
-    quotedRelayerFee: string;
+    /** Host-quoted fee per TX (MIST) */
+    quotedHostFee: string;
     /** Protocol flat fee */
     protocolFee: string;
-    /** relayerClaim = simGas + gasVarianceFixedMist + slippageBufferMist (on-chain settle arg) */
-    relayerClaim: string;
+    /** executionCostClaim = simGas + gasVarianceFixedMist + slippageBufferMist (on-chain settle arg) */
+    executionCostClaim: string;
     /** grossGas = computation + storage (before rebate) */
     grossGas: string;
   };
@@ -120,7 +120,7 @@ export interface PrepareResult {
 // ─────────────────────────────────────────────
 
 export async function handlePrepare(
-  ctx: RelayerContext,
+  ctx: HostContext,
   params: PrepareParams,
   extraCfg: PrepareHandlerConfig,
 ): Promise<PrepareResult> {
@@ -142,7 +142,7 @@ export async function handlePrepare(
   }
 
   const options = {
-    relayerContext: ctx,
+    hostContext: ctx,
     prepare: {
       params,
       config: extraCfg,

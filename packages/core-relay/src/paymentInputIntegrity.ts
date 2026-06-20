@@ -206,7 +206,7 @@ function decodeFundsWithdrawal(
   }
   if (typeArg.Balance !== expectedType) {
     throw new Error(
-      `FundsWithdrawal type ${typeArg.Balance} does not match payment token ${expectedType}`,
+      `FundsWithdrawal type ${typeArg.Balance} does not match settlement token ${expectedType}`,
     );
   }
 
@@ -247,7 +247,7 @@ function isMoveCallCommand(cmd: PtbCommand): cmd is MoveCallCommand {
   return cmd.kind === 'MoveCall';
 }
 
-function isRedeemFundsCall(cmd: PtbCommand, paymentTokenType: string): cmd is MoveCallCommand {
+function isRedeemFundsCall(cmd: PtbCommand, settlementTokenType: string): cmd is MoveCallCommand {
   if (!isMoveCallCommand(cmd)) {
     return false;
   }
@@ -255,7 +255,7 @@ function isRedeemFundsCall(cmd: PtbCommand, paymentTokenType: string): cmd is Mo
     normalizeSuiAddress(cmd.packageId) === SUI_FRAMEWORK_ADDRESS &&
     cmd.module === 'coin' &&
     cmd.function === 'redeem_funds' &&
-    cmd.typeArguments[0] === paymentTokenType
+    cmd.typeArguments[0] === settlementTokenType
   );
 }
 
@@ -263,19 +263,19 @@ function tryExtractDirectRedeemTrace(
   ref: CommandRef | null,
   commands: PtbCommand[],
   inputs: unknown[],
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): { withdrawalAmount: bigint } | null {
   if (!ref || (ref.kind !== 'Result' && ref.kind !== 'NestedResult')) {
     return null;
   }
 
   const redeemCmd = commands[ref.command];
-  if (!redeemCmd || !isRedeemFundsCall(redeemCmd, paymentTokenType)) {
+  if (!redeemCmd || !isRedeemFundsCall(redeemCmd, settlementTokenType)) {
     return null;
   }
   const withdrawalArg = parseCommandRef(redeemCmd.arguments[0]);
   return {
-    withdrawalAmount: decodeFundsWithdrawal(withdrawalArg, inputs, paymentTokenType),
+    withdrawalAmount: decodeFundsWithdrawal(withdrawalArg, inputs, settlementTokenType),
   };
 }
 
@@ -319,7 +319,7 @@ function extractSplitTrace(
 function findRedeemTopupForBase(
   commands: PtbCommand[],
   inputs: unknown[],
-  paymentTokenType: string,
+  settlementTokenType: string,
   baseInputIndex: number,
   splitCommandIndex: number,
 ): { withdrawalAmount: bigint } | null {
@@ -344,7 +344,7 @@ function findRedeemTopupForBase(
         sourceRef,
         commands,
         inputs,
-        paymentTokenType,
+        settlementTokenType,
       );
       if (!redeemTrace) continue;
       if (topup) {
@@ -375,9 +375,9 @@ export function extractPaymentInputTrace(
     };
   }
 
-  const paymentTokenType = settleCmd.typeArguments[0];
-  if (!paymentTokenType) {
-    throw new Error(`Settle function ${settleCmd.function} has no payment token type argument`);
+  const settlementTokenType = settleCmd.typeArguments[0];
+  if (!settlementTokenType) {
+    throw new Error(`Settle function ${settleCmd.function} has no settlement token type argument`);
   }
 
   const { paymentCoinIndex, swapAmountIndex } = VARIANT_LAYOUTS[variantClass];
@@ -396,7 +396,7 @@ export function extractPaymentInputTrace(
   const paymentRef = parseCommandRef(settleCmd.arguments[paymentCoinIndex]);
   const refKind = paymentCoinRefKind(paymentRef);
 
-  const directRedeem = tryExtractDirectRedeemTrace(paymentRef, commands, inputs, paymentTokenType);
+  const directRedeem = tryExtractDirectRedeemTrace(paymentRef, commands, inputs, settlementTokenType);
   if (directRedeem) {
     if (refKind !== 'result' && refKind !== 'nested_result') {
       throw new Error(`Address-balance payment coin must be a command result, got ${refKind}`);
@@ -424,7 +424,7 @@ export function extractPaymentInputTrace(
   const topup = findRedeemTopupForBase(
     commands,
     inputs,
-    paymentTokenType,
+    settlementTokenType,
     splitTrace.baseInputIndex,
     splitTrace.splitCommandIndex,
   );

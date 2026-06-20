@@ -19,7 +19,7 @@
  * forge a proof that matches an attacker-chosen `txBytes` unless they also
  * know the process-env secret.
  *
- * Payload shape:
+ * Signed string shape:
  *   `${receiptId}|${slotId}|${commitDigest}`
  *
  *   commitDigest =

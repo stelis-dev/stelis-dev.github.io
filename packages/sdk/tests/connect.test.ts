@@ -3,18 +3,18 @@
  *
  * Tests verify:
  * - pinnedPackageId validation (S-16 step 2)
- * - rogue relayer packageId rejection (S-16 step 1)
+ * - rogue Host packageId rejection (S-16 step 1)
  * - strict integrityPolicyVersion and config field parsing
  * - settlement swap path integrity fail-closed (settlementSwapDirection ↔ hops ↔ swapDirection)
  * - studioEndpoint mode guard
  *
  * connect() now takes a required endpoint string. There is no canonical fallback,
- * no reconnect(), no allowCanonicalFallback, and no onRelayerSwitch/onRelayerError.
+ * no reconnect(), no allowCanonicalFallback, and no endpoint-switch callbacks.
  * Errors from config parsing, package ID checks, and status checks are thrown directly.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayerConfig, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
@@ -65,11 +65,11 @@ vi.stubGlobal('fetch', mockFetch);
 const CANONICAL_PKG = STELIS_CONTRACT_IDS.testnet!.packageId;
 const PKG_B = '0x' + 'b'.repeat(64);
 
-function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
+function makeConfig(overrides: Partial<RelayConfigResponse> = {}): RelayConfigResponse {
   return {
     network: 'testnet',
     packageId: CANONICAL_PKG,
-    relayerRecipient: '0x' + 'e'.repeat(64),
+    settlementPayoutRecipient: '0x' + 'e'.repeat(64),
     supportedSettlementSwapPaths: [
       {
         hops: [
@@ -81,16 +81,16 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
             feeBps: 0,
           },
         ],
-        paymentTokenType: `${CANONICAL_PKG}::deep::DEEP`,
-        paymentTokenSymbol: 'DEEP',
-        paymentTokenDecimals: 6,
+        settlementTokenType: `${CANONICAL_PKG}::deep::DEEP`,
+        settlementTokenSymbol: 'DEEP',
+        settlementTokenDecimals: 6,
         lotSize: 100,
         minSize: 1_000_000,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: '100000',
+    quotedHostFeeMist: '100000',
     protocolFlatFeeMist: '20000',
     integrityPolicyVersion: 1,
     ...overrides,
@@ -131,11 +131,11 @@ describe('StelisSDK.connect — pinnedPackageId policy', () => {
     expect(sdk.config.packageId).toBe(CANONICAL_PKG);
   });
 
-  it('rejects rogue relayer advertising wrong packageId', async () => {
+  it('rejects rogue Host advertising wrong packageId', async () => {
     stubConfig(makeConfig({ packageId: PKG_B }));
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('relayer packageId mismatch');
+    ).rejects.toThrow('Relay config packageId mismatch');
   });
 });
 
@@ -210,12 +210,12 @@ describe('StelisSDK — integrityPolicyVersion handshake', () => {
     );
   });
 
-  it('config without quotedRelayerFeeMist is rejected at connect', async () => {
+  it('config without quotedHostFeeMist is rejected at connect', async () => {
     const invalid = { ...makeConfig() };
-    delete (invalid as Record<string, unknown>).quotedRelayerFeeMist;
+    delete (invalid as Record<string, unknown>).quotedHostFeeMist;
     stubConfig(invalid);
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'quotedRelayerFeeMist must be a non-negative integer string',
+      'quotedHostFeeMist must be a non-negative integer string',
     );
   });
 
@@ -254,10 +254,10 @@ describe('StelisSDK.connect — studioEndpoint mode guard', () => {
 });
 
 // ─────────────────────────────────────────────
-// Settlement swap path integrity validation in parseRelayerConfig
+// Settlement swap path integrity validation in parseRelayConfigResponse
 // ─────────────────────────────────────────────
 
-describe('parseRelayerConfig — settlement swap path integrity fail-closed', () => {
+describe('parseRelayConfigResponse — settlement swap path integrity fail-closed', () => {
   // connect() reports parse errors directly; no fallback wrapping applied.
 
   it('rejects missing settlementSwapDirection', async () => {
@@ -298,7 +298,7 @@ describe('parseRelayerConfig — settlement swap path integrity fail-closed', ()
     ).rejects.toThrow('hops must be a non-empty array');
   });
 
-  it('rejects duplicate paymentTokenType because each token selects one active settlement swap path', async () => {
+  it('rejects duplicate settlementTokenType because each token selects one active settlement swap path', async () => {
     const bad = makeConfig();
     bad.supportedSettlementSwapPaths.push({
       ...bad.supportedSettlementSwapPaths[0],
@@ -312,7 +312,7 @@ describe('parseRelayerConfig — settlement swap path integrity fail-closed', ()
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('duplicate paymentTokenType');
+    ).rejects.toThrow('duplicate settlementTokenType');
   });
 
   it('rejects invalid swapDirection value', async () => {

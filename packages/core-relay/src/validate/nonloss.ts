@@ -23,8 +23,8 @@ export interface SponsorNonlossContext {
   gasVarianceFixedMist: bigint;
   /** DEX slippage buffer (0 for credit paths) */
   slippageBufferMist: bigint;
-  /** Relayer claim extracted from hash-bound settle args */
-  relayerClaim: bigint;
+  /** Execution cost claim extracted from stored-hash-verified settle args */
+  executionCostClaim: bigint;
   /** TX gas budget from gasData */
   gasBudget: bigint;
 }
@@ -33,14 +33,14 @@ export interface SponsorNonlossContext {
  * Validates nonloss math for /sponsor.
  *
  * Checks (3 total):
- * 1. relayerClaim >= simGas + gasVarianceFixedMist + slippageBufferMist  (nonloss guarantee)
- * 2. gasBudget <= config.maxClaimMist     (upper bound alignment, decoupled from relayerClaim)
+ * 1. executionCostClaim >= simGas + gasVarianceFixedMist + slippageBufferMist  (nonloss guarantee)
+ * 2. gasBudget <= config.maxClaimMist     (upper bound alignment, decoupled from executionCostClaim)
  * 3. simGas <= config.maxClaimMist        (range overflow prevention)
  *
- * `gasBudget` may be larger or smaller than `relayerClaim`: it is the
- * `setGasBudget()` execution cap, not the relayer revenue. Sui refunds
+ * `gasBudget` may be larger or smaller than `executionCostClaim`: it is the
+ * `setGasBudget()` execution cap, not the host revenue. Sui refunds
  * any excess gas. Check 2 still bounds the budget at `maxClaimMist`
- * regardless of the `relayerClaim` value.
+ * regardless of the `executionCostClaim` value.
  */
 export function validateNonlossSponsor(
   ctx: SponsorNonlossContext,
@@ -49,10 +49,10 @@ export function validateNonlossSponsor(
   const requiredClaim = ctx.simGas + ctx.gasVarianceFixedMist + ctx.slippageBufferMist;
 
   // 1. Nonloss guarantee
-  if (ctx.relayerClaim < requiredClaim) {
+  if (ctx.executionCostClaim < requiredClaim) {
     return fail(
       'L3_NONLOSS_VIOLATION',
-      `relayerClaim (${ctx.relayerClaim}) < simGas (${ctx.simGas}) + gasVarianceFixedMist (${ctx.gasVarianceFixedMist}) + slippageBufferMist (${ctx.slippageBufferMist})`,
+      `executionCostClaim (${ctx.executionCostClaim}) < simGas (${ctx.simGas}) + gasVarianceFixedMist (${ctx.gasVarianceFixedMist}) + slippageBufferMist (${ctx.slippageBufferMist})`,
     );
   }
 

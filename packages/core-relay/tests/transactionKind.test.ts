@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Transaction } from '@mysten/sui/transactions';
 import { SETTLE_MODULE, SETTLEMENT_SWAP_DIRECTION_FUNCTIONS } from '@stelis/contracts';
-import type { RelayerEnv } from '../src/types.js';
+import type { HostValidationEnv } from '../src/types.js';
 import {
   validateGenericSettlementTransaction,
   validateGenericUserTransactionKind,
 } from '../src/validate/transactionKind.js';
 
-const ENV: RelayerEnv = {
+const ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: '0xRELAYER',
+  settlementPayoutRecipientAddress: '0xPAYOUT',
   configId: '0xCONFIG',
   vaultRegistryId: '0xREGISTRY',
   packageId: '0xPACKAGE',
@@ -190,7 +190,7 @@ describe('validateGenericUserTransactionKind', () => {
 });
 
 describe('validateGenericSettlementTransaction', () => {
-  it('accepts final transactions with one settlement call and relayer-created Sender withdrawal', () => {
+  it('accepts final transactions with one settlement call and Host-created Sender withdrawal', () => {
     const result = validateGenericSettlementTransaction(
       txWithData([settleCall()], [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '5000000')]),
       ENV,

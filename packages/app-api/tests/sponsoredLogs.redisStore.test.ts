@@ -23,9 +23,9 @@ function makeKnownEntry(
     promotionId: null,
     userId: null,
     recoveredGasMist: '12000',
-    relayerPaidGasMist: '8000',
-    relayerNetMist: overrides.relayerNetMist ?? '5000',
-    relayerFeeMist: overrides.relayerFeeMist ?? '1000',
+    hostPaidGasMist: '8000',
+    hostNetMist: overrides.hostNetMist ?? '5000',
+    hostFeeMist: overrides.hostFeeMist ?? '1000',
     protocolFeeMist: overrides.protocolFeeMist ?? '50',
     grossGasMist: '9500',
     storageRebateMist: '1500',
@@ -50,9 +50,9 @@ function makeUnknownEntry(receiptId: string): SponsoredExecutionLogEntry {
     promotionId: null,
     userId: null,
     recoveredGasMist: null,
-    relayerPaidGasMist: null,
-    relayerNetMist: null,
-    relayerFeeMist: null,
+    hostPaidGasMist: null,
+    hostNetMist: null,
+    hostFeeMist: null,
     protocolFeeMist: null,
     grossGasMist: null,
     storageRebateMist: null,
@@ -98,7 +98,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(args).toHaveLength(7);
     expect(args[1]).toBe('1');
     expect(args[2]).toBe('1'); // known
-    expect(args[3]).toBe('5000'); // cumulative relayer net delta
+    expect(args[3]).toBe('5000'); // cumulative host net delta
     expect(args[4]).toBe('0'); // cumulativeLoss delta
     expect(args[5]).toBe('0'); // not a loss
     // Idempotency contract: SET NX without PX so dedup persists for the
@@ -121,13 +121,13 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(args[5]).toBe('0');
   });
 
-  it('flags loss when relayerNetMist is negative', async () => {
+  it('flags loss when hostNetMist is negative', async () => {
     const { client, evalSpy } = makeMockRedis();
     const store = new RedisSponsoredLogsStore(client);
     await store.append(
       makeKnownEntry({
         receiptId: 'r-loss',
-        relayerNetMist: '-7000',
+        hostNetMist: '-7000',
       }),
     );
     const [, , args] = evalSpy.mock.calls[0];
@@ -147,12 +147,12 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(parsed.economicsStatus).toBe('known');
   });
 
-  it('throws when known entry is missing relayerNetMist (and never calls eval)', async () => {
+  it('throws when known entry is missing hostNetMist (and never calls eval)', async () => {
     const { client, evalSpy } = makeMockRedis();
     const store = new RedisSponsoredLogsStore(client);
     const bad: SponsoredExecutionLogEntry = {
       ...makeKnownEntry({ receiptId: 'r-bad' }),
-      relayerNetMist: null,
+      hostNetMist: null,
     };
     await expect(store.append(bad)).rejects.toThrow(/known economics entry missing/);
     // Validation must run before the Lua script so a rejected append
@@ -165,7 +165,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     const store = new RedisSponsoredLogsStore(client);
     const bad: SponsoredExecutionLogEntry = {
       ...makeKnownEntry({ receiptId: 'r-bad-str' }),
-      relayerNetMist: 'abc',
+      hostNetMist: 'abc',
     };
     await expect(store.append(bad)).rejects.toThrow();
     expect(evalSpy).not.toHaveBeenCalled();
@@ -182,7 +182,7 @@ describe('RedisSponsoredLogsStore — getSummary script wiring', () => {
       mode: 'all',
       sponsoredExecutions: '10',
       lossCount: '2',
-      cumulativeRelayerNetMist: '12345',
+      cumulativeHostNetMist: '12345',
       cumulativeLossMist: '-67890',
     });
     const [, keys] = evalSpy.mock.calls[0];
@@ -196,7 +196,7 @@ describe('RedisSponsoredLogsStore — getSummary script wiring', () => {
     const summary = await store.getSummary('promotion');
     expect(summary.sponsoredExecutions).toBe('0');
     expect(summary.lossCount).toBe('0');
-    expect(summary.cumulativeRelayerNetMist).toBe('0');
+    expect(summary.cumulativeHostNetMist).toBe('0');
     expect(summary.cumulativeLossMist).toBe('0');
   });
 

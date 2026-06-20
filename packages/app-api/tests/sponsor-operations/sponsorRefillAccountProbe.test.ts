@@ -87,7 +87,7 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
       },
       {
         operation: 'test.sponsor_refill_account.success',
-        source: 'admin_pool_sponsor_refill_account_update',
+        source: 'admin_sponsor_operations_sponsor_refill_account_update',
         writeFailureMode: 'throw',
       },
     );
@@ -116,7 +116,7 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
       },
       {
         operation: 'test.sponsor_refill_account.probe_failure',
-        source: 'admin_pool_sponsor_refill_account_update',
+        source: 'admin_sponsor_operations_sponsor_refill_account_update',
         writeFailureMode: 'throw',
       },
     );
@@ -145,7 +145,7 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
       },
       {
         operation: 'test.sponsor_refill_account.invalid_balance',
-        source: 'admin_pool_sponsor_refill_account_update',
+        source: 'admin_sponsor_operations_sponsor_refill_account_update',
         writeFailureMode: 'throw',
       },
     );
@@ -173,7 +173,7 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
       },
       {
         operation: 'test.sponsor_refill_account.probe_failure_trim',
-        source: 'admin_pool_sponsor_refill_account_update',
+        source: 'admin_sponsor_operations_sponsor_refill_account_update',
         writeFailureMode: 'throw',
       },
     );
@@ -297,13 +297,13 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
         },
         {
           operation: 'test.sponsor_refill_account.write_failure_throw',
-          source: 'admin_pool_sponsor_refill_account_update',
+          source: 'admin_sponsor_operations_sponsor_refill_account_update',
           writeFailureMode: 'throw',
         },
       ),
     ).rejects.toThrow('sponsor refill account redis rejected');
 
-    const logs = findWriteFailedLogs('admin_pool_sponsor_refill_account_update');
+    const logs = findWriteFailedLogs('admin_sponsor_operations_sponsor_refill_account_update');
     expect(logs).toHaveLength(1);
     expect(logs[0]['sponsor_refill_account_address']).toBe(SPONSOR_REFILL_ACCOUNT_ADDRESS);
     expect(logs[0]['probe_error']).toBe('sponsor refill account rpc down');
@@ -345,7 +345,7 @@ describe('probeAndWriteSponsorRefillAccountState', () => {
         },
         {
           operation: 'test.sponsor_refill_account.write_failure_throw_log_sink_throw',
-          source: 'admin_pool_sponsor_refill_account_update',
+          source: 'admin_sponsor_operations_sponsor_refill_account_update',
           writeFailureMode: 'throw',
         },
       ),

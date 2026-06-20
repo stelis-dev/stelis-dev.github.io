@@ -7,14 +7,14 @@
   "settleBlock": {
     "fieldCount": 13,
     "fields": [
-      { "offset": 0,  "moveName": "relayer_claim",              "moveType": "u64",        "tsName": "relayerClaim" },
-      { "offset": 1,  "moveName": "relayer_recipient",          "moveType": "address",    "tsName": "relayerRecipient" },
+      { "offset": 0,  "moveName": "execution_cost_claim_mist",              "moveType": "u64",        "tsName": "executionCostClaim" },
+      { "offset": 1,  "moveName": "settlement_payout_recipient",          "moveType": "address",    "tsName": "settlementPayoutRecipient" },
       { "offset": 2,  "moveName": "receipt_id",                 "moveType": "vector<u8>", "tsName": "receiptId" },
       { "offset": 3,  "moveName": "nonce",                      "moveType": "u64",        "tsName": "nonce" },
       { "offset": 4,  "moveName": "sim_gas_reported",           "moveType": "u64",        "tsName": "simGasReported" },
       { "offset": 5,  "moveName": "gas_variance_fixed_mist",    "moveType": "u64",        "tsName": "gasVarianceFixedMist" },
       { "offset": 6,  "moveName": "slippage_buffer_mist",       "moveType": "u64",        "tsName": "slippageBufferMist" },
-      { "offset": 7,  "moveName": "quoted_relayer_fee_mist",    "moveType": "u64",        "tsName": "quotedRelayerFeeMist" },
+      { "offset": 7,  "moveName": "quoted_host_fee_mist",    "moveType": "u64",        "tsName": "quotedHostFeeMist" },
       { "offset": 8,  "moveName": "expected_protocol_fee_mist", "moveType": "u64",        "tsName": "expectedProtocolFeeMist" },
       { "offset": 9,  "moveName": "expected_config_version",    "moveType": "u64",        "tsName": "expectedConfigVersion" },
       { "offset": 10, "moveName": "quote_timestamp_ms",         "moveType": "u64",        "tsName": "quoteTimestampMs" },

@@ -21,7 +21,7 @@ export const ADDR_PAYMENT_COIN = '0x' + '6'.repeat(64);
 export const ADDR_VAULT = '0x' + '7'.repeat(64);
 export const ADDR_DEEP_COIN = '0x' + '8'.repeat(64);
 export const ADDR_SENDER = '0x' + 'a'.repeat(64);
-export const ADDR_RELAYER = '0x' + 'b'.repeat(64);
+export const ADDR_SETTLEMENT_PAYOUT_RECIPIENT = '0x' + 'b'.repeat(64);
 export const ADDR_USABLE_COIN = '0x' + 'c'.repeat(64);
 
 // ─────────────────────────────────────────────
@@ -48,9 +48,9 @@ export const SETTLEMENT_SWAP_PATH_BFQ: SingleHopSettlementSwapPath = {
       feeBps: 0,
     },
   ],
-  paymentTokenType: DEEP_TOKEN_TYPE,
-  paymentTokenSymbol: 'DEEP',
-  paymentTokenDecimals: 6,
+  settlementTokenType: DEEP_TOKEN_TYPE,
+  settlementTokenSymbol: 'DEEP',
+  settlementTokenDecimals: 6,
   lotSize: 1_000n,
   minSize: 10_000n,
   effectiveFeeRateBps: 0,
@@ -63,7 +63,7 @@ export const SETTLEMENT_SWAP_PATH_BFQ: SingleHopSettlementSwapPath = {
 
 export const BASE_CONFIG: PlannerConfig = {
   minSettleMist: 1_000n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   protocolFlatFeeMist: 20_000n,
 };
 
@@ -86,14 +86,14 @@ export function makeInput(overrides: Partial<PlannerInput> = {}): PlannerInput {
 // ─────────────────────────────────────────────
 
 export const BASE_AUDIT: SettlePlanAuditFields = {
-  relayerClaim: 5_000_000n,
-  relayerRecipient: ADDR_RELAYER,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 1n,
   simGasReported: 3_000_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 50_000n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 1n,
   quoteTimestampMs: 1741680000000,

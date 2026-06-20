@@ -8,22 +8,22 @@
  *   preconsume   — route-owned. Produces the data needed by consume
  *                  (raw `txBytes`, tx-derived sender, peeked entry).
  *                  Attribution is route-specific: generic is IP-only
- *                  (tx sender unbound until hash-binding). Promotion is
+ *                  (tx sender unbound until the stored hash match). Promotion is
  *                  studio-user (typed `AbuseSubject` of kind
  *                  `studio_user`, keyed by the route-verified developer
  *                  JWT `userId`); `senderAddress` is a mutable execution
  *                  credential bound by the JWT for the current action
  *                  only and is not the long-lived enforcement principal.
  *   consume      — SHARED runner (`runSponsorConsumePhase`). Owns the
- *                  atomic hash-bind and `not_found` / `expired` /
+ *                  atomic stored-hash match and `not_found` / `expired` /
  *                  `hash_mismatch` branching. Each route supplies a
  *                  `SponsorConsumePolicyAdapter` that encapsulates its
  *                  classification, cleanup, and abuse attribution.
- *   postconsume  — route-owned. After hash-binding the canonical
+ *   postconsume  — route-owned. After the stored hash match the canonical
  *                  `tx.sender` is authoritative against the prepare
  *                  commit, so abuse attribution may flow into a non-IP
  *                  counter — but the kind differs by route. Generic
- *                  uses `{ kind: 'address' }` keyed by the hash-bound
+ *                  uses `{ kind: 'address' }` keyed by the stored-hash-verified
  *                  `senderAddress`; promotion uses
  *                  `{ kind: 'studio_user', userId }` keyed by the
  *                  verified developer JWT principal. Two carve-out
@@ -53,9 +53,9 @@
  *                      `{ kind: 'studio_user', userId }`.
  *                      Promotion additionally releases the ledger
  *                      reservation.
- *                    - generic L3 non-loss failure: throw the specific
- *                      L3 code. No abuse recorded and no drift event —
- *                      L3 reflects post-hash-binding server-side buffer
+ *                    - generic non-loss failure: throw the specific
+ *                      `L3_*` code. No abuse recorded and no drift event —
+ *                      non-loss validation reflects post-consume server-side buffer
  *                      insufficiency against preflight `simGas`.
  *   result       — sponsor runner owned. Sign/submit, route-specific accounting
  *                  (generic economics log; promotion ledger consume +

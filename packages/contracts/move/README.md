@@ -4,9 +4,9 @@ Move smart contracts for sponsored Sui transaction settlement.
 
 - Built for: maintainers, reviewers, and auditors inspecting or changing on-chain settlement behavior.
 - Use for: on-chain modules, contract entry functions, and links into Move implementation details.
-- Not for: host operation runbooks, package integration guidance, or off-chain host policy.
+- Not for: Host operation runbooks, package integration guidance, or off-chain Host policy.
 
-> Users can start with zero SUI. Relayers must not lose money on successful sponsored transactions. Protocol fees are collected during settlement.
+> Users can start with zero SUI. Host operators must not lose money on successful sponsored transactions. Protocol fees are collected during settlement.
 
 > [!NOTE]
 > Codes like `S-2`, `E-4` are invariant IDs defined in [invariants.md](../../../docs/invariants.md)
@@ -17,7 +17,7 @@ Move smart contracts for sponsored Sui transaction settlement.
 
 This package contains the on-chain settlement primitives for Stelis.
 External developer companies and agents do not modify or republish this package in the normal product path.
-They consume the deployed contracts through the SDK or the provided host packages.
+They consume the deployed contracts through the SDK or the provided Host packages.
 Contract changes and package publishing are maintainer-only workflows.
 
 Use it when you need to inspect or modify:
@@ -67,7 +67,7 @@ sources/
 | `swap_and_settle_with_vault_qfb()` | **Existing users** (has Vault), 1-hop qfb   | DeepBook 1-hop quote-for-base swap → optionally use credit → settle → surplus to vault |
 | `settle_with_credit()`             | **Existing users** (has Vault), credit-only | No swap. Uses vault credit only, then settles                                          |
 
-All `swap_and_settle_*` variants atomically swap a payment token (e.g. DEEP) to SUI via DeepBook, then run settlement in a single transaction.
+All `swap_and_settle_*` variants atomically swap a settlement token (e.g. DEEP) to SUI via DeepBook, then run settlement in a single transaction.
 Before each swap, the on-chain spread guard rejects the transaction (abort 110: `ESpreadTooWide`) when the DeepBook order book is empty, one-sided, crossed, or has bid/ask spread exceeding `max_spread_bps`.
 `settle_with_credit()` skips the swap and settles using vault credit only.
 `settle_with_credit()` is credit-only settlement, so it does not enforce `min_settle_mist`; it still checks exact sufficiency, fee cap, config version, and nonce.
@@ -76,7 +76,7 @@ Leftover payment coin is returned to the sender automatically in swap variants. 
 ### Owned Object Protection
 
 `UserVault` is a Sui **Owned Object** with `key` ability only (soulbound) — it cannot be transferred externally to another address.
-Only the owner can include it in transactions. No third party (including relayers) can access it. Even during relayer downtime, users can call `withdraw()` directly.
+Only the owner can include it in transactions. No third party, including the Host operator, can access it. Even during Host downtime, users can call `withdraw()` directly.
 
 ---
 
@@ -90,13 +90,13 @@ Only the owner can include it in transactions. No third party (including relayer
 | `swap_and_settle_with_vault_bfq` | `settle` | `(config, registry, clock, vault, pool, payment_coin, swap_amount, min_sui_out, ..., use_credit_amount, ctx)`                                                                                                                                                                                         | Existing user: 1-hop bfq swap → use credit → settle                                                                           |
 | `swap_and_settle_new_user_qfb`   | `settle` | `(config, registry, clock, pool, payment_coin, swap_amount, min_sui_out, ...)`                                                                                                                                                                                                                        | New user: 1-hop qfb swap → create vault → settle                                                                              |
 | `swap_and_settle_with_vault_qfb` | `settle` | `(config, registry, clock, vault, pool, payment_coin, swap_amount, min_sui_out, ..., use_credit_amount, ctx)`                                                                                                                                                                                         | Existing user: 1-hop qfb swap → use credit → settle                                                                           |
-| `settle_with_credit`             | `settle` | `(config, registry, clock, vault, use_credit_amount, relayer_claim, relayer_recipient, receipt_id, nonce, sim_gas, gas_variance_fixed_mist, slippage_buffer_mist, quoted_relayer_fee_mist, expected_protocol_fee_mist, expected_config_version, quote_timestamp_ms, policy_hash, order_id_hash, ctx)` | Existing user: vault credit only, no swap                                                                                     |
+| `settle_with_credit`             | `settle` | `(config, registry, clock, vault, use_credit_amount, execution_cost_claim_mist, settlement_payout_recipient, receipt_id, nonce, sim_gas, gas_variance_fixed_mist, slippage_buffer_mist, quoted_host_fee_mist, expected_protocol_fee_mist, expected_config_version, quote_timestamp_ms, policy_hash, order_id_hash, ctx)` | Existing user: vault credit only, no swap                                                                                     |
 | `withdraw`                       | `vault`  | `(vault, ctx)`                                                                                                                                                                                                                                                                                        | Withdraw entire vault balance                                                                                                 |
 | `balance`                        | `vault`  | `(vault): u64`                                                                                                                                                                                                                                                                                        | Query vault credit balance                                                                                                    |
 | `set_paused`                     | `config` | `(config, paused, ctx)`                                                                                                                                                                                                                                                                               | Emergency pause to `true` immediately; queue unpause when `paused=false` (admin only)                                         |
 | `apply_paused_update`            | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Apply a matured pending pause update (permissionless)                                                                         |
 | `cancel_paused_update`           | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Cancel a pending pause update (admin only)                                                                                    |
-| `update_config`                  | `config` | `(config, max_relayer_fee_mist, protocol_flat_fee_mist, max_claim, min_settle, max_spread_bps, ctx)`                                                                                                                                                                                                  | Queue settings update including spread cap (admin only)                                                                       |
+| `update_config`                  | `config` | `(config, max_host_fee_mist, protocol_flat_fee_mist, max_claim, min_settle, max_spread_bps, ctx)`                                                                                                                                                                                                  | Queue settings update including spread cap (admin only)                                                                       |
 | `apply_config_update`            | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Apply a matured pending config update (permissionless)                                                                        |
 | `cancel_config_update`           | `config` | `(config, ctx)`                                                                                                                                                                                                                                                                                       | Cancel a pending config update (admin only)                                                                                   |
 | `propose_admin`                  | `config` | `(config, new_admin, ctx)`                                                                                                                                                                                                                                                                            | Propose new admin (admin only). Aborts if a pending proposal already exists; call `cancel_admin_proposal` first                |
@@ -149,14 +149,14 @@ total_in = sui_received_from_swap [+ use_credit_amount]
 enforce_min_settle_mist = true for swap settlement paths
 enforce_min_settle_mist = false for settle_with_credit
 
-quoted_relayer_fee = quoted_relayer_fee_mist     // relayer quoted fee, capped by max_relayer_fee_mist
+quoted_host_fee = quoted_host_fee_mist     // Host quoted fee, capped by max_host_fee_mist
 protocol_fee       = config.protocol_flat_fee_mist
-payout             = relayer_claim + quoted_relayer_fee
+payout             = execution_cost_claim_mist + quoted_host_fee
 
 assert!(config.config_version == expected_config_version) // drift detection
 assert!(config.protocol_flat_fee_mist == expected_protocol_fee_mist) // exact match
-assert!(quoted_relayer_fee_mist <= config.max_relayer_fee_mist)       // fee cap
-assert!(relayer_claim <= max_claim_mist)         // S-2
+assert!(quoted_host_fee_mist <= config.max_host_fee_mist)       // fee cap
+assert!(execution_cost_claim_mist <= max_claim_mist)         // S-2
 if enforce_min_settle_mist:
   assert!(total_in >= min_settle_mist)           // S-3
 assert!(total_in >= total_deduction)             // S-4
@@ -164,7 +164,7 @@ assert!(nonce > vault.last_nonce)                // S-14: on-chain monotonic non
 surplus = total_in − payout − protocol_fee       // S-9: deposited to vault
 ```
 
-> `max_relayer_fee_mist` caps the relayer's quoted fee per TX and is mutable by admin only (A-4).
+> `max_host_fee_mist` caps the Host's quoted fee per TX and is mutable by admin only (A-4).
 > `Config` is read only during settlement as `&Config`.
 
 ---
@@ -190,7 +190,7 @@ Applied state changes and admin transfer flows emit events for audit traceabilit
 
 | Event                         | Trigger                          | Key Fields                                                                                                                                                                                                                                                                                           |
 | ----------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SettleEvent`                 | Settlement entry succeeded       | receipt_id, policy_hash, quote_timestamp_ms, exec_timestamp_ms, sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist, relayer_claim, quoted_relayer_fee_mist, protocol_fee, protocol_treasury, payout, total_in, surplus_credited, config_version, user, relayer_recipient, order_id_hash |
+| `SettleEvent`                 | Settlement entry succeeded       | receipt_id, policy_hash, quote_timestamp_ms, exec_timestamp_ms, sim_gas_reported, gas_variance_fixed_mist, slippage_buffer_mist, execution_cost_claim_mist, quoted_host_fee_mist, protocol_fee, protocol_treasury, payout, total_in, surplus_credited, config_version, user, settlement_payout_recipient, order_id_hash |
 | `CreditUsedEvent`             | Credit used from vault           | user, amount, remaining                                                                                                                                                                                                                                                                              |
 | `WithdrawEvent`               | Vault withdrawal                 | user, amount                                                                                                                                                                                                                                                                                         |
 | `ConfigUpdatedEvent`          | Matured settings update applied  | old/new value pairs (including max_spread_bps), by, epoch                                                                                                                                                                                                                                            |
@@ -263,12 +263,12 @@ Full invariant list: [invariants.md](../../../docs/invariants.md)
 | E (Economy)        | 8     | Non-loss economic model                                                                 |
 | P (Pause)          | 3     | Pause security                                                                          |
 | A (Admin)          | 7     | Admin safety rails                                                                      |
-| R (Relay)          | 17    | Off-chain relayer validation                                                            |
+| R (Relay)          | 17    | Off-chain Relay API validation                                                           |
 
 ## When Not to Start Here
 
 This package is not the best first read if you only need:
 
-- relayer API contract → see `docs/api.md`
-- relayer validation flow → see `packages/core-relay/README.md`
+- Relay API contract → see `docs/api.md`
+- transaction validation flow → see `packages/core-relay/README.md`
 - architecture overview → see `docs/architecture.md`

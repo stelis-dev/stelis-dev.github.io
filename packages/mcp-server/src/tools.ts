@@ -6,7 +6,7 @@ import { StelisMcpHttpError } from './http.js';
 import {
   claimPromotion,
   getPromotionDetail,
-  getRelayConfig,
+  getRelayApiConfig,
   listPromotions,
   preparePromotionSponsoredTransaction,
   prepareSponsoredTransaction,
@@ -14,12 +14,12 @@ import {
   submitSponsoredTransaction,
 } from './operations.js';
 
-const RELAY_FIELDS = {
-  relayUrl: z
+const RELAY_API_FIELDS = {
+  relayApiUrl: z
     .string()
     .url()
     .optional()
-    .describe('Relay endpoint ending in /relay. Overrides STELIS_RELAY_URL for this call.'),
+    .describe('Relay API endpoint ending in /relay. Overrides STELIS_RELAY_API_URL for this call.'),
   timeoutMs: z
     .number()
     .int()
@@ -45,14 +45,14 @@ const RECEIPT_ID = z
 
 export function registerStelisTools(server: McpServer, config: StelisMcpServerConfig): void {
   server.registerTool(
-    'stelis_get_relay_config',
+    'stelis_get_relay_api_config',
     {
-      title: 'Get Stelis Relay Config',
-      description: 'Read a Stelis host relay config from GET /relay/config.',
-      inputSchema: RELAY_FIELDS,
+      title: 'Get Stelis Relay API Config',
+      description: 'Read a Stelis Host Relay API config from GET /relay/config.',
+      inputSchema: RELAY_API_FIELDS,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
-    async (input) => toToolResult(() => getRelayConfig(config, input)),
+    async (input) => toToolResult(() => getRelayApiConfig(config, input)),
   );
 
   server.registerTool(
@@ -62,14 +62,14 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       description:
         'Call POST /relay/prepare with caller-provided serialized TransactionKind bytes. Returns txBytes for wallet signing and a receiptId for sponsor.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         txKindBytes: BASE64_BYTES.describe('Serialized TransactionKind bytes in base64.'),
         senderAddress: SUI_ADDRESS,
-        paymentTokenType: z
+        settlementTokenType: z
           .string()
           .min(1)
           .describe(
-            'Payment token coin type from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for that token.',
+            'Settlement token coin type from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for that token.',
           ),
         slippageBps: z.number().int().min(0).max(500).optional(),
         gasMarginBps: z.number().int().min(0).max(10000).optional(),
@@ -105,7 +105,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       description:
         'Call POST /relay/sponsor with exact prepared txBytes, user signature, and receiptId. This can submit an on-chain transaction.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         txBytes: BASE64_BYTES.describe('Exact txBytes returned by prepare.'),
         userSignature: z.string().min(1).describe('User signature in base64.'),
         receiptId: RECEIPT_ID,
@@ -126,7 +126,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       title: 'List Studio Promotions',
       description: 'Call GET /studio/promotions using a developer JWT.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
       },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -140,7 +140,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       title: 'Get Studio Promotion Detail',
       description: 'Call GET /studio/promotions/:id using a developer JWT.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
         promotionId: PROMOTION_ID,
       },
@@ -155,7 +155,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       title: 'Claim Studio Promotion',
       description: 'Call POST /studio/promotions/:id/claim using a developer JWT.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
         promotionId: PROMOTION_ID,
       },
@@ -171,7 +171,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       description:
         'Call POST /studio/promotions/:id/prepare with caller-provided serialized TransactionKind bytes and a developer JWT.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
         promotionId: PROMOTION_ID,
         senderAddress: SUI_ADDRESS,
@@ -189,7 +189,7 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       description:
         'Call POST /studio/promotions/:id/sponsor with exact prepared txBytes, user signature, receiptId, and developer JWT. This can submit an on-chain transaction.',
       inputSchema: {
-        ...RELAY_FIELDS,
+        ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
         promotionId: PROMOTION_ID,
         receiptId: RECEIPT_ID,

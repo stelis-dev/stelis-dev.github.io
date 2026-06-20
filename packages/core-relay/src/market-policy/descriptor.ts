@@ -8,9 +8,9 @@ export function createStaticSettlementSwapPathDescriptor(
   source: StaticSettlementSwapPathDescriptorSource,
 ): StaticSettlementSwapPathDescriptor {
   return {
-    paymentTokenType: source.paymentTokenType,
-    paymentTokenSymbol: source.paymentTokenSymbol,
-    paymentTokenDecimals: source.paymentTokenDecimals,
+    settlementTokenType: source.settlementTokenType,
+    settlementTokenSymbol: source.settlementTokenSymbol,
+    settlementTokenDecimals: source.settlementTokenDecimals,
     effectiveFeeRateBps: source.effectiveFeeRateBps,
     settlementSwapDirection: source.settlementSwapDirection,
     hops: source.hops.map((hop) => ({ ...hop })),
@@ -24,7 +24,7 @@ export function createStaticSettlementSwapPathDescriptorMap(
 ): StaticSettlementSwapPathDescriptorMap {
   const map: StaticSettlementSwapPathDescriptorMap = new Map();
   for (const source of sources) {
-    map.set(source.paymentTokenType, createStaticSettlementSwapPathDescriptor(source));
+    map.set(source.settlementTokenType, createStaticSettlementSwapPathDescriptor(source));
   }
   return map;
 }

@@ -1,7 +1,7 @@
 export interface PrepareRequest {
   txKindBytes: string;
   senderAddress: string;
-  paymentTokenType: string;
+  settlementTokenType: string;
   slippageBps?: number;
   gasMarginBps?: number;
   orderId?: string;

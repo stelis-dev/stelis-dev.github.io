@@ -44,7 +44,7 @@ Current internal source-of-truth packages:
 - Use the same domain noun for the same concept across package boundaries.
 - Use plain industry terms that a new reader can understand without project history. Do not introduce coined product terms, private shorthand, or broad labels unless the term is already a protocol term, a package name, or a public API field with a clear definition.
 - Define a product term before using it as a label in public docs. If a term needs a local explanation every time it appears, choose a clearer name instead.
-- Split ambiguous words into precise names. If one word can mean an HTTP route, swap path, swap direction, liquidity pool, sponsor account pool, payment token, gas coin, server role, or account role, use different names for those concepts.
+- Split ambiguous words into precise names. If one word can mean an HTTP route, swap path, swap direction, liquidity pool, sponsor account pool, settlement token, gas coin, server role, or account role, use different names for those concepts.
 - Apply the same naming standard to public docs, API fields, exported types, function names, variable names, config files, tests, and examples. Code names and docs must not describe the same concept with different nouns.
 - Keep action verbs tied to the owning boundary: HTTP routes use route actions, core-api handlers use `handle*`, SDK APIs use app-developer goals, MCP tools use snake_case agent actions, and Move entry functions use Move snake_case names.
 - Keep promotion-sponsored flow names aligned as `PromotionSponsored` / `promotion_sponsored` across SDK, MCP, HTTP, and core-api.

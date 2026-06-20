@@ -1,12 +1,12 @@
 /**
  * StelisSDK — sponsored transaction client for Sui dApps.
  *
- * Connects to a relayer endpoint:
+ * Connects to a Relay API endpoint:
  *   1. GET /relay/status → health check
- *   2. GET /relay/config → runtime relayer config (see connection.ts parseRelayerConfig for fields)
+ *   2. GET /relay/config → Relay API config response (see connection.ts parseRelayConfigResponse for fields)
  *
  * Contract addresses (configId, vaultRegistryId, deepbookPackageId, deepType) are resolved
- * from SDK built-in constants in @stelis/contracts — not from the relayer response.
+ * from SDK built-in constants in @stelis/contracts — not from the Relay API response.
  */
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64, toHex } from '@mysten/sui/utils';
@@ -23,7 +23,7 @@ import {
 } from './integrity.js';
 import { assertNoGasPreset } from '@stelis/core-relay/browser';
 import {
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   DEFAULT_GAS_MARGIN_BPS,
   encodePrepareAuthorizationMessage,
   extractSettleTransactionFieldsFromTxBytes,
@@ -32,7 +32,7 @@ import {
   validateGenericUserTransactionKind,
 } from '@stelis/core-relay/browser';
 import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
-import { fetchRelayConfig, parseRelayerConfig } from './connection.js';
+import { fetchRelayConfig, parseRelayConfigResponse } from './connection.js';
 import { isInfraError, normalizeApiError } from './errors.js';
 import {
   bigintToSafeNumberOrNull,
@@ -41,7 +41,7 @@ import {
   parseDecimalBigInt,
 } from './numberFormat.js';
 import type {
-  RelayerConfig,
+  RelayConfigResponse,
   SingleHopSettlementSwapPath,
   StelisConnectOptions,
   PrepareSponsoredOptions,
@@ -114,11 +114,11 @@ interface WithdrawParams {
 export class StelisSDK {
   private _client: StelisClient;
   private _endpoint: string;
-  private _relayerConfig: RelayerConfig;
+  private _relayConfig: RelayConfigResponse;
   private _options: StelisConnectOptions;
   /**
    * True when studioEndpoint was explicitly true at connect time.
-   * Developer JWT requests require studio mode — prevents routing to generic relayers.
+   * Developer JWT requests require studio mode — prevents routing to generic Hosts.
    */
   private readonly _studioMode: boolean;
   // Contract IDs from shared @stelis/contracts constants.
@@ -129,8 +129,8 @@ export class StelisSDK {
   private _deepType: string;
 
   /** Deployment network */
-  get network(): RelayerConfig['network'] {
-    return this._relayerConfig.network;
+  get network(): RelayConfigResponse['network'] {
+    return this._relayConfig.network;
   }
   /** Network config (contract addresses from @stelis/contracts constants) */
   get config() {
@@ -140,7 +140,7 @@ export class StelisSDK {
       vaultRegistryId: this._vaultRegistryId,
       deepbookPackageId: this._deepbookPackageId,
       deepType: this._deepType,
-      integrityPolicyVersion: this._relayerConfig.integrityPolicyVersion,
+      integrityPolicyVersion: this._relayConfig.integrityPolicyVersion,
     };
   }
   /** DeepBook package ID (from @stelis/contracts constants) */
@@ -151,27 +151,27 @@ export class StelisSDK {
   get deepType() {
     return this._deepType;
   }
-  /** Settlement payout recipient address for relayerClaim plus quoted relayer fee. */
-  get relayerRecipient() {
-    return this._relayerConfig.relayerRecipient;
+  /** Settlement payout recipient address for executionCostClaim plus quoted host fee. */
+  get settlementPayoutRecipient() {
+    return this._relayConfig.settlementPayoutRecipient;
   }
   /** Supported settlement swap paths (from /relay/config) */
   get supportedSettlementSwapPaths(): SingleHopSettlementSwapPath[] {
-    return this._relayerConfig.supportedSettlementSwapPaths;
+    return this._relayConfig.supportedSettlementSwapPaths;
   }
   private constructor(
     client: StelisClient,
     endpoint: string,
-    relayerConfig: RelayerConfig,
+    relayConfig: RelayConfigResponse,
     options: StelisConnectOptions = {},
   ) {
     this._client = client;
     this._endpoint = endpoint;
-    this._relayerConfig = relayerConfig;
+    this._relayConfig = relayConfig;
     this._options = options;
     this._studioMode = options.studioEndpoint === true;
     // Resolve contract IDs from shared @stelis/contracts constants.
-    const network = relayerConfig.network;
+    const network = relayConfig.network;
     const ids = STELIS_CONTRACT_IDS[network];
     this._packageId = requireContractId(ids?.packageId, 'STELIS_PACKAGE_ID');
     this._configId = requireContractId(ids?.configId, 'STELIS_CONFIG_ID');
@@ -184,12 +184,12 @@ export class StelisSDK {
   }
 
   /**
-   * Connect to a relayer and auto-configure the SDK.
+   * Connect to a Host and auto-configure the SDK.
    * 1. GET /relay/status → { ok: true }
-   * 2. GET /relay/config → relayer config
+   * 2. GET /relay/config → Relay config response
    * 3. Contract addresses from SDK built-in constants
    *
-   * @param endpoint - Relayer URL (required).
+   * @param endpoint - Relay API URL (required).
    * @param options  - Connection options (pinnedPackageId, studioEndpoint, requestTimeouts)
    */
   static async connect(endpoint: string, options?: StelisConnectOptions): Promise<StelisSDK> {
@@ -203,19 +203,19 @@ export class StelisSDK {
     await client.getStatus();
 
     // Fetch dynamic config from /relay/config.
-    const relayerConfig = parseRelayerConfig(
+    const relayConfig = parseRelayConfigResponse(
       await fetchRelayConfig(endpoint, opts.requestTimeouts),
     );
 
     // S-16: 2-step packageId verification
-    const expectedPackageId = STELIS_CONTRACT_IDS[relayerConfig.network]?.packageId;
+    const expectedPackageId = STELIS_CONTRACT_IDS[relayConfig.network]?.packageId;
 
-    // Step 1: Verify relayer's advertised packageId matches the SDK constant.
-    // Catches rogue relayers advertising a forked/wrong package.
-    if (expectedPackageId && relayerConfig.packageId) {
-      if (normalizeSuiAddress(relayerConfig.packageId) !== normalizeSuiAddress(expectedPackageId)) {
+    // Step 1: Verify Host's advertised packageId matches the SDK constant.
+    // Catches Hosts advertising a forked/wrong package.
+    if (expectedPackageId && relayConfig.packageId) {
+      if (normalizeSuiAddress(relayConfig.packageId) !== normalizeSuiAddress(expectedPackageId)) {
         throw new Error(
-          `relayer packageId mismatch: relayer advertises ${relayerConfig.packageId}, expected ${expectedPackageId}`,
+          `Relay config packageId mismatch: Host advertises ${relayConfig.packageId}, expected ${expectedPackageId}`,
         );
       }
     }
@@ -230,7 +230,7 @@ export class StelisSDK {
       }
     }
 
-    return new StelisSDK(client, endpoint, relayerConfig, opts);
+    return new StelisSDK(client, endpoint, relayConfig, opts);
   }
 
   // ─────────────────────────────────────────
@@ -238,26 +238,26 @@ export class StelisSDK {
   // ─────────────────────────────────────────
 
   /**
-   * Find the settlement swap path for a given payment token type.
+   * Find the settlement swap path for a given settlement token type.
    * @throws if no settlement swap path is found for the given token type.
    */
-  getSettlementSwapPathForPaymentToken(paymentTokenType: string): SingleHopSettlementSwapPath {
-    const settlementSwapPath = this._relayerConfig.supportedSettlementSwapPaths.find(
-      (p) => p.paymentTokenType === paymentTokenType,
+  getSettlementSwapPathForSettlementToken(settlementTokenType: string): SingleHopSettlementSwapPath {
+    const settlementSwapPath = this._relayConfig.supportedSettlementSwapPaths.find(
+      (p) => p.settlementTokenType === settlementTokenType,
     );
     if (!settlementSwapPath) {
-      const supported = this._relayerConfig.supportedSettlementSwapPaths
-        .map((p) => p.paymentTokenSymbol)
+      const supported = this._relayConfig.supportedSettlementSwapPaths
+        .map((p) => p.settlementTokenSymbol)
         .join(', ');
       throw new Error(
-        `No settlement swap path found for payment token ${paymentTokenType}. Supported: ${supported}`,
+        `No settlement swap path found for settlement token ${settlementTokenType}. Supported: ${supported}`,
       );
     }
     return settlementSwapPath;
   }
 
   /**
-   * Query exchange rate for a payment token.
+   * Query exchange rate for a settlement token.
    *
    * DeepBook mid_price is scaled by FLOAT_SCALING (1e9) and represents
    * quote_smallest_units / base_smallest_units. To get human-readable price:
@@ -268,7 +268,7 @@ export class StelisSDK {
    */
   async getExchangeRate(
     client: SuiGrpcClient,
-    paymentTokenType: string,
+    settlementTokenType: string,
   ): Promise<{
     rate: number | null;
     rateRaw: bigint | null;
@@ -276,7 +276,7 @@ export class StelisSDK {
     rateDisplay: string;
     hopMidPrices: bigint[];
   }> {
-    const settlementSwapPath = this.getSettlementSwapPathForPaymentToken(paymentTokenType);
+    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(settlementTokenType);
 
     // Query all hop mid-prices in a single batch
     const hopPrices = await batchGetHopMidPrices(
@@ -303,10 +303,10 @@ export class StelisSDK {
     // We chain using a reference input of 1e18 (high precision bigint).
     const composedMidPriceRaw = composePaymentToSuiMidPrice(settlementSwapPath, hopPrices);
     const rate = bigintToSafeNumberOrNull(composedMidPriceRaw);
-    const numerator = composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.paymentTokenDecimals);
+    const numerator = composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
     const denominator = FLOAT_SCALING * 10n ** BigInt(SUI_DECIMALS);
     const suiPerTokenHuman = formatRatioDecimal(numerator, denominator, 4);
-    const rateDisplay = `1 ${settlementSwapPath.paymentTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
+    const rateDisplay = `1 ${settlementSwapPath.settlementTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
     return {
       rate,
       rateRaw: composedMidPriceRaw,
@@ -322,19 +322,19 @@ export class StelisSDK {
    * **Non-authoritative UX hint.** This estimate does not include the settle TX
    * that `/prepare` appends. Server `/prepare` dry-runs the full TX and is authoritative.
    *
-   * Uses `computeRelayerCosts` from `@stelis/core-relay` for consistency with
+   * Uses `computeExecutionCostClaim` from `@stelis/core-relay` for consistency with
    * the server-side calculation, plus on-chain fees from `/relay/config`.
    *
    * Profile logic (UX classification — not authoritative eligibility check):
-   * - No vault → `new_user` → display in payment token (e.g. DEEP)
+   * - No vault → `new_user` → display in settlement token (e.g. DEEP)
    * - Vault + credit ≥ totalCost → `credit_general` → display in SUI
-   * - Vault + credit < totalCost → `with_vault` → display in payment token
+   * - Vault + credit < totalCost → `with_vault` → display in settlement token
    *
    * @example
    * ```ts
    * const est = await sdk.estimateGas(suiClient, {
    *   addr: userAddress,
-   *   paymentToken: { type: DEEPBOOK_IDS['testnet']!.deepType },
+   *   settlementToken: { type: DEEPBOOK_IDS['testnet']!.deepType },
    * });
    * console.log(`~${est.amountHuman} ${est.displayUnit} (~${est.suiAmountHuman} SUI)`);
    * ```
@@ -343,7 +343,7 @@ export class StelisSDK {
     client: SuiGrpcClient,
     opts: {
       addr: string;
-      paymentToken: { type: string };
+      settlementToken: { type: string };
       intentGasBudget?: number;
       gasMarginBps?: number;
     },
@@ -352,29 +352,29 @@ export class StelisSDK {
     const gasMarginBps = opts.gasMarginBps ?? DEFAULT_GAS_MARGIN_BPS;
 
     // 1. Compute gas costs using the browser-safe core-relay subset.
-    const costs = computeRelayerCosts({
+    const costs = computeExecutionCostClaim({
       computationCost: intentGasBudget.toString(),
       storageCost: '0',
       storageRebate: '0',
     });
 
     // 2. Add fees from /relay/config (strict required fields)
-    const quotedRelayerFee = parseDecimalBigInt(
-      this._relayerConfig.quotedRelayerFeeMist,
-      'quotedRelayerFeeMist',
+    const quotedHostFee = parseDecimalBigInt(
+      this._relayConfig.quotedHostFeeMist,
+      'quotedHostFeeMist',
     );
     const protocolFee = parseDecimalBigInt(
-      this._relayerConfig.protocolFlatFeeMist,
+      this._relayConfig.protocolFlatFeeMist,
       'protocolFlatFeeMist',
     );
-    const totalCostMist = costs.relayerClaim + quotedRelayerFee + protocolFee;
+    const totalCostMist = costs.executionCostClaim + quotedHostFee + protocolFee;
     const suiAmountHuman = formatSmallestUnitDecimal(totalCostMist, SUI_DECIMALS, 4);
 
-    if (!opts.paymentToken) {
-      throw new Error('[StelisSDK] paymentToken is required.');
+    if (!opts.settlementToken) {
+      throw new Error('[StelisSDK] settlementToken is required.');
     }
 
-    const settlementSwapPath = this.getSettlementSwapPathForPaymentToken(opts.paymentToken.type);
+    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
 
     // 3. Vault/credit check for profile determination
     const credit = await queryUserCredit(client, this._vaultRegistryId, opts.addr);
@@ -386,8 +386,8 @@ export class StelisSDK {
         ? ('credit_general' as const)
         : ('with_vault' as const);
 
-    // 4. Exchange rate for payment token display
-    const rateResult = await this.getExchangeRate(client, opts.paymentToken.type);
+    // 4. Exchange rate for settlement token display
+    const rateResult = await this.getExchangeRate(client, opts.settlementToken.type);
     const hasLiquidity = rateResult.hasLiquidity && !!rateResult.rate;
 
     // canSkipLiquidity: credit_general only.
@@ -405,10 +405,10 @@ export class StelisSDK {
       };
     }
 
-    // Payment token display (DEEP etc.)
+    // Settlement token display (DEEP etc.)
     if (!hasLiquidity || !rateResult.rate) {
       return {
-        displayUnit: settlementSwapPath.paymentTokenSymbol,
+        displayUnit: settlementSwapPath.settlementTokenSymbol,
         amountHuman: '0',
         suiAmountHuman,
         profile,
@@ -420,7 +420,7 @@ export class StelisSDK {
     const midPrice = composePaymentToSuiMidPrice(settlementSwapPath, rateResult.hopMidPrices);
     if (midPrice <= 0n) {
       return {
-        displayUnit: settlementSwapPath.paymentTokenSymbol,
+        displayUnit: settlementSwapPath.settlementTokenSymbol,
         amountHuman: '0',
         suiAmountHuman,
         profile,
@@ -430,22 +430,22 @@ export class StelisSDK {
     }
     const marginNumerator = BigInt(10_000 + gasMarginBps);
 
-    // composedMidPrice is paymentToken→SUI; reverse estimate in smallest units.
+    // composedMidPrice is settlementToken→SUI; reverse estimate in smallest units.
     // DeepBook executable min/lot policy is enforced server-side by /prepare;
     // this SDK path remains a non-authoritative UX preview.
     const amountSmallest =
       (totalCostMist * FLOAT_SCALING * marginNumerator + (midPrice * 10_000n - 1n)) /
       (midPrice * 10_000n);
 
-    const scale = 10n ** BigInt(settlementSwapPath.paymentTokenDecimals);
+    const scale = 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
     const whole = amountSmallest / scale;
     const frac = (amountSmallest % scale)
       .toString()
-      .padStart(settlementSwapPath.paymentTokenDecimals, '0');
+      .padStart(settlementSwapPath.settlementTokenDecimals, '0');
     const amountHuman = `${whole.toString()}.${frac}`;
 
     return {
-      displayUnit: settlementSwapPath.paymentTokenSymbol,
+      displayUnit: settlementSwapPath.settlementTokenSymbol,
       amountHuman,
       suiAmountHuman,
       profile,
@@ -479,7 +479,7 @@ export class StelisSDK {
     tx: Transaction,
     opts: PrepareSponsoredOptions,
   ): Promise<PrepareSponsoredResult> {
-    this.getSettlementSwapPathForPaymentToken(opts.paymentToken.type);
+    this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
 
     // Build TransactionKind bytes from user commands
     tx.setSender(opts.addr);
@@ -489,13 +489,13 @@ export class StelisSDK {
     const userCommandValidation = validateGenericUserTransactionKind(
       userTx,
       {
-        network: this._relayerConfig.network,
-        relayerAddress: this._relayerConfig.relayerRecipient,
+        network: this._relayConfig.network,
+        settlementPayoutRecipientAddress: this._relayConfig.settlementPayoutRecipient,
         configId: this._configId,
         vaultRegistryId: this._vaultRegistryId,
         packageId: this._packageId,
       },
-      opts.paymentToken.type,
+      opts.settlementToken.type,
     );
     if (!userCommandValidation.ok) {
       throw new StelisApiException(userCommandValidation.code, userCommandValidation.message, 422);
@@ -504,11 +504,11 @@ export class StelisSDK {
     const prepareAuthorizationTimestampMs = Date.now();
     const prepareAuthorizationRequestNonce = generatePrepareRequestNonce();
     const prepareAuthorizationFields = {
-      network: this._relayerConfig.network,
+      network: this._relayConfig.network,
       packageId: this._packageId,
       senderAddress: opts.addr,
       txKindBytesHash,
-      paymentTokenType: opts.paymentToken.type,
+      settlementTokenType: opts.settlementToken.type,
       slippageBps: opts.slippageBps,
       gasMarginBps: opts.gasMarginBps,
       orderId: opts.orderId,
@@ -528,7 +528,7 @@ export class StelisSDK {
       const preVaultCredit = parseDecimalBigInt(preCredit.credit, 'vault credit');
 
       if (!preHasVault || preVaultCredit === 0n) {
-        // Swap path required → check payment token existence
+        // Swap path required → check settlement token existence
         // If host supports address balance payment, skip this check —
         // the server will resolve coin objects vs address balance at /prepare time.
         // Address balance payment is always enabled — server resolves
@@ -547,11 +547,11 @@ export class StelisSDK {
       // RPC failure → skip preflight, let server decide
     }
 
-    // Call /prepare — relayer handles settle build, dry-run, slot checkout
+    // Call /prepare — Host handles settle build, dry-run, slot checkout
     const prepareRes = await this._client.prepare({
       txKindBytes,
       senderAddress: opts.addr,
-      paymentTokenType: opts.paymentToken.type,
+      settlementTokenType: opts.settlementToken.type,
       slippageBps: opts.slippageBps,
       gasMarginBps: opts.gasMarginBps,
       orderId: opts.orderId,
@@ -561,7 +561,7 @@ export class StelisSDK {
       prepareAuthorizationSignature,
     });
 
-    // S-16: Client-side defense-in-depth — verify relayer preserved user commands
+    // S-16: Client-side defense-in-depth — verify Host preserved user commands
     this._verifyIntegrity(kindBytes, prepareRes.txBytes, opts);
 
     // S-16 companion: fail-closed settle field validation against prepare response.
@@ -579,10 +579,10 @@ export class StelisSDK {
       ? await sha256Bytes(new TextEncoder().encode(opts.orderId))
       : new Uint8Array(0);
     const settleFieldValidation = validateSettleTransactionFields(settleFields, {
-      relayerClaimMist: parseDecimalBigInt(prepareRes.cost.relayerClaim, 'relayerClaim'),
-      quotedRelayerFeeMist: parseDecimalBigInt(
-        prepareRes.cost.quotedRelayerFee,
-        'quotedRelayerFee',
+      executionCostClaimMist: parseDecimalBigInt(prepareRes.cost.executionCostClaim, 'executionCostClaim'),
+      quotedHostFeeMist: parseDecimalBigInt(
+        prepareRes.cost.quotedHostFee,
+        'quotedHostFee',
       ),
       expectedProtocolFeeMist: parseDecimalBigInt(prepareRes.cost.protocolFee, 'protocolFee'),
       policyHash: hexToBytes(prepareRes.policyHash, 'policyHash'),
@@ -594,8 +594,8 @@ export class StelisSDK {
 
     // Notify gas estimate callback — totalCost in MIST + 'SUI'
     const totalCost =
-      parseDecimalBigInt(prepareRes.cost.relayerClaim, 'relayerClaim') +
-      parseDecimalBigInt(prepareRes.cost.quotedRelayerFee, 'quotedRelayerFee') +
+      parseDecimalBigInt(prepareRes.cost.executionCostClaim, 'executionCostClaim') +
+      parseDecimalBigInt(prepareRes.cost.quotedHostFee, 'quotedHostFee') +
       parseDecimalBigInt(prepareRes.cost.protocolFee, 'protocolFee');
     const totalCostSui = formatSmallestUnitDecimal(totalCost, SUI_DECIMALS, 9);
     opts.onGasEstimate?.(totalCost, totalCostSui, 'SUI');
@@ -636,7 +636,7 @@ export class StelisSDK {
   // ─────────────────────────────────────────
 
   /**
-   * Execute any Transaction through the sponsored relay flow with automatic error normalization.
+   * Execute any Transaction through the sponsored Relay API flow with automatic error normalization.
    *
    * Orchestrates: prepare → sign → sponsor → submit.
    * Server API errors are translated into user-friendly
@@ -659,7 +659,7 @@ export class StelisSDK {
    *     },
    *     signer: wallet.signTransaction,
    *     addr: userAddress,
-   *     paymentToken: { type: DEEP },
+   *     settlementToken: { type: DEEP },
    *   });
    * } catch (err) {
    *   if (err instanceof StelisSponsoredError) {
@@ -673,13 +673,13 @@ export class StelisSDK {
     opts: ExecuteSponsoredOptions,
   ): Promise<ExecuteSponsoredResult> {
     try {
-      // ── Step 1: Prepare (relayer builds full TX with settle) ──
+      // ── Step 1: Prepare (Host builds full TX with settle) ──
       const prepared = await this.prepareSponsored(tx, opts);
 
       // ── Step 2: User sign ────────────────────────────────────
       const userSignature = await opts.signer(prepared.txBytes);
 
-      // ── Step 3: Sponsor (relayer verifies, sponsor-signs, submits) ──
+      // ── Step 3: Sponsor (Host verifies, adds sponsor signature, submits) ──
       const sponsorRes = await this._client.sponsor({
         txBytes: prepared.txBytes,
         userSignature,
@@ -707,7 +707,7 @@ export class StelisSDK {
 
   /**
    * Execute a transaction using the user's own SUI if balance is sufficient,
-   * otherwise fall back to executeSponsored (Stelis relayer path).
+   * otherwise fall back to executeSponsored (Stelis Host-sponsored path).
    *
    * Flow:
    *   1. assertNoGasPreset(tx) — UX guard, throws if gas fields are preset
@@ -772,7 +772,7 @@ export class StelisSDK {
     const gasUsed = sim.Transaction.effects?.gasUsed;
     if (!gasUsed)
       throw new Error('[StelisSDK] Simulation returned no gasUsed — cannot determine gas budget');
-    const { grossGas } = computeRelayerCosts(gasUsed);
+    const { grossGas } = computeExecutionCostClaim(gasUsed);
     const gasBudget = (grossGas * BigInt(10000 + DEFAULT_GAS_MARGIN_BPS)) / 10000n;
 
     // ── Step 3a: SUI sufficient — execute directly ────────────────────────
@@ -813,7 +813,7 @@ export class StelisSDK {
    * The server handles sponsor key selection, dry-run, budget reservation.
    *
    * Unlike prepareSponsored(), this does NOT include:
-   * - payment token or settlement swap path selection (promotion budget covers gas)
+   * - settlement token or settlement swap path selection (promotion budget covers gas)
    * - Settle-specific S-16 suffix verification (no settle TX)
    * - Cost cross-validation (simple estimatedGasMist)
    * - Preflight coin checks
@@ -861,7 +861,7 @@ export class StelisSDK {
    * Submit a signed promotion-sponsored transaction (low-level).
    *
    * Sends the signed txBytes + receiptId to POST /studio/promotions/:id/sponsor.
-   * The server re-verifies developer JWT, consumes the reservation, sponsor-signs, and submits.
+   * The server re-verifies developer JWT, consumes the reservation, adds the sponsor signature, and submits.
    *
    * @returns digest, effects, actualGasMist
    */
@@ -966,7 +966,7 @@ export class StelisSDK {
     txBytesBase64: string,
     _opts: PrepareSponsoredOptions,
   ): void {
-    const policyVersion = this._relayerConfig.integrityPolicyVersion;
+    const policyVersion = this._relayConfig.integrityPolicyVersion;
     // Check if version is supported
     if (policyVersion !== SUPPORTED_INTEGRITY_POLICY_VERSION) {
       throw new StelisIntegrityError(

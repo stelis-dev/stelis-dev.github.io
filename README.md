@@ -2,23 +2,98 @@
 
 Stelis is a settlement layer for token-funded transaction execution on Sui.
 
-SUI remains the execution fuel; the user's held value becomes the settlement source.
+SUI remains the execution fuel. A user's held value becomes the settlement source for execution cost.
 
-Across blockchains, the long-running UX problem is not that users lack value. It is that value and execution are often coupled through a native gas token. A wallet, app, service, or agent may hold stablecoins, protocol tokens, or vault credit, but still be unable to act until the required gas asset is available.
+## Beyond Transfers
 
-Stelis separates those concerns. On Sui, transactions still execute with SUI gas, while their cost can be settled from a supported payment token or from user-owned vault credit.
+Sui has already shown a better blockchain UX with qualified stablecoin transfers that do not require users to pay SUI gas directly. This is an important step.
 
-This matches how payment systems normally feel: processing costs are part of settlement, not a second currency the payer must acquire before every action. Sui already points in this direction with gasless stablecoin transfers. Stelis extends the same settlement framing beyond transfers to app actions, service actions, and agent actions that need programmable execution.
+Transfers are only the beginning. Real app usage does not stop at sending tokens. Purchases, subscriptions, protocol actions, game actions, and agent actions often require contract calls and Programmable Transaction Blocks.
 
-Payment-token support is explicit. A host configures settlement-ready assets with viable SUI settlement swap paths, live liquidity, and host policy. That keeps the model broad across token assets while preserving operational control.
+Stelis extends this UX beyond transfers. It reduces native gas management for app, service, and agent actions that need programmable execution.
 
-Stelis uses Sui primitives to make the model concrete. Programmable Transaction Blocks compose the user action and settlement path in one execution flow. Sponsored gas separates the sender from the gas payer. Object ownership keeps vault credit user-owned.
+## Execution and Settlement
 
-A Stelis relay is an execution host for the settlement model. It sponsors only transactions bound to settlement expectations, submits them with SUI gas, and verifies settlement after execution.
+The long-running blockchain UX problem is not that users lack value. Users may already hold stablecoins, protocol tokens, or other held value.
 
-User vaults are user-owned settlement sources, not relayer balances. They preserve the user's asset boundary while giving wallets, apps, services, and agents a reusable way to turn held value into execution capacity.
+The problem is that execution is still tied to a native gas asset. Even when a wallet holds value, transaction execution stops if the required gas asset is missing.
 
-The product surfaces are a TypeScript SDK for apps and services, an MCP server for agent clients, a deployable relay API host for operators, public and admin web apps, and the on-chain Move package.
+Stelis separates execution from settlement.
+
+Transaction execution uses SUI gas. Execution cost can be settled from the user's held value.
+
+In other words, SUI remains the execution fuel, and held value becomes the settlement source.
+
+## Liquidity Makes Value Usable
+
+For a held token to become a settlement source for execution cost, it needs a path to settle into SUI.
+
+Stelis uses DeepBook for this path. DeepBook is Sui's on-chain liquidity infrastructure. Stelis does not automatically accept arbitrary tokens. Settlement tokens and DeepBook SUI settlement swap paths are explicitly configured and must satisfy pricing, fee, and request admission rules.
+
+In this model, liquidity becomes usability infrastructure.
+
+A token with a healthy DeepBook SUI pair can become more than value held in a wallet. It can become a settlement source for app, service, and agent execution.
+
+For token issuers and app developers, this creates a practical incentive. Deeper and more stable SUI liquidity can make a token more useful inside its own product economy.
+
+## Payment Formats Stay Open
+
+Stelis does not define checkout, payment, fulfillment, or refund formats.
+
+Apps can keep their own PTB structure, object model, and business logic. Existing payment SDKs, merchant backends, and external payment protocols can compose with Stelis instead of being replaced by it.
+
+Stelis handles execution-cost settlement underneath. Payment products can focus on their own user experience, while users do not need to manage native gas directly.
+
+## Operating a Host
+
+A Host is a deployed `@stelis/app-api` execution environment that clients connect to. It exposes the Relay API and owns sponsor funding and refill, settlement swap paths, fee policy, and request admission policy.
+
+The Relay API is the `/relay/*` HTTP interface exposed by a Host.
+
+A client connects to a Host. The Host advertises its supported settlement swap paths through `/relay/config`, and the SDK selects the compatible path for the requested settlement token.
+
+The Host execution role is internal to a Host. It appears in settlement fields and implementation names such as `settlementPayoutRecipient`, `executionCostClaim`, `hostFee`, and internal execution flow. Stelis does not present those internal roles as the public product unit.
+
+The Admin app is the tool a Host operator uses to manage Host settings, sponsor state, settlement swap paths, and operating policy.
+
+A developer can connect to an existing Host to start, or operate a Host when their app, protocol, token, settlement swap path, fee policy, or risk policy needs direct control.
+
+```mermaid
+sequenceDiagram
+  participant App as App / service / agent
+  participant SDK as @stelis/sdk
+  participant Host as Host
+  participant Wallet as User wallet
+  participant Sui as Sui execution
+
+  App->>SDK: connect to a Host
+  SDK->>Host: GET /relay/config
+  Host-->>SDK: supported settlement swap paths
+  SDK->>SDK: select settlement swap path for the settlement token
+
+  App->>SDK: request programmable execution
+  SDK->>Host: POST /relay/prepare
+  Host-->>SDK: prepared transaction
+  SDK->>Wallet: request user signature
+  Wallet-->>SDK: signed transaction
+
+  SDK->>Host: POST /relay/sponsor
+  Host->>Sui: submit sponsored transaction
+  Note over Sui: user action and settlement path execute in one transaction flow
+  Sui-->>Host: execution result
+  Host-->>SDK: execution result
+  SDK-->>App: completed action
+```
+
+## Native to Sui Execution
+
+Stelis implements this model while preserving Sui's execution model.
+
+Programmable Transaction Blocks let user actions and settlement paths be composed in one execution flow. Sponsored gas separates the sender from the gas payer.
+
+A User Vault is a reusable settlement source owned by the user. It preserves the user's asset boundary while giving wallets, apps, services, and agents a way to turn held value into execution capacity.
+
+Object ownership keeps User Vault credit user-owned instead of turning it into Host-owned balance.
 
 ## Product Entry Points
 
@@ -26,9 +101,9 @@ The product surfaces are a TypeScript SDK for apps and services, an MCP server f
 | --- | --- | --- |
 | Build a dApp or service integration | [`@stelis/sdk`](./packages/sdk/README.md) | Published TypeScript SDK for app and service developers |
 | Connect an agent runtime | [`@stelis/mcp-server`](./packages/mcp-server/README.md) | Published Model Context Protocol (MCP) server for agent clients |
-| Run the relay and admin API | [`@stelis/app-api`](./packages/app-api/README.md) | Deployable API host for relay, auth, admin, and promotion routes |
+| Run a Host API | [`@stelis/app-api`](./packages/app-api/README.md) | Deployable Host runtime exposing Relay API, auth, admin, and promotion HTTP APIs |
 | Run the demo web app | [`@stelis/app-web`](./packages/app-web/README.md) | Deployable static demo app for docs, status, playground, and sandbox flows |
-| Run the admin web app | [`@stelis/app-admin`](./packages/app-admin/README.md) | Deployable static admin app for host operators |
+| Run the admin web app | [`@stelis/app-admin`](./packages/app-admin/README.md) | Deployable static admin app for Host operators |
 | Review or build the Move package | [`packages/contracts/move`](./packages/contracts/move/README.md) | On-chain Move package |
 
 ## Documentation
@@ -48,7 +123,7 @@ Package scripts define each package's own runtime contract:
 
 - `npm run dev:app-api`, `npm run dev:app-web`, and `npm run dev:app-admin`
   are root-level local development helpers. `dev:app-api` always starts an isolated Redis
-  memory server for the API host.
+  memory server for the `app-api` Host.
 - `npm test`, `npm run lint`, `npm run typecheck`, `npm run release:check`, and `npm run build`
   are repository verification commands.
 - Package `build` scripts create package artifacts.

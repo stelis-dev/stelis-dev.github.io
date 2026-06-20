@@ -96,7 +96,7 @@ describe('API client', () => {
     }
   });
 
-  it('getPool sends GET /api/pool', async () => {
+  it('getSponsorOperations sends GET /api/sponsor-operations', async () => {
     const mockPool = {
       network: 'testnet',
       // `sponsorOperations` is always a concrete payload. The smoke test just
@@ -120,7 +120,7 @@ describe('API client', () => {
           lastError: null,
         },
       },
-      relayerRecipientAddress: '0xR',
+      settlementPayoutRecipientAddress: '0xR',
     };
     vi.stubGlobal(
       'fetch',
@@ -130,11 +130,11 @@ describe('API client', () => {
       }),
     );
 
-    const { getPool } = await import('../src/api/client');
-    const result = await getPool();
+    const { getSponsorOperations } = await import('../src/api/client');
+    const result = await getSponsorOperations();
 
     expect(fetch).toHaveBeenCalledWith(
-      '/api/pool',
+      '/api/sponsor-operations',
       expect.objectContaining({
         credentials: 'include',
       }),

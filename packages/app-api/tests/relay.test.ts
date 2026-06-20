@@ -23,11 +23,11 @@ vi.mock('@stelis/core-api', async () => {
       txBytes: 'mock-tx-bytes',
       nonce: '1',
       cost: {
-        relayerClaim: '500',
+        executionCostClaim: '500',
         simGas: '200',
         gasVarianceFixedMist: '100',
         slippageBufferMist: '0',
-        quotedRelayerFee: '100',
+        quotedHostFee: '100',
         protocolFee: '50',
         grossGas: '300',
       },
@@ -38,7 +38,7 @@ vi.mock('@stelis/core-api', async () => {
     handleSponsor: vi.fn().mockResolvedValue({
       digest: 'mock-digest',
       effects: {},
-      relayerClaim: '500',
+      executionCostClaim: '500',
     }),
     checkBlockedRequest: vi.fn().mockResolvedValue({ blocked: false }),
     toBlockedError: vi.fn().mockReturnValue({ error: 'blocked' }),
@@ -74,7 +74,7 @@ function prepareBody(overrides: Record<string, unknown> = {}): Record<string, un
   return {
     txKindBytes: '0xTX',
     senderAddress: '0x' + 'ab'.repeat(32),
-    paymentTokenType: 'SUI',
+    settlementTokenType: 'SUI',
     ...PREPARE_AUTH_FIELDS,
     ...overrides,
   };
@@ -83,10 +83,10 @@ function prepareBody(overrides: Record<string, unknown> = {}): Record<string, un
 // ── Mock context factory ────────────────────────────────────────────────
 function createMockCtx(): AppApiContext {
   return {
-    relay: {
+    host: {
       network: 'testnet',
       packageId: '0xPKG',
-      relayerRecipientAddress: '0xRECIPIENT',
+      settlementPayoutRecipientAddress: '0xRECIPIENT',
       abuseBlocker: {} as never,
       rateLimiter: {
         check: vi.fn().mockResolvedValue({ allowed: true }),
@@ -104,7 +104,7 @@ function createMockCtx(): AppApiContext {
       dispose: vi.fn(),
     } as never,
     prepareConfig: {
-      quotedRelayerFeeMist: BigInt(500),
+      quotedHostFeeMist: BigInt(500),
       supportedSettlementSwapPaths: [
         {
           hops: [
@@ -116,9 +116,9 @@ function createMockCtx(): AppApiContext {
               feeBps: 0,
             },
           ],
-          paymentTokenType: '0xDEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xDEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1n,
           minSize: 1n,
           effectiveFeeRateBps: 0,
@@ -268,7 +268,7 @@ describe('relay routes', () => {
       const body = await res.json();
       expect(body.network).toBe('testnet');
       expect(body.packageId).toBe('0xPKG');
-      expect(body.relayerRecipient).toBe('0xRECIPIENT');
+      expect(body.settlementPayoutRecipient).toBe('0xRECIPIENT');
       expect(body.supportedSettlementSwapPaths).toHaveLength(1);
       const pool = body.supportedSettlementSwapPaths[0];
       expect(pool.settlementSwapDirection).toBe('baseForQuote');
@@ -277,7 +277,7 @@ describe('relay routes', () => {
       expect(pool.hops[0].swapDirection).toBe('baseForQuote');
       expect(pool.lotSize).toBe(1);
       expect(pool.minSize).toBe(1);
-      expect(body.quotedRelayerFeeMist).toBe('500');
+      expect(body.quotedHostFeeMist).toBe('500');
       expect(body.protocolFlatFeeMist).toBe('100');
       expect(body.integrityPolicyVersion).toBeDefined();
 
@@ -298,9 +298,9 @@ describe('relay routes', () => {
               feeBps: 0,
             },
           ],
-          paymentTokenType: '0xUSDC',
-          paymentTokenSymbol: 'USDC',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xUSDC',
+          settlementTokenSymbol: 'USDC',
+          settlementTokenDecimals: 6,
           lotSize: 100n,
           minSize: 10n,
           effectiveFeeRateBps: 0,
@@ -333,7 +333,7 @@ describe('relay routes', () => {
     });
 
     it('returns 503 when getConfig fails', async () => {
-      (mockCtx.relay.getConfig as ReturnType<typeof vi.fn>).mockRejectedValue(
+      (mockCtx.host.getConfig as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('config refresh failed'),
       );
       const res = await app.request('/relay/config');
@@ -353,7 +353,7 @@ describe('relay routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
-      expect(mockCtx.relay.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
+      expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.objectContaining({
           slots: expect.any(Array),
@@ -386,7 +386,7 @@ describe('relay routes', () => {
           body: JSON.stringify({
             txKindBytes: '0xTX',
             senderAddress: '0xabc',
-            paymentTokenType: 'SUI',
+            settlementTokenType: 'SUI',
           }),
         });
 
@@ -394,7 +394,7 @@ describe('relay routes', () => {
         expect(await res.json()).toEqual({ error, code });
         expect(coreApi.handlePrepare).not.toHaveBeenCalled();
         expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       },
     );
 
@@ -418,7 +418,7 @@ describe('relay routes', () => {
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
       expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
       expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handlePrepare).not.toHaveBeenCalled();
     });
 
@@ -426,14 +426,14 @@ describe('relay routes', () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ senderAddress: '0xABC', paymentTokenType: 'SUI' }),
+        body: JSON.stringify({ senderAddress: '0xABC', settlementTokenType: 'SUI' }),
       });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('returns 400 on missing paymentTokenType', async () => {
+    it('returns 400 on missing settlementTokenType', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -479,7 +479,7 @@ describe('relay routes', () => {
       expect(params.senderAddress).toBe(
         '0x0000000000000000000000000000000000000000000000000000000000000002',
       );
-      expect(mockCtx.relay.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
+      expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ requireFreeSponsorSlot: true }),
@@ -506,7 +506,7 @@ describe('relay routes', () => {
         body: JSON.stringify(
           prepareBody({
             senderAddress: '0x' + 'ab'.repeat(32),
-            paymentTokenType:
+            settlementTokenType:
               '0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP',
           }),
         ),
@@ -531,7 +531,7 @@ describe('relay routes', () => {
         body: JSON.stringify(
           prepareBody({
             senderAddress: '0x' + 'ab'.repeat(32),
-            paymentTokenType:
+            settlementTokenType:
               '0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP',
           }),
         ),
@@ -542,7 +542,7 @@ describe('relay routes', () => {
     });
 
     it('returns 429 on rate limit exceeded (prepare)', async () => {
-      (mockCtx.relay.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (mockCtx.host.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
         allowed: false,
         retryAfterMs: 5000,
       });
@@ -552,11 +552,11 @@ describe('relay routes', () => {
         body: JSON.stringify({
           txKindBytes: '0x...',
           senderAddress: '0xABC',
-          paymentTokenType: 'SUI',
+          settlementTokenType: 'SUI',
         }),
       });
       expect(res.status).toBe(429);
-      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith('prepare:client-ip:127.0.0.1');
+      expect(mockCtx.host.rateLimiter.check).toHaveBeenCalledWith('prepare:client-ip:127.0.0.1');
     });
 
     it('does not check sender address abuse at the HTTP route before authorization', async () => {
@@ -614,7 +614,7 @@ describe('relay routes', () => {
     const validPrepareBase = {
       txKindBytes: '0xTX',
       senderAddress: '0x' + 'ab'.repeat(32),
-      paymentTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: '0xDEEP::deep::DEEP',
       ...PREPARE_AUTH_FIELDS,
     };
 
@@ -851,7 +851,7 @@ describe('relay routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
-      expect(mockCtx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
       const gateCall = vi.mocked(buildSponsorUnavailableResponse).mock.calls[0];
       expect(gateCall).toHaveLength(1);
       expect(gateCall?.[0]).toEqual(
@@ -882,7 +882,7 @@ describe('relay routes', () => {
         expect(await res.json()).toEqual({ error, code });
         expect(coreApi.handleSponsor).not.toHaveBeenCalled();
         expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       },
     );
 
@@ -906,7 +906,7 @@ describe('relay routes', () => {
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
       expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
       expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handleSponsor).not.toHaveBeenCalled();
     });
 
@@ -922,7 +922,7 @@ describe('relay routes', () => {
     });
 
     it('returns 429 on rate limit exceeded', async () => {
-      (mockCtx.relay.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (mockCtx.host.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
         allowed: false,
         retryAfterMs: 3000,
       });
@@ -932,7 +932,7 @@ describe('relay routes', () => {
         body: JSON.stringify(validBody),
       });
       expect(res.status).toBe(429);
-      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith('sponsor:client-ip:127.0.0.1');
+      expect(mockCtx.host.rateLimiter.check).toHaveBeenCalledWith('sponsor:client-ip:127.0.0.1');
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {
@@ -966,7 +966,7 @@ describe('relay routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.digest).toBe('mock-digest');
-      expect(mockCtx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
 
       assertResponseKeys(body, 'sponsorResponse');
     });

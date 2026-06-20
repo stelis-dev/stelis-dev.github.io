@@ -28,7 +28,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK, StelisSponsoredError } from '../src/sdk.js';
-import type { RelayerConfig } from '../src/types.js';
+import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
@@ -97,10 +97,10 @@ const ADDR = '0x' + 'a'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 
-const RELAYER_CONFIG: RelayerConfig = {
+const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipient: '0x' + 'b'.repeat(64),
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -112,16 +112,16 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -134,7 +134,7 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAYER_CONFIG), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -143,7 +143,7 @@ const defaultOpts = () => ({
   prepareAuthorizationSigner: vi.fn().mockResolvedValue('prepare-sig-base64'),
   signer: vi.fn().mockResolvedValue('user-sig-base64'),
   addr: ADDR,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
 });
 
 // ─────────────────────────────────────────────
@@ -170,9 +170,9 @@ describe('StelisSDK.executeSponsored', () => {
         simGas: '5000000',
         gasVarianceFixedMist: '200000',
         slippageBufferMist: '50000',
-        quotedRelayerFee: '100000',
+        quotedHostFee: '100000',
         protocolFee: '20000',
-        relayerClaim: '5250000',
+        executionCostClaim: '5250000',
         grossGas: '7000000',
       },
       profile: 'new_user',
@@ -287,7 +287,7 @@ describe('StelisSDK.executeSponsored', () => {
 
   // ── 5b: SPONSOR_PREFLIGHT_FAILED + subcode INSUFFICIENT_FUNDS → INSUFFICIENT_FUNDS ──
   // settle.move EInsufficientFunds (S-4 non-loss assert): total_in covers
-  // min_settle but not relayer_claim + fees. User-visible exhaustion class —
+  // min_settle but not execution_cost_claim_mist + fees. User-visible exhaustion class —
   // collapse with INSUFFICIENT_SETTLE_INPUT under the same SDK code.
   it('normalizes SPONSOR_PREFLIGHT_FAILED with subcode INSUFFICIENT_FUNDS', async () => {
     const { StelisApiException } = await import('../src/client.js');
@@ -479,9 +479,9 @@ describe('StelisSDK.executeSponsored', () => {
         simGas: '5000000',
         gasVarianceFixedMist: '200000',
         slippageBufferMist: '50000',
-        quotedRelayerFee: '100000',
+        quotedHostFee: '100000',
         protocolFee: '20000',
-        relayerClaim: '5250000',
+        executionCostClaim: '5250000',
         grossGas: '7000000',
       },
       profile: 'new_user',

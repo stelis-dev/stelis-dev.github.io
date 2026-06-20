@@ -21,9 +21,9 @@ function settlementSwapPath(
   overrides: Partial<SingleHopSettlementSwapPath>,
 ): SingleHopSettlementSwapPath {
   return {
-    paymentTokenType: DEEP,
-    paymentTokenSymbol: 'DEEP',
-    paymentTokenDecimals: 6,
+    settlementTokenType: DEEP,
+    settlementTokenSymbol: 'DEEP',
+    settlementTokenDecimals: 6,
     lotSize: 1n,
     minSize: 1n,
     effectiveFeeRateBps: 0,
@@ -45,8 +45,8 @@ describe('deriveAllowedSettlementSwapPaths — settlementSwapDirection ↔ swapD
   it('accepts quoteForBase direction with swapDirection=quoteForBase', () => {
     const result = deriveAllowedSettlementSwapPaths([
       settlementSwapPath({
-        paymentTokenType: USDC,
-        paymentTokenSymbol: 'USDC',
+        settlementTokenType: USDC,
+        settlementTokenSymbol: 'USDC',
         settlementSwapDirection: 'quoteForBase',
         hops: [
           {
@@ -63,7 +63,7 @@ describe('deriveAllowedSettlementSwapPaths — settlementSwapDirection ↔ swapD
     expect(result[0].settlementSwapDirection).toBe('quoteForBase');
   });
 
-  it('rejects duplicate paymentTokenType because each token selects one active settlement swap path', () => {
+  it('rejects duplicate settlementTokenType because each token selects one active settlement swap path', () => {
     expect(() =>
       deriveAllowedSettlementSwapPaths([
         settlementSwapPath({}),
@@ -79,7 +79,7 @@ describe('deriveAllowedSettlementSwapPaths — settlementSwapDirection ↔ swapD
           ],
         }),
       ]),
-    ).toThrow(/Duplicate paymentTokenType/);
+    ).toThrow(/Duplicate settlementTokenType/);
   });
 
   it('rejects baseForQuote direction with swapDirection=quoteForBase (swapDirection vector mismatch)', () => {
@@ -176,8 +176,8 @@ describe('resolvePrepareConfig — settlement swap path descriptor coverage', ()
   it('rejects descriptors that are not backed by supportedSettlementSwapPaths', () => {
     const settlementSwapPaths = [settlementSwapPath({})];
     const extraSettlementSwapPath = settlementSwapPath({
-      paymentTokenType: USDC,
-      paymentTokenSymbol: 'USDC',
+      settlementTokenType: USDC,
+      settlementTokenSymbol: 'USDC',
       settlementSwapDirection: 'quoteForBase',
       hops: [
         {

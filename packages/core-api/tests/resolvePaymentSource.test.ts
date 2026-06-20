@@ -226,7 +226,7 @@ describe('resolvePaymentSource — 6-cell functional matrix', () => {
   // Cell 3: AB-only + does not touch → address_balance
   // Covered by "no coin objects, AB sufficient → address_balance".
 
-  // Cell 4: AB-only + user touches payment token via tx.withdrawal()
+  // Cell 4: AB-only + user touches settlement token via tx.withdrawal()
   // No coin objects exist. User prefix uses tx.withdrawal() to consume some AB.
   // Resolver has no mechanism to receive prefix AB consumption → sees full AB.
   it('cell 4: AB-only + user touches AB via withdrawal → resolver sees full AB (gap)', async () => {
@@ -339,7 +339,7 @@ describe('resolvePaymentSource — FundsWithdrawal accounting gap', () => {
   });
 
   // ── Single coin object, mutated by prefix ────────────────────────────────
-  // User has 1 payment-token Coin<T> with balance 11_000_000.
+  // User has 1 settlement-token Coin<T> with balance 11_000_000.
   // User prefix: splitCoins(thatCoin, [1_000_000]) + transferObjects.
   // classifyUserTxCoins marks thatCoin as mutated.
   // With no reusable provenance and AB = 0, the resolver still rejects.

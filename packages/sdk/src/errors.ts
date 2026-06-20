@@ -9,7 +9,7 @@ import { StelisApiException } from './client.js';
 
 /**
  * Returns true for transient network/infrastructure errors that may resolve
- * when routed through a different endpoint (e.g. the relayer's own RPC node).
+ * when routed through a different endpoint (e.g. the Host's RPC node).
  * Deterministic failures (bad tx, wrong args) are NOT infra errors.
  *
  * Used only in sdk.ts — not a core-relay export (string heuristics are

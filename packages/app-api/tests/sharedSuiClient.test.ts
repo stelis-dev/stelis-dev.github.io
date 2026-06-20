@@ -4,15 +4,15 @@
  * Tests validate:
  *   - Missing shared client → fail-fast error (negative path)
  *   - Injected client identity is preserved through the wiring chain:
- *     loadSettlementSwapPathRegistry() and createRelayerContext() receive the same instance (positive path)
+ *     loadSettlementSwapPathRegistry() and createHostContext() receive the same instance (positive path)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks — must be declared before any imports that use them ────────────
 
-// Track which client was passed to loadSettlementSwapPathRegistry and createRelayerContext
+// Track which client was passed to loadSettlementSwapPathRegistry and createHostContext
 let capturedSettlementSwapPathRegistryClient: unknown = null;
-let capturedRelayerContextClient: unknown = null;
+let capturedHostContextClient: unknown = null;
 let capturedPrepareInflightLimiter: unknown = null;
 
 vi.mock('../src/settlementSwapPathRegistry.js', () => ({
@@ -29,10 +29,10 @@ vi.mock('@stelis/core-api', async () => {
   const actual = await vi.importActual('@stelis/core-api');
   return {
     ...actual,
-    createRelayerContext: vi.fn().mockImplementation((config: Record<string, unknown>) => {
-      capturedRelayerContextClient = config.suiClient;
+    createHostContext: vi.fn().mockImplementation((config: Record<string, unknown>) => {
+      capturedHostContextClient = config.suiClient;
       capturedPrepareInflightLimiter = config.prepareInflightLimiter;
-      // Return a minimal mock RelayerContext
+      // Return a minimal mock HostContext
       return {
         network: config.network,
         sui: config.suiClient,
@@ -43,7 +43,7 @@ vi.mock('@stelis/core-api', async () => {
         rateLimiter: config.rateLimiter,
         abuseBlocker: config.abuseBlocker,
         prepareStore: config.prepareStore,
-        relayerRecipientAddress: config.relayerRecipientAddress,
+        settlementPayoutRecipientAddress: config.settlementPayoutRecipientAddress,
         allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
         vaultsTableId: null,
         getConfig: vi.fn(),
@@ -99,9 +99,9 @@ vi.mock('@stelis/core-api/prepareConfig', () => ({
     deepbookPackageId: '0xDEEPBOOK',
     deepType: '0xDEEP',
     allowedSettlementSwapPaths: [],
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
   }),
-  parseRelayerFeeEnv: vi.fn().mockReturnValue(0n),
+  parseHostFeeEnv: vi.fn().mockReturnValue(0n),
 }));
 
 // ── Test setup ──────────────────────────────────────────────────────────
@@ -111,14 +111,14 @@ let getCtx: typeof import('../src/context.js').getCtx;
 
 beforeEach(async () => {
   capturedSettlementSwapPathRegistryClient = null;
-  capturedRelayerContextClient = null;
+  capturedHostContextClient = null;
   capturedPrepareInflightLimiter = null;
 
   // Set required env vars for initContext
   process.env.REDIS_URL = 'redis://mock';
   process.env.NETWORK = 'testnet';
   process.env.SPONSOR_SECRET_KEY = 'suiprivkey1mock';
-  process.env.RELAYER_RECIPIENT_ADDRESS = '0x' + 'ff'.repeat(32);
+  process.env.SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS = '0x' + 'ff'.repeat(32);
   process.env.SPONSOR_REFILL_ACCOUNT_SECRET_KEY = 'suiprivkey1sponsorrefillaccount';
   // Sponsor pool construction requires an HMAC secret (≥32 chars).
   // Boot validation normally enforces this, but the unit test exercises
@@ -153,7 +153,7 @@ describe('setSharedSuiClient wiring', () => {
     await expect(getCtx()).rejects.toThrow('Shared Sui client not set');
   });
 
-  it('injected client is used by both loadSettlementSwapPathRegistry and createRelayerContext', async () => {
+  it('injected client is used by both loadSettlementSwapPathRegistry and createHostContext', async () => {
     // Create a distinguishable mock client
     const mockSuiClient = {
       __testId: 'shared-client-identity',
@@ -168,13 +168,13 @@ describe('setSharedSuiClient wiring', () => {
 
     // loadSettlementSwapPathRegistry received the injected client
     expect(capturedSettlementSwapPathRegistryClient).toBe(mockSuiClient);
-    // createRelayerContext received the same injected client
-    expect(capturedRelayerContextClient).toBe(mockSuiClient);
+    // createHostContext received the same injected client
+    expect(capturedHostContextClient).toBe(mockSuiClient);
     // Both received the exact same instance (identity, not equality)
-    expect(capturedSettlementSwapPathRegistryClient).toBe(capturedRelayerContextClient);
+    expect(capturedSettlementSwapPathRegistryClient).toBe(capturedHostContextClient);
 
     // WS2: prepareInflightLimiter must be explicitly injected as RedisPrepareInflight
-    // (not the MemoryPrepareInflight default from createRelayerContext)
+    // (not the MemoryPrepareInflight default from createHostContext)
     expect(capturedPrepareInflightLimiter).toBeDefined();
     expect(capturedPrepareInflightLimiter).not.toBeNull();
     // Verify it's the Redis adapter by checking the constructor name.

@@ -38,8 +38,8 @@ interface StudioExecutionPanelProps {
  *   2. Wallet sign
  *   3. sdk.sponsorPromotionSponsored() — POST /studio/promotions/:id/sponsor
  *
- * This uses the promotion-specific endpoints, not the generic relay path.
- * No payment token or settlement swap path is needed — promotion budget covers gas.
+ * This uses the promotion-specific endpoints, not the generic Relay API path.
+ * No settlement token or settlement swap path is needed — promotion budget covers gas.
  *
  * The TX builds a 2-step MoveCall-only PTB:
  *   1. coin::zero<SUI> — creates zero-balance Coin<SUI>
@@ -122,7 +122,7 @@ export function StudioExecutionPanel({
         label: 'TX Build',
         response: {
           moveCallTargets,
-          note: 'Promotion path: MoveCall-only TX. No payment token or settlement swap path needed — budget covers gas.',
+          note: 'Promotion path: MoveCall-only TX. No settlement token or settlement swap path needed — budget covers gas.',
         },
         timestamp: Date.now(),
       });
@@ -225,7 +225,7 @@ export function StudioExecutionPanel({
       <h3 className="promo-panel-title">🚀 Promotion Sponsored Execution</h3>
       <p className="promo-panel-desc">
         Execute a promotion-sponsored transaction. Uses <code>sdk.preparePromotionSponsored()</code>{' '}
-        and <code>sdk.sponsorPromotionSponsored()</code>. No payment token or settlement swap path
+        and <code>sdk.sponsorPromotionSponsored()</code>. No settlement token or settlement swap path
         needed — promotion budget covers gas. Builds a MoveCall-only TX (
         <code>coin::zero&lt;SUI&gt;</code>).
       </p>

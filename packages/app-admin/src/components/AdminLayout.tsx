@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, useOutletContext } from 'react-router-dom';
 import { RenewModal } from './RenewModal';
-import { logout, getPool } from '../api/client';
+import { logout, getSponsorOperations } from '../api/client';
 import type { AuthContext } from './AuthGuard';
 
 const RENEW_WARNING_SECONDS = 60;
@@ -36,7 +36,7 @@ export function AdminLayout() {
 
   // Fetch studio mode on mount
   useEffect(() => {
-    getPool()
+    getSponsorOperations()
       .then((data) => setStudioEnabled(data.studioEnabled === true))
       .catch(() => setStudioEnabled(false));
   }, []);

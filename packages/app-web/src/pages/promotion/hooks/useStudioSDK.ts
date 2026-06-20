@@ -5,7 +5,7 @@ import { useAppConfig } from '../../../AppConfigContext';
 /**
  * useStudioSDK — dynamic studio-endpoint SDK connection hook.
  *
- * Unlike sandbox's useSDK (singleton against RELAYER_BASE), this hook:
+ * Unlike sandbox's useSDK (singleton against RELAY_API_BASE), this hook:
  *   - Accepts a user-provided endpoint URL
  *   - Passes studioEndpoint: true to SDK.connect()
  *   - Re-connects when endpoint changes

@@ -5,7 +5,7 @@
  * Maps ParseSettleArgsError → PrepareValidationError('L2_EXTRACT_FAILED').
  * Non-parser errors are re-thrown so prepare.ts L1_PARSE_FAILED can handle them.
  *
- * IMPORTANT: relayerClaim and relayerRecipient are decoded from
+ * IMPORTANT: executionCostClaim and settlementPayoutRecipient are decoded from
  * built TX Pure inputs — NOT from builder input values.
  * This enables independent L2 validation that catches builder encoding bugs.
  *
@@ -15,7 +15,7 @@
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { MoveCallCommand, PtbCommand } from '@stelis/contracts';
 import { SETTLEMENT_SWAP_DIRECTION_FUNCTIONS, SETTLE_MODULE } from '@stelis/contracts';
-import type { SettleArgs, RelayerEnv, ArgIndexMap } from '@stelis/core-relay';
+import type { SettleArgs, HostValidationEnv, ArgIndexMap } from '@stelis/core-relay';
 import { parseSettleArgs, ParseSettleArgsError, ARG_INDEX_MAP } from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
@@ -45,7 +45,7 @@ export interface ExtractSettleArgsOptions {
 export function extractSettleArgsFromBuiltTx(
   commands: PtbCommand[],
   inputs: unknown[],
-  _env: RelayerEnv,
+  _env: HostValidationEnv,
   options?: ExtractSettleArgsOptions,
 ): ExtractedSettleArgs {
   try {
@@ -75,12 +75,12 @@ const NEW_USER_SETTLE_FNS: ReadonlySet<string> = new Set(
 
 /**
  * Server-only discriminator: does the built PTB call a `swap_and_settle_new_user_*`
- * settle entrypoint on the trusted Stelis package? Walks the same hash-bound
+ * settle entrypoint on the trusted Stelis package? Walks the same stored-hash-verified
  * MoveCall list `parseSettleArgs` already validated; the package + module + function
  * triple must all match before the predicate returns true. External packages
  * with the same module/function name cannot satisfy this gate.
  *
- * Used by sponsor-time new-user vault-drift detection. `SettleArgs` does not
+ * Used by sponsor-time new-user User Vault drift detection. `SettleArgs` does not
  * expose `fnName`, so this is the narrow internal derivation path; intentionally
  * not re-exported from any browser/SDK barrel.
  */

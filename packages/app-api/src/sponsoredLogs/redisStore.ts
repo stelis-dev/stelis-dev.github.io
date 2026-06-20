@@ -14,7 +14,7 @@
  *
  * Key layout:
  *   stelis:sponsored_logs:agg:{all|generic|promotion}     HASH
- *     fields: sponsoredExecutions, cumulativeRelayerNetMist,
+ *     fields: sponsoredExecutions, cumulativeHostNetMist,
  *             cumulativeLossMist, lossCount   (int64 string)
  *   stelis:sponsored_logs:recent                           LIST
  *     createdAt newest-first JSON-serialised SponsoredExecutionLogEntry, capped.
@@ -84,8 +84,8 @@ redis.call('HINCRBY', aggAllKey, 'sponsoredExecutions', execDelta)
 redis.call('HINCRBY', aggModeKey, 'sponsoredExecutions', execDelta)
 
 if isKnown == '1' then
-  redis.call('HINCRBY', aggAllKey, 'cumulativeRelayerNetMist', netDelta)
-  redis.call('HINCRBY', aggModeKey, 'cumulativeRelayerNetMist', netDelta)
+  redis.call('HINCRBY', aggAllKey, 'cumulativeHostNetMist', netDelta)
+  redis.call('HINCRBY', aggModeKey, 'cumulativeHostNetMist', netDelta)
   redis.call('HINCRBY', aggAllKey, 'cumulativeLossMist', lossAmountDelta)
   redis.call('HINCRBY', aggModeKey, 'cumulativeLossMist', lossAmountDelta)
   if tonumber(lossDelta) > 0 then
@@ -127,7 +127,7 @@ const SUMMARY_SCRIPT = `
 local key = KEYS[1]
 return {
   redis.call('HGET', key, 'sponsoredExecutions') or '0',
-  redis.call('HGET', key, 'cumulativeRelayerNetMist') or '0',
+  redis.call('HGET', key, 'cumulativeHostNetMist') or '0',
   redis.call('HGET', key, 'lossCount') or '0',
   redis.call('HGET', key, 'cumulativeLossMist') or '0',
 }
@@ -178,17 +178,17 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     let lossAmountDelta = '0';
     let lossDelta = '0';
     if (entry.economicsStatus === 'known') {
-      if (entry.relayerNetMist === null) {
-        throw new Error('sponsoredLogs.redisStore: known economics entry missing relayerNetMist');
+      if (entry.hostNetMist === null) {
+        throw new Error('sponsoredLogs.redisStore: known economics entry missing hostNetMist');
       }
       // Validate the signed-decimal shape so HINCRBY does not receive a
       // malformed argument; primary error preserved at the recorder's
       // try/catch boundary.
-      const relayerNet = parseSignedMistString(entry.relayerNetMist, 'relayerNetMist');
+      const hostNet = parseSignedMistString(entry.hostNetMist, 'hostNetMist');
       isKnown = true;
-      netDelta = relayerNet.toString();
-      lossAmountDelta = relayerNet < 0n ? relayerNet.toString() : '0';
-      lossDelta = relayerNet < 0n ? '1' : '0';
+      netDelta = hostNet.toString();
+      lossAmountDelta = hostNet < 0n ? hostNet.toString() : '0';
+      lossDelta = hostNet < 0n ? '1' : '0';
     }
     const keys = [idemKey(entry), aggKey('all'), aggKey(entry.mode), RECENT_KEY];
     const args = [
@@ -215,7 +215,7 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       mode,
       sponsoredExecutions: typeof exec === 'string' ? exec : '0',
       lossCount: typeof loss === 'string' ? loss : '0',
-      cumulativeRelayerNetMist: typeof cumulativeNet === 'string' ? cumulativeNet : '0',
+      cumulativeHostNetMist: typeof cumulativeNet === 'string' ? cumulativeNet : '0',
       cumulativeLossMist: typeof cumulativeLoss === 'string' ? cumulativeLoss : '0',
     };
   }

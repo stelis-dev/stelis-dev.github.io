@@ -80,7 +80,7 @@ export type FailureCode =
  * Code-level classification (orthogonal to subcode-level carve-out).
  *
  * - `manipulation`: cryptographic/policy-violation evidence that the
- *   request was crafted to attack the relayer (TAMPERING_DETECTED,
+ *   request was crafted to attack the Host (TAMPERING_DETECTED,
  *   GasCoin/sponsor-withdrawal references, unauthorized route, JWT
  *   forgery, …). The blocker adapter applies a long-duration block via
  *   `setBlock` and returns immediately. Long-block enforcement is owned
@@ -97,7 +97,7 @@ export type FailureCode =
  *   time. Treated like `ignored` for abuse counters (the subject did
  *   not cause the drift), but additionally emits
  *   `SPONSOR_DRIFT_OBSERVED` for operator visibility when the drift
- *   was hash-bound (post-consume). `abuseImpact` is `SKIP_BOTH`.
+ *   was stored-hash-verified (post-consume). `abuseImpact` is `SKIP_BOTH`.
  * - `infra`: 5xx-class infrastructure outcomes (Redis outages, pool
  *   manager unhealthy, sponsor lease commit failures, internal errors).
  *   Counters skip; the call site typically maps to HTTP 503/500.
@@ -382,8 +382,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
   },
 
   // ── Pool / token / order-id config ────────────────────────────────
-  UNSUPPORTED_PAYMENT_TOKEN: {
-    code: 'UNSUPPORTED_PAYMENT_TOKEN',
+  UNSUPPORTED_SETTLEMENT_TOKEN: {
+    code: 'UNSUPPORTED_SETTLEMENT_TOKEN',
     classification: 'normal',
     httpStatus: 422,
     abuseImpact: IP_ONLY,
@@ -561,8 +561,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: IP_ONLY,
     bodyFields: NO_BODY_EXTRAS,
   },
-  L2_RELAYER_FEE_CAP: {
-    code: 'L2_RELAYER_FEE_CAP',
+  L2_HOST_FEE_CAP: {
+    code: 'L2_HOST_FEE_CAP',
     classification: 'normal',
     httpStatus: 422,
     abuseImpact: IP_ONLY,
@@ -727,7 +727,7 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: SKIP_BOTH,
     bodyFields: NO_BODY_EXTRAS,
     notes:
-      'Pre-consume — txSender not yet hash-bound. IP-only abuse attribution; subject counter skipped.',
+      'Pre-consume — txSender not yet stored-hash-verified. IP-only abuse attribution; subject counter skipped.',
   },
   RECEIPT_SESSION_MISMATCH: {
     code: 'RECEIPT_SESSION_MISMATCH',
@@ -750,7 +750,7 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: SKIP_BOTH,
     bodyFields: NO_BODY_EXTRAS,
     notes:
-      'Hash-bound server-side drift after consume — emits SPONSOR_DRIFT_OBSERVED, no abuse counter.',
+      'Stored-hash-verified server-side drift after consume — emits SPONSOR_DRIFT_OBSERVED, no abuse counter.',
   },
   TAMPERING_DETECTED: {
     code: 'TAMPERING_DETECTED',

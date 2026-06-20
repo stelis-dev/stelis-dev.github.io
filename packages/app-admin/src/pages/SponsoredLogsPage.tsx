@@ -15,7 +15,7 @@
  *     `0` substitutions.
  *   - raw orderId is never displayed; only `orderIdHash` (already hashed
  *     in the API response) is shown.
- *   - row economics display the single `Relayer Net` value. Negative
+ *   - row economics display the single `Host Net` value. Negative
  *     values are losses.
  *   - rows with a non-null `failureReason` render the reason inline under
  *     the outcome label so post-submit accounting failures (which keep
@@ -181,7 +181,7 @@ function SponsoredLogsTable({
             <th>Mode</th>
             <th>Outcome</th>
             <th>Digest</th>
-            <th style={{ textAlign: 'right' }}>Relayer Net</th>
+            <th style={{ textAlign: 'right' }}>Host Net</th>
             <th>Identity</th>
           </tr>
         </thead>
@@ -197,7 +197,7 @@ function SponsoredLogsTable({
 
 function SponsoredLogsRow({ entry }: { readonly entry: SponsoredExecutionLogEntry }) {
   const isUnknown = entry.economicsStatus === 'unknown';
-  const negativeNet = !isUnknown && entry.relayerNetMist?.startsWith('-');
+  const negativeNet = !isUnknown && entry.hostNetMist?.startsWith('-');
   // Post-submit accounting failures (e.g. SPONSOR_EXEC_GAS_USED_MISSING,
   // PROMOTION_LEDGER_CONSUME_FAILED) keep `outcome === 'success'` because
   // the TX actually submitted on-chain, but they carry a non-null
@@ -258,7 +258,7 @@ function SponsoredLogsRow({ entry }: { readonly entry: SponsoredExecutionLogEntr
           color: negativeNet ? '#f87171' : undefined,
         }}
       >
-        {isUnknown ? unavailable() : formatSignedSui(entry.relayerNetMist)}
+        {isUnknown ? unavailable() : formatSignedSui(entry.hostNetMist)}
       </td>
       <td style={{ fontSize: 11, color: '#94a3b8' }}>{identity}</td>
     </tr>

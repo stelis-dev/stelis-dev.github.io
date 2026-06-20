@@ -119,7 +119,7 @@ describe('Promotion SDK integration', () => {
     expect(src).toMatch(/await\s+sdk\.preparePromotionSponsored\s*\(/);
     // Must use promotion-specific sponsor method
     expect(src).toMatch(/await\s+sdk\.sponsorPromotionSponsored\s*\(/);
-    // Must NOT use generic relay path
+    // Must NOT use generic Relay API path
     expect(src).not.toMatch(/sdk\.prepareSponsored/);
     expect(src).not.toMatch(/fetch\s*\(/);
   });
@@ -180,7 +180,7 @@ describe('Promotion page inputs', () => {
     expect(src).toContain('setPromotionId');
     // Must pass promotionId to StudioExecutionPanel
     expect(src).toContain('promotionId={promotionId}');
-    // Must NOT have settlement swap path selector (promotion path does not use paymentTokenType)
+    // Must NOT have settlement swap path selector (promotion path does not use settlementTokenType)
     expect(src).not.toContain('settlementSwapPathIndex');
   });
 });

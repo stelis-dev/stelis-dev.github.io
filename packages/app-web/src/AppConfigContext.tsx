@@ -7,7 +7,7 @@
  * Reference: GET /relay/config response shape — see app-api relay.ts config route.
  */
 import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from 'react';
-import { RELAYER_BASE } from './relayerEndpoint';
+import { RELAY_API_BASE } from './relayApiEndpoint';
 
 export type AppWebNetwork = 'testnet' | 'mainnet';
 
@@ -43,7 +43,7 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    fetch(`${RELAYER_BASE}/config`, { signal: AbortSignal.timeout(10_000) })
+    fetch(`${RELAY_API_BASE}/config`, { signal: AbortSignal.timeout(10_000) })
       .then((res) => {
         if (!res.ok) throw new Error(`/relay/config returned ${res.status}`);
         return res.json();

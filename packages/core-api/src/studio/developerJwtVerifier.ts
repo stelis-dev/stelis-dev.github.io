@@ -236,7 +236,7 @@ export async function verifyDeveloperJwt(
     throw new Error(`developer JWT: unsupported algorithm "${header.alg}"`);
   }
 
-  // Payload
+  // JWT payload
   let payload: Record<string, unknown>;
   try {
     payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64)));

@@ -1,5 +1,5 @@
 export interface StelisMcpServerConfig {
-  defaultRelayUrl?: string;
+  defaultRelayApiUrl?: string;
   defaultTimeoutMs: number;
   fetchFn?: FetchLike;
 }
@@ -10,7 +10,7 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): StelisMcpServerConfig {
   return {
-    defaultRelayUrl: normalizeOptionalEnv(env.STELIS_RELAY_URL),
+    defaultRelayApiUrl: normalizeOptionalEnv(env.STELIS_RELAY_API_URL),
     defaultTimeoutMs: parseTimeoutMs(env.STELIS_REQUEST_TIMEOUT_MS),
   };
 }

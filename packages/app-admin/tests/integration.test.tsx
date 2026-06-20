@@ -47,10 +47,10 @@ const VALID_SESSION = {
   iat: Math.floor(Date.now() / 1000),
 };
 
-const POOL_DATA = {
+const SPONSOR_OPERATIONS_DATA = {
   network: 'testnet',
   primaryAddress: '0x' + 'd'.repeat(64),
-  relayerRecipientAddress: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipientAddress: '0x' + 'b'.repeat(64),
   rpcFleet: {
     endpoints: [
       {
@@ -89,7 +89,7 @@ const POOL_DATA = {
     },
   },
   feeConfig: {
-    maxRelayerFeeMist: '100000',
+    maxHostFeeMist: '100000',
     protocolFlatFeeMist: '50000',
     maxClaimMist: '500000',
     minSettleMist: '10000',
@@ -260,11 +260,11 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/pool' && method === 'GET') {
+        if (url === '/api/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve(POOL_DATA),
+            json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
         if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
@@ -302,7 +302,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': POOL_DATA,
+        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -324,13 +324,13 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': POOL_DATA,
+        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
         '/api/sponsored-logs/summary?mode=all': {
           summary: {
             mode: 'all',
             sponsoredExecutions: '1250000',
             lossCount: '3',
-            cumulativeRelayerNetMist: '1000000000',
+            cumulativeHostNetMist: '1000000000',
             cumulativeLossMist: '-3000000',
           },
         },
@@ -352,7 +352,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': POOL_DATA,
+        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -375,18 +375,18 @@ describe('DashboardPage integration', () => {
     expect(screen.getByText('12s')).toBeDefined();
   });
 
-  it('renders sponsor operations gate status in the Sponsor Pool stat card', async () => {
-    const poolData = {
-      ...POOL_DATA,
+  it('renders sponsor operations gate status in the Sponsor Slots stat card', async () => {
+    const sponsorOperationsData = {
+      ...SPONSOR_OPERATIONS_DATA,
       sponsorOperations: {
-        ...POOL_DATA.sponsorOperations,
+        ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
         gateErrorCode: 'NO_HEALTHY_SPONSOR',
       },
     };
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': poolData,
+        '/api/sponsor-operations': sponsorOperationsData,
       }),
     );
 
@@ -400,10 +400,10 @@ describe('DashboardPage integration', () => {
 
   it('renders large MIST balances without Number precision loss', async () => {
     const hugeMist = '9999999999999999999';
-    const poolData = {
-      ...POOL_DATA,
+    const sponsorOperationsData = {
+      ...SPONSOR_OPERATIONS_DATA,
       sponsorOperations: {
-        ...POOL_DATA.sponsorOperations,
+        ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
         slots: [
           {
             address: '0x' + 'e'.repeat(64),
@@ -414,7 +414,7 @@ describe('DashboardPage integration', () => {
           },
         ],
         sponsorRefillAccount: {
-          ...POOL_DATA.sponsorOperations.sponsorRefillAccount,
+          ...SPONSOR_OPERATIONS_DATA.sponsorOperations.sponsorRefillAccount,
           balanceMist: hugeMist,
         },
       },
@@ -423,7 +423,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': poolData,
+        '/api/sponsor-operations': sponsorOperationsData,
       }),
     );
 
@@ -461,11 +461,11 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/pool' && method === 'GET') {
+        if (url === '/api/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve(POOL_DATA),
+            json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
         if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
@@ -808,7 +808,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': POOL_DATA,
+        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -826,12 +826,12 @@ describe('ConfigPage integration', () => {
 
   it('renders baseForQuote settlement swap direction without intermediate token', async () => {
     const DEEP_TYPE = '0x' + 'de'.repeat(32) + '::deep::DEEP';
-    const poolDataWith1hop = {
-      ...POOL_DATA,
+    const sponsorOperationsDataWith1hop = {
+      ...SPONSOR_OPERATIONS_DATA,
       supportedSettlementSwapPaths: [
         {
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenType: DEEP_TYPE,
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenType: DEEP_TYPE,
           settlementSwapDirection: 'baseForQuote',
           hops: [
             {
@@ -849,7 +849,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': poolDataWith1hop,
+        '/api/sponsor-operations': sponsorOperationsDataWith1hop,
         '/api/studio': { enabled: false },
       }),
     );
@@ -870,7 +870,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/pool': POOL_DATA,
+        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
         '/api/studio': { enabled: false },
       }),
     );

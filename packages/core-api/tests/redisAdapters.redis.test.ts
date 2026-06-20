@@ -170,7 +170,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     expect(result).not.toBe('hash_mismatch');
     const consumed = result as typeof entry;
     // Coordination-only round-trip: settle observability copies
-    // (relayerClaim, simGas, ...) are never persisted.
+    // (executionCostClaim, simGas, ...) are never persisted.
     expect(consumed.txBytesHash).toBe('hash-integ');
     expect(consumed.nonce).toBe(1n);
     expect(consumed.mode).toBe('generic');

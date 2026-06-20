@@ -98,9 +98,9 @@ export interface DeepBookPoolHop {
 }
 
 /**
- * Settlement swap path configuration for a payment token.
- * The host exposes one active 1-hop settlement swap path per paymentTokenType.
- * Clients select a payment token, not a pool ID or path ID.
+ * Settlement swap path configuration for a settlement token.
+ * The host exposes one active 1-hop settlement swap path per settlementTokenType.
+ * Clients select a settlement token, not a pool ID or path ID.
  *
  * Hosts derive feeBps at boot from DeepBook whitelisted status, pool params,
  * and the deployed DeepBook fee constants.
@@ -108,12 +108,12 @@ export interface DeepBookPoolHop {
 export interface SingleHopSettlementSwapPath {
   /** Hop configs. Only 1 hop is supported. */
   hops: DeepBookPoolHop[];
-  /** Payment token full coin type (input token for the first hop) */
-  paymentTokenType: string;
+  /** Settlement token full coin type (input token for the first hop) */
+  settlementTokenType: string;
   /** UI display symbol e.g. "DEEP", "USDC" */
-  paymentTokenSymbol: string;
-  /** Decimal places for the payment token */
-  paymentTokenDecimals: number;
+  settlementTokenSymbol: string;
+  /** Decimal places for the settlement token */
+  settlementTokenDecimals: number;
   /** DeepBook minimum order granularity (smallest unit of first-hop base token, on-chain u64) */
   lotSize: bigint;
   /** DeepBook minimum order size (smallest unit of first-hop base token, on-chain u64) */
@@ -127,7 +127,7 @@ export interface SingleHopSettlementSwapPath {
    */
   effectiveFeeRateBps: number;
   /**
-   * Explicit settlement swap direction for L1/L2 verification. Hop count is
+   * Explicit settlement swap direction for structure and settlement-argument verification. Hop count is
    * separately fixed by hops.length === 1, not encoded here.
    */
   settlementSwapDirection: SettlementSwapDirection;
@@ -172,7 +172,7 @@ export interface PrepareAuthorizationFields {
   packageId: string;
   senderAddress: string;
   txKindBytesHash: string;
-  paymentTokenType: string;
+  settlementTokenType: string;
   slippageBps?: number;
   gasMarginBps?: number;
   orderId?: string;
@@ -194,10 +194,10 @@ export type ExpectedSettleEventFields = {
   receiptId: string;
   /** User wallet address expected in the on-chain event. */
   user: string;
-  /** Expected relayer claim in MIST, when the integration tracks amounts. */
-  relayerClaimMist?: string;
-  /** Expected quoted relayer fee in MIST, when the integration tracks amounts. */
-  quotedRelayerFeeMist?: string;
+  /** Expected execution cost claim in MIST, when the integration tracks amounts. */
+  executionCostClaimMist?: string;
+  /** Expected quoted host fee in MIST, when the integration tracks amounts. */
+  quotedHostFeeMist?: string;
   /** Expected protocol fee in MIST, when the integration tracks amounts. */
   protocolFeeMist?: string;
 } & ({ orderId: string; orderIdHash?: never } | { orderId?: never; orderIdHash: string });

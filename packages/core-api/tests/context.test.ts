@@ -5,8 +5,8 @@
  * instead of issuing redundant sui.getObject() calls.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createRelayerContext, SponsorPool } from '../src/context.js';
-import type { RelayerContext } from '../src/context.js';
+import { createHostContext, SponsorPool } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareRequestNonceStore } from '../src/store/prepareRequestNonceStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
@@ -43,7 +43,7 @@ function makeAbuseBlocker() {
 }
 
 describe('getConfig singleflight', () => {
-  let ctx: RelayerContext;
+  let ctx: HostContext;
 
   afterEach(() => {
     ctx?.dispose();
@@ -59,7 +59,7 @@ describe('getConfig singleflight', () => {
               resolve({
                 object: {
                   json: {
-                    max_relayer_fee_mist: '100000',
+                    max_host_fee_mist: '100000',
                     protocol_flat_fee_mist: '50000',
                     max_claim_mist: '50000000',
                     min_settle_mist: '1000',
@@ -73,7 +73,7 @@ describe('getConfig singleflight', () => {
         ),
     );
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://mock.local',
       sponsorPool: makeSponsorPool(),
@@ -85,7 +85,7 @@ describe('getConfig singleflight', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0, // disable cache so every call goes through singleflight
     });
 
@@ -111,7 +111,7 @@ describe('getConfig singleflight', () => {
       return Promise.resolve({
         object: {
           json: {
-            max_relayer_fee_mist: '100000',
+            max_host_fee_mist: '100000',
             protocol_flat_fee_mist: '50000',
             max_claim_mist: '50000000',
             min_settle_mist: '1000',
@@ -122,7 +122,7 @@ describe('getConfig singleflight', () => {
       });
     });
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://mock.local',
       sponsorPool: makeSponsorPool(),
@@ -134,7 +134,7 @@ describe('getConfig singleflight', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0,
     });
 
@@ -153,7 +153,7 @@ describe('getConfig singleflight', () => {
 });
 
 describe('suiClient injection', () => {
-  let ctx: RelayerContext;
+  let ctx: HostContext;
 
   afterEach(() => {
     ctx?.dispose();
@@ -163,7 +163,7 @@ describe('suiClient injection', () => {
     const injectedGetObject = vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: '200000',
+          max_host_fee_mist: '200000',
           protocol_flat_fee_mist: '10000',
           max_claim_mist: '50000000',
           min_settle_mist: '1000',
@@ -178,7 +178,7 @@ describe('suiClient injection', () => {
       getObject: injectedGetObject,
     } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://should-not-be-used.invalid',
       suiClient: mockSuiClient,
@@ -191,7 +191,7 @@ describe('suiClient injection', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0,
     });
 
@@ -205,7 +205,7 @@ describe('suiClient injection', () => {
   });
 
   it('falls back to suiRpcUrl when suiClient is not provided', () => {
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://fallback.local',
       sponsorPool: makeSponsorPool(),
@@ -217,7 +217,7 @@ describe('suiClient injection', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
     });
 
     // ctx.sui should exist and be a real SuiGrpcClient (not undefined)

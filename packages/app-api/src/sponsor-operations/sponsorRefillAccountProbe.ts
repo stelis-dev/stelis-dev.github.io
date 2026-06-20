@@ -11,7 +11,7 @@ import { parseChainBalanceMist } from './balanceParsing.js';
 export type SponsorRefillAccountProbeWriteFailureSource =
   | 'sponsor_result_state_update_sponsor_refill_account_update'
   | 'refill_worker_sponsor_refill_account_update'
-  | 'admin_pool_sponsor_refill_account_update'
+  | 'admin_sponsor_operations_sponsor_refill_account_update'
   | 'admin_withdraw_sponsor_refill_account_update';
 
 export interface SponsorRefillAccountProbeDeps {

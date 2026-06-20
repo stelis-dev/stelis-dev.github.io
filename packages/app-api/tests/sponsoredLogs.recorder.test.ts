@@ -22,7 +22,7 @@ class CapturingStore implements SponsoredLogsStoreAdapter {
       mode,
       sponsoredExecutions: '0',
       lossCount: '0',
-      cumulativeRelayerNetMist: '0',
+      cumulativeHostNetMist: '0',
       cumulativeLossMist: '0',
     };
   }
@@ -51,10 +51,10 @@ function makeMetadata(overrides: Partial<SponsorResultMetadata> = {}): SponsorRe
     economics: {
       economicsStatus: 'known',
       recoveredGasMist: '12000',
-      relayerPaidGasMist: '8000',
-      relayerFeeMist: '1000',
+      hostPaidGasMist: '8000',
+      hostFeeMist: '1000',
       protocolFeeMist: '50',
-      relayerNetMist: '5000',
+      hostNetMist: '5000',
       grossGasMist: '9500',
       storageRebateMist: '1500',
       failureReason: null,
@@ -80,9 +80,9 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
         economics: {
           economicsStatus: 'known',
           recoveredGasMist: '0',
-          relayerPaidGasMist: '7000',
-          relayerFeeMist: '0',
-          relayerNetMist: '-7000',
+          hostPaidGasMist: '7000',
+          hostFeeMist: '0',
+          hostNetMist: '-7000',
           grossGasMist: '8000',
           storageRebateMist: '1000',
           protocolFeeMist: '0',
@@ -92,7 +92,7 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
     );
     expect(store.appended).toHaveLength(1);
     expect(store.appended[0].outcome).toBe('onchain_revert');
-    expect(store.appended[0].relayerNetMist).toBe('-7000');
+    expect(store.appended[0].hostNetMist).toBe('-7000');
   });
 
   it('skips congestion / preflight / validation', async () => {
@@ -112,7 +112,7 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
   it('skips internal_error fall-through (no submit_infra_unknown marker — never burned gas)', async () => {
     // Generic catch-all `internal_error` whose `failureReason` does NOT
     // start with `submit_infra_unknown` — these are crashes that throw
-    // before sponsor signature, so the relayer never paid gas onchain.
+    // before sponsor signature, so the Host never paid gas onchain.
     // They belong to other audit views, not Sponsored Executions.
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
@@ -157,9 +157,9 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
     // Numeric honesty: every monetary field must be null on the
     // unknown-economics row — recorder must not coerce an unknown
     // amount.
-    expect(store.appended[0].relayerPaidGasMist).toBeNull();
+    expect(store.appended[0].hostPaidGasMist).toBeNull();
     expect(store.appended[0].recoveredGasMist).toBeNull();
-    expect(store.appended[0].relayerNetMist).toBeNull();
+    expect(store.appended[0].hostNetMist).toBeNull();
   });
 
   it('records the generic-execution-path submit-infra shape (no ledger consume kind suffix) — `submit_infra_unknown: <rpcMsg>`', async () => {
@@ -207,9 +207,9 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       promotionId: null,
       userId: null,
       recoveredGasMist: '12000',
-      relayerPaidGasMist: '8000',
-      relayerNetMist: '5000',
-      relayerFeeMist: '1000',
+      hostPaidGasMist: '8000',
+      hostNetMist: '5000',
+      hostFeeMist: '1000',
       protocolFeeMist: '50',
       grossGasMist: '9500',
       storageRebateMist: '1500',
@@ -217,9 +217,9 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     });
   });
 
-  it('maps unknown economics — every numeric field including relayerFeeMist is null', async () => {
+  it('maps unknown economics — every numeric field including hostFeeMist is null', async () => {
     // Numeric honesty lock: an unknown-economics row MUST NOT coerce
-    // relayerFeeMist to "0". The recorder did not see a proven fee, so
+    // hostFeeMist to "0". The recorder did not see a proven fee, so
     // it stays null alongside the other unknown numeric fields.
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
@@ -234,11 +234,11 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     const e = store.appended[0];
     expect(e.economicsStatus).toBe('unknown');
     expect(e.recoveredGasMist).toBeNull();
-    expect(e.relayerPaidGasMist).toBeNull();
-    expect(e.relayerNetMist).toBeNull();
+    expect(e.hostPaidGasMist).toBeNull();
+    expect(e.hostNetMist).toBeNull();
     expect(e.grossGasMist).toBeNull();
     expect(e.storageRebateMist).toBeNull();
-    expect(e.relayerFeeMist).toBeNull();
+    expect(e.hostFeeMist).toBeNull();
     expect(e.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
   });
 
@@ -254,9 +254,9 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
         economics: {
           economicsStatus: 'known',
           recoveredGasMist: '5000',
-          relayerPaidGasMist: '5000',
-          relayerFeeMist: '0',
-          relayerNetMist: '0',
+          hostPaidGasMist: '5000',
+          hostFeeMist: '0',
+          hostNetMist: '0',
           grossGasMist: '6000',
           storageRebateMist: '1000',
           protocolFeeMist: '0',
@@ -269,7 +269,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     expect(e.promotionId).toBe('promo-1');
     expect(e.userId).toBe('user-1');
     expect(e.orderIdHash).toBeNull();
-    expect(e.relayerNetMist).toBe('0');
+    expect(e.hostNetMist).toBe('0');
   });
 });
 

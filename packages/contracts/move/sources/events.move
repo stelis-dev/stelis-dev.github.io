@@ -10,21 +10,21 @@ module stelis::events {
         policy_hash: vector<u8>,
         quote_timestamp_ms: u64,
         exec_timestamp_ms: u64,
-        // Audit fields: components used to compute relayer_claim (informational only).
+        // Audit fields: components used to compute execution_cost_claim_mist (informational only).
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
         // Authoritative payout inputs.
-        relayer_claim: u64,
-        quoted_relayer_fee_mist: u64,  // Exact fee relayer quoted (bound in PTB)
+        execution_cost_claim_mist: u64,
+        quoted_host_fee_mist: u64,  // Exact fee quoted by the Host (bound in PTB)
         protocol_fee: u64,             // Fixed protocol fee per TX
         protocol_treasury: address,
-        payout: u64,                   // relayer_claim + quoted_relayer_fee_mist
+        payout: u64,                   // execution_cost_claim_mist + quoted_host_fee_mist
         total_in: u64,
         surplus_credited: u64,
         config_version: u64,           // Config version at settlement time
         user: address,
-        relayer_recipient: address,
+        settlement_payout_recipient: address,
         order_id_hash: vector<u8>,     // sha256(orderId) if provided, empty otherwise (0 or 32 bytes)
     }
 
@@ -37,8 +37,8 @@ module stelis::events {
         sim_gas_reported: u64,
         gas_variance_fixed_mist: u64,
         slippage_buffer_mist: u64,
-        relayer_claim: u64,
-        quoted_relayer_fee_mist: u64,
+        execution_cost_claim_mist: u64,
+        quoted_host_fee_mist: u64,
         protocol_fee: u64,
         protocol_treasury: address,
         payout: u64,
@@ -46,7 +46,7 @@ module stelis::events {
         surplus_credited: u64,
         config_version: u64,
         user: address,
-        relayer_recipient: address,
+        settlement_payout_recipient: address,
         order_id_hash: vector<u8>,
     ) {
         event::emit(SettleEvent {
@@ -58,8 +58,8 @@ module stelis::events {
             sim_gas_reported,
             gas_variance_fixed_mist,
             slippage_buffer_mist,
-            relayer_claim,
-            quoted_relayer_fee_mist,
+            execution_cost_claim_mist,
+            quoted_host_fee_mist,
             protocol_fee,
             protocol_treasury,
             payout,
@@ -67,7 +67,7 @@ module stelis::events {
             surplus_credited,
             config_version,
             user,
-            relayer_recipient,
+            settlement_payout_recipient,
             order_id_hash,
         });
     }
@@ -97,8 +97,8 @@ module stelis::events {
 
     /// Emitted when Config fees or limits are updated.
     public struct ConfigUpdatedEvent has copy, drop {
-        old_max_relayer_fee_mist: u64,
-        new_max_relayer_fee_mist: u64,
+        old_max_host_fee_mist: u64,
+        new_max_host_fee_mist: u64,
         old_protocol_flat_fee_mist: u64,
         new_protocol_flat_fee_mist: u64,
         old_max_claim_mist: u64,
@@ -113,8 +113,8 @@ module stelis::events {
     }
 
     public(package) fun emit_config_updated_event(
-        old_max_relayer_fee_mist: u64,
-        new_max_relayer_fee_mist: u64,
+        old_max_host_fee_mist: u64,
+        new_max_host_fee_mist: u64,
         old_protocol_flat_fee_mist: u64,
         new_protocol_flat_fee_mist: u64,
         old_max_claim_mist: u64,
@@ -128,8 +128,8 @@ module stelis::events {
         epoch: u64,
     ) {
         event::emit(ConfigUpdatedEvent {
-            old_max_relayer_fee_mist,
-            new_max_relayer_fee_mist,
+            old_max_host_fee_mist,
+            new_max_host_fee_mist,
             old_protocol_flat_fee_mist,
             new_protocol_flat_fee_mist,
             old_max_claim_mist,
@@ -220,7 +220,7 @@ module stelis::events {
     #[test_only]
     public fun config_evt_new_config_version(e: &ConfigUpdatedEvent): u64 { e.new_config_version }
     #[test_only]
-    public fun config_evt_old_max_relayer_fee(e: &ConfigUpdatedEvent): u64 { e.old_max_relayer_fee_mist }
+    public fun config_evt_old_max_host_fee(e: &ConfigUpdatedEvent): u64 { e.old_max_host_fee_mist }
     #[test_only]
-    public fun config_evt_new_max_relayer_fee(e: &ConfigUpdatedEvent): u64 { e.new_max_relayer_fee_mist }
+    public fun config_evt_new_max_host_fee(e: &ConfigUpdatedEvent): u64 { e.new_max_host_fee_mist }
 }

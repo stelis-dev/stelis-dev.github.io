@@ -18,11 +18,11 @@ export interface OnchainConfig {
   maxClaimMist: bigint;
   minSettleMist: bigint;
   /**
-   * On-chain cap for the relayer-quoted fee per TX (MIST).
-   * Not the quoted fee itself — that is set per-relayer via RELAYER_FEE_MIST env.
-   * Mirrors on-chain Config.max_relayer_fee_mist.
+   * On-chain cap for the host-quoted fee per TX (MIST).
+   * Not the quoted fee itself — that is set per Host via HOST_FEE_MIST env.
+   * Mirrors on-chain Config.max_host_fee_mist.
    */
-  maxRelayerFeeMist: bigint;
+  maxHostFeeMist: bigint;
   /** Per-TX fixed protocol fee (MIST). Directly mirrors on-chain Config.protocol_flat_fee_mist. */
   protocolFlatFeeMist: bigint;
   /**
@@ -50,7 +50,7 @@ export interface OnchainConfig {
  * L2 validation enforces this.
  */
 export interface AllowedSettlementSwapPath {
-  /** Payment token full coin type (input of the single hop) */
+  /** Settlement token full coin type (input of the single hop) */
   tokenType: string;
   /**
    * Pool object ID for this settlement swap path (single-element array).
@@ -69,7 +69,7 @@ export interface AllowedSettlementSwapPath {
  *
  * The settlement swap paths server-side validation (`validateSettleArgs` L2,
  * `deriveAllowedSettlementSwapPaths` boot barrier) accepts as pre-registered. Distinct
- * from the relayer config advertised to clients via `/relay/config`, even
+ * from the Relay API config advertised to clients via `/relay/config`, even
  * though both originate from the same `settlement-swap-paths.json` at boot time.
  *
  * `readonly` marks this as a read-only authority view: downstream consumers
@@ -78,14 +78,14 @@ export interface AllowedSettlementSwapPath {
 export type AllowedSettlementSwapPaths = readonly AllowedSettlementSwapPath[];
 
 // ─────────────────────────────────────────────
-// RelayerEnv — relayer operational environment configuration
+// HostValidationEnv — Host validation environment configuration
 // ─────────────────────────────────────────────
 
-export interface RelayerEnv {
+export interface HostValidationEnv {
   /** Target network (testnet or mainnet) */
   network: SuiNetwork;
   /** Configured settlement payout recipient address */
-  relayerAddress: string;
+  settlementPayoutRecipientAddress: string;
   /** Known Config object ID */
   configId: string;
   /** Known VaultRegistry shared object ID */
@@ -132,13 +132,13 @@ export interface SettleArgs {
    * VaultRegistry object ID — present for vault-backed settlement variants.
    */
   registryObjectId?: string;
-  relayerRecipient: string;
-  relayerClaim: bigint;
+  settlementPayoutRecipient: string;
+  executionCostClaim: bigint;
   /**
    * The settlement swap path extracted from the PTB, used for L2 validation.
    *
    * Invariant: hops.length === 1. L2 validates this + ordered array equality
-   * against RelayerEnv.allowedSettlementSwapPaths[]. Omitted for credit-only settlement.
+   * against HostValidationEnv.allowedSettlementSwapPaths[]. Omitted for credit-only settlement.
    */
   extractedSettlementSwapPath?: {
     tokenType: string;
@@ -153,10 +153,10 @@ export interface SettleArgs {
    */
   policyHash: Uint8Array;
   /**
-   * Relayer's quoted fee (MIST) — exact value embedded in the PTB.
-   * On-chain checks: quoted_relayer_fee_mist <= max_relayer_fee_mist (L2 ERelayerFeeCapExceeded).
+   * Host's quoted fee (MIST) — exact value embedded in the PTB.
+   * On-chain checks: quoted_host_fee_mist <= max_host_fee_mist (L2 EHostFeeCapExceeded).
    */
-  quotedRelayerFeeMist: bigint;
+  quotedHostFeeMist: bigint;
   /**
    * Expected on-chain protocol fee (MIST) at prepare time.
    * On-chain asserts this equals Config.protocol_flat_fee_mist (L2 EProtocolFeeMismatch).

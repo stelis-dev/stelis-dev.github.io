@@ -3,7 +3,7 @@
  *
  * Verifies that selectPaymentCoin correctly handles the case where user TX
  * prefix coins overlap with swap payment coins. This prevents
- * ArgumentWithoutValue errors when transfer token = payment token.
+ * ArgumentWithoutValue errors when transfer token = settlement token.
  *
  * DEEP fee-coin selection is out of scope: the Move entrypoint materializes
  * `coin::zero<DEEP>(ctx)` internally, so there is no user-facing DEEP

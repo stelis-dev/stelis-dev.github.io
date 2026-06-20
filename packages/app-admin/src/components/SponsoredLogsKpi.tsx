@@ -57,7 +57,7 @@ export function SponsoredLogsKpi({ summary, loading }: SponsoredLogsKpiProps) {
   const lossExecutionRatio = summary
     ? `${formatCompactCount(summary.lossCount)} / ${formatCompactCount(summary.sponsoredExecutions)}`
     : `${placeholder} / ${placeholder}`;
-  const cumulativeNetMist = summary ? summary.cumulativeRelayerNetMist : null;
+  const cumulativeNetMist = summary ? summary.cumulativeHostNetMist : null;
   const cumulativeLossMist = summary ? summary.cumulativeLossMist : null;
 
   const cumulativeNetSui = cumulativeNetMist ? mistToSui(cumulativeNetMist) : placeholder;
@@ -89,7 +89,7 @@ export function SponsoredLogsKpi({ summary, loading }: SponsoredLogsKpiProps) {
         >
           {cumulativeNetSui} SUI
         </div>
-        <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>sum of relayer net</div>
+        <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>sum of host net</div>
       </div>
 
       <div className="admin-card">
@@ -104,7 +104,7 @@ export function SponsoredLogsKpi({ summary, loading }: SponsoredLogsKpiProps) {
           {cumulativeLossSui} SUI
         </div>
         <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
-          sum of negative relayer net
+          sum of negative host net
         </div>
       </div>
 

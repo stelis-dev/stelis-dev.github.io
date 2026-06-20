@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayerConfig, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 const { mockExtractSettleFields, mockValidateSettleFields, mockValidateGenericUserTx } = vi.hoisted(
@@ -90,16 +90,16 @@ vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
-const RELAYER = '0x' + 'b'.repeat(64);
+const SETTLEMENT_PAYOUT_RECIPIENT = '0x' + 'b'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const POOL = '0x' + '4'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
 const SUI_TYPE = '0x2::sui::SUI';
 
-const RELAYER_CONFIG: RelayerConfig = {
+const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: RELAYER,
+  settlementPayoutRecipient: SETTLEMENT_PAYOUT_RECIPIENT,
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -111,16 +111,16 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -133,9 +133,9 @@ const MOCK_PREPARE_RESPONSE: PrepareResponse = {
     simGas: '5000000',
     gasVarianceFixedMist: '200000',
     slippageBufferMist: '50000',
-    quotedRelayerFee: '100000',
+    quotedHostFee: '100000',
     protocolFee: '20000',
-    relayerClaim: '5250000',
+    executionCostClaim: '5250000',
     grossGas: '7000000',
   },
   profile: 'new_user',
@@ -159,7 +159,7 @@ function makeMockSuiClient(overrides?: { listCoins?: ReturnType<typeof vi.fn> })
 async function createSDK(): Promise<StelisSDK> {
   // Mock the internal /relay/config fetch that StelisSDK.connect() uses.
   // The StelisClient constructor is mocked — getStatus() resolves immediately.
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAYER_CONFIG), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -184,7 +184,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
   // ── 1: Calls client.prepare with correct params ──────────────────────
 
-  it('calls client.prepare() with txKindBytes, senderAddress, paymentTokenType', async () => {
+  it('calls client.prepare() with txKindBytes, senderAddress, settlementTokenType', async () => {
     const sdk = await createSDK();
     const tx = new Transaction();
     const client = makeMockSuiClient();
@@ -192,14 +192,14 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(tx, {
       client,
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
     expect(mockPrepare).toHaveBeenCalledTimes(1);
     const prepareArgs = mockPrepare.mock.calls[0][0] as Record<string, unknown>;
     expect(prepareArgs['senderAddress']).toBe(ADDR);
-    expect(prepareArgs['paymentTokenType']).toBe(DEEP_TYPE);
+    expect(prepareArgs['settlementTokenType']).toBe(DEEP_TYPE);
     expect(typeof prepareArgs['txKindBytes']).toBe('string');
     // txKindBytes should be a base64-encoded string
     expect((prepareArgs['txKindBytes'] as string).length).toBeGreaterThan(0);
@@ -210,8 +210,8 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(prepareAuthorizationSigner).toHaveBeenCalledWith(expect.any(Uint8Array));
     expect(mockValidateGenericUserTx).toHaveBeenCalledTimes(1);
     expect(mockValidateGenericUserTx.mock.calls[0][1]).toEqual({
-      network: RELAYER_CONFIG.network,
-      relayerAddress: RELAYER_CONFIG.relayerRecipient,
+      network: RELAY_CONFIG_RESPONSE.network,
+      settlementPayoutRecipientAddress: RELAY_CONFIG_RESPONSE.settlementPayoutRecipient,
       configId: STELIS_CONTRACT_IDS.testnet!.configId,
       vaultRegistryId: STELIS_CONTRACT_IDS.testnet!.vaultRegistryId,
       packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
@@ -231,7 +231,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: DEEP_TYPE },
+        settlementToken: { type: DEEP_TYPE },
         prepareAuthorizationSigner,
       }),
     ).rejects.toMatchObject({
@@ -251,7 +251,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -265,7 +265,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -279,7 +279,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -288,20 +288,20 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
   // ── 5: Calls onGasEstimate with totalCost from prepare ───────────────
 
-  it('calls onGasEstimate callback with totalCost (relayerClaim + quotedRelayerFee + protocolFee) in SUI', async () => {
+  it('calls onGasEstimate callback with totalCost (executionCostClaim + quotedHostFee + protocolFee) in SUI', async () => {
     const sdk = await createSDK();
     const onGasEstimate = vi.fn();
 
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       onGasEstimate,
     });
 
     expect(onGasEstimate).toHaveBeenCalledTimes(1);
-    // totalCost = relayerClaim(5250000) + quotedRelayerFee(100000) + protocolFee(20000) = 5370000
+    // totalCost = executionCostClaim(5250000) + quotedHostFee(100000) + protocolFee(20000) = 5370000
     expect(onGasEstimate).toHaveBeenCalledWith(5_370_000n, '0.005370000', 'SUI');
   });
 
@@ -312,11 +312,11 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
-    // totalCost = relayerClaim(5250000) + quotedRelayerFee(100000) + protocolFee(20000) = 5370000
+    // totalCost = executionCostClaim(5250000) + quotedHostFee(100000) + protocolFee(20000) = 5370000
     expect(result.totalCostSui).toBe('0.005370000');
     expect(result.totalCostMist).toBe(5_370_000n);
   });
@@ -329,7 +329,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       slippageBps: 300,
       gasMarginBps: 500,
@@ -350,7 +350,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -366,23 +366,23 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
     expect(result.vaultId).toBeNull();
   });
 
-  // ── 11: Throws on unknown paymentToken type ─────────────────────────────
+  // ── 11: Throws on unknown settlementToken type ─────────────────────────────
 
-  it('throws when paymentToken type is not in supported settlement swap paths', async () => {
+  it('throws when settlementToken type is not in supported settlement swap paths', async () => {
     const sdk = await createSDK();
 
     await expect(
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: '0xunknown::token::TOKEN' },
+        settlementToken: { type: '0xunknown::token::TOKEN' },
       }),
     ).rejects.toThrow();
   });
@@ -395,7 +395,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       orderId: 'sponsored-order-42',
     });
@@ -417,7 +417,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       orderId: 'echoed-order-42',
     });
@@ -453,7 +453,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -471,7 +471,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -488,7 +488,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -511,7 +511,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -543,7 +543,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -566,7 +566,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: DEEP_TYPE },
+        settlementToken: { type: DEEP_TYPE },
         prepareAuthorizationSigner,
       }),
     ).rejects.toThrow(CreditQueryInconsistentStateError);

@@ -171,7 +171,7 @@ async function setup() {
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
       minSettleMist: 0n,
-      maxRelayerFeeMist: 0n,
+      maxHostFeeMist: 0n,
       protocolFlatFeeMist: 0n,
       configVersion: 1n,
       maxSpreadBps: 500n,

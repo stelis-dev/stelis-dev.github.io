@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { RELAYER_BASE } from '../relayerEndpoint';
+import { RELAY_API_BASE } from '../relayApiEndpoint';
 
-/** Strip /relay suffix from RELAYER_BASE to get origin for full paths like /relay/status */
-const RELAYER_ORIGIN = RELAYER_BASE.replace(/\/relay\/?$/, '');
+/** Strip /relay suffix from RELAY_API_BASE to get origin for full paths like /relay/status */
+const RELAY_API_ORIGIN = RELAY_API_BASE.replace(/\/relay\/?$/, '');
 
 interface FieldDef {
   name: string;
@@ -36,7 +36,7 @@ const endpoints: EndpointDef[] = [
     fields: [
       { name: 'txKindBytes', type: 'body', placeholder: 'base64...' },
       { name: 'senderAddress', type: 'body', placeholder: '0x...' },
-      { name: 'paymentTokenType', type: 'body', placeholder: '0x...::deep::DEEP (required)' },
+      { name: 'settlementTokenType', type: 'body', placeholder: '0x...::deep::DEEP (required)' },
       { name: 'slippageBps', type: 'body', placeholder: '200', valueType: 'number' },
       { name: 'gasMarginBps', type: 'body', placeholder: '1000', valueType: 'number' },
       { name: 'orderId', type: 'body', placeholder: 'order-123 (optional)' },
@@ -79,7 +79,7 @@ export function PlaygroundPage() {
     setLoading(true);
     setResponse(null);
     try {
-      let url = `${RELAYER_ORIGIN}${ep.path}`;
+      let url = `${RELAY_API_ORIGIN}${ep.path}`;
       const init: RequestInit = {};
       if (ep.method === 'GET') {
         const params = new URLSearchParams();
@@ -131,7 +131,7 @@ export function PlaygroundPage() {
         if (values[f.name]) params.set(f.name, values[f.name]);
       });
       const qs = params.toString();
-      return `curl "${RELAYER_ORIGIN}${ep.path}${qs ? '?' + qs : ''}"`;
+      return `curl "${RELAY_API_ORIGIN}${ep.path}${qs ? '?' + qs : ''}"`;
     }
     const body: Record<string, string> = {};
     ep.fields
@@ -139,7 +139,7 @@ export function PlaygroundPage() {
       .forEach((f) => {
         if (values[f.name]) body[f.name] = values[f.name];
       });
-    return `curl -X POST "${RELAYER_ORIGIN}${ep.path}" \\
+    return `curl -X POST "${RELAY_API_ORIGIN}${ep.path}" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(body)}'`;
   };

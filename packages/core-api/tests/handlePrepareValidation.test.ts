@@ -1,15 +1,15 @@
 /**
- * handlePrepare — L1/L2 validation rejection tests.
+ * handlePrepare — built-transaction validation rejection tests.
  *
  * Tests that the prepare handler correctly rejects transactions
- * when L1 (PTB structure) or L2 (settle args) validation fails.
+ * when PTB structure or settlement-argument validation fails.
  *
  * These tests mock runGenericPrepareBuildPipeline to return a REAL Transaction
  * containing forbidden or invalid commands, then verify the handler
  * reports PrepareValidationError with the correct error code.
  *
  * References:
- *   prepare.ts:211-241 (L1/L2 try-catch block)
+ *   prepare.ts:211-241 (built-transaction validation try-catch block)
  *   validate/static.ts:validatePtbStructure
  *   extractSettleArgs.ts:extractSettleArgsFromBuiltTx
  */
@@ -49,7 +49,7 @@ function makeCtx() {
     configId: '0xCONFIG',
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
-    maxRelayerFeeMist: 500_000n,
+    maxHostFeeMist: 500_000n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
   };
@@ -98,7 +98,7 @@ function makeCtx() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',
@@ -127,9 +127,9 @@ function makeExtraCfg(): PrepareHandlerConfig {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -149,7 +149,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: 50_000n,
+    quotedHostFeeMist: 50_000n,
   };
 }
 
@@ -164,7 +164,7 @@ async function makeParams(txKindBytes: string): Promise<PrepareParams> {
   return withPrepareAuthorization({
     txKindBytes,
     senderAddress: TEST_PREPARE_AUTH_SENDER,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '127.0.0.1',
   });
 }
@@ -216,7 +216,7 @@ async function buildNoSettleTxBytes(): Promise<Uint8Array> {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe('handlePrepare — L1/L2 rejection', () => {
+describe('handlePrepare — built-transaction validation rejection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockQueryUserCredit.mockResolvedValue(MOCK_CREDIT);
@@ -230,7 +230,7 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 350_000n,
       slippageBufferMist: 150_000n,
-      relayerClaim: 1_800_000n,
+      executionCostClaim: 1_800_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
@@ -261,8 +261,8 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 1_800_000n,
-      quotedRelayerFee: 50_000n,
+      executionCostClaim: 1_800_000n,
+      quotedHostFee: 50_000n,
       protocolFee: 10_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',
@@ -284,7 +284,7 @@ describe('handlePrepare — L1/L2 rejection', () => {
     }
   });
 
-  it('slot is released when L1/L2 validation fails', async () => {
+  it('slot is released when built-transaction validation fails', async () => {
     const noSettleBytes = await buildNoSettleTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
       txBytes: noSettleBytes,
@@ -292,8 +292,8 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 1_800_000n,
-      quotedRelayerFee: 50_000n,
+      executionCostClaim: 1_800_000n,
+      quotedHostFee: 50_000n,
       protocolFee: 10_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',
@@ -307,7 +307,7 @@ describe('handlePrepare — L1/L2 rejection', () => {
 
     await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg()).catch(() => {});
 
-    // Slot must be released even on L1/L2 failure. checkin is called with
+    // Slot must be released even on built-transaction validation failure. checkin is called with
     // `(slotId, receiptId)` where receiptId is the generated lease
     // authenticator; assert on its shape.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);

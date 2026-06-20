@@ -2,10 +2,10 @@
  * Coin selection utilities for /prepare.
  *
  * Adapted from sdk/src/sdk.ts L540-593 (coin querying, merging, splitting).
- * Server-owned — the relayer selects, merges, and splits coins on behalf of the user.
+ * Server-owned — the Host selects, merges, and splits coins on behalf of the user.
  *
  * User protection: the final txBytes is returned for user review and signature.
- * If the relayer makes malicious coin selections, the user can refuse to sign.
+ * If the Host makes malicious coin selections, the user can refuse to sign.
  *
  * R-9: When the user TX prefix already references coins of the same type,
  * coin selection must avoid double-consuming those coins. Callers pass
@@ -30,7 +30,7 @@ export interface CoinSelectionResult {
 }
 
 /**
- * Result of resolvePaymentSource(): determines where the payment token comes from.
+ * Result of resolvePaymentSource(): determines where the settlement token comes from.
  *
  * Callers use `source` to branch into the correct PTB construction path:
  * - `coin_object`: existing selectPaymentCoin() flow
@@ -41,7 +41,7 @@ export interface PaymentSourceResolution {
   source: PaymentInputSource;
   /** Total usable coin object balance (MIST). 0 if no usable objects. */
   usableCoinTotal: bigint;
-  /** Address balance available for payment token (MIST). 0 if not queried or disabled. */
+  /** Address balance available for settlement token (MIST). 0 if not queried or disabled. */
   addressBalance: bigint;
   /** Usable coin objects (filtered by R-9 consumed set). Empty if none. */
   usableCoins: Array<{ objectId: string; balance: string }>;
@@ -191,7 +191,7 @@ export async function selectPaymentCoin(
 // ─────────────────────────────────────────────
 
 /**
- * Determine where the payment token comes from: coin objects, address balance,
+ * Determine where the settlement token comes from: coin objects, address balance,
  * or a mix of both.
  *
  * Selection priority:

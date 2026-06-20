@@ -49,11 +49,11 @@ export interface SettlementSwapPathLiquidityStatus {
   /** Exact path-wide DeepBook mid_price (FLOAT_SCALING=1e9). null if no liquidity. */
   midPriceRaw: bigint | null;
   /**
-   * Approximate display number: SUI per payment token.
+   * Approximate display number: SUI per settlement token.
    * Example: a DEEP/SUI display price.
    */
   priceHuman: number | null;
-  /** Exact rounded display string for SUI per payment token. */
+  /** Exact rounded display string for SUI per settlement token. */
   priceDisplay: string | null;
   /** e.g. "DEEP/SUI" */
   label: string;
@@ -76,7 +76,7 @@ export async function checkSettlementSwapPathLiquidity(
   deepbookPackageId: string,
   settlementSwapPath: SingleHopSettlementSwapPath,
 ): Promise<SettlementSwapPathLiquidityStatus> {
-  const label = `${settlementSwapPath.paymentTokenSymbol}/SUI`;
+  const label = `${settlementSwapPath.settlementTokenSymbol}/SUI`;
 
   // Query all hop mid-prices in a single batch call
   const hopPrices = await batchGetHopMidPrices(client, deepbookPackageId, settlementSwapPath.hops);
@@ -129,9 +129,9 @@ export async function checkSettlementSwapPathLiquidity(
   }
   const composedMidPriceRaw = (chainedOutput * FLOAT_SCALING) / REF_INPUT;
   const composedMidPrice = bigintToSafeNumberOrNull(composedMidPriceRaw);
-  const inputDecimals = settlementSwapPath.paymentTokenDecimals ?? 6;
+  const inputDecimals = settlementSwapPath.settlementTokenDecimals ?? 6;
   const SUI_DECIMALS = 9;
-  // composedMidPrice is always paymentToken→SUI direction
+  // composedMidPrice is always settlementToken→SUI direction
   const priceDisplay = formatRatioDecimal(
     composedMidPriceRaw * 10n ** BigInt(inputDecimals),
     FLOAT_SCALING * 10n ** BigInt(SUI_DECIMALS),

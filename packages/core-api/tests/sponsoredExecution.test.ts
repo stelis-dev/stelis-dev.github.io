@@ -6,115 +6,115 @@ import {
   unknownSponsoredExecutionEconomics,
   type SponsoredExecutionEconomics,
 } from '../src/sponsoredExecution.js';
-import { buildRelayerEconomicsSnapshot } from '../src/economicsLogging.js';
+import { buildSettlementEconomicsSnapshot } from '../src/economicsLogging.js';
 
 describe('sponsoredExecution — derive known economics', () => {
-  it('generic success: positive relayer net', () => {
+  it('generic success: positive host net', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 12_000n,
-      relayerPaidGasMist: 8_000n,
-      relayerFeeMist: 1_000n,
+      hostPaidGasMist: 8_000n,
+      hostFeeMist: 1_000n,
       grossGasMist: 9_500n,
       storageRebateMist: 1_500n,
       protocolFeeMist: 50n,
     });
     expect(econ.economicsStatus).toBe('known');
-    expect(econ.relayerNetMist).toBe(5_000n);
+    expect(econ.hostNetMist).toBe(5_000n);
     expect(econ.protocolFeeMist).toBe(50n);
     expect(econ.failureReason).toBe(null);
   });
 
-  it('generic boundary: zero relayer net is NOT negative', () => {
+  it('generic boundary: zero host net is NOT negative', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 5_000n,
-      relayerPaidGasMist: 5_000n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 5_000n,
+      hostFeeMist: 0n,
     });
-    expect(econ.relayerNetMist).toBe(0n);
+    expect(econ.hostNetMist).toBe(0n);
   });
 
   it('generic onchain revert with gas: recovered=0, paid>0 → negative net', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 0n,
-      relayerPaidGasMist: 7_000n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 7_000n,
+      hostFeeMist: 0n,
       failureReason: 'onchain_revert: MoveAbort',
     });
-    expect(econ.relayerNetMist).toBe(-7_000n);
+    expect(econ.hostNetMist).toBe(-7_000n);
     expect(econ.failureReason).toBe('onchain_revert: MoveAbort');
   });
 
-  it('promotion success: recovered === paid and no relayer fee → relayer net is exactly 0', () => {
-    // Promotion ledger.consume reimburses the relayer for `actualGasMist`,
+  it('promotion success: recovered === paid and no host fee → host net is exactly 0', () => {
+    // Promotion ledger.consume reimburses the Host for `actualGasMist`,
     // so consumedGasMist === actualGasMist on every successful promotion path.
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 4_321n,
-      relayerPaidGasMist: 4_321n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 4_321n,
+      hostFeeMist: 0n,
     });
-    expect(econ.relayerNetMist).toBe(0n);
+    expect(econ.hostNetMist).toBe(0n);
   });
 
   it('promotion ledger consume failure post-submit: recovered=0, paid=actual → loss', () => {
     // Only known-economics promotion failure path that produces a real loss
-    // — relayer paid gas onchain but the budget did not reimburse.
+    // — Host paid gas onchain but the budget did not reimburse.
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 0n,
-      relayerPaidGasMist: 12_345n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 12_345n,
+      hostFeeMist: 0n,
       failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED',
     });
-    expect(econ.relayerNetMist).toBe(-12_345n);
+    expect(econ.hostNetMist).toBe(-12_345n);
     expect(econ.failureReason).toBe('PROMOTION_LEDGER_CONSUME_FAILED');
   });
 
-  it('protocol_fee is auxiliary context only — NOT subtracted from relayerNetMist', () => {
+  it('protocol_fee is auxiliary context only — NOT subtracted from hostNetMist', () => {
     // Trust-root invariant (docs/economics-formal.md): protocol fee flows
-    // from user surplus to protocol treasury. It does not enter relayer net.
+    // from user surplus to protocol treasury. It does not enter host net.
     const protocolFee = 1_000_000n;
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 10_000n,
-      relayerPaidGasMist: 6_000n,
-      relayerFeeMist: 500n,
+      hostPaidGasMist: 6_000n,
+      hostFeeMist: 500n,
       protocolFeeMist: protocolFee,
     });
-    // Without protocol_fee: relayerNet = 10000 + 500 - 6000 = 4500
+    // Without protocol_fee: hostNet = 10000 + 500 - 6000 = 4500
     // With protocol_fee subtracted (WRONG):                       4500 - 1000000 = -995500
-    expect(econ.relayerNetMist).toBe(4_500n);
+    expect(econ.hostNetMist).toBe(4_500n);
     expect(econ.protocolFeeMist).toBe(protocolFee);
   });
 
-  it('relayerNetMist matches the relayer-side profit/loss value', () => {
+  it('hostNetMist matches the host-side profit/loss value', () => {
     const recovered = 8_000n;
     const paid = 8_500n;
     const fee = 1_000n;
 
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: recovered,
-      relayerPaidGasMist: paid,
-      relayerFeeMist: fee,
+      hostPaidGasMist: paid,
+      hostFeeMist: fee,
     });
-    const payoutSnapshot = buildRelayerEconomicsSnapshot({
+    const payoutSnapshot = buildSettlementEconomicsSnapshot({
       gasUsed: { computationCost: '7000', storageCost: '2000', storageRebate: '500' },
-      relayerClaim: recovered,
+      executionCostClaim: recovered,
       feeCharged: fee,
       protocolFee: 0n,
     });
 
-    expect(econ.relayerNetMist).toBe(500n); // 8000 + 1000 - 8500
+    expect(econ.hostNetMist).toBe(500n); // 8000 + 1000 - 8500
     // payoutSnapshot.payoutNet uses snapshot's own derived netGas (not the
     // sponsoredExecution paid value). The shapes are therefore independent
     // and must not be conflated even when input numbers overlap.
     expect(payoutSnapshot.payoutNet).toBe(
-      payoutSnapshot.relayerClaim + payoutSnapshot.feeCharged - payoutSnapshot.netGas,
+      payoutSnapshot.executionCostClaim + payoutSnapshot.feeCharged - payoutSnapshot.netGas,
     );
   });
 
   it('omits optional auxiliary fields cleanly when not provided', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 100n,
-      relayerPaidGasMist: 90n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 90n,
+      hostFeeMist: 0n,
     });
     expect(econ.grossGasMist).toBe(null);
     expect(econ.storageRebateMist).toBe(null);
@@ -135,8 +135,8 @@ describe('sponsoredExecution — unknown economics', () => {
     // Type-level: unknown variant has no recoveredGasMist / paid / net fields.
     // Runtime: recorder consumers check economicsStatus before reading numbers.
     expect((u as Record<string, unknown>).recoveredGasMist).toBeUndefined();
-    expect((u as Record<string, unknown>).relayerPaidGasMist).toBeUndefined();
-    expect((u as Record<string, unknown>).relayerNetMist).toBeUndefined();
+    expect((u as Record<string, unknown>).hostPaidGasMist).toBeUndefined();
+    expect((u as Record<string, unknown>).hostNetMist).toBeUndefined();
   });
 
   it('SERIALIZED_UNKNOWN_ECONOMICS is a frozen serialized-shape default', () => {
@@ -154,8 +154,8 @@ describe('sponsoredExecution — serialize response shape', () => {
     const big = 9_223_372_036_854_775_000n;
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: big,
-      relayerPaidGasMist: 1n,
-      relayerFeeMist: 2n,
+      hostPaidGasMist: 1n,
+      hostFeeMist: 2n,
       grossGasMist: 100n,
       storageRebateMist: 50n,
       protocolFeeMist: 7n,
@@ -165,24 +165,24 @@ describe('sponsoredExecution — serialize response shape', () => {
     expect(serialized.economicsStatus).toBe('known');
     if (serialized.economicsStatus !== 'known') return;
     expect(serialized.recoveredGasMist).toBe(big.toString());
-    expect(serialized.relayerPaidGasMist).toBe('1');
-    expect(serialized.relayerFeeMist).toBe('2');
-    expect(serialized.relayerNetMist).toBe((big + 2n - 1n).toString());
+    expect(serialized.hostPaidGasMist).toBe('1');
+    expect(serialized.hostFeeMist).toBe('2');
+    expect(serialized.hostNetMist).toBe((big + 2n - 1n).toString());
     expect(serialized.grossGasMist).toBe('100');
     expect(serialized.storageRebateMist).toBe('50');
     expect(serialized.protocolFeeMist).toBe('7');
     expect(serialized.failureReason).toBe(null);
   });
 
-  it('serializes negative relayerNet with leading minus (signed-decimal)', () => {
+  it('serializes negative hostNet with leading minus (signed-decimal)', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 0n,
-      relayerPaidGasMist: 7_000n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 7_000n,
+      hostFeeMist: 0n,
     });
     const serialized = serializeSponsoredExecutionEconomics(econ);
     if (serialized.economicsStatus !== 'known') throw new Error('expected known');
-    expect(serialized.relayerNetMist).toBe('-7000');
+    expect(serialized.hostNetMist).toBe('-7000');
   });
 
   it('serializes unknown economics without numeric fields', () => {
@@ -193,14 +193,14 @@ describe('sponsoredExecution — serialize response shape', () => {
     expect(serialized.economicsStatus).toBe('unknown');
     expect(serialized.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
     expect((serialized as Record<string, unknown>).recoveredGasMist).toBeUndefined();
-    expect((serialized as Record<string, unknown>).relayerNetMist).toBeUndefined();
+    expect((serialized as Record<string, unknown>).hostNetMist).toBeUndefined();
   });
 
   it('preserves null auxiliary fields through serialize (no "0" coercion)', () => {
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 100n,
-      relayerPaidGasMist: 90n,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: 90n,
+      hostFeeMist: 0n,
     });
     const serialized = serializeSponsoredExecutionEconomics(econ);
     if (serialized.economicsStatus !== 'known') throw new Error('expected known');

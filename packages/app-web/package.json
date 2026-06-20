@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "VITE_STELIS_RELAY_API_URL=http://localhost:3200/relay vitest run"
   },
   "dependencies": {
     "@mysten/dapp-kit-react": "^1.0.2",

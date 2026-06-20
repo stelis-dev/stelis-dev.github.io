@@ -1,17 +1,17 @@
 /**
- * Address constraint validation for relayer configuration.
+ * Address constraint validation for Host configuration.
  *
  * Enforces address separation rules at startup:
  *   [1] Each sponsor address must be unique (pool concurrency)
- *   [2] Sponsor addresses must differ from relayerRecipientAddress (settlement separation)
+ *   [2] Sponsor addresses must differ from settlementPayoutRecipientAddress (settlement separation)
  *   [3] Sponsor addresses must differ from sponsorRefillAccountAddress (if explicitly set)
- *   [4] relayerRecipientAddress == sponsorRefillAccountAddress is allowed
+ *   [4] settlementPayoutRecipientAddress == sponsorRefillAccountAddress is allowed
  *
  * Accounting separation note:
- *   RELAYER_RECIPIENT_ADDRESS: address only (no private key held by system), receives settlement payout.
+ *   SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS: address only (no private key held by system), receives settlement payout.
  *   SPONSOR_REFILL_ACCOUNT_SECRET_KEY: private key held by system, signs refill TXs from operational capital.
  *   Keeping them separate enables clean revenue vs. opex tracking:
- *     - Recipient inflows = relayer claim plus quoted relayer fee
+ *     - Recipient inflows = execution cost claim plus quoted host fee
  *     - Sponsor Refill Account outflows = refill operational cost
  *   Operators may use the same address or sweep externally. The
  *   enforced system constraints here only require sponsor addresses to
@@ -34,8 +34,8 @@ export function canonicalizeAddress(raw: string, label: string): string {
 export interface AddressConstraintInput {
   /** Already-canonical sponsor addresses (from toSuiAddress()). */
   sponsorAddresses: string[];
-  /** Already-canonical relayer recipient address. */
-  relayerRecipientAddress: string;
+  /** Already-canonical settlement payout recipient address. */
+  settlementPayoutRecipientAddress: string;
   /**
    * Sponsor refill account address — only when SPONSOR_REFILL_ACCOUNT_SECRET_KEY is explicitly set.
    * When undefined (fallback to primary sponsor), [3] is skipped.
@@ -48,7 +48,7 @@ export interface AddressConstraintInput {
  * Throws on first violation. Call at context creation and/or boot-time.
  */
 export function validateAddressConstraints(opts: AddressConstraintInput): void {
-  const { sponsorAddresses, relayerRecipientAddress, sponsorRefillAccountAddress } = opts;
+  const { sponsorAddresses, settlementPayoutRecipientAddress, sponsorRefillAccountAddress } = opts;
 
   // [1] Sponsor addresses must be unique
   const seen = new Set<string>();
@@ -61,11 +61,11 @@ export function validateAddressConstraints(opts: AddressConstraintInput): void {
     seen.add(addr);
   }
 
-  // [2] Sponsor != Relayer Recipient
+  // [2] Sponsor != Settlement Payout Recipient
   for (const addr of sponsorAddresses) {
-    if (addr === relayerRecipientAddress) {
+    if (addr === settlementPayoutRecipientAddress) {
       throw new Error(
-        `Sponsor address ${addr} must not equal RELAYER_RECIPIENT_ADDRESS. ` +
+        `Sponsor address ${addr} must not equal SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS. ` +
           'Use a dedicated signing key separate from the settlement payout recipient.',
       );
     }

@@ -130,7 +130,7 @@ describe('compileCreditSettlement', () => {
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledOnce();
     const args = mockBuildSettleWithCreditPtb.mock.calls[0];
     expect(args[1].useCreditAmount).toBe(5_120_000n);
-    expect(args[1].relayerClaim).toBe(BASE_AUDIT.relayerClaim);
+    expect(args[1].executionCostClaim).toBe(BASE_AUDIT.executionCostClaim);
     expect(args[1].slippageBufferMist).toBe(0n);
   });
 

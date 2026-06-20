@@ -1,5 +1,5 @@
 /**
- * Shared HTTP body-size limits for relayer hosts.
+ * Shared HTTP body-size limits for Host HTTP endpoints.
  *
  * These limits sit above protocol-level validation such as MAX_TX_KIND_BYTES.
  * They prevent hosts from buffering arbitrarily large JSON request bodies before

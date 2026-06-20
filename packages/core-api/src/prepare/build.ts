@@ -3,17 +3,17 @@
  *
  * Implements the multi-stage build strategy:
  *   Credit probe: for credit_general candidates, dry-run a credit-only
- *             settlement PTB before payment-token resolution.
+ *             settlement PTB before settlement-token resolution.
  *   Pass 1:   Build with maxClaimMist → dry-run → extract actual gas
  *   Path decision: the pre-swap credit probe either selects final credit with
  *             zero slippage or leaves pass 1 / 1.5 / 2 on the swap path.
- *   Pass 2:   Rebuild with path-canonical relayerClaim + slippageBuffer → final txBytes
+ *   Pass 2:   Rebuild with path-canonical executionCostClaim + slippageBuffer → final txBytes
  *
  * The Sui SDK does not allow modifying MoveCall arguments after construction,
  * so each pass creates a fresh Transaction.
  */
 import { Transaction } from '@mysten/sui/transactions';
-import type { RelayerCostEstimate, SimulationGasUsed } from '@stelis/core-relay';
+import type { ExecutionCostClaimEstimate, SimulationGasUsed } from '@stelis/core-relay';
 import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
 import type {
   ExecutableSwapQuote,
@@ -24,7 +24,7 @@ import {
   batchGetHopMidPrices,
   classifyUserTxCoins,
   extractPrefixWithdrawals,
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   CONVERGENCE_TOLERANCE_BPS,
   SlippageQueryError,
 } from '@stelis/core-relay';
@@ -103,7 +103,7 @@ function logPrepareBuildStage(stage: string, payload: Record<string, unknown> = 
  * Build the baseForQuote market-executable floor diagnostic payload from a solver
  * quote. Emitted in `PREPARE_BUILD_STAGE` events so operators can correlate
  * any downstream `INSUFFICIENT_BALANCE` (raised swap input vs. user's
- * payment-token funding) with the floor that triggered the raise.
+ * settlement-token funding) with the floor that triggered the raise.
  *
  * `bfq_floor_raised` is true only on the baseForQuote branch and only when the solver
  * lifted the target. quoteForBase's existing minSize bump path keeps the field at
@@ -143,7 +143,7 @@ function buildSettleMeta(
 ): Record<string, string> {
   return _buildSettleMeta(
     ctx.minSettleMist,
-    ctx.quotedRelayerFeeMist,
+    ctx.quotedHostFeeMist,
     ctx.protocolFlatFeeMist,
     claimEstimate,
     isEstimate,
@@ -161,7 +161,7 @@ function buildPlannerInputs(
   return {
     config: {
       minSettleMist: ctx.minSettleMist,
-      quotedRelayerFeeMist: ctx.quotedRelayerFeeMist,
+      quotedHostFeeMist: ctx.quotedHostFeeMist,
       protocolFlatFeeMist: ctx.protocolFlatFeeMist,
     },
     input: {
@@ -175,7 +175,7 @@ function buildPlannerInputs(
 
 type FinalSettlePath = 'credit' | 'swap';
 type CreditProbeMeasurement =
-  | { outcome: 'selected'; costs: RelayerCostEstimate }
+  | { outcome: 'selected'; costs: ExecutionCostClaimEstimate }
   | { outcome: 'rejected' }
   | { outcome: 'skipped' };
 
@@ -224,7 +224,7 @@ async function dryRunForGas(
   meta: Record<string, string>,
   completedStage: string,
   pass: 'credit_preswap' | 'pass1',
-  failureContext: { poolId: string; paymentTokenSymbol: string },
+  failureContext: { poolId: string; settlementTokenSymbol: string },
   quoteStats: QuoteRpcStats = emptyQuoteRpcStats(),
 ): Promise<SimulationGasUsed> {
   // Schema-shared invariant: dryrun_*_failed are lifecycle phase failures that
@@ -242,7 +242,7 @@ async function dryRunForGas(
   // can detect them via direct field-name regex (the lint does not follow
   // `...identifier` spreads).
   const poolId = failureContext.poolId;
-  const paymentTokenSymbol = failureContext.paymentTokenSymbol;
+  const settlementTokenSymbol = failureContext.settlementTokenSymbol;
 
   let dryRunBytes: Uint8Array;
   try {
@@ -251,7 +251,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_safebuild_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
@@ -277,7 +277,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_simulate_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
@@ -306,7 +306,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       has_transaction: Boolean(simResult.Transaction),
       completed_stage_emitted: true,
@@ -329,15 +329,15 @@ function assertSingleHopOnly(settlementSwapPath: SingleHopSettlementSwapPath): v
   if (settlementSwapPath.hops.length !== 1) {
     throw new PrepareValidationError(
       'SLIPPAGE_QUERY_FAILED',
-      `Unsupported hop count ${settlementSwapPath.hops.length} (only 1-hop routes are supported)`,
+      `Unsupported hop count ${settlementSwapPath.hops.length} (only one-hop settlement swap paths are supported)`,
       { stage: 'hop_validation', poolId: settlementSwapPath.hops[0]?.poolId ?? 'unknown' },
     );
   }
 }
 
-function materializePrefixUsage(tx: Transaction, paymentTokenType: string): PrefixUsage {
+function materializePrefixUsage(tx: Transaction, settlementTokenType: string): PrefixUsage {
   const classification = classifyUserTxCoins(tx);
-  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(tx, paymentTokenType);
+  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(tx, settlementTokenType);
   if (unaccountable) {
     throw new PrepareValidationError(
       'UNACCOUNTABLE_WITHDRAWAL',
@@ -426,7 +426,7 @@ interface SolveSwapResult {
 async function solveSwapForClaim(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
-  relayerClaim: bigint,
+  executionCostClaim: bigint,
   rawMidPrices: readonly bigint[],
   stage: string,
   pass: QuoteSolvePass,
@@ -434,7 +434,7 @@ async function solveSwapForClaim(
   quoteCache?: QuoteCache,
 ): Promise<SolveSwapResult> {
   const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
-  const targetOutputMist = calculateRequiredSwapOutput(plannerConfig, plannerInput, relayerClaim);
+  const targetOutputMist = calculateRequiredSwapOutput(plannerConfig, plannerInput, executionCostClaim);
   const basePort = createDeepbookQuotePort(ctx.sui, ctx.deepbookPackageId);
   const { port, stats } = quoteCache
     ? wrapQuotePortWithCacheAndStats(basePort, quoteCache)
@@ -473,7 +473,7 @@ async function solveSwapForClaim(
       pass,
       error_code: classifyQuoteFailure(err),
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
       target_output_mist: targetOutputMist.toString(),
       quote_quantity_in_rpc_calls: stats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: stats.quantityOutVerifyCalls,
@@ -538,7 +538,7 @@ async function dryRunPreSwapCreditPathCosts(
   }
 
   logPrepareBuildStage('credit_preswap_probe_seed_selected', {
-    seed_relayer_claim_mist: seedClaim.toString(),
+    seed_execution_cost_claim_mist: seedClaim.toString(),
     max_claim_mist: ctx.maxClaimMist.toString(),
   });
 
@@ -546,11 +546,11 @@ async function dryRunPreSwapCreditPathCosts(
     ctx,
     input,
     {
-      relayerClaim: seedClaim,
+      executionCostClaim: seedClaim,
       simGasReported: seedClaim,
       gasVarianceFixedMist: 0n,
       slippageBufferMist: 0n,
-      quotedRelayerFeeMist: ctx.quotedRelayerFeeMist,
+      quotedHostFeeMist: ctx.quotedHostFeeMist,
       expectedProtocolFeeMist: ctx.protocolFlatFeeMist,
       expectedConfigVersion: ctx.configVersion,
     },
@@ -588,19 +588,19 @@ async function dryRunPreSwapCreditPathCosts(
     'credit_preswap',
     {
       poolId: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      paymentTokenSymbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlementTokenSymbol: input.settlementSwapPath.settlementTokenSymbol,
     },
   );
-  const creditCosts = computeRelayerCosts(gasUsed);
+  const creditCosts = computeExecutionCostClaim(gasUsed);
   logPrepareBuildStage('credit_preswap_costs_extracted', {
-    seed_relayer_claim_mist: seedClaim.toString(),
+    seed_execution_cost_claim_mist: seedClaim.toString(),
     sim_gas_mist: creditCosts.simGas.toString(),
     gross_gas_mist: creditCosts.grossGas.toString(),
     gas_variance_fixed_mist: creditCosts.gasVarianceFixedMist.toString(),
-    relayer_claim_mist: creditCosts.relayerClaim.toString(),
+    execution_cost_claim_mist: creditCosts.executionCostClaim.toString(),
   });
 
-  if (creditCosts.relayerClaim > ctx.maxClaimMist) {
+  if (creditCosts.executionCostClaim > ctx.maxClaimMist) {
     throwClaimWouldExceedMax(ctx, creditCosts);
   }
 
@@ -608,38 +608,38 @@ async function dryRunPreSwapCreditPathCosts(
   const verifiedCreditCheck = checkCreditOnlyEligibility(
     plannerConfig,
     plannerInput,
-    creditCosts.relayerClaim,
+    creditCosts.executionCostClaim,
   );
   if (!verifiedCreditCheck) {
     logPrepareBuildStage('credit_preswap_rejected_after_dryrun', {
-      seed_relayer_claim_mist: seedClaim.toString(),
-      measured_relayer_claim_mist: creditCosts.relayerClaim.toString(),
+      seed_execution_cost_claim_mist: seedClaim.toString(),
+      measured_execution_cost_claim_mist: creditCosts.executionCostClaim.toString(),
       credit_mist: input.credit,
     });
     return { outcome: 'rejected' };
   }
 
   logPrepareBuildStage('credit_preswap_final_path_selected', {
-    seed_relayer_claim_mist: seedClaim.toString(),
-    measured_relayer_claim_mist: creditCosts.relayerClaim.toString(),
+    seed_execution_cost_claim_mist: seedClaim.toString(),
+    measured_execution_cost_claim_mist: creditCosts.executionCostClaim.toString(),
     use_credit_amount_mist: verifiedCreditCheck.useCreditAmount.toString(),
     slippage_buffer_mist: creditCosts.slippageBufferMist.toString(),
   });
   return { outcome: 'selected', costs: creditCosts };
 }
 
-function throwClaimWouldExceedMax(ctx: BuildContext, costs: RelayerCostEstimate): never {
+function throwClaimWouldExceedMax(ctx: BuildContext, costs: ExecutionCostClaimEstimate): never {
   logPrepareBuildStage('claim_exceeds_max', {
-    relayer_claim_mist: costs.relayerClaim.toString(),
+    execution_cost_claim_mist: costs.executionCostClaim.toString(),
     max_claim_mist: ctx.maxClaimMist.toString(),
     sim_gas_mist: costs.simGas.toString(),
     slippage_buffer_mist: costs.slippageBufferMist.toString(),
   });
   throw new PrepareValidationError(
     'CLAIM_WOULD_EXCEED_MAX',
-    `Computed relayer claim ${costs.relayerClaim} exceeds maxClaimMist ${ctx.maxClaimMist}`,
+    `Computed execution cost claim ${costs.executionCostClaim} exceeds maxClaimMist ${ctx.maxClaimMist}`,
     {
-      relayerClaim: costs.relayerClaim.toString(),
+      executionCostClaim: costs.executionCostClaim.toString(),
       maxClaimMist: ctx.maxClaimMist.toString(),
       simGas: costs.simGas.toString(),
       gasVarianceFixedMist: costs.gasVarianceFixedMist.toString(),
@@ -651,7 +651,7 @@ function throwClaimWouldExceedMax(ctx: BuildContext, costs: RelayerCostEstimate)
 async function buildFinalGenericPrepareResult(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
-  finalCosts: RelayerCostEstimate,
+  finalCosts: ExecutionCostClaimEstimate,
   finalSettlePath: FinalSettlePath,
   prefetchedMidPrices: bigint[] | undefined,
   probeQuote: ExecutableSwapQuote | null,
@@ -663,25 +663,25 @@ async function buildFinalGenericPrepareResult(
   // Tag the two fields consumed by downstream sponsor / store code.
   // Other bigint fields are co-located audit data and stay untagged.
   const simGas: Mist = mist(finalCosts.simGas);
-  const relayerClaim: Mist = mist(finalCosts.relayerClaim);
+  const executionCostClaim: Mist = mist(finalCosts.executionCostClaim);
   logPrepareBuildStage('final_costs_ready', {
     final_settle_path: finalSettlePath,
     sim_gas_mist: simGas.toString(),
     gross_gas_mist: grossGas.toString(),
     gas_variance_fixed_mist: gasVarianceFixedMist.toString(),
     slippage_buffer_mist: slippageBufferMist.toString(),
-    relayer_claim_mist: relayerClaim.toString(),
+    execution_cost_claim_mist: executionCostClaim.toString(),
     max_claim_mist: ctx.maxClaimMist.toString(),
   });
 
-  // Fail-closed before pass2 build: on-chain settle enforces relayer_claim <= max_claim_mist
+  // Fail-closed before pass2 build: on-chain settle enforces execution_cost_claim_mist <= max_claim_mist
   // (settle.move EClaimTooHigh = 101). Reject here with an explicit typed error so
   // we do not rely on downstream MoveAbort parsing for this deterministic boundary.
-  if (relayerClaim > ctx.maxClaimMist) {
+  if (executionCostClaim > ctx.maxClaimMist) {
     throwClaimWouldExceedMax(ctx, finalCosts);
   }
 
-  // ── Pass 2: Final build with confirmed relayerClaim + actual audit fields ─
+  // ── Pass 2: Final build with confirmed executionCostClaim + actual audit fields ─
 
   const {
     tx: pass2Tx,
@@ -694,11 +694,11 @@ async function buildFinalGenericPrepareResult(
     ctx,
     input,
     {
-      relayerClaim,
+      executionCostClaim,
       simGasReported: simGas,
       gasVarianceFixedMist,
       slippageBufferMist,
-      quotedRelayerFeeMist: ctx.quotedRelayerFeeMist,
+      quotedHostFeeMist: ctx.quotedHostFeeMist,
       expectedProtocolFeeMist: ctx.protocolFlatFeeMist,
       expectedConfigVersion: ctx.configVersion,
     },
@@ -777,7 +777,7 @@ async function buildFinalGenericPrepareResult(
   const gasBudget = rawGasBudget > ctx.maxClaimMist ? ctx.maxClaimMist : rawGasBudget;
   pass2Tx.setGasBudget(gasBudget);
 
-  const settleMeta = buildSettleMeta(ctx, relayerClaim, false);
+  const settleMeta = buildSettleMeta(ctx, executionCostClaim, false);
   let txBytes: Uint8Array;
   try {
     txBytes = await safeBuild(pass2Tx, ctx.sui, ctx.packageId, ctx.deepbookPackageId, settleMeta);
@@ -793,7 +793,7 @@ async function buildFinalGenericPrepareResult(
       pass: 'pass2',
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
       quote_quantity_in_rpc_calls: rpcSummary.quoteQuantityInCalls,
       quote_quantity_out_verify_rpc_calls: rpcSummary.quoteQuantityOutVerifyCalls,
       quote_total_rpc_calls: rpcSummary.quoteTotalRpcCalls,
@@ -815,7 +815,7 @@ async function buildFinalGenericPrepareResult(
   const rpcSummary = summarizeRpcStats(rpcAcc);
   logPrepareBuildStage('two_pass_complete', {
     tx_bytes_hash: txBytesHash,
-    relayer_claim_mist: relayerClaim.toString(),
+    execution_cost_claim_mist: executionCostClaim.toString(),
     sim_gas_mist: simGas.toString(),
     slippage_buffer_mist: slippageBufferMist.toString(),
     gross_gas_mist: grossGas.toString(),
@@ -848,7 +848,7 @@ async function buildFinalGenericPrepareResult(
   return {
     txBytes,
     txBytesHash,
-    relayerClaim,
+    executionCostClaim,
     simGas,
     gasVarianceFixedMist,
     slippageBufferMist,
@@ -866,11 +866,11 @@ async function buildFinalGenericPrepareResult(
 /**
  * Execute the generic prepare build pipeline in code order:
  *   Credit probe: for eligible credit_general requests, measure a credit-only
- *             candidate before requiring payment-token funding for a swap probe.
+ *             candidate before requiring settlement-token funding for a swap probe.
  *   Pass 1:   dry-run with maxClaimMist to extract actual gas.
  *   Path decision: if the pre-swap credit probe did not select credit, the
  *             remaining final path is swap and must measure execution gap.
- *   Pass 2:   rebuild with confirmed relayerClaim + actual audit fields.
+ *   Pass 2:   rebuild with confirmed executionCostClaim + actual audit fields.
  *   Pass 2 convergence recheck: compare residual execution gap for the
  *             final executable quote against the pass 1.5 embedded buffer
  *             (swap paths only).
@@ -881,14 +881,14 @@ interface GenericPrepareBuildRunContext {
 }
 
 interface MaxClaimGasProbeResult {
-  readonly baseCosts: RelayerCostEstimate;
+  readonly baseCosts: ExecutionCostClaimEstimate;
   readonly gasUsed: SimulationGasUsed;
   readonly pass1MidPrices: bigint[];
   readonly pass1ExecutionQuote: ExecutableSwapQuote | null;
 }
 
 interface SwapExecutionGapMeasurement {
-  readonly finalCosts: RelayerCostEstimate;
+  readonly finalCosts: ExecutionCostClaimEstimate;
   readonly probeQuote: ExecutableSwapQuote;
 }
 
@@ -938,11 +938,11 @@ async function runMaxClaimGasProbe(
     ctx,
     input,
     {
-      relayerClaim: pass1Claim,
+      executionCostClaim: pass1Claim,
       simGasReported: pass1Claim,
       gasVarianceFixedMist: 0n,
       slippageBufferMist: 0n,
-      quotedRelayerFeeMist: ctx.quotedRelayerFeeMist,
+      quotedHostFeeMist: ctx.quotedHostFeeMist,
       expectedProtocolFeeMist: ctx.protocolFlatFeeMist,
       expectedConfigVersion: ctx.configVersion,
     },
@@ -982,16 +982,16 @@ async function runMaxClaimGasProbe(
     'pass1',
     {
       poolId: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      paymentTokenSymbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlementTokenSymbol: input.settlementSwapPath.settlementTokenSymbol,
     },
     runContext.rpcAcc.pass1Quote,
   );
-  const baseCosts = computeRelayerCosts(gasUsed);
+  const baseCosts = computeExecutionCostClaim(gasUsed);
   logPrepareBuildStage('pass1_costs_extracted', {
     sim_gas_mist: baseCosts.simGas.toString(),
     gross_gas_mist: baseCosts.grossGas.toString(),
     gas_variance_fixed_mist: baseCosts.gasVarianceFixedMist.toString(),
-    relayer_claim_mist: baseCosts.relayerClaim.toString(),
+    execution_cost_claim_mist: baseCosts.executionCostClaim.toString(),
   });
 
   return {
@@ -1029,7 +1029,7 @@ async function measureSwapExecutionGap(
     const probeSolve = await solveSwapForClaim(
       ctx,
       input,
-      maxClaimProbe.baseCosts.relayerClaim,
+      maxClaimProbe.baseCosts.executionCostClaim,
       rawMidPrices,
       'pass1_5',
       'pass1_5',
@@ -1039,28 +1039,28 @@ async function measureSwapExecutionGap(
     probeQuote = probeSolve.quote;
     runContext.rpcAcc.pass1_5Quote = probeSolve.rpcStats;
 
-    finalCosts = computeRelayerCosts(maxClaimProbe.gasUsed, {
+    finalCosts = computeExecutionCostClaim(maxClaimProbe.gasUsed, {
       slippageBufferMist: probeQuote.executionGapMist,
     });
     logPrepareBuildStage('pass1_5_slippage_measured', {
       swap_probe_amount_smallest: probeQuote.swapAmountSmallest.toString(),
       slippage_buffer_mist: probeQuote.executionGapMist.toString(),
-      relayer_claim_mist: finalCosts.relayerClaim.toString(),
+      execution_cost_claim_mist: finalCosts.executionCostClaim.toString(),
       actual_sui_out: probeQuote.actualOutputMist.toString(),
       pass1_5_quantity_in_rpc_calls: runContext.rpcAcc.pass1_5Quote.quantityInCalls,
       ...buildBfqFloorPayload(probeQuote, input.settlementSwapPath.hops[0]?.swapDirection),
     });
 
-    // Pass 2 will use adjusted relayerClaim — verify convergence below
+    // Pass 2 will use adjusted executionCostClaim — verify convergence below
   } else {
-    if (finalCosts.relayerClaim > ctx.maxClaimMist) {
+    if (finalCosts.executionCostClaim > ctx.maxClaimMist) {
       throwClaimWouldExceedMax(ctx, finalCosts);
     }
     throw new PrepareValidationError(
       'INSUFFICIENT_BALANCE',
       'Pre-swap credit measurement did not select credit and no swap quote is available',
       {
-        relayerClaim: finalCosts.relayerClaim.toString(),
+        executionCostClaim: finalCosts.executionCostClaim.toString(),
         credit: input.credit,
       },
     );
@@ -1078,7 +1078,7 @@ export async function runGenericPrepareBuildPipeline(
 
   // A credit_general request can be credit-coverable after measurement even
   // when it cannot cover maxClaimMist. Measure that candidate without first
-  // requiring a payment-token source for a max-claim swap probe.
+  // requiring a settlement-token source for a max-claim swap probe.
   const preSwapCreditProbe = shouldAttemptPreSwapCreditProbe(input)
     ? await dryRunPreSwapCreditPathCosts(ctx, input)
     : ({ outcome: 'skipped' } as const);
@@ -1130,15 +1130,15 @@ export const __testingGenericPrepareBuildStages = {
  * Pass 1 uses placeholder values; Pass 2 uses actual dry-run results.
  */
 interface SettleAuditFields {
-  relayerClaim: bigint;
+  executionCostClaim: bigint;
   /** Actual simulation gas (computation + storage - rebate) from dry-run */
   simGasReported: bigint;
   /** Fixed gas variance (GAS_VARIANCE_FIXED_MIST). */
   gasVarianceFixedMist: bigint;
   /** Slippage buffer (MIST). 0 for credit-only paths. */
   slippageBufferMist: bigint;
-  /** Relayer-quoted fee (MIST) — exact value embedded in PTB. */
-  quotedRelayerFeeMist: bigint;
+  /** Host-quoted fee (MIST) — exact value embedded in PTB. */
+  quotedHostFeeMist: bigint;
   /** Expected on-chain protocol fee at quote time — tamper detection. */
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */
@@ -1154,7 +1154,7 @@ interface PreparePassResult {
   swapAmountSmallest: bigint;
   /** Per-hop raw u64 mid_price from getHopMidPriceRaw (bigint[]). Empty for credit paths. */
   rawMidPrices: bigint[];
-  /** How payment token was sourced. */
+  /** How settlement token was sourced. */
   paymentInputSource: PaymentInputSource;
   /** Canonical market-policy result for swap paths. */
   executionQuote: ExecutableSwapQuote | null;
@@ -1189,7 +1189,7 @@ async function runPreparePass(
     pass: passLabel,
     forced_settle_path: forcedSettlePath ?? 'auto',
     requested_profile: input.profile,
-    relayer_claim_mist: audit.relayerClaim.toString(),
+    execution_cost_claim_mist: audit.executionCostClaim.toString(),
   });
 
   const tx = Transaction.fromKind(
@@ -1199,20 +1199,20 @@ async function runPreparePass(
   const settlementSwapPath = input.settlementSwapPath;
   // API contract: unaccountable Sender withdrawals are rejected before
   // payment-source selection, including credit-only paths.
-  const prefixUsage = materializePrefixUsage(tx, settlementSwapPath.paymentTokenType);
+  const prefixUsage = materializePrefixUsage(tx, settlementSwapPath.settlementTokenType);
 
   // ── Build planner config + input from orchestrator context ─────────────
   const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
 
   const auditFields: SettlePlanAuditFields = {
-    relayerClaim: audit.relayerClaim,
-    relayerRecipient: ctx.relayerRecipientAddress,
+    executionCostClaim: audit.executionCostClaim,
+    settlementPayoutRecipient: ctx.settlementPayoutRecipientAddress,
     receiptId: input.receiptId,
     nonce: input.nonce,
     simGasReported: audit.simGasReported,
     gasVarianceFixedMist: audit.gasVarianceFixedMist,
     slippageBufferMist: audit.slippageBufferMist,
-    quotedRelayerFeeMist: audit.quotedRelayerFeeMist,
+    quotedHostFeeMist: audit.quotedHostFeeMist,
     expectedProtocolFeeMist: audit.expectedProtocolFeeMist,
     expectedConfigVersion: audit.expectedConfigVersion,
     quoteTimestampMs: input.quoteTimestampMs,
@@ -1221,7 +1221,7 @@ async function runPreparePass(
   };
 
   // ── Step 1: Credit-only eligibility (planner) ─────────────────────────
-  const creditCheck = checkCreditOnlyEligibility(plannerConfig, plannerInput, audit.relayerClaim);
+  const creditCheck = checkCreditOnlyEligibility(plannerConfig, plannerInput, audit.executionCostClaim);
   if (creditCheck && forcedSettlePath !== 'swap') {
     const plan = assembleCreditSettlementPlan(
       plannerInput,
@@ -1254,7 +1254,7 @@ async function runPreparePass(
       'INSUFFICIENT_BALANCE',
       'Forced credit settlement path is not credit-coverable for the current audit claim',
       {
-        relayerClaim: audit.relayerClaim.toString(),
+        executionCostClaim: audit.executionCostClaim.toString(),
         credit: input.credit,
       },
     );
@@ -1291,7 +1291,7 @@ async function runPreparePass(
         pass: passLabel,
         error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
         pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-        payment_token_symbol: settlementSwapPath.paymentTokenSymbol,
+        settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
         mid_price_total_ms: Date.now() - midPriceStartedAt,
         mid_price_stats_complete: false,
       });
@@ -1307,7 +1307,7 @@ async function runPreparePass(
   const { quote: executionQuote, rpcStats: solveRpcStats } = await solveSwapForClaim(
     ctx,
     input,
-    audit.relayerClaim,
+    audit.executionCostClaim,
     rawMidPrices,
     `${passLabel}_market_policy`,
     passLabel,
@@ -1337,9 +1337,9 @@ async function runPreparePass(
     const sourceResolution = await resolvePaymentSource(
       ctx.sui,
       input.senderAddress,
-      settlementSwapPath.paymentTokenType,
+      settlementSwapPath.settlementTokenType,
       swapAmountSmallest,
-      settlementSwapPath.paymentTokenSymbol,
+      settlementSwapPath.settlementTokenSymbol,
       prefixUsage,
     );
     const funding: FundingResolution = {
@@ -1410,7 +1410,7 @@ async function runPreparePass(
       pass: passLabel,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
       quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,
