@@ -94,7 +94,7 @@ export interface FundingPlan {
  * For credit-only paths, swapAmountSmallest is 0n and guards are unused.
  */
 export interface SwapPlan {
-  /** Exact payment token amount to swap (after direction-aware DeepBook min/lot constraints). */
+  /** Exact settlement token amount to swap (after direction-aware DeepBook min/lot constraints). */
   readonly swapAmountSmallest: bigint;
   /** Minimum SUI output (slippage guard). */
   readonly minSuiOut: bigint;

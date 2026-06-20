@@ -72,7 +72,7 @@ function buildNewUser1HopPtb(): Transaction {
   buildSwapAndSettlePtb(tx, {
     variant: 'new_user',
     settlementSwapDirection: 'baseForQuote',
-    paymentTokenType: PAYMENT_TYPE,
+    settlementTokenType: PAYMENT_TYPE,
     poolId: ADDR_POOL,
     packageId: ADDR_PKG,
     configId: ADDR_CONFIG,
@@ -90,7 +90,7 @@ function buildWithVault1HopPtb(): Transaction {
   buildSwapAndSettlePtb(tx, {
     variant: 'with_vault',
     settlementSwapDirection: 'baseForQuote',
-    paymentTokenType: PAYMENT_TYPE,
+    settlementTokenType: PAYMENT_TYPE,
     poolId: ADDR_POOL,
     vaultId: ADDR_VAULT,
     useCreditAmount: 0n,
@@ -123,7 +123,7 @@ function build1HopQfbNewUserPtb(): Transaction {
   buildSwapAndSettlePtb(tx, {
     variant: 'new_user',
     settlementSwapDirection: 'quoteForBase',
-    paymentTokenType: PAYMENT_TYPE,
+    settlementTokenType: PAYMENT_TYPE,
     poolId: ADDR_POOL,
     packageId: ADDR_PKG,
     configId: ADDR_CONFIG,
@@ -141,7 +141,7 @@ function build1HopQfbWithVaultPtb(): Transaction {
   buildSwapAndSettlePtb(tx, {
     variant: 'with_vault',
     settlementSwapDirection: 'quoteForBase',
-    paymentTokenType: PAYMENT_TYPE,
+    settlementTokenType: PAYMENT_TYPE,
     poolId: ADDR_POOL,
     vaultId: ADDR_VAULT,
     useCreditAmount: 0n,
@@ -364,7 +364,7 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     buildSwapAndSettlePtb(tx, {
       variant: 'with_vault',
       settlementSwapDirection: 'baseForQuote',
-      paymentTokenType: PAYMENT_TYPE,
+      settlementTokenType: PAYMENT_TYPE,
       poolId: ADDR_POOL,
       vaultId: ADDR_VAULT,
       useCreditAmount: USE_CREDIT,
@@ -396,7 +396,7 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     buildSwapAndSettlePtb(tx, {
       variant: 'new_user',
       settlementSwapDirection: 'baseForQuote',
-      paymentTokenType: PAYMENT_TYPE,
+      settlementTokenType: PAYMENT_TYPE,
       poolId: ADDR_POOL,
       packageId: ADDR_PKG,
       configId: ADDR_CONFIG,

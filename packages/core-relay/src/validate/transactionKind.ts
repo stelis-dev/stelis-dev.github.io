@@ -15,7 +15,7 @@ import { validatePtbStructure, validateUserCommands } from './static.js';
 export function validateGenericUserTransactionKind(
   tx: Transaction,
   env: RelayerEnv,
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): ValidationResult {
   const data = tx.getData();
   const commandResult = validateUserCommands(convertSdkCommands(data.commands as unknown[]), env);
@@ -28,7 +28,7 @@ export function validateGenericUserTransactionKind(
     );
   }
 
-  const withdrawalResult = extractPrefixWithdrawals(tx, paymentTokenType);
+  const withdrawalResult = extractPrefixWithdrawals(tx, settlementTokenType);
   if (withdrawalResult.unaccountable) {
     return fail(
       'UNACCOUNTABLE_WITHDRAWAL',

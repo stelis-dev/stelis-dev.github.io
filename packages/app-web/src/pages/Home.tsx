@@ -88,7 +88,7 @@ export function HomePage() {
     Note over U: Build PTB
 
     U->>R: POST /relay/prepare
-    Note right of U: txKindBytes, senderAddress, paymentTokenType
+    Note right of U: txKindBytes, senderAddress, settlementTokenType
     Note over R: L1/L2 validate, build + dry-run
     R-->>U: txBytes, receiptId, nonce, cost
 
@@ -126,7 +126,7 @@ const result = await sdk.executeSponsored(tx, {
   },
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
+  settlementToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
 });
 
 console.log(result.digest);`}

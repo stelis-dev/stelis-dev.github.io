@@ -65,7 +65,7 @@ describe('StelisClient', () => {
       await c.prepare({
         txKindBytes: 'k',
         senderAddress: '0x' + 'a'.repeat(64),
-        paymentTokenType: '0x2::sui::SUI',
+        settlementTokenType: '0x2::sui::SUI',
       });
       await c.sponsor({
         txBytes: 'b64',
@@ -131,7 +131,7 @@ describe('StelisClient', () => {
       const result = await client.prepare({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
       });
 
       expect(result.txBytes).toBe('base64txbytes');
@@ -143,7 +143,7 @@ describe('StelisClient', () => {
       expect(JSON.parse(init.body)).toEqual({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
       });
     });
 
@@ -168,7 +168,7 @@ describe('StelisClient', () => {
       const result = await client.prepare({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
-        paymentTokenType: 'DEEP',
+        settlementTokenType: 'DEEP',
         orderId: 'test-123',
       });
 

@@ -40,7 +40,7 @@ export async function withPrepareAuthorization(
     packageId: overrides.packageId ?? '0xPACKAGE',
     senderAddress: input.senderAddress,
     txKindBytesHash,
-    paymentTokenType: input.paymentTokenType,
+    settlementTokenType: input.settlementTokenType,
     slippageBps: input.slippageBps,
     gasMarginBps: input.gasMarginBps,
     orderId: input.orderId,

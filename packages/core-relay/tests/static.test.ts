@@ -709,12 +709,12 @@ describe('Layer 2: settlement swap path validation — allowedSettlementSwapPath
   });
 
   it('fail — token type mismatch: L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH', () => {
-    const badPaymentTokenSettlementSwapPath = {
+    const badSettlementTokenSettlementSwapPath = {
       ...SETTLEMENT_SWAP_PATH_1HOP,
       tokenType: '0xfake::fake::FAKE',
     };
     const result = validateSettleArgs(
-      { ...validArgs, extractedSettlementSwapPath: badPaymentTokenSettlementSwapPath },
+      { ...validArgs, extractedSettlementSwapPath: badSettlementTokenSettlementSwapPath },
       CONFIG,
       TENANT_ENV,
     );

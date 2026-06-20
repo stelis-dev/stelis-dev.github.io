@@ -13,9 +13,9 @@ import type { QuantityInQuote } from '../deepbook.js';
  * prepare pipeline consumes this narrower descriptor internally.
  */
 export interface StaticSettlementSwapPathDescriptor {
-  readonly paymentTokenType: string;
-  readonly paymentTokenSymbol: string;
-  readonly paymentTokenDecimals: number;
+  readonly settlementTokenType: string;
+  readonly settlementTokenSymbol: string;
+  readonly settlementTokenDecimals: number;
   readonly effectiveFeeRateBps: number;
   readonly settlementSwapDirection: SettlementSwapDirection;
   readonly hops: readonly DeepBookPoolHop[];
@@ -86,9 +86,9 @@ export type StaticSettlementSwapPathDescriptorMap = Map<string, StaticSettlement
  */
 export type StaticSettlementSwapPathDescriptorSource = Pick<
   SingleHopSettlementSwapPath,
-  | 'paymentTokenType'
-  | 'paymentTokenSymbol'
-  | 'paymentTokenDecimals'
+  | 'settlementTokenType'
+  | 'settlementTokenSymbol'
+  | 'settlementTokenDecimals'
   | 'effectiveFeeRateBps'
   | 'settlementSwapDirection'
   | 'hops'

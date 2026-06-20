@@ -4,7 +4,7 @@
  * Covers:
  *   - parseSettlementSwapPathRegistryJson: network-keyed JSON -> registry entries
  *   - validateSettlementSwapPathRegistry: duplicate-token rejection, empty-registry rejection
- *   - determinePaymentToken: settle.move baseForQuote direction enforcement
+ *   - determineSettlementToken: settle.move baseForQuote direction enforcement
  */
 import { describe, it, expect, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   parseSettlementSwapPathRegistryJson,
   validateSettlementSwapPathRegistry,
-  determinePaymentToken,
+  determineSettlementToken,
   loadSettlementSwapPathRegistry,
 } from '../src/settlementSwapPathRegistry.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
@@ -138,13 +138,13 @@ describe('parseSettlementSwapPathRegistryJson', () => {
 
 /** Test helper to build a minimal SingleHopSettlementSwapPath. */
 function makeSettlementSwapPath(
-  paymentTokenType: string,
+  settlementTokenType: string,
   symbol: string,
 ): SingleHopSettlementSwapPath {
   return {
-    paymentTokenType,
-    paymentTokenSymbol: symbol,
-    paymentTokenDecimals: 9,
+    settlementTokenType,
+    settlementTokenSymbol: symbol,
+    settlementTokenDecimals: 9,
     lotSize: 1000,
     minSize: 10000,
     effectiveFeeRateBps: 0,
@@ -152,7 +152,7 @@ function makeSettlementSwapPath(
     hops: [
       {
         poolId: '0xfake',
-        baseType: paymentTokenType,
+        baseType: settlementTokenType,
         quoteType: SUI_TYPE,
         swapDirection: 'baseForQuote',
         feeBps: 0,
@@ -167,7 +167,7 @@ describe('validateSettlementSwapPathRegistry', () => {
     expect(() => validateSettlementSwapPathRegistry(settlementSwapPaths)).not.toThrow();
   });
 
-  it('accepts multiple paths with distinct payment tokens', () => {
+  it('accepts multiple paths with distinct settlement tokens', () => {
     const settlementSwapPaths = [
       makeSettlementSwapPath(DEEP_TYPE, 'DEEP'),
       makeSettlementSwapPath(USDC_TYPE, 'USDC'),
@@ -179,13 +179,13 @@ describe('validateSettlementSwapPathRegistry', () => {
     expect(() => validateSettlementSwapPathRegistry([])).toThrow('Resolved registry is empty');
   });
 
-  it('rejects duplicate paymentTokenType', () => {
+  it('rejects duplicate settlementTokenType', () => {
     const settlementSwapPaths = [
       makeSettlementSwapPath(DEEP_TYPE, 'DEEP'),
       makeSettlementSwapPath(DEEP_TYPE, 'DEEP'),
     ];
     expect(() => validateSettlementSwapPathRegistry(settlementSwapPaths)).toThrow(
-      'Duplicate paymentTokenType',
+      'Duplicate settlementTokenType',
     );
   });
 
@@ -209,24 +209,24 @@ describe('validateSettlementSwapPathRegistry', () => {
 });
 
 // ─────────────────────────────────────────────
-// determinePaymentToken (settlement swap direction enforcement)
+// determineSettlementToken (settlement swap direction enforcement)
 // ─────────────────────────────────────────────
 
-describe('determinePaymentToken', () => {
+describe('determineSettlementToken', () => {
   it('accepts Pool<Token, SUI> → baseForQuote', () => {
-    const result = determinePaymentToken({ baseType: DEEP_TYPE, quoteType: SUI_TYPE });
-    expect(result.paymentTokenType).toBe(DEEP_TYPE);
+    const result = determineSettlementToken({ baseType: DEEP_TYPE, quoteType: SUI_TYPE });
+    expect(result.settlementTokenType).toBe(DEEP_TYPE);
     expect(result.swapDirection).toBe('baseForQuote');
   });
 
   it('accepts Pool<SUI, Token> → quoteForBase', () => {
-    const result = determinePaymentToken({ baseType: SUI_TYPE, quoteType: DEEP_TYPE });
-    expect(result.paymentTokenType).toBe(DEEP_TYPE);
+    const result = determineSettlementToken({ baseType: SUI_TYPE, quoteType: DEEP_TYPE });
+    expect(result.settlementTokenType).toBe(DEEP_TYPE);
     expect(result.swapDirection).toBe('quoteForBase');
   });
 
   it('rejects Pool<Token1, Token2> (no SUI on either side)', () => {
-    expect(() => determinePaymentToken({ baseType: DEEP_TYPE, quoteType: USDC_TYPE })).toThrow(
+    expect(() => determineSettlementToken({ baseType: DEEP_TYPE, quoteType: USDC_TYPE })).toThrow(
       'Neither base nor quote is SUI',
     );
   });

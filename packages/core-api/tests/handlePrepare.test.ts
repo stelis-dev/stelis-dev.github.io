@@ -4,7 +4,7 @@
  * Tests validate:
  *   - P0: txKindBytes size check
  *   - P1: pre-settle validation (settle command rejection)
- *   - Unsupported payment token rejection
+ *   - Unsupported settlement token rejection
  *   - Slot checkout failure → NO_SPONSOR_SLOT
  *   - Slot release on post-checkout failure (await checkin)
  *   - No slot release for pre-checkout errors (P0, orderId, queryUserCredit)
@@ -121,9 +121,9 @@ function makeExtraCfg(): PrepareHandlerConfig {
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1,
       minSize: 1,
       effectiveFeeRateBps: 0,
@@ -159,7 +159,7 @@ async function makeParams(overrides?: Partial<PrepareParams>): Promise<PreparePa
   return withPrepareAuthorization({
     txKindBytes: '',
     senderAddress: TEST_SENDER_ADDR,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '127.0.0.1',
     ...overrides,
   });
@@ -254,17 +254,17 @@ describe('handlePrepare', () => {
     expect(ctx.prepareStore.store).not.toHaveBeenCalled();
   });
 
-  // ── Unsupported payment token ────────────────────────────────────────────────
+  // ── Unsupported settlement token ────────────────────────────────────────────────
 
-  it('rejects unsupported payment token', async () => {
+  it('rejects unsupported settlement token', async () => {
     const { ctx } = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({
       txKindBytes,
-      paymentTokenType: '0xUNSUPPORTED::token::TOKEN',
+      settlementTokenType: '0xUNSUPPORTED::token::TOKEN',
     });
 
-    await expectPrepareError(ctx, params, makeExtraCfg(), 'UNSUPPORTED_PAYMENT_TOKEN');
+    await expectPrepareError(ctx, params, makeExtraCfg(), 'UNSUPPORTED_SETTLEMENT_TOKEN');
   });
 
   // ── Slot checkout failure ────────────────────────────────────────────────

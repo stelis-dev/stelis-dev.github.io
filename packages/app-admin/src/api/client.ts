@@ -117,7 +117,7 @@ export interface PoolAdminStatus {
   feeConfig: FeeConfig | null;
   /**
    * Subset of `SingleHopSettlementSwapPathResponse` consumed by admin pages. Fields
-   * `lotSize`, `minSize`, and `paymentTokenDecimals` are omitted because
+   * `lotSize`, `minSize`, and `settlementTokenDecimals` are omitted because
    * admin never reads them. The shared transport type lives in
    * `@stelis/contracts` (type-only import above); drift is prevented at
    * type-check time by deriving this subset from it directly.
@@ -125,8 +125,8 @@ export interface PoolAdminStatus {
   supportedSettlementSwapPaths: Array<
     Pick<
       SingleHopSettlementSwapPathResponse,
-      | 'paymentTokenSymbol'
-      | 'paymentTokenType'
+      | 'settlementTokenSymbol'
+      | 'settlementTokenType'
       | 'settlementSwapDirection'
       | 'hops'
       | 'effectiveFeeRateBps'

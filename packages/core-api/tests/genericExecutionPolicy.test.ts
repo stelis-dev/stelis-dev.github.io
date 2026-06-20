@@ -37,7 +37,7 @@ const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const SENDER = `0x${'11'.repeat(32)}`;
 const OTHER_SENDER = `0x${'33'.repeat(32)}`;
 const SPONSOR = `0x${'22'.repeat(32)}`;
-const PAYMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
 const GAS_USED = {
   computationCost: '1000',
@@ -163,7 +163,7 @@ function makePrepareOptions(
       params: {
         txKindBytes: 'mock-tx-kind-bytes',
         senderAddress: SENDER,
-        paymentTokenType: PAYMENT_TOKEN_TYPE,
+        settlementTokenType: SETTLEMENT_TOKEN_TYPE,
         clientIp: '127.0.0.1',
         txKindBytesHash: 'a'.repeat(64),
         prepareAuthorizationTimestampMs: 1,
@@ -211,7 +211,7 @@ function makeUnaccountableWithdrawalTx(): Transaction {
           $kind: 'FundsWithdrawal',
           FundsWithdrawal: {
             reservation: { $kind: 'UnknownShape', UnknownShape: '5000000' },
-            typeArg: { $kind: 'Balance', Balance: PAYMENT_TOKEN_TYPE },
+            typeArg: { $kind: 'Balance', Balance: SETTLEMENT_TOKEN_TYPE },
             withdrawFrom: { $kind: 'Sender' },
           },
         },

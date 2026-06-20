@@ -59,7 +59,7 @@ const endpoints: EndpointOverview[] = [
     detail:
       'Prepare performs dry-run pricing, issues a one-time receiptId and monotonic nonce, and returns the txBytes that the user must sign.',
     highlights: [
-      'Required body: txKindBytes, senderAddress, paymentTokenType',
+      'Required body: txKindBytes, senderAddress, settlementTokenType',
       'Optional body: slippageBps, gasMarginBps, orderId',
       'Dry-run rejections return 422 domain codes such as DRY_RUN_FAILED and DRY_RUN_NO_GAS',
     ],
@@ -126,7 +126,7 @@ const tx = new Transaction();
     code: `const result = await sdk.executeSponsored(tx, {
   client,
   addr: userAddress,
-  paymentToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
+  settlementToken: { type: DEEPBOOK_IDS[sdk.network]!.deepType },
   prepareAuthorizationSigner: async (messageBytes) => {
     const { signature } = await wallet.signPersonalMessage({ message: messageBytes });
     return signature;

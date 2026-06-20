@@ -140,9 +140,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
           400,
         );
       }
-      if (typeof body.paymentTokenType !== 'string' || body.paymentTokenType === '') {
+      if (typeof body.settlementTokenType !== 'string' || body.settlementTokenType === '') {
         return c.json(
-          { error: 'Missing required field: paymentTokenType', code: 'BAD_REQUEST' },
+          { error: 'Missing required field: settlementTokenType', code: 'BAD_REQUEST' },
           400,
         );
       }
@@ -206,7 +206,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
         {
           txKindBytes: body.txKindBytes,
           senderAddress: canonicalSender,
-          paymentTokenType: body.paymentTokenType,
+          settlementTokenType: body.settlementTokenType,
           slippageBps,
           gasMarginBps,
           orderId: typeof body.orderId === 'string' ? body.orderId : undefined,

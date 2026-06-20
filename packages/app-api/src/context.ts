@@ -313,7 +313,7 @@ async function initContext(): Promise<AppApiContext> {
     // eslint-disable-next-line no-console
     console.log(
       `[app-api] Settlement swap path registry loaded: ${settlementSwapPaths.length} path(s) — ` +
-        settlementSwapPaths.map((p) => p.paymentTokenSymbol).join(', '),
+        settlementSwapPaths.map((p) => p.settlementTokenSymbol).join(', '),
     );
 
     // ── 6. PrepareConfig ────────────────────────────────────────────

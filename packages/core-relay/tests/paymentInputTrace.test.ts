@@ -102,7 +102,7 @@ describe('paymentInputIntegrity extraction', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'new_user',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         paymentCoinId: paymentCoin,
         swapAmount: SWAP_AMOUNT,
@@ -133,7 +133,7 @@ describe('paymentInputIntegrity extraction', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'with_vault',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         vaultId: VAULT,
         useCreditAmount: 0n,
@@ -166,7 +166,7 @@ describe('paymentInputIntegrity extraction', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'with_vault',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         vaultId: VAULT,
         useCreditAmount: 0n,
@@ -202,7 +202,7 @@ describe('paymentInputIntegrity extraction', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'with_vault',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         vaultId: VAULT,
         useCreditAmount: 0n,

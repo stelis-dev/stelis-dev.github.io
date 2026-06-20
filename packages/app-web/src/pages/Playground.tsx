@@ -36,7 +36,7 @@ const endpoints: EndpointDef[] = [
     fields: [
       { name: 'txKindBytes', type: 'body', placeholder: 'base64...' },
       { name: 'senderAddress', type: 'body', placeholder: '0x...' },
-      { name: 'paymentTokenType', type: 'body', placeholder: '0x...::deep::DEEP (required)' },
+      { name: 'settlementTokenType', type: 'body', placeholder: '0x...::deep::DEEP (required)' },
       { name: 'slippageBps', type: 'body', placeholder: '200', valueType: 'number' },
       { name: 'gasMarginBps', type: 'body', placeholder: '1000', valueType: 'number' },
       { name: 'orderId', type: 'body', placeholder: 'order-123 (optional)' },

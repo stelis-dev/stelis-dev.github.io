@@ -111,9 +111,9 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
@@ -184,7 +184,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
   // ── 1: Calls client.prepare with correct params ──────────────────────
 
-  it('calls client.prepare() with txKindBytes, senderAddress, paymentTokenType', async () => {
+  it('calls client.prepare() with txKindBytes, senderAddress, settlementTokenType', async () => {
     const sdk = await createSDK();
     const tx = new Transaction();
     const client = makeMockSuiClient();
@@ -192,14 +192,14 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(tx, {
       client,
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
     expect(mockPrepare).toHaveBeenCalledTimes(1);
     const prepareArgs = mockPrepare.mock.calls[0][0] as Record<string, unknown>;
     expect(prepareArgs['senderAddress']).toBe(ADDR);
-    expect(prepareArgs['paymentTokenType']).toBe(DEEP_TYPE);
+    expect(prepareArgs['settlementTokenType']).toBe(DEEP_TYPE);
     expect(typeof prepareArgs['txKindBytes']).toBe('string');
     // txKindBytes should be a base64-encoded string
     expect((prepareArgs['txKindBytes'] as string).length).toBeGreaterThan(0);
@@ -231,7 +231,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: DEEP_TYPE },
+        settlementToken: { type: DEEP_TYPE },
         prepareAuthorizationSigner,
       }),
     ).rejects.toMatchObject({
@@ -251,7 +251,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -265,7 +265,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -279,7 +279,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -295,7 +295,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       onGasEstimate,
     });
@@ -312,7 +312,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -329,7 +329,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       slippageBps: 300,
       gasMarginBps: 500,
@@ -350,7 +350,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -366,23 +366,23 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
     expect(result.vaultId).toBeNull();
   });
 
-  // ── 11: Throws on unknown paymentToken type ─────────────────────────────
+  // ── 11: Throws on unknown settlementToken type ─────────────────────────────
 
-  it('throws when paymentToken type is not in supported settlement swap paths', async () => {
+  it('throws when settlementToken type is not in supported settlement swap paths', async () => {
     const sdk = await createSDK();
 
     await expect(
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: '0xunknown::token::TOKEN' },
+        settlementToken: { type: '0xunknown::token::TOKEN' },
       }),
     ).rejects.toThrow();
   });
@@ -395,7 +395,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       orderId: 'sponsored-order-42',
     });
@@ -417,7 +417,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
       orderId: 'echoed-order-42',
     });
@@ -453,7 +453,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -471,7 +471,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -488,7 +488,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient({ listCoins }),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -511,7 +511,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -543,7 +543,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
       addr: ADDR,
-      paymentToken: { type: DEEP_TYPE },
+      settlementToken: { type: DEEP_TYPE },
       prepareAuthorizationSigner,
     });
 
@@ -566,7 +566,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
       sdk.prepareSponsored(new Transaction(), {
         client: makeMockSuiClient(),
         addr: ADDR,
-        paymentToken: { type: DEEP_TYPE },
+        settlementToken: { type: DEEP_TYPE },
         prepareAuthorizationSigner,
       }),
     ).rejects.toThrow(CreditQueryInconsistentStateError);

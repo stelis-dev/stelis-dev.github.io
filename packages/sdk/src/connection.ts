@@ -124,7 +124,7 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
       minSize: BigInt(p.minSize),
     };
   }) as SingleHopSettlementSwapPath[];
-  validateUniquePaymentTokenTypes(parsedSettlementSwapPaths);
+  validateUniqueSettlementTokenTypes(parsedSettlementSwapPaths);
 
   return {
     network,
@@ -218,14 +218,14 @@ function validateSettlementSwapPathIntegrity(p: Record<string, unknown>, idx: nu
   }
 }
 
-function validateUniquePaymentTokenTypes(paths: readonly SingleHopSettlementSwapPath[]): void {
+function validateUniqueSettlementTokenTypes(paths: readonly SingleHopSettlementSwapPath[]): void {
   const seen = new Set<string>();
   for (const path of paths) {
-    if (seen.has(path.paymentTokenType)) {
+    if (seen.has(path.settlementTokenType)) {
       throw new Error(
-        `Invalid /relay/config response: duplicate paymentTokenType in supportedSettlementSwapPaths: ${path.paymentTokenType}`,
+        `Invalid /relay/config response: duplicate settlementTokenType in supportedSettlementSwapPaths: ${path.settlementTokenType}`,
       );
     }
-    seen.add(path.paymentTokenType);
+    seen.add(path.settlementTokenType);
   }
 }

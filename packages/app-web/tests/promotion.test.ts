@@ -180,7 +180,7 @@ describe('Promotion page inputs', () => {
     expect(src).toContain('setPromotionId');
     // Must pass promotionId to StudioExecutionPanel
     expect(src).toContain('promotionId={promotionId}');
-    // Must NOT have settlement swap path selector (promotion path does not use paymentTokenType)
+    // Must NOT have settlement swap path selector (promotion path does not use settlementTokenType)
     expect(src).not.toContain('settlementSwapPathIndex');
   });
 });

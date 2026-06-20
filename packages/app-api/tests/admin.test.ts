@@ -139,9 +139,9 @@ function createMockCtx(): AppApiContext {
       quotedHostFeeMist: 500n,
       supportedSettlementSwapPaths: [
         {
-          paymentTokenType: '0xdeeb::deep::DEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xdeeb::deep::DEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,
@@ -713,9 +713,9 @@ describe('admin routes', () => {
       const DEEP_TYPE = '0xdeeb::deep::DEEP';
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: DEEP_TYPE,
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: DEEP_TYPE,
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,
@@ -736,7 +736,7 @@ describe('admin routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.count).toBe(1);
-      expect(body.settlementSwapPaths[0].paymentTokenSymbol).toBe('DEEP');
+      expect(body.settlementSwapPaths[0].settlementTokenSymbol).toBe('DEEP');
       expect(body.settlementSwapPaths[0].hopCount).toBe(1);
       expect(body.settlementSwapPaths[0].hops[0].swapDirection).toBe('baseForQuote');
     });
@@ -744,9 +744,9 @@ describe('admin routes', () => {
     it('returns 500 when pool metadata exceeds safe integer range (fail-closed)', async () => {
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xTOKEN',
-          paymentTokenSymbol: 'TOKEN',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xTOKEN',
+          settlementTokenSymbol: 'TOKEN',
+          settlementTokenDecimals: 6,
           lotSize: 9007199254740993n,
           minSize: 1n,
           effectiveFeeRateBps: 0,
@@ -1747,7 +1747,7 @@ describe('admin routes', () => {
     it('returns 500 when pool metadata exceeds safe integer range (fail-closed)', async () => {
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xTOKEN',
+          settlementTokenType: '0xTOKEN',
           lotSize: 9007199254740993n,
           minSize: 1n,
         },
@@ -1757,9 +1757,9 @@ describe('admin routes', () => {
       // Restore
       (mockCtx.prepareConfig as unknown as Record<string, unknown>).supportedSettlementSwapPaths = [
         {
-          paymentTokenType: '0xdeeb::deep::DEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xdeeb::deep::DEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1000000n,
           minSize: 10000000n,
           effectiveFeeRateBps: 0,

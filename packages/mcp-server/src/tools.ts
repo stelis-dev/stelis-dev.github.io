@@ -65,11 +65,11 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
         ...RELAY_FIELDS,
         txKindBytes: BASE64_BYTES.describe('Serialized TransactionKind bytes in base64.'),
         senderAddress: SUI_ADDRESS,
-        paymentTokenType: z
+        settlementTokenType: z
           .string()
           .min(1)
           .describe(
-            'Payment token coin type from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for that token.',
+            'Settlement token coin type from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for that token.',
           ),
         slippageBps: z.number().int().min(0).max(500).optional(),
         gasMarginBps: z.number().int().min(0).max(10000).optional(),

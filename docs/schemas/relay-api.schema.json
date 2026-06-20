@@ -50,9 +50,9 @@
       "additionalProperties": false,
       "required": [
         "hops",
-        "paymentTokenType",
-        "paymentTokenSymbol",
-        "paymentTokenDecimals",
+        "settlementTokenType",
+        "settlementTokenSymbol",
+        "settlementTokenDecimals",
         "lotSize",
         "minSize",
         "effectiveFeeRateBps",
@@ -67,14 +67,14 @@
             "$ref": "#/$defs/deepBookPoolHop"
           }
         },
-        "paymentTokenType": {
+        "settlementTokenType": {
           "type": "string",
-          "description": "Settlement token coin type. Each paymentTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
+          "description": "Settlement token coin type. Each settlementTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
         },
-        "paymentTokenSymbol": {
+        "settlementTokenSymbol": {
           "type": "string"
         },
-        "paymentTokenDecimals": {
+        "settlementTokenDecimals": {
           "type": "integer",
           "minimum": 0
         },
@@ -126,7 +126,7 @@
         },
         "supportedSettlementSwapPaths": {
           "type": "array",
-          "description": "Host-supported settlement tokens and their active one-hop settlement swap paths. Each paymentTokenType appears once.",
+          "description": "Host-supported settlement tokens and their active one-hop settlement swap paths. Each settlementTokenType appears once.",
           "items": {
             "$ref": "#/$defs/singleHopSettlementSwapPath"
           }
@@ -149,7 +149,7 @@
       "required": [
         "txKindBytes",
         "senderAddress",
-        "paymentTokenType",
+        "settlementTokenType",
         "txKindBytesHash",
         "prepareAuthorizationTimestampMs",
         "prepareAuthorizationRequestNonce",
@@ -163,7 +163,7 @@
         "senderAddress": {
           "$ref": "#/$defs/hexString"
         },
-        "paymentTokenType": {
+        "settlementTokenType": {
           "type": "string",
           "description": "Settlement token coin type string from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for this token."
         },
@@ -383,7 +383,7 @@
         "P1_UNAUTHORIZED_STELIS_CALL",
         "P1_FORBIDDEN_COMMAND",
         "P1_SPONSOR_WITHDRAWAL_FORBIDDEN",
-        "UNSUPPORTED_PAYMENT_TOKEN",
+        "UNSUPPORTED_SETTLEMENT_TOKEN",
         "INVALID_ORDER_ID",
         "INSUFFICIENT_BALANCE",
         "CLAIM_WOULD_EXCEED_MAX",

@@ -12,7 +12,7 @@ This document summarizes the current security boundaries that are visible in the
 | Final Host-built transaction | The Host-built transaction must contain exactly one allowed settlement call. |
 | Payment-token funding | The Host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
 | Prepare authorization | Generic prepare requires a sender personal-message signature over the transaction-kind hash and request fields. |
-| Settlement swap path | Relay validation accepts only configured settlement swap paths. Each supported `paymentTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
+| Settlement swap path | Relay validation accepts only configured settlement swap paths. Each supported `settlementTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
 | Prepare records | Prepare records are single-use and time-limited. |
 | Promotion calls | Promotion-sponsored Move calls must match `STUDIO_ALLOWED_TARGETS`. |
 | Admin routes | `/api/*` routes require an admin session. |

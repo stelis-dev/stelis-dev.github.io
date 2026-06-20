@@ -341,7 +341,7 @@ describe('classifyUserTxCoins — FundsWithdrawal accounting gap', () => {
     tx.withdrawal({ amount: 7_000_000n, type: DUMMY_COIN_TYPE });
 
     // Relayer suffix: withdraw 8_000_000 from AB for gas swap
-    // (mirrors build.ts L767: tx.withdrawal({ amount: swapAmountSmallest, type: pool.paymentTokenType }))
+    // (mirrors build.ts L767: tx.withdrawal({ amount: swapAmountSmallest, type: pool.settlementTokenType }))
     tx.withdrawal({ amount: 8_000_000n, type: DUMMY_COIN_TYPE });
 
     // Verify PTB actually contains 2 FundsWithdrawal inputs

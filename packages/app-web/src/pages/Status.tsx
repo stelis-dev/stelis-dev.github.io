@@ -12,8 +12,8 @@ const STATUS_PROBE_INTERVAL_MS = 30_000;
 type ServiceStatus = 'operational' | 'degraded' | 'outage' | 'loading';
 
 interface SettlementSwapPathInfo {
-  paymentTokenSymbol: string;
-  paymentTokenType: string;
+  settlementTokenSymbol: string;
+  settlementTokenType: string;
   effectiveFeeRateBps: number;
 }
 
@@ -151,7 +151,7 @@ function SettlementSwapPathRow({
   return (
     <div className="token-row">
       <div className="token-info">
-        <span className="token-symbol">{settlementSwapPath.paymentTokenSymbol}</span>
+        <span className="token-symbol">{settlementSwapPath.settlementTokenSymbol}</span>
         <span className="token-network">
           {network} · {feeLabel}
         </span>

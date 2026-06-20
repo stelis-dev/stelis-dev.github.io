@@ -238,26 +238,26 @@ export class StelisSDK {
   // ─────────────────────────────────────────
 
   /**
-   * Find the settlement swap path for a given payment token type.
+   * Find the settlement swap path for a given settlement token type.
    * @throws if no settlement swap path is found for the given token type.
    */
-  getSettlementSwapPathForPaymentToken(paymentTokenType: string): SingleHopSettlementSwapPath {
+  getSettlementSwapPathForSettlementToken(settlementTokenType: string): SingleHopSettlementSwapPath {
     const settlementSwapPath = this._relayerConfig.supportedSettlementSwapPaths.find(
-      (p) => p.paymentTokenType === paymentTokenType,
+      (p) => p.settlementTokenType === settlementTokenType,
     );
     if (!settlementSwapPath) {
       const supported = this._relayerConfig.supportedSettlementSwapPaths
-        .map((p) => p.paymentTokenSymbol)
+        .map((p) => p.settlementTokenSymbol)
         .join(', ');
       throw new Error(
-        `No settlement swap path found for payment token ${paymentTokenType}. Supported: ${supported}`,
+        `No settlement swap path found for settlement token ${settlementTokenType}. Supported: ${supported}`,
       );
     }
     return settlementSwapPath;
   }
 
   /**
-   * Query exchange rate for a payment token.
+   * Query exchange rate for a settlement token.
    *
    * DeepBook mid_price is scaled by FLOAT_SCALING (1e9) and represents
    * quote_smallest_units / base_smallest_units. To get human-readable price:
@@ -268,7 +268,7 @@ export class StelisSDK {
    */
   async getExchangeRate(
     client: SuiGrpcClient,
-    paymentTokenType: string,
+    settlementTokenType: string,
   ): Promise<{
     rate: number | null;
     rateRaw: bigint | null;
@@ -276,7 +276,7 @@ export class StelisSDK {
     rateDisplay: string;
     hopMidPrices: bigint[];
   }> {
-    const settlementSwapPath = this.getSettlementSwapPathForPaymentToken(paymentTokenType);
+    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(settlementTokenType);
 
     // Query all hop mid-prices in a single batch
     const hopPrices = await batchGetHopMidPrices(
@@ -303,10 +303,10 @@ export class StelisSDK {
     // We chain using a reference input of 1e18 (high precision bigint).
     const composedMidPriceRaw = composePaymentToSuiMidPrice(settlementSwapPath, hopPrices);
     const rate = bigintToSafeNumberOrNull(composedMidPriceRaw);
-    const numerator = composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.paymentTokenDecimals);
+    const numerator = composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
     const denominator = FLOAT_SCALING * 10n ** BigInt(SUI_DECIMALS);
     const suiPerTokenHuman = formatRatioDecimal(numerator, denominator, 4);
-    const rateDisplay = `1 ${settlementSwapPath.paymentTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
+    const rateDisplay = `1 ${settlementSwapPath.settlementTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
     return {
       rate,
       rateRaw: composedMidPriceRaw,
@@ -326,15 +326,15 @@ export class StelisSDK {
    * the server-side calculation, plus on-chain fees from `/relay/config`.
    *
    * Profile logic (UX classification — not authoritative eligibility check):
-   * - No vault → `new_user` → display in payment token (e.g. DEEP)
+   * - No vault → `new_user` → display in settlement token (e.g. DEEP)
    * - Vault + credit ≥ totalCost → `credit_general` → display in SUI
-   * - Vault + credit < totalCost → `with_vault` → display in payment token
+   * - Vault + credit < totalCost → `with_vault` → display in settlement token
    *
    * @example
    * ```ts
    * const est = await sdk.estimateGas(suiClient, {
    *   addr: userAddress,
-   *   paymentToken: { type: DEEPBOOK_IDS['testnet']!.deepType },
+   *   settlementToken: { type: DEEPBOOK_IDS['testnet']!.deepType },
    * });
    * console.log(`~${est.amountHuman} ${est.displayUnit} (~${est.suiAmountHuman} SUI)`);
    * ```
@@ -343,7 +343,7 @@ export class StelisSDK {
     client: SuiGrpcClient,
     opts: {
       addr: string;
-      paymentToken: { type: string };
+      settlementToken: { type: string };
       intentGasBudget?: number;
       gasMarginBps?: number;
     },
@@ -370,11 +370,11 @@ export class StelisSDK {
     const totalCostMist = costs.executionCostClaim + quotedHostFee + protocolFee;
     const suiAmountHuman = formatSmallestUnitDecimal(totalCostMist, SUI_DECIMALS, 4);
 
-    if (!opts.paymentToken) {
-      throw new Error('[StelisSDK] paymentToken is required.');
+    if (!opts.settlementToken) {
+      throw new Error('[StelisSDK] settlementToken is required.');
     }
 
-    const settlementSwapPath = this.getSettlementSwapPathForPaymentToken(opts.paymentToken.type);
+    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
 
     // 3. Vault/credit check for profile determination
     const credit = await queryUserCredit(client, this._vaultRegistryId, opts.addr);
@@ -386,8 +386,8 @@ export class StelisSDK {
         ? ('credit_general' as const)
         : ('with_vault' as const);
 
-    // 4. Exchange rate for payment token display
-    const rateResult = await this.getExchangeRate(client, opts.paymentToken.type);
+    // 4. Exchange rate for settlement token display
+    const rateResult = await this.getExchangeRate(client, opts.settlementToken.type);
     const hasLiquidity = rateResult.hasLiquidity && !!rateResult.rate;
 
     // canSkipLiquidity: credit_general only.
@@ -405,10 +405,10 @@ export class StelisSDK {
       };
     }
 
-    // Payment token display (DEEP etc.)
+    // Settlement token display (DEEP etc.)
     if (!hasLiquidity || !rateResult.rate) {
       return {
-        displayUnit: settlementSwapPath.paymentTokenSymbol,
+        displayUnit: settlementSwapPath.settlementTokenSymbol,
         amountHuman: '0',
         suiAmountHuman,
         profile,
@@ -420,7 +420,7 @@ export class StelisSDK {
     const midPrice = composePaymentToSuiMidPrice(settlementSwapPath, rateResult.hopMidPrices);
     if (midPrice <= 0n) {
       return {
-        displayUnit: settlementSwapPath.paymentTokenSymbol,
+        displayUnit: settlementSwapPath.settlementTokenSymbol,
         amountHuman: '0',
         suiAmountHuman,
         profile,
@@ -430,22 +430,22 @@ export class StelisSDK {
     }
     const marginNumerator = BigInt(10_000 + gasMarginBps);
 
-    // composedMidPrice is paymentToken→SUI; reverse estimate in smallest units.
+    // composedMidPrice is settlementToken→SUI; reverse estimate in smallest units.
     // DeepBook executable min/lot policy is enforced server-side by /prepare;
     // this SDK path remains a non-authoritative UX preview.
     const amountSmallest =
       (totalCostMist * FLOAT_SCALING * marginNumerator + (midPrice * 10_000n - 1n)) /
       (midPrice * 10_000n);
 
-    const scale = 10n ** BigInt(settlementSwapPath.paymentTokenDecimals);
+    const scale = 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
     const whole = amountSmallest / scale;
     const frac = (amountSmallest % scale)
       .toString()
-      .padStart(settlementSwapPath.paymentTokenDecimals, '0');
+      .padStart(settlementSwapPath.settlementTokenDecimals, '0');
     const amountHuman = `${whole.toString()}.${frac}`;
 
     return {
-      displayUnit: settlementSwapPath.paymentTokenSymbol,
+      displayUnit: settlementSwapPath.settlementTokenSymbol,
       amountHuman,
       suiAmountHuman,
       profile,
@@ -479,7 +479,7 @@ export class StelisSDK {
     tx: Transaction,
     opts: PrepareSponsoredOptions,
   ): Promise<PrepareSponsoredResult> {
-    this.getSettlementSwapPathForPaymentToken(opts.paymentToken.type);
+    this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
 
     // Build TransactionKind bytes from user commands
     tx.setSender(opts.addr);
@@ -495,7 +495,7 @@ export class StelisSDK {
         vaultRegistryId: this._vaultRegistryId,
         packageId: this._packageId,
       },
-      opts.paymentToken.type,
+      opts.settlementToken.type,
     );
     if (!userCommandValidation.ok) {
       throw new StelisApiException(userCommandValidation.code, userCommandValidation.message, 422);
@@ -508,7 +508,7 @@ export class StelisSDK {
       packageId: this._packageId,
       senderAddress: opts.addr,
       txKindBytesHash,
-      paymentTokenType: opts.paymentToken.type,
+      settlementTokenType: opts.settlementToken.type,
       slippageBps: opts.slippageBps,
       gasMarginBps: opts.gasMarginBps,
       orderId: opts.orderId,
@@ -528,7 +528,7 @@ export class StelisSDK {
       const preVaultCredit = parseDecimalBigInt(preCredit.credit, 'vault credit');
 
       if (!preHasVault || preVaultCredit === 0n) {
-        // Swap path required → check payment token existence
+        // Swap path required → check settlement token existence
         // If host supports address balance payment, skip this check —
         // the server will resolve coin objects vs address balance at /prepare time.
         // Address balance payment is always enabled — server resolves
@@ -551,7 +551,7 @@ export class StelisSDK {
     const prepareRes = await this._client.prepare({
       txKindBytes,
       senderAddress: opts.addr,
-      paymentTokenType: opts.paymentToken.type,
+      settlementTokenType: opts.settlementToken.type,
       slippageBps: opts.slippageBps,
       gasMarginBps: opts.gasMarginBps,
       orderId: opts.orderId,
@@ -659,7 +659,7 @@ export class StelisSDK {
    *     },
    *     signer: wallet.signTransaction,
    *     addr: userAddress,
-   *     paymentToken: { type: DEEP },
+   *     settlementToken: { type: DEEP },
    *   });
    * } catch (err) {
    *   if (err instanceof StelisSponsoredError) {
@@ -813,7 +813,7 @@ export class StelisSDK {
    * The server handles sponsor key selection, dry-run, budget reservation.
    *
    * Unlike prepareSponsored(), this does NOT include:
-   * - payment token or settlement swap path selection (promotion budget covers gas)
+   * - settlement token or settlement swap path selection (promotion budget covers gas)
    * - Settle-specific S-16 suffix verification (no settle TX)
    * - Cost cross-validation (simple estimatedGasMist)
    * - Preflight coin checks

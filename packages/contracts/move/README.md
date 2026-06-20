@@ -67,7 +67,7 @@ sources/
 | `swap_and_settle_with_vault_qfb()` | **Existing users** (has Vault), 1-hop qfb   | DeepBook 1-hop quote-for-base swap → optionally use credit → settle → surplus to vault |
 | `settle_with_credit()`             | **Existing users** (has Vault), credit-only | No swap. Uses vault credit only, then settles                                          |
 
-All `swap_and_settle_*` variants atomically swap a payment token (e.g. DEEP) to SUI via DeepBook, then run settlement in a single transaction.
+All `swap_and_settle_*` variants atomically swap a settlement token (e.g. DEEP) to SUI via DeepBook, then run settlement in a single transaction.
 Before each swap, the on-chain spread guard rejects the transaction (abort 110: `ESpreadTooWide`) when the DeepBook order book is empty, one-sided, crossed, or has bid/ask spread exceeding `max_spread_bps`.
 `settle_with_credit()` skips the swap and settles using vault credit only.
 `settle_with_credit()` is credit-only settlement, so it does not enforce `min_settle_mist`; it still checks exact sufficiency, fee cap, config version, and nonce.

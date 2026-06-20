@@ -11,9 +11,9 @@
  * In particular, for every supported SettlementSwapDirection × variant (4 combos),
  * we verify:
  *
- *   1. MoveCall typeArguments contain exactly the payment token, matching
+ *   1. MoveCall typeArguments contain exactly the settlement token, matching
  *      the on-chain entry's generic params.
- *   2. parseSettleArgs().extractedSettlementSwapPath.tokenType equals the payment token
+ *   2. parseSettleArgs().extractedSettlementSwapPath.tokenType equals the settlement token
  *      (not SUI, not a pool type arg).
  *   3. extractedSettlementSwapPath.settlementSwapDirection matches the input settlementSwapDirection.
  *   4. extractedSettlementSwapPath.hops matches the input poolId.
@@ -161,12 +161,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
     expectedWithVaultFunction,
   } of cases) {
     describe(`${settlementSwapDirection}`, () => {
-      it(`new_user → Move call type args start with paymentTokenType`, () => {
+      it(`new_user → Move call type args start with settlementTokenType`, () => {
         const { rawCommands } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'new_user',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             ...SHARED_PARAMS,
           });
@@ -177,12 +177,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
         expect(call.typeArguments).toEqual([PAYMENT_TYPE]);
       });
 
-      it(`with_vault → Move call type args start with paymentTokenType`, () => {
+      it(`with_vault → Move call type args start with settlementTokenType`, () => {
         const { rawCommands } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'with_vault',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             vaultId: VAULT,
             useCreditAmount: 0n,
@@ -195,12 +195,12 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
         expect(call.typeArguments).toEqual([PAYMENT_TYPE]);
       });
 
-      it(`parseSettleArgs extractedSettlementSwapPath reports paymentTokenType + settlementSwapDirection + hops`, () => {
+      it(`parseSettleArgs extractedSettlementSwapPath reports settlementTokenType + settlementSwapDirection + hops`, () => {
         const { normalizedCommands, inputs } = getCommands((tx) => {
           buildSwapAndSettlePtb(tx, {
             variant: 'new_user',
             settlementSwapDirection: settlementSwapDirection as 'baseForQuote' | 'quoteForBase',
-            paymentTokenType: PAYMENT_TYPE,
+            settlementTokenType: PAYMENT_TYPE,
             poolId: POOL,
             ...SHARED_PARAMS,
           });
@@ -278,7 +278,7 @@ describe('builder → parser settle field roundtrip', () => {
       buildSwapAndSettlePtb(tx, {
         variant: 'new_user',
         settlementSwapDirection: 'baseForQuote',
-        paymentTokenType: PAYMENT_TYPE,
+        settlementTokenType: PAYMENT_TYPE,
         poolId: POOL,
         packageId: PKG,
         configId: CONFIG,
@@ -338,7 +338,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'new_user',
           settlementSwapDirection: 'baseForQuote',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           packageId: PKG,
           configId: CONFIG,
@@ -355,7 +355,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'new_user',
           settlementSwapDirection: 'quoteForBase',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           packageId: PKG,
           configId: CONFIG,
@@ -372,7 +372,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'with_vault',
           settlementSwapDirection: 'baseForQuote',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           vaultId: VAULT,
           useCreditAmount: 0n,
@@ -391,7 +391,7 @@ describe('builder, parser, and static validation share every current settlement 
         buildSwapAndSettlePtb(tx, {
           variant: 'with_vault',
           settlementSwapDirection: 'quoteForBase',
-          paymentTokenType: PAYMENT_TYPE,
+          settlementTokenType: PAYMENT_TYPE,
           poolId: POOL,
           vaultId: VAULT,
           useCreditAmount: 0n,

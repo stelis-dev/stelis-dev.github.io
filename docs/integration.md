@@ -8,7 +8,7 @@ This document describes the generic sponsored transaction flow.
 2. Choose a settlement token from `supportedSettlementSwapPaths`.
 3. Build transaction-kind bytes.
 4. Hash `txKindBytes` and ask the sender to sign the prepare authorization personal message.
-5. Call `POST /relay/prepare` with `txKindBytes`, `senderAddress`, `paymentTokenType`, `txKindBytesHash`, `prepareAuthorizationTimestampMs`, `prepareAuthorizationRequestNonce`, and `prepareAuthorizationSignature`.
+5. Call `POST /relay/prepare` with `txKindBytes`, `senderAddress`, `settlementTokenType`, `txKindBytesHash`, `prepareAuthorizationTimestampMs`, `prepareAuthorizationRequestNonce`, and `prepareAuthorizationSignature`.
 6. Ask the user wallet or signer to sign returned `txBytes`.
 7. Call `POST /relay/sponsor` with `txBytes`, `userSignature`, and `receiptId`.
 

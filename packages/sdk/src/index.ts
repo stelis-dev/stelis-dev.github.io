@@ -15,7 +15,7 @@ export type {
   // SDK initialization
   StelisConnectOptions,
   StelisRequestTimeouts,
-  PaymentToken,
+  SettlementToken,
   ExecuteSponsoredOptions,
   ExecuteSponsoredResult,
   GasEstimateResult,

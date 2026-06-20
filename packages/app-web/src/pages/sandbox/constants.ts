@@ -1,7 +1,7 @@
 /**
  * Shared constants for sandbox UI.
  *
- * Payment token type and decimals are derived from the connected host's
+ * Settlement token type and decimals are derived from the connected host's
  * supported settlement swap paths at runtime, not from built-in DEEPBOOK_IDS
  * constants.
  */
@@ -46,7 +46,7 @@ export type SwapDemoRejectReason = 'unsupported_hop_count' | 'fee_bearing';
  *      runtime shapes (e.g. a misconfigured settlement-swap-paths.json with multiple hops).
  *   2. hop fee rate must be 0 (whitelisted path) — fee-bearing 1-hop paths
  *      run under DeepBook's input-fee economics, so the fee is charged from the
- *      input-token side of the quote and the user receives less payment token.
+ *      input-token side of the quote and the user receives less settlement token.
  *      Handling that safely requires a min-out / slippage UX that the sandbox
  *      demo intentionally does not implement. Supporting fee-bearing pools in
  *      the demo is a separate UX/testing effort and is out of scope here.
@@ -85,7 +85,7 @@ export function getSwapDemoRejectMessage(
     return `Direct swap demo is available for 1-hop settlement swap paths only. This path reports ${settlementSwapPath.hops.length} hops.`;
   }
   // reason === 'fee_bearing'
-  return `Direct swap demo is available for whitelisted settlement swap paths only (feeBps = 0). This path charges ${settlementSwapPath.hops[0].feeBps} bps under DeepBook's input-fee economics, so the user would receive less payment token than quoted; the demo does not implement the min-out / slippage UX required to handle that safely.`;
+  return `Direct swap demo is available for whitelisted settlement swap paths only (feeBps = 0). This path charges ${settlementSwapPath.hops[0].feeBps} bps under DeepBook's input-fee economics, so the user would receive less settlement token than quoted; the demo does not implement the min-out / slippage UX required to handle that safely.`;
 }
 
 /**

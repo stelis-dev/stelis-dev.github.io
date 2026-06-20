@@ -74,7 +74,7 @@ are authoritative.
 - _Prepare_: generic `/relay/prepare` proves control of `senderAddress` with a
   Sui personal-message signature over the canonical prepare authorization
   message. That message binds `network`, `packageId`, `senderAddress`,
-  `txKindBytesHash`, `paymentTokenType`, optional BPS fields, optional `orderId`,
+  `txKindBytesHash`, `settlementTokenType`, optional BPS fields, optional `orderId`,
   timestamp, and request nonce.
 - _Pre-consume sponsor_: the submitted sponsor `txBytes` is still unbound until
   the route verifies the user's transaction signature and checks that
@@ -328,7 +328,7 @@ The request carries:
 
 - `txKindBytes`
 - `senderAddress`
-- `paymentTokenType`
+- `settlementTokenType`
 - `txKindBytesHash`
 - `prepareAuthorizationTimestampMs`
 - `prepareAuthorizationRequestNonce`

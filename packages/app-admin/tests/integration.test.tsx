@@ -830,8 +830,8 @@ describe('ConfigPage integration', () => {
       ...POOL_DATA,
       supportedSettlementSwapPaths: [
         {
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenType: DEEP_TYPE,
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenType: DEEP_TYPE,
           settlementSwapDirection: 'baseForQuote',
           hops: [
             {

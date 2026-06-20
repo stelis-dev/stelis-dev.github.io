@@ -68,7 +68,7 @@ const result = await sdk.executeSponsored(tx, {
     return signature;
   },
   addr: senderAddress,
-  paymentToken: { type: sdk.supportedSettlementSwapPaths[${settlementSwapPathIndex}].paymentTokenType },
+  settlementToken: { type: sdk.supportedSettlementSwapPaths[${settlementSwapPathIndex}].settlementTokenType },
 });
 
 console.log(result.digest);        // on-chain TX digest
@@ -88,7 +88,7 @@ export function CodePanel({
   const selectedSettlementSwapPath = sdk
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
-  const tokenSymbol = selectedSettlementSwapPath?.paymentTokenSymbol ?? 'TOKEN';
+  const tokenSymbol = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'TOKEN';
   const snippets = makeSnippets(tokenSymbol, settlementSwapPathIndex);
   const { title, code } = snippets[activeStep];
 

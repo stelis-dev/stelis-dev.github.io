@@ -44,12 +44,12 @@ describe('Sandbox SDK wiring', () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { paymentTokenType: '0xTOKEN', paymentTokenSymbol: 'TOKEN', paymentTokenDecimals: 6 },
+        { settlementTokenType: '0xTOKEN', settlementTokenSymbol: 'TOKEN', settlementTokenDecimals: 6 },
       ],
     };
     const settlementSwapPath = getSelectedSettlementSwapPath(mockSdk as never);
-    expect(settlementSwapPath.paymentTokenType).toBe('0xTOKEN');
-    expect(settlementSwapPath.paymentTokenSymbol).toBe('TOKEN');
+    expect(settlementSwapPath.settlementTokenType).toBe('0xTOKEN');
+    expect(settlementSwapPath.settlementTokenSymbol).toBe('TOKEN');
   });
 
   it('getSelectedSettlementSwapPath throws when no paths are available', async () => {
@@ -64,19 +64,19 @@ describe('Sandbox SDK wiring', () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { paymentTokenType: '0xDEEP', paymentTokenSymbol: 'DEEP', paymentTokenDecimals: 6 },
-        { paymentTokenType: '0xUSDC', paymentTokenSymbol: 'USDC', paymentTokenDecimals: 6 },
+        { settlementTokenType: '0xDEEP', settlementTokenSymbol: 'DEEP', settlementTokenDecimals: 6 },
+        { settlementTokenType: '0xUSDC', settlementTokenSymbol: 'USDC', settlementTokenDecimals: 6 },
       ],
     };
-    expect(getSelectedSettlementSwapPath(mockSdk as never, 0).paymentTokenSymbol).toBe('DEEP');
-    expect(getSelectedSettlementSwapPath(mockSdk as never, 1).paymentTokenSymbol).toBe('USDC');
+    expect(getSelectedSettlementSwapPath(mockSdk as never, 0).settlementTokenSymbol).toBe('DEEP');
+    expect(getSelectedSettlementSwapPath(mockSdk as never, 1).settlementTokenSymbol).toBe('USDC');
   });
 
   it('getSelectedSettlementSwapPath throws on out-of-range path index', async () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { paymentTokenType: '0xDEEP', paymentTokenSymbol: 'DEEP', paymentTokenDecimals: 6 },
+        { settlementTokenType: '0xDEEP', settlementTokenSymbol: 'DEEP', settlementTokenDecimals: 6 },
       ],
     };
     expect(() => getSelectedSettlementSwapPath(mockSdk as never, 5)).toThrow('out of range');
@@ -119,7 +119,7 @@ describe('Sandbox SDK wiring', () => {
 
   it('isSwapDemoSupported returns false for fee-bearing 1-hop (demo scope limit)', async () => {
     // Fee-bearing 1-hop pools run under DeepBook's input-fee economics, so the
-    // fee is charged on the input side and the user receives less payment token.
+    // fee is charged on the input side and the user receives less settlement token.
     // Handling that requires a min-out / slippage UX that the sandbox demo does
     // not implement.
     const { isSwapDemoSupported } = await import('../src/pages/sandbox/constants');

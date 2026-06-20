@@ -49,8 +49,8 @@ export interface PrepareParams {
   txKindBytes: string;
   /** User wallet address */
   senderAddress: string;
-  /** Payment token type string (e.g. "0x...::deep::DEEP"). */
-  paymentTokenType: string;
+  /** Settlement token type string (e.g. "0x...::deep::DEEP"). */
+  settlementTokenType: string;
   /** Slippage tolerance in BPS. Default: `DEFAULT_SLIPPAGE_BPS`. */
   slippageBps?: number;
   /** Gas margin in BPS. Default: `DEFAULT_GAS_MARGIN_BPS`. */

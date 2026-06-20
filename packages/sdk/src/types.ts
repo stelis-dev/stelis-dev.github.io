@@ -54,8 +54,8 @@ export interface PrepareParams {
   txKindBytes: string;
   /** Sender address */
   senderAddress: string;
-  /** Payment token type from supportedSettlementSwapPaths. Selects the host's single active settlement swap path for that token. */
-  paymentTokenType: string;
+  /** Settlement token type from supportedSettlementSwapPaths. Selects the host's single active settlement swap path for that token. */
+  settlementTokenType: string;
   /** Slippage tolerance in basis points (optional) */
   slippageBps?: number;
   /** Gas margin in basis points (optional) */
@@ -157,7 +157,7 @@ export interface RelayerConfig {
   packageId: string;
   /** Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist. */
   settlementPayoutRecipient: string;
-  /** One active settlement swap path per paymentTokenType. */
+  /** One active settlement swap path per settlementTokenType. */
   supportedSettlementSwapPaths: SingleHopSettlementSwapPath[];
   /** Host-quoted fee per TX in MIST (from HOST_FEE_MIST env). */
   quotedHostFeeMist: string;
@@ -198,8 +198,8 @@ export interface StelisConnectOptions {
 // executeSponsored options
 // ─────────────────────────────────────────────
 
-/** Payment token configuration for sponsored settlement. */
-export interface PaymentToken {
+/** Settlement token configuration for sponsored settlement. */
+export interface SettlementToken {
   /** Full coin type string from supportedSettlementSwapPaths. */
   type: string;
   /**
@@ -217,8 +217,8 @@ export interface PrepareSponsoredOptions {
   addr: string;
   /** Wallet personal-message sign function for the prepare authorization message. */
   prepareAuthorizationSigner: (messageBytes: Uint8Array) => Promise<string>;
-  /** Payment token to swap to SUI internally. Required. */
-  paymentToken: PaymentToken;
+  /** Settlement token to swap to SUI internally. Required. */
+  settlementToken: SettlementToken;
   /** Intended gas budget in MIST. Default: `DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST`. */
   intentGasBudget?: number;
   /** Slippage tolerance in basis points. Default: `DEFAULT_SLIPPAGE_BPS`. */
@@ -226,7 +226,7 @@ export interface PrepareSponsoredOptions {
   /**
    * Extra margin added to the auto-calculated gas amount, in basis points.
    * Default: `DEFAULT_GAS_MARGIN_BPS`.
-   * Only applies when paymentToken.amount is not explicitly set.
+   * Only applies when settlementToken.amount is not explicitly set.
    * Covers price movement between quote time and swap execution.
    */
   gasMarginBps?: number;

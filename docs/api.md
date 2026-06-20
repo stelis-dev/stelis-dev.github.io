@@ -41,7 +41,7 @@ Returns runtime capability:
 - `integrityPolicyVersion`
 
 Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement token list and settlement swap path list.
-Each `paymentTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `paymentTokenType`; clients do not send a pool ID or path ID.
+Each `settlementTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `settlementTokenType`; clients do not send a pool ID or path ID.
 The settlement swap path includes the DeepBook pool and `swapDirection` used by the Host. `settlementPayoutRecipient` is an address, not the Host role or a sponsor signing account.
 
 ## POST /relay/prepare
@@ -52,7 +52,7 @@ Required fields:
 
 - `txKindBytes`: serialized transaction-kind bytes in base64
 - `senderAddress`: Sui address
-- `paymentTokenType`: settlement token coin type from `GET /relay/config.supportedSettlementSwapPaths`
+- `settlementTokenType`: settlement token coin type from `GET /relay/config.supportedSettlementSwapPaths`
 - `txKindBytesHash`: SHA-256 hash of `txKindBytes`, encoded as hex
 - `prepareAuthorizationTimestampMs`: Unix timestamp in milliseconds included in the prepare authorization message
 - `prepareAuthorizationRequestNonce`: client-generated nonce included in the prepare authorization message
@@ -70,7 +70,7 @@ Minimal JSON body:
 {
   "txKindBytes": "<base64 TransactionKind bytes>",
   "senderAddress": "0x...",
-  "paymentTokenType": "0x...::coin::COIN",
+  "settlementTokenType": "0x...::coin::COIN",
   "txKindBytesHash": "<64 lowercase hex chars>",
   "prepareAuthorizationTimestampMs": 1760000000000,
   "prepareAuthorizationRequestNonce": "<client nonce>",
@@ -111,7 +111,7 @@ The signed prepare authorization message is a UTF-8 JSON string with these field
   "packageId": "0x...",
   "senderAddress": "0x...",
   "txKindBytesHash": "<64 lowercase hex chars>",
-  "paymentTokenType": "0x...::coin::COIN",
+  "settlementTokenType": "0x...::coin::COIN",
   "slippageBps": null,
   "gasMarginBps": null,
   "orderId": null,

@@ -743,9 +743,9 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       return c.json({
         count: settlementSwapPaths.length,
         settlementSwapPaths: settlementSwapPaths.map((p) => ({
-          paymentTokenType: p.paymentTokenType,
-          paymentTokenSymbol: p.paymentTokenSymbol,
-          paymentTokenDecimals: p.paymentTokenDecimals,
+          settlementTokenType: p.settlementTokenType,
+          settlementTokenSymbol: p.settlementTokenSymbol,
+          settlementTokenDecimals: p.settlementTokenDecimals,
           lotSize: safeBigintToNumber(p.lotSize, 'lotSize'),
           minSize: safeBigintToNumber(p.minSize, 'minSize'),
           effectiveFeeRateBps: p.effectiveFeeRateBps,

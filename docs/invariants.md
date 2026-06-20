@@ -83,7 +83,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | R-14 | A user-supplied generic `User TransactionKind` must not include `FundsWithdrawal(Sponsor)`. | Relay validation |
 | R-15 | A malformed same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is rejected with `UNACCOUNTABLE_WITHDRAWAL`. | Relay validation |
 | R-16 | A bounded same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is allowed and subtracted from address-balance funding. | Relay validation |
-| R-17 | Each supported `paymentTokenType` maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
+| R-17 | Each supported `settlementTokenType` maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
 
 ## Code References
 

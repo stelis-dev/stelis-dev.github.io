@@ -24,11 +24,11 @@ interface SwapFormProps {
 }
 
 /**
- * Sandbox helper: swap SUI → payment token of the selected settlement swap path
+ * Sandbox helper: swap SUI → settlement token of the selected settlement swap path
  * via DeepBook.
  *
  * Uses a hardcoded testnet/mainnet DeepBook pair list (testSwapPairs.ts) keyed
- * by payment token TYPE — independent of the relayer's settlement registry.
+ * by settlement token TYPE — independent of the relayer's settlement registry.
  * The target token auto-tracks the selected settlement swap path.
  */
 export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormProps) {
@@ -42,9 +42,9 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
   const selectedSettlementSwapPath = sdk
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
-  const paymentTokenType = selectedSettlementSwapPath?.paymentTokenType ?? '';
-  const paymentTokenLabel = selectedSettlementSwapPath?.paymentTokenSymbol ?? 'TOKEN';
-  const testPair = paymentTokenType ? findTestSwapPair(network, paymentTokenType) : null;
+  const settlementTokenType = selectedSettlementSwapPath?.settlementTokenType ?? '';
+  const settlementTokenLabel = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'TOKEN';
+  const testPair = settlementTokenType ? findTestSwapPair(network, settlementTokenType) : null;
   // Direct-swap demo scope gate (unsupported_hop_count / fee_bearing). See
   // sandbox/constants.ts. Fee-bearing paths require min-out/slippage UX that
   // the demo intentionally does not implement.
@@ -72,7 +72,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     if (!account || !sdk) throw new Error('Not ready');
     if (!testPair) {
       throw new Error(
-        `No hardcoded DeepBook pair registered for ${paymentTokenLabel} on ${network}`,
+        `No hardcoded DeepBook pair registered for ${settlementTokenLabel} on ${network}`,
       );
     }
     const suiMist = parseDecimalToSmallestUnit(suiAmount, SUI_DECIMALS, 'SUI amount');
@@ -145,7 +145,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     setErrorMsg('');
     setDigest('');
     setLogs([]);
-    addLog(`Swapping ${suiAmount} SUI → ${paymentTokenLabel}...`);
+    addLog(`Swapping ${suiAmount} SUI → ${settlementTokenLabel}...`);
 
     try {
       const tx = buildSwapTx();
@@ -193,7 +193,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
 
   return (
     <div style={SANDBOX_CARD_STYLE}>
-      <h3 style={{ margin: '0 0 14px 0', fontSize: 15 }}>🔄 Swap SUI → {paymentTokenLabel}</h3>
+      <h3 style={{ margin: '0 0 14px 0', fontSize: 15 }}>🔄 Swap SUI → {settlementTokenLabel}</h3>
 
       {demoRejectMessage && (
         <div
@@ -223,7 +223,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
             border: '1px solid rgba(245,158,11,0.2)',
           }}
         >
-          No hardcoded DeepBook pair is registered for {paymentTokenLabel} on {network}. Add one in
+          No hardcoded DeepBook pair is registered for {settlementTokenLabel} on {network}. Add one in
           <code style={{ margin: '0 4px' }}>testSwapPairs.ts</code>to enable direct acquisition.
         </div>
       )}
@@ -238,7 +238,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           borderRadius: 6,
         }}
       >
-        ⚡ Direct DeepBook swap: pay gas in SUI. Use this to acquire {paymentTokenLabel} tokens for
+        ⚡ Direct DeepBook swap: pay gas in SUI. Use this to acquire {settlementTokenLabel} tokens for
         testing.
       </div>
 
@@ -282,7 +282,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           opacity: swapDisabled ? 0.5 : 1,
         }}
       >
-        {isBusy ? status.toUpperCase() : `⚡ Swap ${suiAmount} SUI → ${paymentTokenLabel}`}
+        {isBusy ? status.toUpperCase() : `⚡ Swap ${suiAmount} SUI → ${settlementTokenLabel}`}
       </button>
 
       {sdkError && (

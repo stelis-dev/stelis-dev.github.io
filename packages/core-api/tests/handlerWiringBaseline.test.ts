@@ -165,9 +165,9 @@ const SUPPORTED_POOL = {
       feeBps: 0,
     },
   ],
-  paymentTokenType: '0xDEEP::deep::DEEP',
-  paymentTokenSymbol: 'DEEP',
-  paymentTokenDecimals: 6,
+  settlementTokenType: '0xDEEP::deep::DEEP',
+  settlementTokenSymbol: 'DEEP',
+  settlementTokenDecimals: 6,
   lotSize: 1n,
   minSize: 1n,
   effectiveFeeRateBps: 0,
@@ -176,11 +176,11 @@ const SUPPORTED_POOL = {
 
 const SETTLEMENT_SWAP_PATH_DESCRIPTORS: StaticSettlementSwapPathDescriptorMap = new Map([
   [
-    SUPPORTED_POOL.paymentTokenType,
+    SUPPORTED_POOL.settlementTokenType,
     {
-      paymentTokenType: SUPPORTED_POOL.paymentTokenType,
-      paymentTokenSymbol: SUPPORTED_POOL.paymentTokenSymbol,
-      paymentTokenDecimals: SUPPORTED_POOL.paymentTokenDecimals,
+      settlementTokenType: SUPPORTED_POOL.settlementTokenType,
+      settlementTokenSymbol: SUPPORTED_POOL.settlementTokenSymbol,
+      settlementTokenDecimals: SUPPORTED_POOL.settlementTokenDecimals,
       effectiveFeeRateBps: SUPPORTED_POOL.effectiveFeeRateBps,
       settlementSwapDirection: SUPPORTED_POOL.settlementSwapDirection,
       hops: SUPPORTED_POOL.hops,
@@ -290,7 +290,7 @@ function mockSettleArgs(paymentInputTrace: unknown) {
     extractedSettlementSwapPath: isCreditOnly
       ? undefined
       : {
-          tokenType: SUPPORTED_POOL.paymentTokenType,
+          tokenType: SUPPORTED_POOL.settlementTokenType,
           hops: [SUPPORTED_POOL.hops[0].poolId],
           settlementSwapDirection: SUPPORTED_POOL.settlementSwapDirection,
         },
@@ -303,7 +303,7 @@ const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>
   withPrepareAuthorization({
     txKindBytes,
     senderAddress: TEST_PREPARE_AUTH_SENDER,
-    paymentTokenType: '0xDEEP::deep::DEEP',
+    settlementTokenType: '0xDEEP::deep::DEEP',
     clientIp: '10.0.0.1',
   });
 

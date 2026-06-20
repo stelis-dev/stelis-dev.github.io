@@ -44,7 +44,7 @@ describe('PTB admissibility wiring lock', () => {
     const prepareBuild = readWorkspaceFile('packages/core-api/src/prepare/build.ts');
 
     expect(genericPolicy).not.toContain('extractPrefixWithdrawals');
-    expect(prepareBuild).toContain('extractPrefixWithdrawals(tx, paymentTokenType)');
+    expect(prepareBuild).toContain('extractPrefixWithdrawals(tx, settlementTokenType)');
   });
 
   it('keeps GasCoin detection in the shared primitive and reuses it from integrity and promotion layers', () => {

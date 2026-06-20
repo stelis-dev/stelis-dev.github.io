@@ -6,7 +6,7 @@
  * and validates integrity before the server starts.
  *
  * Constraints:
- *   - 1 active settlement swap path per paymentTokenType
+ *   - 1 active settlement swap path per settlementTokenType
  *   - Boot-time validation (fail-closed: missing file, empty registry,
  *     bad pool ID, duplicate token, nested path-array shape)
  *   - All fields except poolId are derived from on-chain data
@@ -437,24 +437,24 @@ async function queryCoinMetadata(
 }
 
 /**
- * Determine the payment token and swap direction from one pool's type parameters.
+ * Determine the settlement token and swap direction from one pool's type parameters.
  *
- * 1-hop baseForQuote: Pool<Token, SUI> → swap_exact_base_for_quote → paymentToken = Token
- * 1-hop quoteForBase: Pool<SUI, Token> → swap_exact_quote_for_base → paymentToken = Token
+ * 1-hop baseForQuote: Pool<Token, SUI> → swap_exact_base_for_quote → settlementToken = Token
+ * 1-hop quoteForBase: Pool<SUI, Token> → swap_exact_quote_for_base → settlementToken = Token
  *
  * @throws Error if pool type params do not match any supported 1-hop settlement swap path
  */
-export function determinePaymentToken(pool: { baseType: string; quoteType: string }): {
-  paymentTokenType: string;
+export function determineSettlementToken(pool: { baseType: string; quoteType: string }): {
+  settlementTokenType: string;
   swapDirection: 'baseForQuote' | 'quoteForBase';
 } {
   // Pool<Token, SUI> → baseForQuote
   if (pool.quoteType === SUI_TYPE) {
-    return { paymentTokenType: pool.baseType, swapDirection: 'baseForQuote' };
+    return { settlementTokenType: pool.baseType, swapDirection: 'baseForQuote' };
   }
-  // Pool<SUI, Token> → quoteForBase, paymentToken = Token (quote)
+  // Pool<SUI, Token> → quoteForBase, settlementToken = Token (quote)
   if (pool.baseType === SUI_TYPE) {
-    return { paymentTokenType: pool.quoteType, swapDirection: 'quoteForBase' };
+    return { settlementTokenType: pool.quoteType, swapDirection: 'quoteForBase' };
   }
   throw new Error(
     `[SETTLEMENT_SWAP_PATHS_JSON] 1-hop settlement swap path requires ` +
@@ -484,13 +484,13 @@ async function resolveSettlementSwapPathConfig(
   // Step 1: Read type params for the configured pool
   const typeInfo = await getPoolTypeInfo(client, entry.poolId);
 
-  // Step 2: Determine payment token and swap direction
-  const { paymentTokenType, swapDirection } = determinePaymentToken(typeInfo);
+  // Step 2: Determine settlement token and swap direction
+  const { settlementTokenType, swapDirection } = determineSettlementToken(typeInfo);
 
   // Step 3: Query on-chain params for the single hop
   const [bookParams, coinMeta, whitelisted] = await Promise.all([
     queryPoolBookParams(client, deepbookPkg, entry.poolId, typeInfo.baseType, typeInfo.quoteType),
-    queryCoinMetadata(client, paymentTokenType),
+    queryCoinMetadata(client, settlementTokenType),
     queryPoolWhitelisted(client, deepbookPkg, entry.poolId, typeInfo.baseType, typeInfo.quoteType),
   ]);
 
@@ -531,9 +531,9 @@ async function resolveSettlementSwapPathConfig(
   }
 
   return {
-    paymentTokenType,
-    paymentTokenSymbol: coinMeta.symbol,
-    paymentTokenDecimals: coinMeta.decimals,
+    settlementTokenType,
+    settlementTokenSymbol: coinMeta.symbol,
+    settlementTokenDecimals: coinMeta.decimals,
     lotSize: bookParams.lotSize,
     minSize: bookParams.minSize,
     effectiveFeeRateBps,
@@ -551,7 +551,7 @@ async function resolveSettlementSwapPathConfig(
  *
  * @throws Error on validation failure:
  *   - Empty registry
- *   - Duplicate paymentTokenType
+ *   - Duplicate settlementTokenType
  */
 export function validateSettlementSwapPathRegistry(
   settlementSwapPaths: SingleHopSettlementSwapPath[],
@@ -562,13 +562,13 @@ export function validateSettlementSwapPathRegistry(
     );
   }
 
-  // Reject duplicate paymentTokenType
+  // Reject duplicate settlementTokenType
   const seen = new Set<string>();
   for (const settlementSwapPath of settlementSwapPaths) {
-    if (seen.has(settlementSwapPath.paymentTokenType)) {
+    if (seen.has(settlementSwapPath.settlementTokenType)) {
       throw new Error(
-        `[SETTLEMENT_SWAP_PATHS_JSON] Duplicate paymentTokenType detected: ${settlementSwapPath.paymentTokenType} ` +
-          `(${settlementSwapPath.paymentTokenSymbol}). Only 1 settlement swap path per payment token is allowed.`,
+        `[SETTLEMENT_SWAP_PATHS_JSON] Duplicate settlementTokenType detected: ${settlementSwapPath.settlementTokenType} ` +
+          `(${settlementSwapPath.settlementTokenSymbol}). Only 1 settlement swap path per settlement token is allowed.`,
       );
     }
     if (
@@ -577,28 +577,28 @@ export function validateSettlementSwapPathRegistry(
       settlementSwapPath.effectiveFeeRateBps > 10_000
     ) {
       throw new Error(
-        `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.paymentTokenSymbol}: effectiveFeeRateBps must be a safe integer in [0, 10000].`,
+        `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.settlementTokenSymbol}: effectiveFeeRateBps must be a safe integer in [0, 10000].`,
       );
     }
     if (settlementSwapPath.hops.length !== 1) {
       throw new Error(
-        `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.paymentTokenSymbol}: resolved settlement swap path must have exactly 1 hop.`,
+        `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.settlementTokenSymbol}: resolved settlement swap path must have exactly 1 hop.`,
       );
     }
     for (let i = 0; i < settlementSwapPath.hops.length; i++) {
       const hop = settlementSwapPath.hops[i];
       if (!Number.isSafeInteger(hop.feeBps) || hop.feeBps < 0 || hop.feeBps > 10_000) {
         throw new Error(
-          `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.paymentTokenSymbol}: hops[${i}].feeBps must be a safe integer in [0, 10000].`,
+          `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.settlementTokenSymbol}: hops[${i}].feeBps must be a safe integer in [0, 10000].`,
         );
       }
       if (hop.feeBps !== settlementSwapPath.effectiveFeeRateBps) {
         throw new Error(
-          `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.paymentTokenSymbol}: hops[${i}].feeBps must equal effectiveFeeRateBps for a 1-hop settlement swap path.`,
+          `[SETTLEMENT_SWAP_PATHS_JSON] ${settlementSwapPath.settlementTokenSymbol}: hops[${i}].feeBps must equal effectiveFeeRateBps for a 1-hop settlement swap path.`,
         );
       }
     }
-    seen.add(settlementSwapPath.paymentTokenType);
+    seen.add(settlementSwapPath.settlementTokenType);
   }
 }
 

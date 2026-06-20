@@ -50,7 +50,7 @@ export interface OnchainConfig {
  * L2 validation enforces this.
  */
 export interface AllowedSettlementSwapPath {
-  /** Payment token full coin type (input of the single hop) */
+  /** Settlement token full coin type (input of the single hop) */
   tokenType: string;
   /**
    * Pool object ID for this settlement swap path (single-element array).

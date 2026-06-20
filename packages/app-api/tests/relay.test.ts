@@ -74,7 +74,7 @@ function prepareBody(overrides: Record<string, unknown> = {}): Record<string, un
   return {
     txKindBytes: '0xTX',
     senderAddress: '0x' + 'ab'.repeat(32),
-    paymentTokenType: 'SUI',
+    settlementTokenType: 'SUI',
     ...PREPARE_AUTH_FIELDS,
     ...overrides,
   };
@@ -116,9 +116,9 @@ function createMockCtx(): AppApiContext {
               feeBps: 0,
             },
           ],
-          paymentTokenType: '0xDEEP',
-          paymentTokenSymbol: 'DEEP',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xDEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
           lotSize: 1n,
           minSize: 1n,
           effectiveFeeRateBps: 0,
@@ -298,9 +298,9 @@ describe('relay routes', () => {
               feeBps: 0,
             },
           ],
-          paymentTokenType: '0xUSDC',
-          paymentTokenSymbol: 'USDC',
-          paymentTokenDecimals: 6,
+          settlementTokenType: '0xUSDC',
+          settlementTokenSymbol: 'USDC',
+          settlementTokenDecimals: 6,
           lotSize: 100n,
           minSize: 10n,
           effectiveFeeRateBps: 0,
@@ -386,7 +386,7 @@ describe('relay routes', () => {
           body: JSON.stringify({
             txKindBytes: '0xTX',
             senderAddress: '0xabc',
-            paymentTokenType: 'SUI',
+            settlementTokenType: 'SUI',
           }),
         });
 
@@ -426,14 +426,14 @@ describe('relay routes', () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ senderAddress: '0xABC', paymentTokenType: 'SUI' }),
+        body: JSON.stringify({ senderAddress: '0xABC', settlementTokenType: 'SUI' }),
       });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('returns 400 on missing paymentTokenType', async () => {
+    it('returns 400 on missing settlementTokenType', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -506,7 +506,7 @@ describe('relay routes', () => {
         body: JSON.stringify(
           prepareBody({
             senderAddress: '0x' + 'ab'.repeat(32),
-            paymentTokenType:
+            settlementTokenType:
               '0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP',
           }),
         ),
@@ -531,7 +531,7 @@ describe('relay routes', () => {
         body: JSON.stringify(
           prepareBody({
             senderAddress: '0x' + 'ab'.repeat(32),
-            paymentTokenType:
+            settlementTokenType:
               '0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP',
           }),
         ),
@@ -552,7 +552,7 @@ describe('relay routes', () => {
         body: JSON.stringify({
           txKindBytes: '0x...',
           senderAddress: '0xABC',
-          paymentTokenType: 'SUI',
+          settlementTokenType: 'SUI',
         }),
       });
       expect(res.status).toBe(429);
@@ -614,7 +614,7 @@ describe('relay routes', () => {
     const validPrepareBase = {
       txKindBytes: '0xTX',
       senderAddress: '0x' + 'ab'.repeat(32),
-      paymentTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: '0xDEEP::deep::DEEP',
       ...PREPARE_AUTH_FIELDS,
     };
 

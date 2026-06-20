@@ -4,7 +4,7 @@
  * The relayer builds settle commands server-side.
  *
  * Functions:
- *   buildSwapAndSettlePtb()    — swap payment token → SUI + settle
+ *   buildSwapAndSettlePtb()    — swap settlement token → SUI + settle
  *   buildSettleWithCreditPtb() — vault credit only settlement
  *
  * buildWithdrawPtb() stays in sdk/src/ptb.ts — user operation.
@@ -51,15 +51,15 @@ function validateSettleInput(params: {
 
 // ─────────────────────────────────────────────
 // buildSwapAndSettlePtb — single MoveCall
-//   Swap payment token → SUI → settle atomically.
+//   Swap settlement token → SUI → settle atomically.
 //   Enables arbitrary MoveCall commands in the same PTB.
 // ─────────────────────────────────────────────
 
 /** Single-hop settlement swap path fields. */
 export type SettlementSwapPathFields = {
   settlementSwapDirection: SettlementSwapDirection;
-  /** Move entry type parameter: payment token. */
-  paymentTokenType: string;
+  /** Move entry type parameter: settlement token. */
+  settlementTokenType: string;
   /** DeepBook pool shared object ID. */
   poolId: string;
 };
@@ -72,7 +72,7 @@ interface SwapAndSettleSharedParams {
   configId: string;
   vaultRegistryId: string;
 
-  /** Payment token coin object ID */
+  /** Settlement token coin object ID */
   paymentCoinId: string | TransactionObjectArgument;
   /** Exact base amount to swap (on-chain u64) */
   swapAmount: bigint;
@@ -139,12 +139,12 @@ function buildSettlePureArgs(tx: Transaction, values: SettleFieldValues) {
 
 /**
  * Builds a single-MoveCall PTB that atomically:
- *   1. Swaps payment token → SUI via DeepBook
+ *   1. Swaps settlement token → SUI via DeepBook
  *   2. Settles: validates vault, deducts host fees, deposits surplus
  *
  * settlementSwapDirection determines which Move function suffix to call
  * (`_bfq` for `baseForQuote`, `_qfb` for `quoteForBase`).
- * paymentTokenType becomes the Move entry's single type parameter.
+ * settlementTokenType becomes the Move entry's single type parameter.
  */
 export function buildSwapAndSettlePtb(tx: Transaction, params: SwapAndSettleParams): void {
   validateSettleInput(params);
@@ -162,7 +162,7 @@ export function buildSwapAndSettlePtb(tx: Transaction, params: SwapAndSettlePara
 
   const settleArgs = buildSettlePureArgs(tx, params);
 
-  const typeArguments = [params.paymentTokenType];
+  const typeArguments = [params.settlementTokenType];
 
   const swapArgs = [
     tx.object(params.poolId),

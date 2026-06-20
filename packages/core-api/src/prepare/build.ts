@@ -224,7 +224,7 @@ async function dryRunForGas(
   meta: Record<string, string>,
   completedStage: string,
   pass: 'credit_preswap' | 'pass1',
-  failureContext: { poolId: string; paymentTokenSymbol: string },
+  failureContext: { poolId: string; settlementTokenSymbol: string },
   quoteStats: QuoteRpcStats = emptyQuoteRpcStats(),
 ): Promise<SimulationGasUsed> {
   // Schema-shared invariant: dryrun_*_failed are lifecycle phase failures that
@@ -242,7 +242,7 @@ async function dryRunForGas(
   // can detect them via direct field-name regex (the lint does not follow
   // `...identifier` spreads).
   const poolId = failureContext.poolId;
-  const paymentTokenSymbol = failureContext.paymentTokenSymbol;
+  const settlementTokenSymbol = failureContext.settlementTokenSymbol;
 
   let dryRunBytes: Uint8Array;
   try {
@@ -251,7 +251,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_safebuild_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
@@ -277,7 +277,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_simulate_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
@@ -306,7 +306,7 @@ async function dryRunForGas(
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
       pool_id: poolId,
-      payment_token_symbol: paymentTokenSymbol,
+      settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       has_transaction: Boolean(simResult.Transaction),
       completed_stage_emitted: true,
@@ -335,9 +335,9 @@ function assertSingleHopOnly(settlementSwapPath: SingleHopSettlementSwapPath): v
   }
 }
 
-function materializePrefixUsage(tx: Transaction, paymentTokenType: string): PrefixUsage {
+function materializePrefixUsage(tx: Transaction, settlementTokenType: string): PrefixUsage {
   const classification = classifyUserTxCoins(tx);
-  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(tx, paymentTokenType);
+  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(tx, settlementTokenType);
   if (unaccountable) {
     throw new PrepareValidationError(
       'UNACCOUNTABLE_WITHDRAWAL',
@@ -473,7 +473,7 @@ async function solveSwapForClaim(
       pass,
       error_code: classifyQuoteFailure(err),
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
       target_output_mist: targetOutputMist.toString(),
       quote_quantity_in_rpc_calls: stats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: stats.quantityOutVerifyCalls,
@@ -588,7 +588,7 @@ async function dryRunPreSwapCreditPathCosts(
     'credit_preswap',
     {
       poolId: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      paymentTokenSymbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlementTokenSymbol: input.settlementSwapPath.settlementTokenSymbol,
     },
   );
   const creditCosts = computeExecutionCostClaim(gasUsed);
@@ -793,7 +793,7 @@ async function buildFinalGenericPrepareResult(
       pass: 'pass2',
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
       quote_quantity_in_rpc_calls: rpcSummary.quoteQuantityInCalls,
       quote_quantity_out_verify_rpc_calls: rpcSummary.quoteQuantityOutVerifyCalls,
       quote_total_rpc_calls: rpcSummary.quoteTotalRpcCalls,
@@ -982,7 +982,7 @@ async function runMaxClaimGasProbe(
     'pass1',
     {
       poolId: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      paymentTokenSymbol: input.settlementSwapPath.paymentTokenSymbol,
+      settlementTokenSymbol: input.settlementSwapPath.settlementTokenSymbol,
     },
     runContext.rpcAcc.pass1Quote,
   );
@@ -1154,7 +1154,7 @@ interface PreparePassResult {
   swapAmountSmallest: bigint;
   /** Per-hop raw u64 mid_price from getHopMidPriceRaw (bigint[]). Empty for credit paths. */
   rawMidPrices: bigint[];
-  /** How payment token was sourced. */
+  /** How settlement token was sourced. */
   paymentInputSource: PaymentInputSource;
   /** Canonical market-policy result for swap paths. */
   executionQuote: ExecutableSwapQuote | null;
@@ -1199,7 +1199,7 @@ async function runPreparePass(
   const settlementSwapPath = input.settlementSwapPath;
   // API contract: unaccountable Sender withdrawals are rejected before
   // payment-source selection, including credit-only paths.
-  const prefixUsage = materializePrefixUsage(tx, settlementSwapPath.paymentTokenType);
+  const prefixUsage = materializePrefixUsage(tx, settlementSwapPath.settlementTokenType);
 
   // ── Build planner config + input from orchestrator context ─────────────
   const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
@@ -1291,7 +1291,7 @@ async function runPreparePass(
         pass: passLabel,
         error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
         pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-        payment_token_symbol: settlementSwapPath.paymentTokenSymbol,
+        settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
         mid_price_total_ms: Date.now() - midPriceStartedAt,
         mid_price_stats_complete: false,
       });
@@ -1337,9 +1337,9 @@ async function runPreparePass(
     const sourceResolution = await resolvePaymentSource(
       ctx.sui,
       input.senderAddress,
-      settlementSwapPath.paymentTokenType,
+      settlementSwapPath.settlementTokenType,
       swapAmountSmallest,
-      settlementSwapPath.paymentTokenSymbol,
+      settlementSwapPath.settlementTokenSymbol,
       prefixUsage,
     );
     const funding: FundingResolution = {
@@ -1410,7 +1410,7 @@ async function runPreparePass(
       pass: passLabel,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      payment_token_symbol: settlementSwapPath.paymentTokenSymbol,
+      settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
       quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
       quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
       quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,

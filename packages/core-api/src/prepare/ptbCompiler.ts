@@ -112,19 +112,19 @@ export async function compileSwapSettlement(
       ctx.sui,
       tx,
       senderAddress,
-      settlementSwapPath.paymentTokenType,
+      settlementSwapPath.settlementTokenType,
       plan.swap.swapAmountSmallest,
-      settlementSwapPath.paymentTokenSymbol,
+      settlementSwapPath.settlementTokenSymbol,
       prefixUsage,
     ));
   } else if (plan.funding.source === 'address_balance') {
     const withdrawalInput = tx.withdrawal({
       amount: plan.swap.swapAmountSmallest,
-      type: settlementSwapPath.paymentTokenType,
+      type: settlementSwapPath.settlementTokenType,
     });
     [paymentCoin] = tx.moveCall({
       target: '0x2::coin::redeem_funds',
-      typeArguments: [settlementSwapPath.paymentTokenType],
+      typeArguments: [settlementSwapPath.settlementTokenType],
       arguments: [withdrawalInput],
     });
   } else {
@@ -133,7 +133,7 @@ export async function compileSwapSettlement(
     if (usable.length === 0) {
       throw new PrepareValidationError(
         'PAYMENT_COIN_CONFLICT',
-        `Mixed topup selected but no usable ${settlementSwapPath.paymentTokenSymbol} coin objects remain after R-9 filtering.`,
+        `Mixed topup selected but no usable ${settlementSwapPath.settlementTokenSymbol} coin objects remain after R-9 filtering.`,
       );
     }
     const baseCoin = pickPreferredPaymentBaseCoin(usable, prefixUsage);
@@ -147,11 +147,11 @@ export async function compileSwapSettlement(
     }
     const withdrawalInput = tx.withdrawal({
       amount: plan.funding.redeemDelta,
-      type: settlementSwapPath.paymentTokenType,
+      type: settlementSwapPath.settlementTokenType,
     });
     const [redeemedCoin] = tx.moveCall({
       target: '0x2::coin::redeem_funds',
-      typeArguments: [settlementSwapPath.paymentTokenType],
+      typeArguments: [settlementSwapPath.settlementTokenType],
       arguments: [withdrawalInput],
     });
     tx.mergeCoins(tx.object(baseCoinId), [redeemedCoin]);
@@ -163,7 +163,7 @@ export async function compileSwapSettlement(
 
   const settlementSwapPathArgs = {
     settlementSwapDirection: settlementSwapPath.settlementSwapDirection,
-    paymentTokenType: settlementSwapPath.paymentTokenType,
+    settlementTokenType: settlementSwapPath.settlementTokenType,
     poolId: settlementSwapPath.hops[0].poolId,
   };
 

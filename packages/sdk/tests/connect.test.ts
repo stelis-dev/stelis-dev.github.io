@@ -81,9 +81,9 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
             feeBps: 0,
           },
         ],
-        paymentTokenType: `${CANONICAL_PKG}::deep::DEEP`,
-        paymentTokenSymbol: 'DEEP',
-        paymentTokenDecimals: 6,
+        settlementTokenType: `${CANONICAL_PKG}::deep::DEEP`,
+        settlementTokenSymbol: 'DEEP',
+        settlementTokenDecimals: 6,
         lotSize: 100,
         minSize: 1_000_000,
         effectiveFeeRateBps: 0,
@@ -298,7 +298,7 @@ describe('parseRelayerConfig — settlement swap path integrity fail-closed', ()
     ).rejects.toThrow('hops must be a non-empty array');
   });
 
-  it('rejects duplicate paymentTokenType because each token selects one active settlement swap path', async () => {
+  it('rejects duplicate settlementTokenType because each token selects one active settlement swap path', async () => {
     const bad = makeConfig();
     bad.supportedSettlementSwapPaths.push({
       ...bad.supportedSettlementSwapPaths[0],
@@ -312,7 +312,7 @@ describe('parseRelayerConfig — settlement swap path integrity fail-closed', ()
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('duplicate paymentTokenType');
+    ).rejects.toThrow('duplicate settlementTokenType');
   });
 
   it('rejects invalid swapDirection value', async () => {

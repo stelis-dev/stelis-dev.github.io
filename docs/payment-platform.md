@@ -11,7 +11,7 @@ This document defines the product terms used by SDK, web app, and API package do
 | Host operator | The party that deploys and operates a Host and its Admin app |
 | Admin app | The operator tool used to manage Host settings, sponsor state, settlement swap paths, and operating policy |
 | Studio | Promotion and policy-controlled flows layered on the same Host |
-| settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `paymentTokenType` for the token's Sui coin type. |
+| settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `settlementTokenType` for the token's Sui coin type. |
 | User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned and is not Host-owned balance. |
 | relayer role | The internal Host role for execution, sponsorship, and settlement fields such as `settlementPayoutRecipient`, `executionCostClaim`, and `hostFee` |
 

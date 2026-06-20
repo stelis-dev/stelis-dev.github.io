@@ -219,7 +219,7 @@ The file is a network-keyed object with `testnet` and `mainnet` sections. The Ho
 
 At boot, the Host reads each pool ID in the active network section and derives settlement swap path metadata from on-chain data. Each pool must be `Pool<Token, SUI>` or `Pool<SUI, Token>`, so every configured entry resolves to one settlement-token-to-SUI settlement swap path.
 
-The product contract is one active 1-hop settlement swap path per `paymentTokenType`. `POST /relay/prepare` receives `paymentTokenType` and the Host selects that token's registered path. Clients do not send a pool ID, path ID, or multi-hop path.
+The product contract is one active 1-hop settlement swap path per `settlementTokenType`. `POST /relay/prepare` receives `settlementTokenType` and the Host selects that token's registered path. Clients do not send a pool ID, path ID, or multi-hop path.
 
 If the file is missing, the selected network section is empty, or an entry is malformed, nested, duplicated by settlement token, not SUI-adjacent, or cannot be verified, the Host fails to start.
 

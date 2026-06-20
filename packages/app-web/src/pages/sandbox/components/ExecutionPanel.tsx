@@ -33,7 +33,7 @@ function ExecutionPanelInner({
   const onTxSuccess = useCallback(() => setRefreshKey((k) => k + 1), []);
   const { config } = useAppConfig();
   const isMainnet = config?.network === 'mainnet';
-  // On mainnet, hide the Swap card — users acquire payment tokens from DEXes directly.
+  // On mainnet, hide the Swap card — users acquire settlement tokens from DEXes directly.
   const cards: CardId[] = isMainnet ? ['connect', 'transfer'] : ['connect', 'swap', 'transfer'];
 
   return (

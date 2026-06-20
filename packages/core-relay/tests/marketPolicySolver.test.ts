@@ -40,9 +40,9 @@ function makeDescriptor(
   overrides?: { lotSize?: bigint; minSize?: bigint },
 ) {
   return createStaticSettlementSwapPathDescriptor({
-    paymentTokenType: TOKEN_TYPE,
-    paymentTokenSymbol: 'TOKEN',
-    paymentTokenDecimals: 6,
+    settlementTokenType: TOKEN_TYPE,
+    settlementTokenSymbol: 'TOKEN',
+    settlementTokenDecimals: 6,
     effectiveFeeRateBps: 0,
     settlementSwapDirection: swapDirection === 'baseForQuote' ? 'baseForQuote' : 'quoteForBase',
     lotSize: overrides?.lotSize ?? 1_000n,

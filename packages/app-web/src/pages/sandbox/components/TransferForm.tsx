@@ -30,8 +30,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
   const selectedSettlementSwapPath = sdk
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
-  const paymentTokenType = selectedSettlementSwapPath?.paymentTokenType ?? '';
-  const PAYMENT_TOKEN_DECIMALS = selectedSettlementSwapPath?.paymentTokenDecimals ?? 6;
+  const settlementTokenType = selectedSettlementSwapPath?.settlementTokenType ?? '';
+  const SETTLEMENT_TOKEN_DECIMALS = selectedSettlementSwapPath?.settlementTokenDecimals ?? 6;
 
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('1.0');
@@ -53,8 +53,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const isBusy = status !== 'idle' && status !== 'error' && status !== 'success';
 
-  const settlementSwapPath = sdk?.getSettlementSwapPathForPaymentToken(paymentTokenType);
-  const PAYMENT_TOKEN_LABEL = settlementSwapPath?.paymentTokenSymbol ?? 'DEEP';
+  const settlementSwapPath = sdk?.getSettlementSwapPathForSettlementToken(settlementTokenType);
+  const SETTLEMENT_TOKEN_LABEL = settlementSwapPath?.settlementTokenSymbol ?? 'DEEP';
 
   useEffect(() => {
     if (!sdk || !client || !settlementSwapPath) return;
@@ -74,7 +74,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     if (!sdk || !account || !client) return;
     let cancelled = false;
     sdk
-      .estimateGas(client, { addr: account.address, paymentToken: { type: paymentTokenType } })
+      .estimateGas(client, { addr: account.address, settlementToken: { type: settlementTokenType } })
       .then((est) => {
         if (!cancelled && (est.hasLiquidity || est.canSkipLiquidity))
           setGasEstimate({
@@ -91,7 +91,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     return () => {
       cancelled = true;
     };
-  }, [sdk, account, client, paymentTokenType]);
+  }, [sdk, account, client, settlementTokenType]);
 
   const handleTransfer = async () => {
     if (!account || !sdk || !settlementSwapPath) return;
@@ -112,8 +112,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     try {
       transferMist = parseDecimalToSmallestUnit(
         amount,
-        PAYMENT_TOKEN_DECIMALS,
-        `${PAYMENT_TOKEN_LABEL} amount`,
+        SETTLEMENT_TOKEN_DECIMALS,
+        `${SETTLEMENT_TOKEN_LABEL} amount`,
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Invalid transfer amount');
@@ -149,7 +149,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
             addLog('⚠️ One or more DeepBook pools have no liquidity — transfer may fail');
           } else if (settlementSwapPathCheck.priceDisplay != null) {
             addLog(
-              `  Settlement path rate: 1 ${PAYMENT_TOKEN_LABEL} ≈ ${settlementSwapPathCheck.priceDisplay} SUI`,
+              `  Settlement path rate: 1 ${SETTLEMENT_TOKEN_LABEL} ≈ ${settlementSwapPathCheck.priceDisplay} SUI`,
             );
           }
         } catch {
@@ -157,7 +157,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
         }
       }
 
-      addLog(`Preparing ${amount} ${PAYMENT_TOKEN_LABEL} transfer...`);
+      addLog(`Preparing ${amount} ${SETTLEMENT_TOKEN_LABEL} transfer...`);
 
       const tx = new Transaction();
 
@@ -168,10 +168,10 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
             coinType: string;
           }) => Promise<{ objects: { objectId: string; balance: string }[] }>;
         }
-      ).listCoins({ owner: account.address, coinType: paymentTokenType });
+      ).listCoins({ owner: account.address, coinType: settlementTokenType });
 
       const coinObjects = coins.objects ?? [];
-      if (coinObjects.length === 0) throw new Error(`No ${PAYMENT_TOKEN_LABEL} found in wallet`);
+      if (coinObjects.length === 0) throw new Error(`No ${SETTLEMENT_TOKEN_LABEL} found in wallet`);
 
       // Merge all coins → split transfer amount.
       // The relayer's resolvePaymentSource handles R-9 coin collision and
@@ -188,7 +188,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
       const [transferCoin] = tx.splitCoins(primaryCoin, [tx.pure.u64(transferMist)]);
       tx.transferObjects([transferCoin], recipient);
 
-      addLog(`Transferring ${amount} ${PAYMENT_TOKEN_LABEL} to ${recipient.slice(0, 10)}...`);
+      addLog(`Transferring ${amount} ${SETTLEMENT_TOKEN_LABEL} to ${recipient.slice(0, 10)}...`);
       addLog(`Slippage: ${parsedSlippagePercent}% (${parsedSlippageBps} bps)`);
       setStatus('executing');
 
@@ -203,7 +203,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
           return signature;
         },
         addr: account.address,
-        paymentToken: { type: paymentTokenType },
+        settlementToken: { type: settlementTokenType },
         slippageBps: parsedSlippageBps,
         onGasEstimate: (_, amountHuman, symbol) => {
           if (amountHuman !== '0') {
@@ -259,7 +259,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
   return (
     <div style={SANDBOX_CARD_STYLE}>
       <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>
-        📤 Sponsored Transfer ({PAYMENT_TOKEN_LABEL})
+        📤 Sponsored Transfer ({SETTLEMENT_TOKEN_LABEL})
       </h3>
 
       <div style={{ marginBottom: 12 }}>
@@ -273,7 +273,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
         />
       </div>
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Amount ({PAYMENT_TOKEN_LABEL})</label>
+        <label style={labelStyle}>Amount ({SETTLEMENT_TOKEN_LABEL})</label>
         <input
           type="number"
           value={amount}
@@ -349,7 +349,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
               : 1,
         }}
       >
-        {isBusy ? status.toUpperCase() : `📤 Transfer ${amount} ${PAYMENT_TOKEN_LABEL}`}
+        {isBusy ? status.toUpperCase() : `📤 Transfer ${amount} ${SETTLEMENT_TOKEN_LABEL}`}
       </button>
 
       <div style={{ marginTop: 12 }}>

@@ -15,7 +15,7 @@ interface CanonicalPrepareAuthorizationMessage {
   packageId: string;
   senderAddress: string;
   txKindBytesHash: string;
-  paymentTokenType: string;
+  settlementTokenType: string;
   slippageBps: number | null;
   gasMarginBps: number | null;
   orderId: string | null;
@@ -67,7 +67,7 @@ function canonicalPrepareAuthorizationFields(
       requireNonEmptyString(fields.txKindBytesHash, 'txKindBytesHash'),
       'txKindBytesHash',
     ),
-    paymentTokenType: requireNonEmptyString(fields.paymentTokenType, 'paymentTokenType'),
+    settlementTokenType: requireNonEmptyString(fields.settlementTokenType, 'settlementTokenType'),
     slippageBps: optionalNonNegativeInteger(fields.slippageBps, 'slippageBps'),
     gasMarginBps: optionalNonNegativeInteger(fields.gasMarginBps, 'gasMarginBps'),
     orderId,

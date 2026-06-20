@@ -5,7 +5,7 @@
  * §1: Sponsor Operations — refill controls and thresholds
  * §2: Fee Config — host + on-chain fee parameters
  * §3: Studio Settings — JWT/API key config status (studio-only)
- * §4: Supported Settlement Swap Paths — payment token settlement
+ * §4: Supported Settlement Swap Paths — settlement token settlement
  * §5: On-chain IDs — contract reference (rarely changes)
  *
  */
@@ -159,7 +159,7 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Fee charged by the Host per sponsored transaction. Added to user's payment token cost (env: HOST_FEE_MIST)"
+                  title="Fee charged by the Host per sponsored transaction. Added to user's settlement token cost (env: HOST_FEE_MIST)"
                 >
                   Host Fee
                 </td>
@@ -321,7 +321,7 @@ export function ConfigPage() {
           <table className="admin-table">
             <thead>
               <tr>
-                <th title="Payment token symbol">Token</th>
+                <th title="Settlement token symbol">Token</th>
                 <th title="Settlement swap path through DeepBook pools to convert to SUI">Path</th>
                 <th title="Stelis input-fee basis for DeepBook execution. 0% = whitelisted pool (no fee)">
                   DeepBook Fee
@@ -333,7 +333,7 @@ export function ConfigPage() {
             </thead>
             <tbody>
               {data.supportedSettlementSwapPaths.map((p) => {
-                const symbol = p.paymentTokenSymbol;
+                const symbol = p.settlementTokenSymbol;
                 const hopCount = p.hops.length;
                 const midSymbol =
                   hopCount >= 2
@@ -347,7 +347,7 @@ export function ConfigPage() {
                 const swapPath =
                   hopCount === 1 ? `${symbol} → SUI` : `${symbol} → ${midSymbol} → SUI`;
                 return (
-                  <tr key={p.paymentTokenType}>
+                  <tr key={p.settlementTokenType}>
                     <td style={{ fontWeight: 600 }}>{symbol}</td>
                     <td style={{ color: '#94a3b8' }}>{swapPath}</td>
                     <td
@@ -367,15 +367,15 @@ export function ConfigPage() {
                         color: '#64748b',
                         textAlign: 'right',
                       }}
-                      title={p.paymentTokenType}
+                      title={p.settlementTokenType}
                     >
                       {(() => {
-                        const parts = p.paymentTokenType.split('::');
+                        const parts = p.settlementTokenType.split('::');
                         if (parts.length >= 3) {
                           const pkg = parts[0];
                           return `${pkg.length > 14 ? `${pkg.slice(0, 8)}…${pkg.slice(-4)}` : pkg}::${parts.slice(1).join('::')}`;
                         }
-                        return p.paymentTokenType;
+                        return p.settlementTokenType;
                       })()}
                     </td>
                   </tr>

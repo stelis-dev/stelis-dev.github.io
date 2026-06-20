@@ -282,18 +282,18 @@ function makeInput(
           feeBps: 0,
         },
       ],
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 1n,
       minSize: 1n,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote',
     } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
     descriptor: {
-      paymentTokenType: '0xDEEP::deep::DEEP',
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote',
       hops: [
@@ -2744,7 +2744,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_quantity_out_verify_logical_calls).toBe(3);
     expect(failed!.payload.quote_cache_hits).toBe(0);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // The planner's economic target is captured even though the solver
     // threw before any quote object existed. Without this field, an
     // operator triaging a failed quote cannot recover the target the
@@ -2801,7 +2801,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_rpc_max_ms).toBe(60);
     expect(failed!.payload.quote_rpc_stats_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // pass1 emit succeeded before the failure; aggregate did not.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeDefined();
     expect(events.find((e) => e.stage === 'two_pass_complete')).toBeUndefined();
@@ -2863,7 +2863,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(2);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
     expect(aborted!.payload.pool_id).toBe('0xPOOL');
-    expect(aborted!.payload.payment_token_symbol).toBe('DEEP');
+    expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Caller never absorbed pass1 stats → no per-pass emit, no aggregate.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeUndefined();
     expect(events.find((e) => e.stage === 'two_pass_complete')).toBeUndefined();
@@ -2919,7 +2919,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(1);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
     expect(aborted!.payload.pool_id).toBe('0xPOOL');
-    expect(aborted!.payload.payment_token_symbol).toBe('DEEP');
+    expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Funding emit happened (resolvePaymentSource succeeded), but pass1 emit
     // never did because compile threw before caller absorption.
     expect(events.find((e) => e.stage === 'run_prepare_pass_funding_resolved')).toBeDefined();
@@ -3126,18 +3126,18 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
             feeBps: 0,
           },
         ],
-        paymentTokenType: '0xUSDC::usdc::USDC',
-        paymentTokenSymbol: 'USDC',
-        paymentTokenDecimals: 6,
+        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenSymbol: 'USDC',
+        settlementTokenDecimals: 6,
         lotSize: 1_000n,
         minSize: 1_000_000_000n,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'quoteForBase',
       } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
       descriptor: {
-        paymentTokenType: '0xUSDC::usdc::USDC',
-        paymentTokenSymbol: 'USDC',
-        paymentTokenDecimals: 6,
+        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenSymbol: 'USDC',
+        settlementTokenDecimals: 6,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'quoteForBase',
         hops: [
@@ -3220,7 +3220,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(typeof failed!.payload.mid_price_total_ms).toBe('number');
     expect(failed!.payload.mid_price_stats_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Mid-price failure is upstream of any solve work — neither solve-time
     // nor post-solve emits should fire.
     expect(events.find((e) => e.stage === 'quote_rpc_failed')).toBeUndefined();
@@ -3281,7 +3281,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.pass).toBe('credit_preswap');
     expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     expect(failed!.payload.phase_complete).toBe(false);
     // Quote-stats schema: credit_preswap path is upstream of any quote solve,
     // so all 8 quote-stat fields are zero and the marker is `false` because
@@ -3336,7 +3336,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.error_code).toBe('UNKNOWN');
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema: pass1 dry-run runs AFTER pass1 quote-solve has
     // already accumulated, so the failure emit MUST carry forward the injected
     // non-zero pass1 stats. Marker is `false` because pass1.5 / pass2 quote
@@ -3400,7 +3400,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.completed_stage_emitted).toBe(true);
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema with non-zero forward-carry — same lock as
     // `dryrun_simulate_failed`. Pass1 stats already accumulated by the time
     // dry-run runs; the dual-emit (simulated + extract_failed) does not
@@ -3441,7 +3441,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
     expect(failed!.payload.phase_complete).toBe(false);
     expect(failed!.payload.pool_id).toBe('0xPOOL');
-    expect(failed!.payload.payment_token_symbol).toBe('DEEP');
+    expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Final safeBuild fails after all quote work has completed, so this
     // lifecycle failure still carries a complete request-level quote-stats
     // payload. The default mock path has one mid-price RPC and no quote-port

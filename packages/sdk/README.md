@@ -40,7 +40,7 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | **You prepare**             | wallet bridge, prepare authorization signer, transaction signer, user-intent PTB, endpoint choice, and approval policy                          |
 | **Stelis provides**         | the shipped `StelisSDK`, runtime capability discovery through `supportedSettlementSwapPaths`, and prepare/sponsor orchestration helpers                      |
-| **Shared boundary**         | choose `paymentToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
+| **Shared boundary**         | choose `settlementToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
 | **Out of scope for Stelis** | wallet custody, MCP runtime, agent autonomy, and human approval UX                                                                             |
 
 > The SDK does not retry Host errors. It returns Host failures as `StelisApiException` or `StelisSponsoredError` with the Host-provided code, and retry/backoff policy belongs on your side. Capacity codes include `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`, `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`. `ABUSE_BLOCKED` includes `retryAfterMs`; raw HTTP clients also receive `Retry-After` for `PREPARE_OVERLOADED`.
@@ -160,8 +160,8 @@ npm install @stelis/sdk
 (bundled at build time from the shared internal contract package).
 `settlementPayoutRecipient` is the settlement payout recipient address for `executionCostClaim` plus the quoted host fee.
 
-`supportedSettlementSwapPaths` contains one active settlement swap path per `paymentTokenType`.
-SDK calls choose a settlement token with `paymentToken.type`; they do not send a pool ID or path ID.
+`supportedSettlementSwapPaths` contains one active settlement swap path per `settlementTokenType`.
+SDK calls choose a settlement token with `settlementToken.type`; they do not send a pool ID or path ID.
 If a token is absent from `supportedSettlementSwapPaths`, the SDK treats it as unsupported on that Host.
 The Host operator can add new settlement swap paths via `packages/app-api/settlement-swap-paths.json` — see [operations.md -> Settlement Token Onboarding Procedure](../../docs/operations.md#settlement-token-onboarding-procedure).
 
@@ -221,7 +221,7 @@ const result = await sdk.executeSponsored(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE }, // amount auto-calculated from prepare cost + exchange rate
+  settlementToken: { type: DEEP_TYPE }, // amount auto-calculated from prepare cost + exchange rate
   orderId: 'invoice-2026-001', // optional: external reference for payment tracking
 });
 console.log(result.digest);
@@ -238,7 +238,7 @@ const result = await sdk.executeSponsored(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
   onGasEstimate: (amount, amountHuman, symbol) => {
     showToast(`Gas cost: ${amountHuman} ${symbol}`);
   },
@@ -250,7 +250,7 @@ const result = await sdk.executeSponsored(tx, {
 ```typescript
 const est = await sdk.estimateGas(suiClient, {
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
 });
 // est.amountHuman   → '3.120000' (display unit amount)
 // est.displayUnit   → 'DEEP' or 'SUI' (depends on profile)
@@ -259,7 +259,7 @@ const est = await sdk.estimateGas(suiClient, {
 // est.canSkipLiquidity → true when credit_general (no swap needed)
 ```
 
-`paymentToken` is required.
+`settlementToken` is required.
 
 ### Programmatic Signer (Server or Agent Runtime)
 
@@ -275,7 +275,7 @@ const USDC_TYPE = '0x...::usdc::USDC';
 const result = await sdk.executeSponsored(tx, {
   client: suiClient,
   addr: keypair.toSuiAddress(),
-  paymentToken: { type: USDC_TYPE },
+  settlementToken: { type: USDC_TYPE },
   prepareAuthorizationSigner: async (messageBytes: Uint8Array) => {
     const { signature } = await keypair.signPersonalMessage(messageBytes);
     return signature;
@@ -310,7 +310,7 @@ const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
 
 For promotion-specific flows, use `executePromotionSponsored()`. This uses dedicated
 `/studio/promotions/:id/prepare` and `/studio/promotions/:id/sponsor` endpoints instead
-of the generic sponsored path. No `paymentToken` is needed — the promotion budget covers gas.
+of the generic sponsored path. No `settlementToken` is needed — the promotion budget covers gas.
 
 ```typescript
 const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
@@ -484,7 +484,7 @@ tx.add(
 const result = await stelis.executeSponsored(tx, {
   client,
   addr: userAddress,
-  paymentToken: { type: USDC_TYPE },
+  settlementToken: { type: USDC_TYPE },
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   onGasEstimate: (amount, amountHuman) => {
@@ -543,7 +543,7 @@ const result = await sdk.executeSuiFirst(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  paymentToken: { type: DEEP_TYPE }, // used only if sponsored execution is selected
+  settlementToken: { type: DEEP_TYPE }, // used only if sponsored execution is selected
 });
 
 console.log(result.path); // 'sui' | 'sponsored' (for debug/tracing)
@@ -669,7 +669,7 @@ Choose monorepo source helpers instead when:
 
 ### Gas Auto-Calculation
 
-When `paymentToken.amount` is omitted, the SDK auto-calculates swap amount:
+When `settlementToken.amount` is omitted, the SDK auto-calculates swap amount:
 
 1. **Needed SUI** = `executionCostClaim + fee + protocolFee` (from the prepare response)
 2. **Payment amount** = `neededSuiMist × FLOAT_SCALING(1e9) / midPrice × margin`

@@ -30,7 +30,7 @@ export interface CoinSelectionResult {
 }
 
 /**
- * Result of resolvePaymentSource(): determines where the payment token comes from.
+ * Result of resolvePaymentSource(): determines where the settlement token comes from.
  *
  * Callers use `source` to branch into the correct PTB construction path:
  * - `coin_object`: existing selectPaymentCoin() flow
@@ -41,7 +41,7 @@ export interface PaymentSourceResolution {
   source: PaymentInputSource;
   /** Total usable coin object balance (MIST). 0 if no usable objects. */
   usableCoinTotal: bigint;
-  /** Address balance available for payment token (MIST). 0 if not queried or disabled. */
+  /** Address balance available for settlement token (MIST). 0 if not queried or disabled. */
   addressBalance: bigint;
   /** Usable coin objects (filtered by R-9 consumed set). Empty if none. */
   usableCoins: Array<{ objectId: string; balance: string }>;
@@ -191,7 +191,7 @@ export async function selectPaymentCoin(
 // ─────────────────────────────────────────────
 
 /**
- * Determine where the payment token comes from: coin objects, address balance,
+ * Determine where the settlement token comes from: coin objects, address balance,
  * or a mix of both.
  *
  * Selection priority:

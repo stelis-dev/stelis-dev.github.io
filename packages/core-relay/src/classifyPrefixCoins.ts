@@ -340,7 +340,7 @@ function resolveWithdrawFrom(
 
 /**
  * Extract the total address-balance consumption from user prefix FundsWithdrawal
- * inputs that match the payment token type.
+ * inputs that match the settlement token type.
  *
  * FundsWithdrawal inputs represent Sui address-balance withdrawals (`tx.withdrawal()`).
  * The classifier (`classifyUserTxCoins`) tracks object provenance only and does not
@@ -364,10 +364,10 @@ function resolveWithdrawFrom(
  */
 export function extractPrefixWithdrawals(
   tx: Transaction,
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): { total: bigint; unaccountable: boolean } {
   const inputs = tx.getData().inputs as Record<string, unknown>[];
-  const normalizedPaymentType = normalizeStructTag(paymentTokenType);
+  const normalizedPaymentType = normalizeStructTag(settlementTokenType);
   let total = 0n;
   let unaccountable = false;
 

@@ -72,9 +72,9 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
             feeBps: 0,
           },
         ],
-        paymentTokenType: `${CANONICAL_PKG}::deep::DEEP`,
-        paymentTokenSymbol: 'DEEP',
-        paymentTokenDecimals: 6,
+        settlementTokenType: `${CANONICAL_PKG}::deep::DEEP`,
+        settlementTokenSymbol: 'DEEP',
+        settlementTokenDecimals: 6,
         lotSize: 100,
         minSize: 1_000_000,
         effectiveFeeRateBps: 0,
@@ -126,7 +126,7 @@ function callPrepareSponsored(sdk: StelisSDK) {
       listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
     } as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
     addr: '0x' + 'a'.repeat(64),
-    paymentToken: { type: `${CANONICAL_PKG}::deep::DEEP` },
+    settlementToken: { type: `${CANONICAL_PKG}::deep::DEEP` },
     prepareAuthorizationSigner: vi.fn().mockResolvedValue('prepare-signature'),
   });
 }

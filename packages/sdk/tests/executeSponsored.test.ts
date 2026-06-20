@@ -112,9 +112,9 @@ const RELAYER_CONFIG: RelayerConfig = {
           feeBps: 0,
         },
       ],
-      paymentTokenType: DEEP_TYPE,
-      paymentTokenSymbol: 'DEEP',
-      paymentTokenDecimals: 6,
+      settlementTokenType: DEEP_TYPE,
+      settlementTokenSymbol: 'DEEP',
+      settlementTokenDecimals: 6,
       lotSize: 100,
       minSize: 1_000_000,
       effectiveFeeRateBps: 0,
@@ -143,7 +143,7 @@ const defaultOpts = () => ({
   prepareAuthorizationSigner: vi.fn().mockResolvedValue('prepare-sig-base64'),
   signer: vi.fn().mockResolvedValue('user-sig-base64'),
   addr: ADDR,
-  paymentToken: { type: DEEP_TYPE },
+  settlementToken: { type: DEEP_TYPE },
 });
 
 // ─────────────────────────────────────────────

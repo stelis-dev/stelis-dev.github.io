@@ -66,7 +66,7 @@ describe('Stelis MCP operations', () => {
       timeoutMs: 500,
       txKindBytes: 'kind',
       senderAddress: '0x1234',
-      paymentTokenType: '0x2::sui::SUI',
+      settlementTokenType: '0x2::sui::SUI',
       slippageBps: 25,
       txKindBytesHash: '0x' + '11'.repeat(32),
       prepareAuthorizationTimestampMs: 1_700_000_000_000,
@@ -80,7 +80,7 @@ describe('Stelis MCP operations', () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       txKindBytes: 'kind',
       senderAddress: '0x1234',
-      paymentTokenType: '0x2::sui::SUI',
+      settlementTokenType: '0x2::sui::SUI',
       slippageBps: 25,
       txKindBytesHash: '0x' + '11'.repeat(32),
       prepareAuthorizationTimestampMs: 1_700_000_000_000,

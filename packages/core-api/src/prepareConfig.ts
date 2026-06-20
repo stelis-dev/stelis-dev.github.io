@@ -55,13 +55,13 @@ export function parseHostFeeEnv(envValue: string | undefined): bigint {
 export function deriveAllowedSettlementSwapPaths(
   settlementSwapPaths: SingleHopSettlementSwapPath[],
 ): AllowedSettlementSwapPath[] {
-  assertUniquePaymentTokenTypes(settlementSwapPaths);
+  assertUniqueSettlementTokenTypes(settlementSwapPaths);
   return settlementSwapPaths.map((settlementSwapPath) => {
     const expectedDeepBookSwapDirections =
       SETTLEMENT_SWAP_DIRECTION_VECTORS[settlementSwapPath.settlementSwapDirection];
     if (settlementSwapPath.hops.length !== expectedDeepBookSwapDirections.length) {
       throw new Error(
-        `Settlement swap path ${settlementSwapPath.paymentTokenSymbol}: settlementSwapDirection '${settlementSwapPath.settlementSwapDirection}' requires ` +
+        `Settlement swap path ${settlementSwapPath.settlementTokenSymbol}: settlementSwapDirection '${settlementSwapPath.settlementSwapDirection}' requires ` +
           `${expectedDeepBookSwapDirections.length} hop(s), got ${settlementSwapPath.hops.length}`,
       );
     }
@@ -70,30 +70,30 @@ export function deriveAllowedSettlementSwapPaths(
       const expected = expectedDeepBookSwapDirections[i];
       if (actual !== expected) {
         throw new Error(
-          `Settlement swap path ${settlementSwapPath.paymentTokenSymbol}: settlementSwapDirection '${settlementSwapPath.settlementSwapDirection}' requires ` +
+          `Settlement swap path ${settlementSwapPath.settlementTokenSymbol}: settlementSwapDirection '${settlementSwapPath.settlementSwapDirection}' requires ` +
             `hops[${i}].swapDirection='${expected}', got '${actual}'`,
         );
       }
     }
     return {
-      tokenType: settlementSwapPath.paymentTokenType,
+      tokenType: settlementSwapPath.settlementTokenType,
       hops: settlementSwapPath.hops.map((h) => h.poolId),
       settlementSwapDirection: settlementSwapPath.settlementSwapDirection,
     };
   });
 }
 
-function assertUniquePaymentTokenTypes(
+function assertUniqueSettlementTokenTypes(
   settlementSwapPaths: readonly SingleHopSettlementSwapPath[],
 ): void {
   const seen = new Set<string>();
   for (const settlementSwapPath of settlementSwapPaths) {
-    if (seen.has(settlementSwapPath.paymentTokenType)) {
+    if (seen.has(settlementSwapPath.settlementTokenType)) {
       throw new Error(
-        `[PREPARE_CONFIG] Duplicate paymentTokenType in supported settlement swap paths: ${settlementSwapPath.paymentTokenType}`,
+        `[PREPARE_CONFIG] Duplicate settlementTokenType in supported settlement swap paths: ${settlementSwapPath.settlementTokenType}`,
       );
     }
-    seen.add(settlementSwapPath.paymentTokenType);
+    seen.add(settlementSwapPath.settlementTokenType);
   }
 }
 
@@ -103,34 +103,34 @@ function assertDescriptorMatchesSettlementSwapPath(
 ): void {
   if (!descriptor) {
     throw new Error(
-      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${settlementSwapPath.paymentTokenType}`,
+      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${settlementSwapPath.settlementTokenType}`,
     );
   }
   const mismatch = (field: string, expected: unknown, actual: unknown): Error =>
     new Error(
-      `[PREPARE_CONFIG] StaticSettlementSwapPathDescriptor mismatch for ${settlementSwapPath.paymentTokenSymbol}: ` +
+      `[PREPARE_CONFIG] StaticSettlementSwapPathDescriptor mismatch for ${settlementSwapPath.settlementTokenSymbol}: ` +
         `${field} expected ${String(expected)}, got ${String(actual)}`,
     );
 
-  if (descriptor.paymentTokenType !== settlementSwapPath.paymentTokenType) {
+  if (descriptor.settlementTokenType !== settlementSwapPath.settlementTokenType) {
     throw mismatch(
-      'paymentTokenType',
-      settlementSwapPath.paymentTokenType,
-      descriptor.paymentTokenType,
+      'settlementTokenType',
+      settlementSwapPath.settlementTokenType,
+      descriptor.settlementTokenType,
     );
   }
-  if (descriptor.paymentTokenSymbol !== settlementSwapPath.paymentTokenSymbol) {
+  if (descriptor.settlementTokenSymbol !== settlementSwapPath.settlementTokenSymbol) {
     throw mismatch(
-      'paymentTokenSymbol',
-      settlementSwapPath.paymentTokenSymbol,
-      descriptor.paymentTokenSymbol,
+      'settlementTokenSymbol',
+      settlementSwapPath.settlementTokenSymbol,
+      descriptor.settlementTokenSymbol,
     );
   }
-  if (descriptor.paymentTokenDecimals !== settlementSwapPath.paymentTokenDecimals) {
+  if (descriptor.settlementTokenDecimals !== settlementSwapPath.settlementTokenDecimals) {
     throw mismatch(
-      'paymentTokenDecimals',
-      settlementSwapPath.paymentTokenDecimals,
-      descriptor.paymentTokenDecimals,
+      'settlementTokenDecimals',
+      settlementSwapPath.settlementTokenDecimals,
+      descriptor.settlementTokenDecimals,
     );
   }
   if (descriptor.effectiveFeeRateBps !== settlementSwapPath.effectiveFeeRateBps) {
@@ -183,12 +183,12 @@ function assertSettlementSwapPathDescriptorCoverage(
   descriptors: StaticSettlementSwapPathDescriptorMap,
 ): void {
   const expectedTokens = new Set(
-    settlementSwapPaths.map((settlementSwapPath) => settlementSwapPath.paymentTokenType),
+    settlementSwapPaths.map((settlementSwapPath) => settlementSwapPath.settlementTokenType),
   );
   for (const settlementSwapPath of settlementSwapPaths) {
     assertDescriptorMatchesSettlementSwapPath(
       settlementSwapPath,
-      descriptors.get(settlementSwapPath.paymentTokenType),
+      descriptors.get(settlementSwapPath.settlementTokenType),
     );
   }
   for (const tokenType of descriptors.keys()) {

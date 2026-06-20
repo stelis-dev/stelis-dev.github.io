@@ -382,8 +382,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
   },
 
   // ── Pool / token / order-id config ────────────────────────────────
-  UNSUPPORTED_PAYMENT_TOKEN: {
-    code: 'UNSUPPORTED_PAYMENT_TOKEN',
+  UNSUPPORTED_SETTLEMENT_TOKEN: {
+    code: 'UNSUPPORTED_SETTLEMENT_TOKEN',
     classification: 'normal',
     httpStatus: 422,
     abuseImpact: IP_ONLY,

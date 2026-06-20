@@ -14,7 +14,7 @@ export const MAX_PREPARE_REQUEST_NONCE_BYTES = 128;
 export interface PrepareAuthorizationParams {
   txKindBytes: string;
   senderAddress: string;
-  paymentTokenType: string;
+  settlementTokenType: string;
   slippageBps?: number;
   gasMarginBps?: number;
   orderId?: string;
@@ -115,7 +115,7 @@ export function prepareAuthorizationFields(
     packageId: ctx.packageId,
     senderAddress: params.senderAddress,
     txKindBytesHash: normalizedTxKindBytesHash,
-    paymentTokenType: params.paymentTokenType,
+    settlementTokenType: params.settlementTokenType,
     slippageBps: params.slippageBps,
     gasMarginBps: params.gasMarginBps,
     orderId: params.orderId,

@@ -80,7 +80,7 @@ export interface GenericPrepareBuildOutput {
   slippageBufferMist: bigint;
   grossGas: bigint;
   profile: SettleProfile;
-  /** How the payment token was sourced for this build. */
+  /** How the settlement token was sourced for this build. */
   paymentInputSource: PaymentInputSource;
   /** Final pass2 swap input amount. 0 for credit-only settlement. */
   swapAmountSmallest: bigint;

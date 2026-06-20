@@ -106,7 +106,7 @@ import { parseBps, mist, type Bps, type Mist } from '../../internal/brand.js';
 export interface GenericPreparePolicyParams {
   readonly txKindBytes: string;
   readonly senderAddress: string;
-  readonly paymentTokenType: string;
+  readonly settlementTokenType: string;
   readonly slippageBps?: number;
   readonly gasMarginBps?: number;
   readonly clientIp: string;
@@ -285,7 +285,7 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
         const prepare = requirePrepare(options);
         logPrepareStage('request_received', {
           sender: prepare.params.senderAddress,
-          payment_token_type: prepare.params.paymentTokenType,
+          settlement_token_type: prepare.params.settlementTokenType,
           has_order_id: prepare.params.orderId !== undefined,
         });
         assertPrepareCtx(ctx, prepare.params);
@@ -563,7 +563,7 @@ async function runGenericRequestValidation(
   const validationResult = validateGenericUserTransactionKind(
     userTx,
     env,
-    prepare.params.paymentTokenType,
+    prepare.params.settlementTokenType,
   );
   if (!validationResult.ok) {
     throw new PrepareValidationError(
@@ -574,21 +574,21 @@ async function runGenericRequestValidation(
 
   state.settlementSwapPath = findSettlementSwapPath(
     prepare.config.supportedSettlementSwapPaths,
-    prepare.params.paymentTokenType,
+    prepare.params.settlementTokenType,
   );
   if (!state.settlementSwapPath) {
     throw new PrepareValidationError(
-      'UNSUPPORTED_PAYMENT_TOKEN',
-      `Payment token ${prepare.params.paymentTokenType} is not supported`,
+      'UNSUPPORTED_SETTLEMENT_TOKEN',
+      `Settlement token ${prepare.params.settlementTokenType} is not supported`,
     );
   }
   state.descriptor = findSettlementSwapPathDescriptor(
     prepare.config.settlementSwapPathDescriptors,
-    prepare.params.paymentTokenType,
+    prepare.params.settlementTokenType,
   );
   if (!state.descriptor) {
     throw new Error(
-      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${prepare.params.paymentTokenType}`,
+      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${prepare.params.settlementTokenType}`,
     );
   }
 
@@ -1473,18 +1473,18 @@ function buildGenericExecutionPathKey(
 
 function findSettlementSwapPath(
   settlementSwapPaths: readonly SingleHopSettlementSwapPath[] | undefined,
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): SingleHopSettlementSwapPath | undefined {
   return settlementSwapPaths?.find(
-    (settlementSwapPath) => settlementSwapPath.paymentTokenType === paymentTokenType,
+    (settlementSwapPath) => settlementSwapPath.settlementTokenType === settlementTokenType,
   );
 }
 
 function findSettlementSwapPathDescriptor(
   descriptors: StaticSettlementSwapPathDescriptorMap | undefined,
-  paymentTokenType: string,
+  settlementTokenType: string,
 ): StaticSettlementSwapPathDescriptor | undefined {
-  return descriptors?.get(paymentTokenType);
+  return descriptors?.get(settlementTokenType);
 }
 
 function parseReceiptIdBytes(receiptId: string): Uint8Array {

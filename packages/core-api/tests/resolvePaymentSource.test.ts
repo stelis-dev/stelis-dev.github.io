@@ -226,7 +226,7 @@ describe('resolvePaymentSource — 6-cell functional matrix', () => {
   // Cell 3: AB-only + does not touch → address_balance
   // Covered by "no coin objects, AB sufficient → address_balance".
 
-  // Cell 4: AB-only + user touches payment token via tx.withdrawal()
+  // Cell 4: AB-only + user touches settlement token via tx.withdrawal()
   // No coin objects exist. User prefix uses tx.withdrawal() to consume some AB.
   // Resolver has no mechanism to receive prefix AB consumption → sees full AB.
   it('cell 4: AB-only + user touches AB via withdrawal → resolver sees full AB (gap)', async () => {
