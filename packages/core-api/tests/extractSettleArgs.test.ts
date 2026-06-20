@@ -113,7 +113,7 @@ import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.j
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { toBase64 } from '@mysten/sui/utils';
 import type { PtbCommand } from '@stelis/contracts';
-import type { RelayerEnv } from '@stelis/core-relay';
+import type { HostValidationEnv } from '@stelis/core-relay';
 
 /** Encode a u64 as base64 BCS (8-byte little-endian). */
 function encodeU64(value: bigint): string {
@@ -176,9 +176,9 @@ function makePureVectorU8Input(data: Uint8Array) {
   return { $kind: 'Pure', Pure: { bytes: encodePureVectorU8(data) } };
 }
 
-const DUMMY_ENV: RelayerEnv = {
+const DUMMY_ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
   packageId: '0x' + '11'.repeat(32),

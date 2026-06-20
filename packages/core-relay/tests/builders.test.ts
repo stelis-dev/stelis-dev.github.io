@@ -34,7 +34,7 @@ import {
   SETTLE_WITH_CREDIT_FUNCTION,
   type SettlementSwapDirection,
 } from '@stelis/contracts';
-import type { OnchainConfig, RelayerEnv } from '../src/types.js';
+import type { OnchainConfig, HostValidationEnv } from '../src/types.js';
 
 // ─────────────────────────────────────────────
 // Fixtures
@@ -62,9 +62,9 @@ const ONCHAIN_CONFIG: OnchainConfig = {
   maxSpreadBps: 500n,
 };
 
-const RELAYER_ENV: RelayerEnv = {
+const HOST_VALIDATION_ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: ROUNDTRIP_RECIPIENT,
+  settlementPayoutRecipientAddress: ROUNDTRIP_RECIPIENT,
   configId: CONFIG,
   vaultRegistryId: REGISTRY,
   packageId: PKG,
@@ -428,9 +428,9 @@ describe('builder, parser, and static validation share every current settlement 
       const call = findMoveCall(rawCommands);
       expect(call.function).toBe(entry.functionName);
 
-      expect(validatePtbStructure(normalizedCommands, RELAYER_ENV)).toEqual({ ok: true });
+      expect(validatePtbStructure(normalizedCommands, HOST_VALIDATION_ENV)).toEqual({ ok: true });
       const parsed = parseSettleArgs(normalizedCommands, inputs, PKG);
-      expect(validateSettleArgs(parsed, ONCHAIN_CONFIG, RELAYER_ENV)).toEqual({ ok: true });
+      expect(validateSettleArgs(parsed, ONCHAIN_CONFIG, HOST_VALIDATION_ENV)).toEqual({ ok: true });
     });
   }
 });

@@ -12,7 +12,7 @@
  *   - Periodic eviction of expired entries
  *
  * Test-only fixture. Production hosts inject `RedisRateLimiter` through
- * `createRelayerContext()`; this class is not exported from the
+ * `createHostContext()`; this class is not exported from the
  * `@stelis/core-api` main barrel and is not a runtime fallback.
  */
 import type { RateLimitAdapter, RateLimitResult, RateLimitConfig } from './rateLimitTypes.js';

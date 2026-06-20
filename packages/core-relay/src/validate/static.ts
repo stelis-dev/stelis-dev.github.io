@@ -8,7 +8,7 @@
 import { MAX_COMMANDS } from '../constants.js';
 import { SETTLE_MODULE, SETTLE_FUNCTIONS, SETTLE_WITH_CREDIT_FUNCTION } from '@stelis/contracts';
 import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
-import type { OnchainConfig, RelayerEnv, SettleArgs, ValidationResult } from '../types.js';
+import type { OnchainConfig, HostValidationEnv, SettleArgs, ValidationResult } from '../types.js';
 import { ok, fail } from '../types.js';
 
 /** Type guard: narrows PtbCommand to MoveCallCommand */
@@ -80,7 +80,7 @@ export function containsGasCoinReference(args: unknown[]): boolean {
  *   - Publish/Upgrade: always rejected
  *   - Command count: <= MAX_COMMANDS
  */
-export function validatePtbStructure(commands: PtbCommand[], env: RelayerEnv): ValidationResult {
+export function validatePtbStructure(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'L1_TOO_MANY_COMMANDS',
@@ -153,7 +153,7 @@ export function validatePtbStructure(commands: PtbCommand[], env: RelayerEnv): V
  *   - Stelis package guard (only vault::withdraw allowed)
  *   - Publish/Upgrade implicitly blocked by non-MoveCall allowlist
  */
-export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): ValidationResult {
+export function validateUserCommands(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'P1_TOO_MANY_COMMANDS',
@@ -212,7 +212,7 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
  * Checks (in order):
  *   1. Config object ID == env.configId
  *   2. VaultRegistry object ID == env.vaultRegistryId
- *   3. settlement_payout_recipient == env.relayerAddress
+ *   3. settlement_payout_recipient == env.settlementPayoutRecipientAddress
  *   4. execution_cost_claim_mist <= config.maxClaimMist
  *   5. quoted_host_fee_mist <= config.maxHostFeeMist (L2_HOST_FEE_CAP)
  *   6. expected_protocol_fee_mist == config.protocolFlatFeeMist (L2_PROTOCOL_FEE_MISMATCH)
@@ -232,7 +232,7 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
 export function validateSettleArgs(
   args: SettleArgs,
   config: OnchainConfig,
-  env: RelayerEnv,
+  env: HostValidationEnv,
   expectedPolicyHash?: Uint8Array,
   expectedOrderIdHash?: Uint8Array,
 ): ValidationResult {
@@ -255,10 +255,10 @@ export function validateSettleArgs(
   }
 
   // (3) Settlement payout recipient check
-  if (args.settlementPayoutRecipient !== env.relayerAddress) {
+  if (args.settlementPayoutRecipient !== env.settlementPayoutRecipientAddress) {
     return fail(
       'L2_WRONG_RECIPIENT',
-      `Settlement payout recipient mismatch: got ${args.settlementPayoutRecipient}, expected ${env.relayerAddress}`,
+      `Settlement payout recipient mismatch: got ${args.settlementPayoutRecipient}, expected ${env.settlementPayoutRecipientAddress}`,
     );
   }
 

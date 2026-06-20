@@ -108,7 +108,7 @@ import type { AppApiContext } from '../src/context.js';
 
 function createMockCtx(): AppApiContext {
   return {
-    relay: {
+    host: {
       network: 'testnet',
       packageId: '0xPKG',
       settlementPayoutRecipientAddress: '0xRECIPIENT',
@@ -619,8 +619,8 @@ describe('admin routes', () => {
     it('returns 422 when dry-run simulation fails', async () => {
       // nonce consumed by DEL (default mock returns 1)
       // simulateTransaction returns failure status
-      (mockCtx.relay as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.relay.sui,
+      (mockCtx.host as unknown as Record<string, unknown>).sui = {
+        ...mockCtx.host.sui,
         getBalance: vi.fn().mockResolvedValue({ balance: { balance: '1000000000' } }),
         simulateTransaction: vi.fn().mockResolvedValue({
           Transaction: {
@@ -643,8 +643,8 @@ describe('admin routes', () => {
     it('returns 200 on successful withdrawal', async () => {
       // nonce consumed by DEL (default mock returns 1)
       // simulateTransaction returns success, signAndExecute returns digest
-      (mockCtx.relay as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.relay.sui,
+      (mockCtx.host as unknown as Record<string, unknown>).sui = {
+        ...mockCtx.host.sui,
         getBalance: vi.fn().mockResolvedValue({ balance: { balance: '500000000' } }),
         simulateTransaction: vi.fn().mockResolvedValue({
           Transaction: {
@@ -1828,7 +1828,7 @@ describe('admin routes', () => {
     it('serialises the shared-state sponsor operations payload (no null/stale/generation)', async () => {
       const observedAtMs = 1_700_000_000_000;
       (
-        mockCtx.relay.sponsorPool.leaseStatus as unknown as ReturnType<typeof vi.fn>
+        mockCtx.host.sponsorPool.leaseStatus as unknown as ReturnType<typeof vi.fn>
       ).mockResolvedValueOnce({
         leasedSlots: 1,
         freeSlots: 1,
@@ -1943,7 +1943,7 @@ describe('admin routes', () => {
         minSettleMist: '50',
         configVersion: '1',
       });
-      expect(mockCtx.relay.getConfig).toHaveBeenCalled();
+      expect(mockCtx.host.getConfig).toHaveBeenCalled();
       expect(body.onChainIds).toBeDefined();
       expect(typeof body.studioEnabled).toBe('boolean');
     });

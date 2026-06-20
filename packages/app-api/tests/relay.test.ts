@@ -83,7 +83,7 @@ function prepareBody(overrides: Record<string, unknown> = {}): Record<string, un
 // ── Mock context factory ────────────────────────────────────────────────
 function createMockCtx(): AppApiContext {
   return {
-    relay: {
+    host: {
       network: 'testnet',
       packageId: '0xPKG',
       settlementPayoutRecipientAddress: '0xRECIPIENT',
@@ -333,7 +333,7 @@ describe('relay routes', () => {
     });
 
     it('returns 503 when getConfig fails', async () => {
-      (mockCtx.relay.getConfig as ReturnType<typeof vi.fn>).mockRejectedValue(
+      (mockCtx.host.getConfig as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('config refresh failed'),
       );
       const res = await app.request('/relay/config');
@@ -353,7 +353,7 @@ describe('relay routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
-      expect(mockCtx.relay.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
+      expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.objectContaining({
           slots: expect.any(Array),
@@ -394,7 +394,7 @@ describe('relay routes', () => {
         expect(await res.json()).toEqual({ error, code });
         expect(coreApi.handlePrepare).not.toHaveBeenCalled();
         expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       },
     );
 
@@ -418,7 +418,7 @@ describe('relay routes', () => {
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
       expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
       expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handlePrepare).not.toHaveBeenCalled();
     });
 
@@ -479,7 +479,7 @@ describe('relay routes', () => {
       expect(params.senderAddress).toBe(
         '0x0000000000000000000000000000000000000000000000000000000000000002',
       );
-      expect(mockCtx.relay.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
+      expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ requireFreeSponsorSlot: true }),
@@ -542,7 +542,7 @@ describe('relay routes', () => {
     });
 
     it('returns 429 on rate limit exceeded (prepare)', async () => {
-      (mockCtx.relay.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (mockCtx.host.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
         allowed: false,
         retryAfterMs: 5000,
       });
@@ -556,7 +556,7 @@ describe('relay routes', () => {
         }),
       });
       expect(res.status).toBe(429);
-      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith('prepare:client-ip:127.0.0.1');
+      expect(mockCtx.host.rateLimiter.check).toHaveBeenCalledWith('prepare:client-ip:127.0.0.1');
     });
 
     it('does not check sender address abuse at the HTTP route before authorization', async () => {
@@ -851,7 +851,7 @@ describe('relay routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
-      expect(mockCtx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
       const gateCall = vi.mocked(buildSponsorUnavailableResponse).mock.calls[0];
       expect(gateCall).toHaveLength(1);
       expect(gateCall?.[0]).toEqual(
@@ -882,7 +882,7 @@ describe('relay routes', () => {
         expect(await res.json()).toEqual({ error, code });
         expect(coreApi.handleSponsor).not.toHaveBeenCalled();
         expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       },
     );
 
@@ -906,7 +906,7 @@ describe('relay routes', () => {
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
       expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
       expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-      expect(mockCtx.relay.rateLimiter.check).not.toHaveBeenCalled();
+      expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handleSponsor).not.toHaveBeenCalled();
     });
 
@@ -922,7 +922,7 @@ describe('relay routes', () => {
     });
 
     it('returns 429 on rate limit exceeded', async () => {
-      (mockCtx.relay.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (mockCtx.host.rateLimiter.check as ReturnType<typeof vi.fn>).mockResolvedValue({
         allowed: false,
         retryAfterMs: 3000,
       });
@@ -932,7 +932,7 @@ describe('relay routes', () => {
         body: JSON.stringify(validBody),
       });
       expect(res.status).toBe(429);
-      expect(mockCtx.relay.rateLimiter.check).toHaveBeenCalledWith('sponsor:client-ip:127.0.0.1');
+      expect(mockCtx.host.rateLimiter.check).toHaveBeenCalledWith('sponsor:client-ip:127.0.0.1');
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {
@@ -966,7 +966,7 @@ describe('relay routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.digest).toBe('mock-digest');
-      expect(mockCtx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
 
       assertResponseKeys(body, 'sponsorResponse');
     });

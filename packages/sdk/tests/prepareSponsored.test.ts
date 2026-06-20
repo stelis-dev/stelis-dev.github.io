@@ -211,7 +211,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(mockValidateGenericUserTx).toHaveBeenCalledTimes(1);
     expect(mockValidateGenericUserTx.mock.calls[0][1]).toEqual({
       network: RELAY_CONFIG_RESPONSE.network,
-      relayerAddress: RELAY_CONFIG_RESPONSE.settlementPayoutRecipient,
+      settlementPayoutRecipientAddress: RELAY_CONFIG_RESPONSE.settlementPayoutRecipient,
       configId: STELIS_CONTRACT_IDS.testnet!.configId,
       vaultRegistryId: STELIS_CONTRACT_IDS.testnet!.vaultRegistryId,
       packageId: STELIS_CONTRACT_IDS.testnet!.packageId,

@@ -15,7 +15,7 @@
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { MoveCallCommand, PtbCommand } from '@stelis/contracts';
 import { SETTLEMENT_SWAP_DIRECTION_FUNCTIONS, SETTLE_MODULE } from '@stelis/contracts';
-import type { SettleArgs, RelayerEnv, ArgIndexMap } from '@stelis/core-relay';
+import type { SettleArgs, HostValidationEnv, ArgIndexMap } from '@stelis/core-relay';
 import { parseSettleArgs, ParseSettleArgsError, ARG_INDEX_MAP } from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
@@ -45,7 +45,7 @@ export interface ExtractSettleArgsOptions {
 export function extractSettleArgsFromBuiltTx(
   commands: PtbCommand[],
   inputs: unknown[],
-  _env: RelayerEnv,
+  _env: HostValidationEnv,
   options?: ExtractSettleArgsOptions,
 ): ExtractedSettleArgs {
   try {

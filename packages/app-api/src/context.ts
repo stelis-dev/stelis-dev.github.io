@@ -1,11 +1,11 @@
 /**
  * [app-api] Runtime context creation — host-layer singleton.
  *
- * Creates and caches a RelayerContext (generic) or StudioRelayContext (dual mode)
+ * Creates and caches a HostContext (generic) or StudioHostContext (dual mode)
  * using Redis-backed stores for multi-instance runtime operation.
  *
  * Shared references:
- *   - createRelayerContext → @stelis/core-api
+ *   - createHostContext → @stelis/core-api
  *   - resolvePrepareConfig, parseHostFeeEnv → @stelis/core-api/prepareConfig
  *   - Redis store adapters → @stelis/core-api (RedisPrepareStore, RedisSponsorPool, etc.)
  *   - Studio adapters → @stelis/core-api/studio
@@ -20,7 +20,7 @@
  *   the same initialization promise.
  */
 import {
-  createRelayerContext,
+  createHostContext,
   parseSponsorKey,
   parseSponsorKeys,
   RedisPrepareStore,
@@ -29,7 +29,7 @@ import {
   RedisAbuseBlocker,
   RedisPrepareInflight,
   RedisPrepareRequestNonceStore,
-  type RelayerContext,
+  type HostContext,
   type PreparedTxEntry,
 } from '@stelis/core-api';
 import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS } from '@stelis/contracts';
@@ -58,7 +58,7 @@ import {
   PREPARE_STORE_EVICT_CLEANUP_FAILED,
   PREPARE_STORE_EVICT_CLEANUP_THREW,
 } from '@stelis/core-api/observability';
-import type { StudioRelayContext, DeveloperJwtTrustConfig } from '@stelis/core-api/studio';
+import type { StudioHostContext, DeveloperJwtTrustConfig } from '@stelis/core-api/studio';
 import {
   RedisPromotionStore,
   hashTargets,
@@ -91,12 +91,12 @@ const SPONSOR_OPERATIONS_REFILL_LOCK_SAFETY_MARGIN_MS = 5_000;
 // ── Exported context interface ──────────────────────────────────────────
 
 export interface AppApiContext {
-  /** Base relay context (always available) */
-  relay: RelayerContext;
+  /** Base Host context (always available) */
+  host: HostContext;
   /** Prepare handler config (always available — generic + studio) */
   prepareConfig: import('@stelis/core-api').PrepareHandlerConfig;
   /** Studio context (only in dual mode — null in generic-only) */
-  studio: StudioRelayContext | null;
+  studio: StudioHostContext | null;
 
   /** Promotion registry store — null in generic-only */
   promotionStore: PromotionStoreAdapter | null;
@@ -126,7 +126,7 @@ export interface AppApiContext {
    * Sponsored execution recorder store. Owns recent log + lifetime
    * aggregate. Admin route reads via `getSummary()` / `getRecent()`;
    * sponsor SponsoredExecutionPolicy Release hooks write via the recorder callback wired into
-   * `relay.onSponsorResult`.
+   * `host.onSponsorResult`.
    */
   sponsoredLogsStore: import('./sponsoredLogs/store.js').SponsoredLogsStoreAdapter;
   /** Release all resources */
@@ -222,7 +222,7 @@ async function initContext(): Promise<AppApiContext> {
   const redis = await createRedisClient(requireEnv('REDIS_URL'));
 
   // Track disposable resources for cleanup on partial failure
-  let relay: RelayerContext | null = null;
+  let host: HostContext | null = null;
   let sponsorOperationsForCleanup: AppSponsorOperations | null = null;
 
   try {
@@ -335,8 +335,8 @@ async function initContext(): Promise<AppApiContext> {
       ) ?? sponsorPool.size * 2;
     const prepareInflightLimiter = new RedisPrepareInflight(redis, prepareInflightCapacity);
 
-    // ── 8. Create base RelayerContext ───────────────────────────────
-    relay = createRelayerContext({
+    // ── 8. Create base HostContext ───────────────────────────────
+    host = createHostContext({
       network,
       suiRpcUrl: '', // Not used when suiClient is provided
       suiClient,
@@ -360,7 +360,7 @@ async function initContext(): Promise<AppApiContext> {
     });
 
     // ── 9. Warm up (fail-closed) ────────────────────────────────────
-    await relay.warmUp();
+    await host.warmUp();
 
     // NOTE: NOT_BEFORE_KEY is set in boot.ts only (not here).
     // Context init is lazy (first request) — re-setting not_before here
@@ -433,7 +433,7 @@ async function initContext(): Promise<AppApiContext> {
     // failure for an individual slot or sponsor refill account is written as `rpc_unreachable`
     // / `healthy=0` and boot continues.
     await bootstrapSponsorOperations({
-      sui: relay.sui,
+      sui: host.sui,
       state: sponsorOperationsState,
       slotAddresses: sponsorAddresses,
       sponsorRefillAccountAddress: sponsorRefillAccountAddress,
@@ -465,12 +465,12 @@ async function initContext(): Promise<AppApiContext> {
     });
 
     // ── 8e. Refill worker — Redis-shared state + distributed locks ───
-    const relayRefForSponsorOperations = relay;
+    const hostRefForSponsorOperations = host;
     const refillWorker = createSponsorOperationsRefillWorker({
       state: sponsorOperationsState,
       refillLock,
       sponsorRefillAccountDispatchLock,
-      sui: relay.sui,
+      sui: host.sui,
       sponsorRefillAccountAddress: sponsorRefillAccountAddress,
       warnThresholdMist: warnMist,
       refillTargetMist: refillTargetMist ?? null,
@@ -482,14 +482,14 @@ async function initContext(): Promise<AppApiContext> {
           throw new Error('refill disabled or target not configured');
         }
         return await executeSponsorSlotRefill({
-          sui: relayRefForSponsorOperations.sui,
+          sui: hostRefForSponsorOperations.sui,
           signer: sponsorRefillAccountKey,
           sponsorAddress: slotAddress,
           amountMist,
         });
       },
       getSlotBalance: async (slotAddress: string) => {
-        const res = await relayRefForSponsorOperations.sui.getBalance({ owner: slotAddress });
+        const res = await hostRefForSponsorOperations.sui.getBalance({ owner: slotAddress });
         return parseChainBalanceMist(res.balance.balance, `Slot ${slotAddress} balance`);
       },
     });
@@ -499,10 +499,10 @@ async function initContext(): Promise<AppApiContext> {
     // newly writes `low_balance` in steady state immediately nudges the
     // worker instead of waiting for a periodic sweep.
     const sponsorResultStateUpdater = createSponsorResultStateUpdater({
-      sui: relay.sui,
+      sui: host.sui,
       state: sponsorOperationsState,
       sponsorRefillAccountAddress: sponsorRefillAccountAddress,
-      settlementPayoutRecipientAddress: relay.settlementPayoutRecipientAddress,
+      settlementPayoutRecipientAddress: host.settlementPayoutRecipientAddress,
       slotBalanceTimeoutMs,
       sponsorRefillAccountBalanceTimeoutMs,
       warnThresholdMist: warnMist,
@@ -517,15 +517,15 @@ async function initContext(): Promise<AppApiContext> {
     // Owns the durable recent-log + lifetime-aggregate projections used
     // by the admin Dashboard / Sponsored Logs page. Composed alongside the
     // sponsor operations state callback via a fan-out wrapper so both run from
-    // the single `RelayerApiConfig.onSponsorResult` slot.
+    // the single `HostRuntimeConfig.onSponsorResult` slot.
     const sponsoredLogsStore = new RedisSponsoredLogsStore(redis);
     const sponsoredLogsRecorder = createSponsoredLogsRecorder({
       store: sponsoredLogsStore,
     });
 
-    // Assigned before studio spread (further down) so both `relay` and
+    // Assigned before studio spread (further down) so both `host` and
     // `studio` routes see the callback. HTTP listen has not started yet.
-    relay.onSponsorResult = fanOutSponsorResult(sponsorResultStateUpdater, sponsoredLogsRecorder);
+    host.onSponsorResult = fanOutSponsorResult(sponsorResultStateUpdater, sponsoredLogsRecorder);
 
     // Bootstrap may have written `low_balance` / `refill_failed` for a
     // slot that entered with a depleted balance. Queue those on process
@@ -541,13 +541,13 @@ async function initContext(): Promise<AppApiContext> {
     }
 
     // ── 8g. Sponsor refill account bounded probe helper for admin reads and withdraws
-    const probeRelayRef = relay;
+    const probeHostRef = host;
     async function probeSponsorRefillAccount(
       trigger: 'admin_sponsor_operations' | 'admin_withdraw',
     ): Promise<void> {
       await probeAndWriteSponsorRefillAccountState(
         {
-          sui: probeRelayRef.sui,
+          sui: probeHostRef.sui,
           state: sponsorOperationsState,
           sponsorRefillAccountAddress: sponsorRefillAccountAddress,
           refillTargetMist: refillTargetMist ?? null,
@@ -581,7 +581,7 @@ async function initContext(): Promise<AppApiContext> {
 
     // ── 9. Studio context ────────────────────────────────────────────
     // Studio auth uses developer JWT trust (STUDIO_DEVELOPER_JWT_TRUST_JSON).
-    let studio: StudioRelayContext | null = null;
+    let studio: StudioHostContext | null = null;
     const studioEnvComplete = [
       'ADMIN_JWT_SECRET',
       'ADMIN_ADDRESS',
@@ -591,7 +591,7 @@ async function initContext(): Promise<AppApiContext> {
 
     if (studioEnvComplete) {
       studio = {
-        ...relay,
+        ...host,
         prepareConfig,
       };
 
@@ -647,10 +647,10 @@ async function initContext(): Promise<AppApiContext> {
     }
 
     // ── 10. Assemble ────────────────────────────────────────────────
-    const relayRef = relay;
+    const hostRef = host;
     const sponsorOperationsRef = sponsorOperations;
     return {
-      relay: relayRef,
+      host: hostRef,
       prepareConfig,
       studio,
       promotionStore,
@@ -666,7 +666,7 @@ async function initContext(): Promise<AppApiContext> {
       sponsoredLogsStore,
       async dispose() {
         executionLedger?.dispose();
-        relayRef.dispose();
+        hostRef.dispose();
         sponsorOperationsRef.dispose();
         await redis.dispose();
         _ctxPromise = null;
@@ -675,7 +675,7 @@ async function initContext(): Promise<AppApiContext> {
   } catch (err) {
     // Cleanup all acquired resources on partial initialization failure
     sponsorOperationsForCleanup?.dispose();
-    relay?.dispose();
+    host?.dispose();
     await redis.dispose();
     throw err;
   }

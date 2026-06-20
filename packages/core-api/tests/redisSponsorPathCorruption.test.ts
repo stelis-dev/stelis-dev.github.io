@@ -35,7 +35,7 @@ import { GAS_VARIANCE_FIXED_MIST, sha256Bytes as _sha256Bytes } from '@stelis/co
 import { SETTLE_WITH_CREDIT_FUNCTION, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
 import { computePolicyHash } from '../src/policyHash.js';
 import { handleSponsor, SponsorValidationError } from '../src/handlers/sponsor.js';
-import type { RelayerContext } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import { SponsorPool } from '../src/context.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
@@ -58,7 +58,7 @@ const MOCK_CONFIG = {
   packageId: '0x' + '11'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
   maxHostFeeMist: 100_000n,
@@ -108,7 +108,7 @@ async function buildValidTx(): Promise<{
       objRef('0x' + '04'.repeat(32)),
       tx.pure(bcs.u64().serialize(1_000n)),
       tx.pure(bcs.u64().serialize(5_250_000n)),
-      tx.pure(bcs.Address.serialize(MOCK_CONFIG.relayerAddress)),
+      tx.pure(bcs.Address.serialize(MOCK_CONFIG.settlementPayoutRecipientAddress)),
       tx.pure(bcs.vector(bcs.u8()).serialize([])),
       tx.pure(bcs.u64().serialize(1n)),
       tx.pure(bcs.u64().serialize(5_000_000n)),
@@ -177,7 +177,7 @@ interface E2EHarness {
   redis: FakeRedisClient;
   prepareStore: RedisPrepareStore;
   sponsorPool: SponsorPool;
-  ctx: RelayerContext;
+  ctx: HostContext;
   releaseSpy: ReturnType<typeof vi.fn>;
 }
 
@@ -200,17 +200,17 @@ async function buildHarness(): Promise<E2EHarness> {
 
   const prepareStore = new RedisPrepareStore(redis, releaseSpy);
 
-  const ctx: RelayerContext = {
+  const ctx: HostContext = {
     network: 'testnet',
-    sui: makeMockSui() as unknown as RelayerContext['sui'],
-    sponsorPool: sponsorPool as unknown as RelayerContext['sponsorPool'],
+    sui: makeMockSui() as unknown as HostContext['sui'],
+    sponsorPool: sponsorPool as unknown as HostContext['sponsorPool'],
     packageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
-    rateLimiter: {} as RelayerContext['rateLimiter'],
-    abuseBlocker: new MemoryAbuseBlocker() as unknown as RelayerContext['abuseBlocker'],
+    rateLimiter: {} as HostContext['rateLimiter'],
+    abuseBlocker: new MemoryAbuseBlocker() as unknown as HostContext['abuseBlocker'],
     prepareStore,
-    settlementPayoutRecipientAddress: MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: MOCK_CONFIG.packageId,

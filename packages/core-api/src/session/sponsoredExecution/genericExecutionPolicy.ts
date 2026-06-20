@@ -27,7 +27,7 @@ import {
   validateGenericUserTransactionKind,
   validateSettleArgs,
 } from '@stelis/core-relay';
-import type { AllowedSettlementSwapPath, OnchainConfig, RelayerEnv } from '@stelis/core-relay';
+import type { AllowedSettlementSwapPath, OnchainConfig, HostValidationEnv } from '@stelis/core-relay';
 import { validatePaymentInputIntegrity } from '@stelis/core-relay/server';
 import type {
   StaticSettlementSwapPathDescriptor,
@@ -68,7 +68,7 @@ import {
   VAULT_DRIFT_QUERY_FAILED,
   VAULT_DRIFT_STATE_INCONSISTENT,
 } from '../../failures.js';
-import type { RelayerContext } from '../../context.js';
+import type { HostContext } from '../../context.js';
 import type { GenericPreparedTxEntry, PreparedTxEntry } from '../../store/prepareTypes.js';
 import { SponsorLeaseExpiredError } from '../../store/sponsorPoolErrors.js';
 import { safeSlotCheckin } from '../sessionPrimitives.js';
@@ -135,7 +135,7 @@ export interface GenericSponsorErrorFactory {
 }
 
 export interface GenericExecutionPolicyOptions {
-  readonly relayerContext: RelayerContext;
+  readonly hostContext: HostContext;
   readonly prepare?: {
     readonly params: GenericPreparePolicyParams;
     readonly config: GenericPreparePolicyConfig;
@@ -351,7 +351,7 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
 }
 
 export function createGenericSponsorConsumeAdapter(input: {
-  readonly relayerContext: RelayerContext;
+  readonly hostContext: HostContext;
   readonly clientIp: string;
   readonly state: GenericExecutionPolicyState;
   readonly errors: GenericSponsorErrorFactory;
@@ -372,7 +372,7 @@ export function createGenericSponsorConsumeAdapter(input: {
       ),
     onHashMismatch: async () => {
       await getDeps(input).recordSponsorFailureForAbuse(
-        input.relayerContext.abuseBlocker,
+        input.hostContext.abuseBlocker,
         input.clientIp,
         undefined,
         'TAMPERING_DETECTED',
@@ -383,11 +383,11 @@ export function createGenericSponsorConsumeAdapter(input: {
       );
     },
     onCorrupt: async ({ receiptId, err, stage }) =>
-      handleCorruptPreparedEntry(input.relayerContext, input.errors, receiptId, err, stage),
+      handleCorruptPreparedEntry(input.hostContext, input.errors, receiptId, err, stage),
     validateConsumedEntry: async (entry) => {
       if (entry.mode === 'promotion') {
         await safeSlotCheckin(
-          input.relayerContext.sponsorPool,
+          input.hostContext.sponsorPool,
           entry.slotId,
           entry.receiptId,
           entry.txBytesHash,
@@ -491,8 +491,8 @@ export function createGenericSignAndSubmitPort(
   return async (slotId, receiptId, txBytes, userSignature) => {
     try {
       return await d.signAndSubmit(
-        options.relayerContext.sponsorPool,
-        options.relayerContext.sui,
+        options.hostContext.sponsorPool,
+        options.hostContext.sui,
         slotId,
         receiptId,
         txBytes,
@@ -557,9 +557,9 @@ async function runGenericRequestValidation(
 
   const userTx = await d.deserializeUserTxKind(
     prepare.params.txKindBytes,
-    options.relayerContext.sui,
+    options.hostContext.sui,
   );
-  const env = buildPrepareEnv(options.relayerContext);
+  const env = buildPrepareEnv(options.hostContext);
   const validationResult = validateGenericUserTransactionKind(
     userTx,
     env,
@@ -620,12 +620,12 @@ async function runGenericChainSnapshot(
   try {
     const [credit, config] = await Promise.all([
       d.queryUserCredit(
-        options.relayerContext.sui,
-        options.relayerContext.vaultRegistryId,
+        options.hostContext.sui,
+        options.hostContext.vaultRegistryId,
         prepare.params.senderAddress,
-        options.relayerContext.vaultsTableId ?? undefined,
+        options.hostContext.vaultsTableId ?? undefined,
       ),
-      options.relayerContext.getConfig(),
+      options.hostContext.getConfig(),
     ]);
     state.credit = credit;
     state.config = config;
@@ -686,12 +686,12 @@ async function runGenericGasBoundBuild(
 
   const buildResult = await d.runGenericPrepareBuildPipeline(
     {
-      sui: options.relayerContext.sui,
+      sui: options.hostContext.sui,
       packageId: config.packageId,
       configId: config.configId,
-      vaultRegistryId: options.relayerContext.vaultRegistryId,
+      vaultRegistryId: options.hostContext.vaultRegistryId,
       deepbookPackageId: prepare.config.deepbookPackageId,
-      settlementPayoutRecipientAddress: options.relayerContext.settlementPayoutRecipientAddress,
+      settlementPayoutRecipientAddress: options.hostContext.settlementPayoutRecipientAddress,
       maxClaimMist: config.maxClaimMist,
       minSettleMist: config.minSettleMist,
       quotedHostFeeMist: prepare.config.quotedHostFeeMist,
@@ -750,8 +750,8 @@ async function runGenericSelfCheck(
     const builtTx = Transaction.from(buildResult.txBytes);
     const builtTxData = builtTx.getData();
     const builtCommands = convertSdkCommands(builtTxData.commands);
-    const builtEnv: RelayerEnv = {
-      ...buildPrepareEnv(options.relayerContext),
+    const builtEnv: HostValidationEnv = {
+      ...buildPrepareEnv(options.hostContext),
       allowedSettlementSwapPaths: [...prepare.config.allowedSettlementSwapPaths],
     };
     const l1 = validateGenericSettlementTransaction(builtTx, builtEnv);
@@ -813,11 +813,11 @@ async function runGenericDecodeSponsorSubmission(
     );
   }
 
-  const peeked = await options.relayerContext.prepareStore
+  const peeked = await options.hostContext.prepareStore
     .peek(ctx.receiptId)
     .catch(async (err) => {
       throw await handleCorruptPreparedEntry(
-        options.relayerContext,
+        options.hostContext,
         sponsor.errors,
         ctx.receiptId,
         err,
@@ -849,7 +849,7 @@ async function runGenericUserSignatureValidation(
   } catch (err) {
     if (err instanceof SenderSignatureError) {
       await d.recordSponsorFailureForAbuse(
-        options.relayerContext.abuseBlocker,
+        options.hostContext.abuseBlocker,
         ctx.clientIp,
         undefined,
         'SENDER_SIGNATURE_INVALID',
@@ -868,7 +868,7 @@ async function runGenericUserSignatureValidation(
       outcome: 'rejected',
     });
     await d.recordSponsorFailureForAbuse(
-      options.relayerContext.abuseBlocker,
+      options.hostContext.abuseBlocker,
       ctx.clientIp,
       undefined,
       'RECEIPT_SESSION_MISMATCH',
@@ -879,7 +879,7 @@ async function runGenericUserSignatureValidation(
     );
   }
 
-  const blocked = await d.checkBlockedRequest(options.relayerContext.abuseBlocker, ctx.clientIp);
+  const blocked = await d.checkBlockedRequest(options.hostContext.abuseBlocker, ctx.clientIp);
   if (blocked.blocked) {
     throw sponsor.errors.sponsorBlocked(blocked.retryAfterMs);
   }
@@ -896,7 +896,7 @@ async function runGenericSharedPostconsumeChecks(
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const txSender = requireValue(state.txSender, 'tx sender');
 
-  const blocked = await d.checkBlockedRequest(options.relayerContext.abuseBlocker, ctx.clientIp, {
+  const blocked = await d.checkBlockedRequest(options.hostContext.abuseBlocker, ctx.clientIp, {
     kind: 'address',
     address: txSender,
   });
@@ -907,7 +907,7 @@ async function runGenericSharedPostconsumeChecks(
 
   try {
     state.revalidation = await d.revalidateGenericSponsorPolicy(
-      options.relayerContext,
+      options.hostContext,
       prepared,
       sponsor.txBytes,
       ctx.clientIp,
@@ -973,10 +973,10 @@ async function runGenericPolicyPostconsumeChecks(
   let credit;
   try {
     credit = await d.queryUserCredit(
-      options.relayerContext.sui,
-      options.relayerContext.vaultRegistryId,
+      options.hostContext.sui,
+      options.hostContext.vaultRegistryId,
       txSender,
-      options.relayerContext.vaultsTableId ?? undefined,
+      options.hostContext.vaultsTableId ?? undefined,
     );
   } catch (err) {
     if (err instanceof CreditQueryInconsistentStateError) {
@@ -1031,16 +1031,16 @@ async function runGenericPreflight(
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const txSender = requireValue(state.txSender, 'tx sender');
-  const preflight = await d.runPreflight(options.relayerContext.sui, sponsor.txBytes);
+  const preflight = await d.runPreflight(options.hostContext.sui, sponsor.txBytes);
 
   if (!preflight.success) {
     const subcode = classifySponsorFailureSubcode(
       preflight.reason,
-      options.relayerContext.packageId,
-      options.relayerContext.deepbookPackageId,
+      options.hostContext.packageId,
+      options.hostContext.deepbookPackageId,
     );
     await d.recordSponsorFailureForAbuse(
-      options.relayerContext.abuseBlocker,
+      options.hostContext.abuseBlocker,
       ctx.clientIp,
       { kind: 'address', address: txSender },
       'PREFLIGHT_FAILED',
@@ -1107,11 +1107,11 @@ async function classifyGenericSponsorResult(
 
     const subcode = classifySponsorFailureSubcode(
       result.reason,
-      options.relayerContext.packageId,
-      options.relayerContext.deepbookPackageId,
+      options.hostContext.packageId,
+      options.hostContext.deepbookPackageId,
     );
     await d.recordSponsorFailureForAbuse(
-      options.relayerContext.abuseBlocker,
+      options.hostContext.abuseBlocker,
       ctx.clientIp,
       { kind: 'address', address: txSender },
       'ONCHAIN_REVERT',
@@ -1218,7 +1218,7 @@ async function runGenericRelease(
   const state = requireSponsorState(runtime);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const txSender = requireValue(state.txSender, 'tx sender');
-  const callback = options.relayerContext.onSponsorResult;
+  const callback = options.hostContext.onSponsorResult;
   if (!callback) return;
 
   try {
@@ -1258,7 +1258,7 @@ async function runGenericRelease(
 // -------------------------------------------------------------
 
 async function handleCorruptPreparedEntry(
-  ctx: RelayerContext,
+  ctx: HostContext,
   errors: GenericSponsorErrorFactory,
   receiptId: string,
   err: unknown,
@@ -1324,17 +1324,17 @@ function setValidationFailure(state: GenericSponsorRuntimeState, message: string
   );
 }
 
-function buildPrepareEnv(ctx: RelayerContext): RelayerEnv {
+function buildPrepareEnv(ctx: HostContext): HostValidationEnv {
   return {
     network: ctx.network,
-    relayerAddress: ctx.settlementPayoutRecipientAddress,
+    settlementPayoutRecipientAddress: ctx.settlementPayoutRecipientAddress,
     configId: ctx.configId,
     vaultRegistryId: ctx.vaultRegistryId,
     packageId: ctx.packageId,
   };
 }
 
-function buildGenericSponsorEnv(ctx: RelayerContext): RelayerEnv {
+function buildGenericSponsorEnv(ctx: HostContext): HostValidationEnv {
   return {
     ...buildPrepareEnv(ctx),
     allowedSettlementSwapPaths: ctx.allowedSettlementSwapPaths,
@@ -1359,7 +1359,7 @@ function emitGenericDriftEvent(
 }
 
 async function revalidateGenericSponsorPolicy(
-  ctx: RelayerContext,
+  ctx: HostContext,
   prepared: GenericPreparedTxEntry,
   txBytes: Uint8Array,
   clientIp: string,

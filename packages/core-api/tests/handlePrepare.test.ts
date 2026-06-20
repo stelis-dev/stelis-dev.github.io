@@ -26,7 +26,7 @@ import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAut
 /** Valid-format test address (64-hex) for use in tests that reach BCS serialize. */
 const TEST_SENDER_ADDR = TEST_PREPARE_AUTH_SENDER;
 
-// ─── Mock RelayerContext factory ────────────────────────────────────────────
+// ─── Mock HostContext factory ────────────────────────────────────────────
 
 function makeMockContext(overrides?: {
   checkoutResult?: { slotId: string; sponsorAddress: string } | null;

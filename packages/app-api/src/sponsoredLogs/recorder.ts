@@ -96,7 +96,7 @@ export interface SponsoredLogsRecorderDeps {
 
 /**
  * Build the host-side recorder callback. Pass the returned function to
- * `RelayerApiConfig.onSponsorResult` (alongside other sponsor result
+ * `HostRuntimeConfig.onSponsorResult` (alongside other sponsor result
  * callbacks via a fan-out wrapper if multiple are needed).
  */
 export function createSponsoredLogsRecorder(
@@ -217,7 +217,7 @@ function buildLogEntry(
  *
  * Used by the host to combine the sponsor operations state callback with the
  * sponsored-execution recorder under the single
- * `RelayerApiConfig.onSponsorResult` slot.
+ * `HostRuntimeConfig.onSponsorResult` slot.
  */
 export function fanOutSponsorResult(
   ...callbacks: readonly SponsorResultCallback[]

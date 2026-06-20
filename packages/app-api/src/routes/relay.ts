@@ -46,9 +46,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
   // ── GET /relay/config ─────────────────────────────────────────────
   app.get('/config', async (c) => {
     const ctx = await getCtx();
-    const relay = ctx.relay;
+    const host = ctx.host;
     try {
-      const config = await relay.getConfig();
+      const config = await host.getConfig();
 
       // Convert bigint pool metadata to JSON-safe numbers for HTTP JSON transport.
       // lotSize/minSize are on-chain u64 stored as bigint internally;
@@ -61,9 +61,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       });
 
       return c.json({
-        network: relay.network,
-        packageId: relay.packageId,
-        settlementPayoutRecipient: relay.settlementPayoutRecipientAddress,
+        network: host.network,
+        packageId: host.packageId,
+        settlementPayoutRecipient: host.settlementPayoutRecipientAddress,
         supportedSettlementSwapPaths: jsonSafePools,
         quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         protocolFlatFeeMist: config.protocolFlatFeeMist.toString(),
@@ -87,7 +87,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
     try {
       const ip = getClientIp(c);
       const ctx = await getCtx();
-      const relay = ctx.relay;
+      const host = ctx.host;
 
       // Sponsor operations gate check — shared-state read + pure derivation.
       // Bootstrap has already populated the state before HTTP listen, so
@@ -97,7 +97,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       // an existing lease.
       const [sponsorOperationsState, slotLeases] = await Promise.all([
         ctx.sponsorOperations.readState(),
-        relay.sponsorPool.leaseStatus(),
+        host.sponsorPool.leaseStatus(),
       ]);
       const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, {
         requireFreeSponsorSlot: true,
@@ -109,7 +109,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // IP-level block check
-      const blockedByIp = await checkBlockedRequest(relay.abuseBlocker, ip);
+      const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
       if (blockedByIp.blocked) {
         return c.json(toBlockedError(blockedByIp), {
           status: 429,
@@ -118,7 +118,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // Rate limit
-      const rl = await relay.rateLimiter.check(`prepare:client-ip:${ip}`);
+      const rl = await host.rateLimiter.check(`prepare:client-ip:${ip}`);
       if (!rl.allowed) {
         return c.json(
           { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
@@ -202,7 +202,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
 
       // ── Generic path ─────────────────────────────────────
       const result = await handlePrepare(
-        relay,
+        host,
         {
           txKindBytes: body.txKindBytes,
           senderAddress: canonicalSender,
@@ -234,7 +234,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
     try {
       const ip = getClientIp(c);
       const ctx = await getCtx();
-      const relay = ctx.relay;
+      const host = ctx.host;
 
       // Sponsor operations gate check — shared-state read + pure derivation.
       // Bootstrap has already populated the state before HTTP listen, so
@@ -247,7 +247,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // IP-level block check
-      const blockedByIp = await checkBlockedRequest(relay.abuseBlocker, ip);
+      const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
       if (blockedByIp.blocked) {
         return c.json(toBlockedError(blockedByIp), {
           status: 429,
@@ -256,7 +256,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // Rate limit
-      const rl = await relay.rateLimiter.check(`sponsor:client-ip:${ip}`);
+      const rl = await host.rateLimiter.check(`sponsor:client-ip:${ip}`);
       if (!rl.allowed) {
         return c.json(
           { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
@@ -293,7 +293,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       // The post-terminal host callback writes slot and sponsor refill account state through that
       // runner path, so no separate wake signal is required here.
       const sponsorResult: SponsorResult = await handleSponsor(
-        relay,
+        host,
         { txBytes, userSignature, receiptId },
         ip,
       );

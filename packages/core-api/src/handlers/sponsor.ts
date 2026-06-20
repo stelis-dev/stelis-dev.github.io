@@ -5,7 +5,7 @@
  * sponsor result policy, and finally slot checkin. This module keeps the stable
  * public handler signature and error carrier classes consumed by app-api.
  */
-import type { RelayerContext } from '../context.js';
+import type { HostContext } from '../context.js';
 import { decodeTxBytes, SessionDecodeError } from '../session/index.js';
 import type { GasUsedFields } from '../session/index.js';
 import {
@@ -120,7 +120,7 @@ export { SponsorLeaseExpiredError } from '../store/sponsorPoolErrors.js';
 // ─────────────────────────────────────────────
 
 export async function handleSponsor(
-  ctx: RelayerContext,
+  ctx: HostContext,
   params: SponsorParams,
   /** Client IP for abuse detection — passed from host route */
   clientIp: string,
@@ -146,7 +146,7 @@ export async function handleSponsor(
   };
 
   const options = {
-    relayerContext: ctx,
+    hostContext: ctx,
     sponsor: {
       txBytes,
       userSignature: params.userSignature,
@@ -172,7 +172,7 @@ export async function handleSponsor(
     },
     policy,
     createGenericSponsorConsumeAdapter({
-      relayerContext: ctx,
+      hostContext: ctx,
       clientIp,
       state,
       errors,

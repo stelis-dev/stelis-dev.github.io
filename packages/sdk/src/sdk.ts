@@ -490,7 +490,7 @@ export class StelisSDK {
       userTx,
       {
         network: this._relayConfig.network,
-        relayerAddress: this._relayConfig.settlementPayoutRecipient,
+        settlementPayoutRecipientAddress: this._relayConfig.settlementPayoutRecipient,
         configId: this._configId,
         vaultRegistryId: this._vaultRegistryId,
         packageId: this._packageId,

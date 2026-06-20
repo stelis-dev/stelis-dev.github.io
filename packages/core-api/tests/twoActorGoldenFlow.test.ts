@@ -78,7 +78,7 @@ import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { SponsorPool } from '../src/context.js';
-import type { RelayerContext } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import {
   handlePromotionPrepare,
@@ -116,7 +116,7 @@ const GENERIC_MOCK_CONFIG = {
   packageId: '0x' + '11'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
   maxHostFeeMist: 100_000n,
@@ -176,7 +176,7 @@ async function buildCreditTx(opts: {
       objRef('0x' + '04'.repeat(32)), // 3: vault
       tx.pure(bcs.u64().serialize(1_000n)), // 4: useCreditAmount
       tx.pure(bcs.u64().serialize(5_250_000n)), // 5: executionCostClaim
-      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.relayerAddress)), // 6: settlementPayoutRecipient
+      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress)), // 6: settlementPayoutRecipient
       tx.pure(bcs.vector(bcs.u8()).serialize([])), // 7: receiptId (empty for fixture)
       tx.pure(bcs.u64().serialize(opts.nonce ?? 1n)), // 8: nonce
       tx.pure(bcs.u64().serialize(5_000_000n)), // 9: simGasReported
@@ -246,7 +246,7 @@ function genericMockSui() {
 }
 
 interface GenericHarness {
-  ctx: RelayerContext;
+  ctx: HostContext;
   prepareStore: MemoryPrepareStore;
   sponsorPool: SponsorPool;
   abuseBlocker: MemoryAbuseBlocker;
@@ -293,22 +293,22 @@ function makeGenericHarness(): GenericHarness {
     quotedHostFeeMist: GENERIC_QUOTED_HOST_FEE,
   };
 
-  const ctx: RelayerContext = {
+  const ctx: HostContext = {
     network: 'testnet',
-    sui: sui as unknown as RelayerContext['sui'],
+    sui: sui as unknown as HostContext['sui'],
     sponsorPool,
     packageId: GENERIC_MOCK_CONFIG.packageId,
     configId: GENERIC_MOCK_CONFIG.configId,
     vaultRegistryId: GENERIC_MOCK_CONFIG.vaultRegistryId,
     deepbookPackageId: extraCfg.deepbookPackageId,
-    rateLimiter: {} as RelayerContext['rateLimiter'],
+    rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker,
     prepareStore,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
     prepareInflightLimiter: prepareInflight,
-    settlementPayoutRecipientAddress: GENERIC_MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: GENERIC_MOCK_CONFIG.packageId,
@@ -376,7 +376,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
   vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
     configObjectId: GENERIC_MOCK_CONFIG.configId,
     registryObjectId: GENERIC_MOCK_CONFIG.vaultRegistryId,
-    settlementPayoutRecipient: GENERIC_MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipient: GENERIC_MOCK_CONFIG.settlementPayoutRecipientAddress,
     executionCostClaim: 5_250_000n,
     policyHash: policyHashBytes,
     orderIdHash: new Uint8Array(0),

@@ -6,7 +6,7 @@
  */
 
 // Domain types
-export type { StudioRelayContext } from './types.js';
+export type { StudioHostContext } from './types.js';
 
 // Auth token extraction (framework-agnostic Bearer token parser)
 export { extractBearerToken, type ExtractBearerTokenResult } from './extractBearerToken.js';

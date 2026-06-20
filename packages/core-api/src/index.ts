@@ -37,8 +37,8 @@ export { FAILURE_TABLE } from './failures.js';
 export type { FailureCode } from './failures.js';
 
 // Context
-export { createRelayerContext } from './context.js';
-export type { RelayerApiConfig, RelayerContext } from './context.js';
+export { createHostContext } from './context.js';
+export type { HostRuntimeConfig, HostContext } from './context.js';
 
 // Address constraints
 export { canonicalizeAddress, validateAddressConstraints } from './addressConstraints.js';

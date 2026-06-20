@@ -148,7 +148,7 @@ export async function runStudioAuth(
   // verified developer JWT `userId`. `senderAddress` is a mutable execution
   // credential bound by the JWT for the current action (matched on the
   // prepare/sponsor route path) but is not the long-lived enforcement subject.
-  const blocked = await checkBlockedRequest(ctx.relay.abuseBlocker, ip, {
+  const blocked = await checkBlockedRequest(ctx.host.abuseBlocker, ip, {
     kind: 'studio_user',
     userId: identity.userId,
   });
@@ -170,7 +170,7 @@ export async function runStudioAuth(
   ];
   if (promotionId) keys.push(`${opts.rateLimitPrefix}:promotion:${promotionId}`);
   for (const key of keys) {
-    const rl = await ctx.relay.rateLimiter.check(key);
+    const rl = await ctx.host.rateLimiter.check(key);
     if (!rl.allowed) {
       return {
         ok: false,

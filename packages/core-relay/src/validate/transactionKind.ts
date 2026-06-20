@@ -1,7 +1,7 @@
 import type { Transaction } from '@mysten/sui/transactions';
 import { containsSponsorWithdrawal, extractPrefixWithdrawals } from '../classifyPrefixCoins.js';
 import { convertSdkCommands } from '../convert.js';
-import type { RelayerEnv, ValidationResult } from '../types.js';
+import type { HostValidationEnv, ValidationResult } from '../types.js';
 import { fail, ok } from '../types.js';
 import { validatePtbStructure, validateUserCommands } from './static.js';
 
@@ -14,7 +14,7 @@ import { validatePtbStructure, validateUserCommands } from './static.js';
  */
 export function validateGenericUserTransactionKind(
   tx: Transaction,
-  env: RelayerEnv,
+  env: HostValidationEnv,
   settlementTokenType: string,
 ): ValidationResult {
   const data = tx.getData();
@@ -48,7 +48,7 @@ export function validateGenericUserTransactionKind(
  */
 export function validateGenericSettlementTransaction(
   tx: Transaction,
-  env: RelayerEnv,
+  env: HostValidationEnv,
 ): ValidationResult {
   const data = tx.getData();
   return validatePtbStructure(convertSdkCommands(data.commands as unknown[]), env);

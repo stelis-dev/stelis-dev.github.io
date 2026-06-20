@@ -69,7 +69,7 @@ export interface AllowedSettlementSwapPath {
  *
  * The settlement swap paths server-side validation (`validateSettleArgs` L2,
  * `deriveAllowedSettlementSwapPaths` boot barrier) accepts as pre-registered. Distinct
- * from the relayer config advertised to clients via `/relay/config`, even
+ * from the Relay API config advertised to clients via `/relay/config`, even
  * though both originate from the same `settlement-swap-paths.json` at boot time.
  *
  * `readonly` marks this as a read-only authority view: downstream consumers
@@ -78,14 +78,14 @@ export interface AllowedSettlementSwapPath {
 export type AllowedSettlementSwapPaths = readonly AllowedSettlementSwapPath[];
 
 // ─────────────────────────────────────────────
-// RelayerEnv — relayer operational environment configuration
+// HostValidationEnv — Host validation environment configuration
 // ─────────────────────────────────────────────
 
-export interface RelayerEnv {
+export interface HostValidationEnv {
   /** Target network (testnet or mainnet) */
   network: SuiNetwork;
   /** Configured settlement payout recipient address */
-  relayerAddress: string;
+  settlementPayoutRecipientAddress: string;
   /** Known Config object ID */
   configId: string;
   /** Known VaultRegistry shared object ID */
@@ -138,7 +138,7 @@ export interface SettleArgs {
    * The settlement swap path extracted from the PTB, used for L2 validation.
    *
    * Invariant: hops.length === 1. L2 validates this + ordered array equality
-   * against RelayerEnv.allowedSettlementSwapPaths[]. Omitted for credit-only settlement.
+   * against HostValidationEnv.allowedSettlementSwapPaths[]. Omitted for credit-only settlement.
    */
   extractedSettlementSwapPath?: {
     tokenType: string;

@@ -1,5 +1,5 @@
 /**
- * RelayerContext — framework-independent relayer configuration.
+ * HostContext — framework-independent Host runtime configuration.
  *
  * Provides SuiGrpcClient, sponsor keypair pool, and cached on-chain Config.
  * Pass this context to all handler functions.
@@ -390,7 +390,7 @@ function isDisposable(obj: unknown): obj is Disposable {
 // Configuration
 // ─────────────────────────────────────────────
 
-export interface RelayerApiConfig {
+export interface HostRuntimeConfig {
   /** Target network */
   network: SuiNetwork;
   /** Sui RPC URL (e.g. "http://127.0.0.1:9000") */
@@ -487,7 +487,7 @@ export interface RelayerApiConfig {
 // Context
 // ─────────────────────────────────────────────
 
-export interface RelayerContext {
+export interface HostContext {
   network: SuiNetwork;
   sui: SuiGrpcClient;
   /**
@@ -502,7 +502,7 @@ export interface RelayerContext {
   vaultRegistryId: string;
   /**
    * Trusted DeepBook package ID for the active network. See
-   * `RelayerApiConfig.deepbookPackageId` for the contract.
+   * `HostRuntimeConfig.deepbookPackageId` for the contract.
    * Sponsor-time abort classifier reads this to package-bind
    * DeepBook min-out aborts.
    */
@@ -557,7 +557,7 @@ export interface RelayerContext {
   /**
    * Eagerly loads and validates on-chain Config at server startup.
    *
-   * createRelayerContext() is sync, so await cannot be used inside it.
+   * createHostContext() is sync, so await cannot be used inside it.
    * Call `await ctx.warmUp()` immediately after context creation to:
    *   1. Validate Config object exists on-chain
    *   2. Verify `max_host_fee_mist` / `protocol_flat_fee_mist` / `config_version` / `max_spread_bps` fields are present (fail-closed)
@@ -581,7 +581,7 @@ export interface RelayerContext {
    *
    * Ownership contract:
    *   - Hosts and tests own the lifecycle of every adapter they inject
-   *     into `createRelayerContext()`. `dispose()` is a convenience
+   *     into `createHostContext()`. `dispose()` is a convenience
    *     dispatcher that walks each injected adapter once and calls
    *     `.dispose()` if implemented; it does not own the underlying
    *     resource.
@@ -595,14 +595,14 @@ export interface RelayerContext {
   dispose(): void;
   /**
    * Host-provided post-sponsor result callback for sponsor handlers. See
-   * `onSponsorResult` in `RelayerApiConfig` for the contract.
+   * `onSponsorResult` in `HostRuntimeConfig` for the contract.
    * `undefined` means no callback is wired; handlers skip invocation.
    */
   onSponsorResult?: SponsorResultCallback;
 }
 
 /**
- * Creates a RelayerContext from configuration.
+ * Creates a HostContext from configuration.
  * Call once at server startup, then pass to all handlers.
  *
  * Every coordination adapter (`sponsorPool`, `prepareStore`,
@@ -611,38 +611,38 @@ export interface RelayerContext {
  * (Redis-backed for `app-api`); test code injects memory fixtures directly.
  * Missing adapters fail closed at construction time.
  */
-export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
+export function createHostContext(config: HostRuntimeConfig): HostContext {
   const sui =
     config.suiClient ?? new SuiGrpcClient({ network: config.network, baseUrl: config.suiRpcUrl });
 
   if (!config.sponsorPool) {
     throw new Error(
-      'createRelayerContext: sponsorPool is required (production hosts inject RedisSponsorPool; tests inject a fixture pool). No runtime default is provided.',
+      'createHostContext: sponsorPool is required (production hosts inject RedisSponsorPool; tests inject a fixture pool). No runtime default is provided.',
     );
   }
   if (!config.prepareStore) {
     throw new Error(
-      'createRelayerContext: prepareStore is required (production hosts inject RedisPrepareStore; tests inject a fixture store).',
+      'createHostContext: prepareStore is required (production hosts inject RedisPrepareStore; tests inject a fixture store).',
     );
   }
   if (!config.prepareRequestNonceStore) {
     throw new Error(
-      'createRelayerContext: prepareRequestNonceStore is required (production hosts inject RedisPrepareRequestNonceStore; tests inject a fixture store).',
+      'createHostContext: prepareRequestNonceStore is required (production hosts inject RedisPrepareRequestNonceStore; tests inject a fixture store).',
     );
   }
   if (!config.prepareInflightLimiter) {
     throw new Error(
-      'createRelayerContext: prepareInflightLimiter is required (production hosts inject RedisPrepareInflight; tests inject a fixture limiter).',
+      'createHostContext: prepareInflightLimiter is required (production hosts inject RedisPrepareInflight; tests inject a fixture limiter).',
     );
   }
   if (!config.rateLimiter) {
     throw new Error(
-      'createRelayerContext: rateLimiter is required (production hosts inject RedisRateLimiter; tests inject a fixture limiter).',
+      'createHostContext: rateLimiter is required (production hosts inject RedisRateLimiter; tests inject a fixture limiter).',
     );
   }
   if (!config.abuseBlocker) {
     throw new Error(
-      'createRelayerContext: abuseBlocker is required (production hosts inject RedisAbuseBlocker; tests inject a fixture blocker).',
+      'createHostContext: abuseBlocker is required (production hosts inject RedisAbuseBlocker; tests inject a fixture blocker).',
     );
   }
   const sponsorPool = config.sponsorPool;
@@ -807,7 +807,7 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
     dispose() {
       // Dispatch dispose() to every injected adapter that implements
       // it. Hosts and tests own the underlying lifecycle (see the
-      // `dispose()` doc on `RelayerContext`); this dispatcher fans out
+      // `dispose()` doc on `HostContext`); this dispatcher fans out
       // to memory fixtures that hold background timers (e.g.
       // `MemoryPrepareStore`) so test teardown does not have to walk
       // every adapter manually. Production Redis adapters do not

@@ -39,7 +39,7 @@ import {
   SponsorCongestionError,
   SponsorLeaseExpiredError,
 } from '../src/handlers/sponsor.js';
-import type { RelayerContext } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import type {
   SponsorResultCallback,
   SponsorResultMetadata,
@@ -84,7 +84,7 @@ const MOCK_CONFIG = {
   packageId: '0x' + '11'.repeat(32),
   configId: '0x' + '22'.repeat(32),
   vaultRegistryId: '0x' + '33'.repeat(32),
-  relayerAddress: '0x' + 'ff'.repeat(32),
+  settlementPayoutRecipientAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
   maxHostFeeMist: 100_000n,
@@ -180,7 +180,7 @@ async function buildValidTx(
   const packageId = opts?.packageId ?? MOCK_CONFIG.packageId;
   const configId = opts?.configId ?? MOCK_CONFIG.configId;
   const vaultRegistryId = opts?.vaultRegistryId ?? MOCK_CONFIG.vaultRegistryId;
-  const settlementPayoutRecipient = opts?.settlementPayoutRecipient ?? MOCK_CONFIG.relayerAddress;
+  const settlementPayoutRecipient = opts?.settlementPayoutRecipient ?? MOCK_CONFIG.settlementPayoutRecipientAddress;
 
   tx.moveCall({
     target: `${packageId}::settle::${SETTLE_WITH_CREDIT_FUNCTION}`,
@@ -293,7 +293,7 @@ async function buildAddressBalanceSwapTx(
           tx.pure(bcs.u64().serialize(swapAmount)), // 6: swapAmount
           tx.pure(bcs.u64().serialize(400_000n)), // 7: minSuiOut
           tx.pure(bcs.u64().serialize(5_250_000n)), // 8: executionCostClaim
-          tx.pure(bcs.Address.serialize(MOCK_CONFIG.relayerAddress)), // 9: settlementPayoutRecipient
+          tx.pure(bcs.Address.serialize(MOCK_CONFIG.settlementPayoutRecipientAddress)), // 9: settlementPayoutRecipient
           tx.pure(bcs.vector(bcs.u8()).serialize([])), // 10: receiptId
           tx.pure(bcs.u64().serialize(1n)), // 11: nonce
           tx.pure(bcs.u64().serialize(5_000_000n)), // 12: simGasReported
@@ -330,7 +330,7 @@ async function buildAddressBalanceSwapTx(
           tx.pure(bcs.u64().serialize(swapAmount)),
           tx.pure(bcs.u64().serialize(400_000n)),
           tx.pure(bcs.u64().serialize(5_250_000n)),
-          tx.pure(bcs.Address.serialize(MOCK_CONFIG.relayerAddress)),
+          tx.pure(bcs.Address.serialize(MOCK_CONFIG.settlementPayoutRecipientAddress)),
           tx.pure(bcs.vector(bcs.u8()).serialize([])),
           tx.pure(bcs.u64().serialize(1n)),
           tx.pure(bcs.u64().serialize(5_000_000n)),
@@ -478,14 +478,14 @@ function makeMockContext(
     abuseBlocker?: AbuseBlockerAdapter;
     sponsorPool?: SponsorPoolAdapter;
     sui?: ReturnType<typeof makeMockSui>;
-    onSponsorResult?: RelayerContext['onSponsorResult'];
+    onSponsorResult?: HostContext['onSponsorResult'];
   } = {},
-): RelayerContext {
+): HostContext {
   const sponsorPool = overrides.sponsorPool ?? makeMockSponsorPool();
   const sui = overrides.sui ?? makeMockSui();
   return {
     network: 'testnet',
-    sui: sui as unknown as RelayerContext['sui'],
+    sui: sui as unknown as HostContext['sui'],
     sponsorPool,
     packageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
@@ -497,10 +497,10 @@ function makeMockContext(
     // that path, so any value matching the test's abort fixtures is
     // sufficient.
     deepbookPackageId: MOCK_CONFIG.packageId,
-    rateLimiter: {} as RelayerContext['rateLimiter'],
+    rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker: overrides.abuseBlocker ?? makeMockAbuseBlocker(),
     prepareStore: overrides.prepareStore ?? makeMockPrepareStore(),
-    settlementPayoutRecipientAddress: MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: MOCK_CONFIG.packageId,
@@ -516,7 +516,7 @@ function makeMockContext(
     warmUp: vi.fn(),
     dispose: vi.fn(),
     onSponsorResult: overrides.onSponsorResult,
-    prepareInflightLimiter: {} as RelayerContext['prepareInflightLimiter'],
+    prepareInflightLimiter: {} as HostContext['prepareInflightLimiter'],
   };
 }
 
@@ -3154,7 +3154,7 @@ describe('handleSponsor', () => {
     function makeVaultDriftContext(
       ctxOverrides: Parameters<typeof makeMockContext>[0],
       opts: { needsAllowedSettlementSwapPaths?: boolean } = {},
-    ): RelayerContext {
+    ): HostContext {
       const ctx = makeMockContext(ctxOverrides);
       // Pre-cached vaultsTableId so queryUserCredit skips the registry fetch.
       (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;

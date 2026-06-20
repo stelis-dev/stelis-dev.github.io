@@ -35,8 +35,8 @@
  *   `pool::swap_exact_quantity`) and the same numeric code do not
  *   classify, and free-floating numeric tokens like `command N`,
  *   `5th command`, or `(instruction N)` cannot impersonate the abort
- *   code. Trusted IDs come from `RelayerContext.packageId` /
- *   `RelayerContext.deepbookPackageId` (sponsor-time) and
+ *   code. Trusted IDs come from `HostContext.packageId` /
+ *   `HostContext.deepbookPackageId` (sponsor-time) and
  *   `BuildContext.packageId` / `BuildContext.deepbookPackageId`
  *   (prepare-time); host wiring is verified by
  *   `packages/app-api/src/context.ts`.
@@ -311,7 +311,7 @@ export function classifyDryRunFailure(
  *
  * Move-abort classifications inside this wrapper are package-bound;
  * pass the trusted Stelis and DeepBook package IDs from the
- * surrounding `BuildContext` / `RelayerContext`.
+ * surrounding `BuildContext` / `HostContext`.
  */
 export async function safeBuild(
   tx: Transaction,

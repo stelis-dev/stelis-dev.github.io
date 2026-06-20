@@ -214,7 +214,7 @@ const TEST_TRUST_CONFIG = {
 
 function createMockCtx(studioEnabled: boolean): AppApiContext {
   return {
-    relay: {
+    host: {
       rateLimiter: {
         check: vi.fn().mockResolvedValue({ allowed: true }),
       },
@@ -336,7 +336,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
       expect(res.status).toBe(503);
-      expect(ctx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
     it('returns 503 (not 401) when globalTargetHashes missing AND Authorization is missing', async () => {
@@ -411,7 +411,7 @@ describe('studio routes', () => {
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalTargetHashes = new Set<string>();
-      vi.mocked(ctx.relay.rateLimiter.check).mockResolvedValueOnce({
+      vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
         current: 10,
@@ -465,7 +465,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
       expect(res.status).toBe(200);
-      const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
+      const calls = vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0]);
       expect(calls).toContain('promo_prepare:client-ip:127.0.0.1');
       expect(calls).toContain('promo_prepare:developer-user:mock-user');
       expect(calls).toContain('promo_prepare:promotion:promo-1');
@@ -507,7 +507,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
       expect(res.status).toBe(503);
-      expect(ctx.relay.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
+      expect(ctx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(mockBuildSponsorOperationsBlockedResponse).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ requireFreeSponsorSlot: true }),
@@ -614,7 +614,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(503);
-      expect(ctx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
     it('returns 503 when executionLedger is missing', async () => {
@@ -627,7 +627,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(503);
-      expect(ctx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
     // Precedence: 503 infrastructure failures must outrank 401 auth.
@@ -707,7 +707,7 @@ describe('studio routes', () => {
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalTargetHashes = new Set<string>();
-      vi.mocked(ctx.relay.rateLimiter.check).mockResolvedValueOnce({
+      vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
         current: 10,
@@ -764,7 +764,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(200);
-      const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
+      const calls = vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0]);
       expect(calls).toContain('promo_sponsor:client-ip:127.0.0.1');
       expect(calls).toContain('promo_sponsor:developer-user:mock-user');
       expect(calls).toContain('promo_sponsor:promotion:promo-1');
@@ -878,7 +878,7 @@ describe('studio routes', () => {
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(503);
-      expect(ctx.relay.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
     it('returns 401 AUTH_FAILED when developer JWT verification fails', async () => {

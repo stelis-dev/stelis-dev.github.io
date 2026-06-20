@@ -4,7 +4,7 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { verifyPersonalMessageSignature } from '@mysten/sui/verify';
 import type { PrepareAuthorizationFields } from '@stelis/contracts';
 import { encodePrepareAuthorizationMessage } from '@stelis/core-relay';
-import type { RelayerContext } from '../context.js';
+import type { HostContext } from '../context.js';
 import { PrepareValidationError } from './replay.js';
 
 export const PREPARE_AUTHORIZATION_TTL_MS = 5 * 60 * 1000;
@@ -25,7 +25,7 @@ export interface PrepareAuthorizationParams {
 }
 
 export async function verifyPrepareAuthorization(
-  ctx: RelayerContext,
+  ctx: HostContext,
   params: PrepareAuthorizationParams,
 ): Promise<void> {
   const requestNonceBytes = new TextEncoder().encode(params.prepareAuthorizationRequestNonce);
@@ -106,7 +106,7 @@ export async function verifyPrepareAuthorization(
 }
 
 export function prepareAuthorizationFields(
-  ctx: Pick<RelayerContext, 'network' | 'packageId'>,
+  ctx: Pick<HostContext, 'network' | 'packageId'>,
   params: Omit<PrepareAuthorizationParams, 'prepareAuthorizationSignature'>,
   normalizedTxKindBytesHash = normalizeHashHex(params.txKindBytesHash),
 ): PrepareAuthorizationFields {

@@ -22,7 +22,7 @@ The table lists the primary entrypoints. The complete subpath export map is the 
 ## Usage
 
 ```ts
-import { createRelayerContext, handlePrepare, handleSponsor } from '@stelis/core-api';
+import { createHostContext, handlePrepare, handleSponsor } from '@stelis/core-api';
 import { type AdminJwtConfig, signAdminJwt } from '@stelis/core-api/admin';
 import { extractBearerToken, verifyDeveloperJwt } from '@stelis/core-api/studio';
 ```
@@ -40,7 +40,7 @@ All configuration is injected by the Host layer (app-api).
 
 ## Coordination adapters — Host-injected only
 
-`createRelayerContext()` requires every coordination adapter
+`createHostContext()` requires every coordination adapter
 (`sponsorPool`, `prepareStore`, `prepareInflightLimiter`,
 `rateLimiter`, `abuseBlocker`) to be injected by the caller. There is
 no in-memory runtime default: missing inputs fail closed at context

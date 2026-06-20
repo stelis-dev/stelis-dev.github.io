@@ -92,14 +92,14 @@ export interface SponsorResultCallbackDeps {
 
 /**
  * Build the host-side post-sponsor result callback. The returned function is the
- * value you pass to `RelayerApiConfig.onSponsorResult` /
+ * value you pass to `HostRuntimeConfig.onSponsorResult` /
  * `PromotionSponsorContext.onSponsorResult`.
  */
 export function createSponsorResultStateUpdater(
   deps: SponsorResultCallbackDeps,
 ): SponsorResultCallback {
   const warnThresholdMist = deps.warnThresholdMist ?? SPONSOR_BALANCE_WARN_MIST;
-  const sponsorRefillAccountIsRelayerRecipient =
+  const sponsorRefillAccountIsSettlementPayoutRecipient =
     deps.sponsorRefillAccountAddress === deps.settlementPayoutRecipientAddress;
 
   function classifySlot(balance: bigint): SponsorSlotState {
@@ -196,7 +196,7 @@ export function createSponsorResultStateUpdater(
   return async function onSponsorResult(metadata: SponsorResultMetadata): Promise<void> {
     try {
       await probeAndWriteSlot(metadata.sponsorAddress);
-      if (sponsorRefillAccountIsRelayerRecipient && metadata.outcome === 'success') {
+      if (sponsorRefillAccountIsSettlementPayoutRecipient && metadata.outcome === 'success') {
         await probeAndWriteSponsorRefillAccount();
       }
     } catch (outerErr) {

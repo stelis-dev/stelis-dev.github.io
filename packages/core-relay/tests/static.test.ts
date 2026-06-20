@@ -11,11 +11,11 @@ import {
   SETTLE_WITH_CREDIT_FUNCTION,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
 } from '@stelis/contracts';
-import type { SettleArgs, OnchainConfig, RelayerEnv } from '../src/types.js';
+import type { SettleArgs, OnchainConfig, HostValidationEnv } from '../src/types.js';
 
-const ENV: RelayerEnv = {
+const ENV: HostValidationEnv = {
   network: 'testnet',
-  relayerAddress: '0xRELAYER',
+  settlementPayoutRecipientAddress: '0xRELAYER',
   configId: '0xCONFIG',
   vaultRegistryId: '0xREGISTRY',
   packageId: '0xPACKAGE',
@@ -576,12 +576,12 @@ const ALLOWED_SETTLEMENT_SWAP_PATHS = [
   { tokenType: DEEP_TYPE, hops: [POOL_1], settlementSwapDirection: 'baseForQuote' as const },
 ];
 
-const TENANT_ENV: RelayerEnv = {
+const TENANT_ENV: HostValidationEnv = {
   ...ENV,
   allowedSettlementSwapPaths: ALLOWED_SETTLEMENT_SWAP_PATHS,
 };
 
-const CANONICAL_ENV: RelayerEnv = {
+const CANONICAL_ENV: HostValidationEnv = {
   ...ENV,
   allowedSettlementSwapPaths: ALLOWED_SETTLEMENT_SWAP_PATHS,
 };
@@ -604,7 +604,7 @@ describe('Layer 2: settlement swap path validation — allowedSettlementSwapPath
       hops: [POOL_1],
       settlementSwapDirection: 'quoteForBase' as const,
     };
-    const qfbEnv: RelayerEnv = {
+    const qfbEnv: HostValidationEnv = {
       ...ENV,
       allowedSettlementSwapPaths: [
         { tokenType: QFB_TOKEN, hops: [POOL_1], settlementSwapDirection: 'quoteForBase' as const },
@@ -657,7 +657,7 @@ describe('Layer 2: settlement swap path validation — allowedSettlementSwapPath
   // ── allowedSettlementSwapPaths empty: harden fail ─────────────────────────────────────
 
   it('fail — allowedSettlementSwapPaths empty: L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED', () => {
-    const emptyEnv: RelayerEnv = { ...TENANT_ENV, allowedSettlementSwapPaths: [] };
+    const emptyEnv: HostValidationEnv = { ...TENANT_ENV, allowedSettlementSwapPaths: [] };
     const result = validateSettleArgs(
       { ...validArgs, extractedSettlementSwapPath: SETTLEMENT_SWAP_PATH_1HOP },
       CONFIG,
@@ -668,7 +668,7 @@ describe('Layer 2: settlement swap path validation — allowedSettlementSwapPath
   });
 
   it('fail — allowedSettlementSwapPaths undefined: L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED', () => {
-    const noSettlementSwapPathsEnv: RelayerEnv = {
+    const noSettlementSwapPathsEnv: HostValidationEnv = {
       ...TENANT_ENV,
       allowedSettlementSwapPaths: undefined,
     };

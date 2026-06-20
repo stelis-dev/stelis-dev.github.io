@@ -5,8 +5,8 @@
  * instead of issuing redundant sui.getObject() calls.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createRelayerContext, SponsorPool } from '../src/context.js';
-import type { RelayerContext } from '../src/context.js';
+import { createHostContext, SponsorPool } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareRequestNonceStore } from '../src/store/prepareRequestNonceStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
@@ -43,7 +43,7 @@ function makeAbuseBlocker() {
 }
 
 describe('getConfig singleflight', () => {
-  let ctx: RelayerContext;
+  let ctx: HostContext;
 
   afterEach(() => {
     ctx?.dispose();
@@ -73,7 +73,7 @@ describe('getConfig singleflight', () => {
         ),
     );
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://mock.local',
       sponsorPool: makeSponsorPool(),
@@ -122,7 +122,7 @@ describe('getConfig singleflight', () => {
       });
     });
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://mock.local',
       sponsorPool: makeSponsorPool(),
@@ -153,7 +153,7 @@ describe('getConfig singleflight', () => {
 });
 
 describe('suiClient injection', () => {
-  let ctx: RelayerContext;
+  let ctx: HostContext;
 
   afterEach(() => {
     ctx?.dispose();
@@ -178,7 +178,7 @@ describe('suiClient injection', () => {
       getObject: injectedGetObject,
     } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://should-not-be-used.invalid',
       suiClient: mockSuiClient,
@@ -205,7 +205,7 @@ describe('suiClient injection', () => {
   });
 
   it('falls back to suiRpcUrl when suiClient is not provided', () => {
-    ctx = createRelayerContext({
+    ctx = createHostContext({
       network: 'testnet',
       suiRpcUrl: 'http://fallback.local',
       sponsorPool: makeSponsorPool(),

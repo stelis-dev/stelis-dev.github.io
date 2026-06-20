@@ -15,7 +15,7 @@ import {
 } from '@stelis/contracts';
 import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
 import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
-import type { RelayerContext } from '../context.js';
+import type { HostContext } from '../context.js';
 import { checkBlockedRequest } from '../abuseBlocking.js';
 import { PREPARE_TTL_MS } from '../preparePolicy.js';
 import { PrepareValidationError } from '../prepare/replay.js';
@@ -120,7 +120,7 @@ export interface PrepareResult {
 // ─────────────────────────────────────────────
 
 export async function handlePrepare(
-  ctx: RelayerContext,
+  ctx: HostContext,
   params: PrepareParams,
   extraCfg: PrepareHandlerConfig,
 ): Promise<PrepareResult> {
@@ -142,7 +142,7 @@ export async function handlePrepare(
   }
 
   const options = {
-    relayerContext: ctx,
+    hostContext: ctx,
     prepare: {
       params,
       config: extraCfg,

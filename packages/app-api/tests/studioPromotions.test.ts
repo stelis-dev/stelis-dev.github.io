@@ -63,7 +63,7 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
   const promotionStore = new MemoryPromotionStore();
 
   return {
-    relay: {
+    host: {
       rateLimiter: { check: vi.fn().mockResolvedValue({ allowed: true }) },
       abuseBlocker: {
         checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -153,19 +153,19 @@ describe('studio promotion routes', () => {
         headers: { Authorization: 'Bearer test-jwt' },
       });
       expect(res.status).toBe(200);
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).toHaveBeenCalledWith({
+      expect(vi.mocked(ctx.host.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
+      expect(vi.mocked(ctx.host.abuseBlocker.checkSubject)).toHaveBeenCalledWith({
         kind: 'studio_user',
         userId: 'user-1',
       });
-      expect(vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
+      expect(vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
         'promo_list:client-ip:127.0.0.1',
         'promo_list:developer-user:user-1',
       ]);
     });
 
     it('returns 429 when list request is blocked', async () => {
-      vi.mocked(ctx.relay.abuseBlocker.checkIp).mockResolvedValueOnce({
+      vi.mocked(ctx.host.abuseBlocker.checkIp).mockResolvedValueOnce({
         blocked: true,
         retryAfterMs: 60000,
       });
@@ -176,7 +176,7 @@ describe('studio promotion routes', () => {
 
       expect(res.status).toBe(429);
       expect(res.headers.get('Retry-After')).toBeTruthy();
-      expect(vi.mocked(ctx.relay.rateLimiter.check)).not.toHaveBeenCalled();
+      expect(vi.mocked(ctx.host.rateLimiter.check)).not.toHaveBeenCalled();
     });
 
     it('does not include draft/paused promotions', async () => {
@@ -258,12 +258,12 @@ describe('studio promotion routes', () => {
         headers: { Authorization: 'Bearer test-jwt' },
       });
       expect(res.status).toBe(200);
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
-      expect(vi.mocked(ctx.relay.abuseBlocker.checkSubject)).toHaveBeenCalledWith({
+      expect(vi.mocked(ctx.host.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
+      expect(vi.mocked(ctx.host.abuseBlocker.checkSubject)).toHaveBeenCalledWith({
         kind: 'studio_user',
         userId: 'user-1',
       });
-      expect(vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
+      expect(vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0])).toEqual([
         'promo_detail:client-ip:127.0.0.1',
         'promo_detail:developer-user:user-1',
         `promo_detail:promotion:${record.promotionId}`,
@@ -273,7 +273,7 @@ describe('studio promotion routes', () => {
     it('returns 429 when detail request exceeds rate limit', async () => {
       const record = await ctx.promotionStore!.create(BASE_PROMO);
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
-      vi.mocked(ctx.relay.rateLimiter.check).mockResolvedValueOnce({
+      vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 5000,
       });
@@ -389,7 +389,7 @@ describe('studio promotion routes', () => {
       const record = await ctx.promotionStore!.create(BASE_PROMO);
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
 
-      vi.mocked(ctx.relay.abuseBlocker.checkIp).mockRejectedValueOnce(new Error('redis down'));
+      vi.mocked(ctx.host.abuseBlocker.checkIp).mockRejectedValueOnce(new Error('redis down'));
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const res = await app.request(`/studio/promotions/${record.promotionId}/claim`, {
@@ -487,7 +487,7 @@ describe('studio promotion routes', () => {
     it('returns 429 when IP is blocked', async () => {
       // Override abuseBlocker to return blocked
       const blockedCtx = createFullCtx({
-        relay: {
+        host: {
           rateLimiter: { check: vi.fn().mockResolvedValue({ allowed: true }) },
           abuseBlocker: {
             checkIp: vi.fn().mockResolvedValue({ blocked: true, retryAfterMs: 60000 }),
@@ -511,7 +511,7 @@ describe('studio promotion routes', () => {
     it('returns 429 when rate limit exceeded', async () => {
       // Override rateLimiter to return not allowed
       const rlCtx = createFullCtx({
-        relay: {
+        host: {
           rateLimiter: { check: vi.fn().mockResolvedValue({ allowed: false, retryAfterMs: 5000 }) },
           abuseBlocker: {
             checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -542,7 +542,7 @@ describe('studio promotion routes', () => {
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-jwt' },
         body: JSON.stringify({}),
       });
-      const calls = vi.mocked(ctx.relay.rateLimiter.check).mock.calls.map((c) => c[0]);
+      const calls = vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0]);
       expect(calls).toContain('promo_claim:client-ip:127.0.0.1');
       expect(calls).toContain('promo_claim:developer-user:user-1');
       expect(calls).toContain(`promo_claim:promotion:${record.promotionId}`);

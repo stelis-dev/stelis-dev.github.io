@@ -39,7 +39,7 @@ export {
 export type {
   OnchainConfig,
   AllowedSettlementSwapPath,
-  RelayerEnv,
+  HostValidationEnv,
   ValidationResult,
   SettleArgs,
 } from './types.js';

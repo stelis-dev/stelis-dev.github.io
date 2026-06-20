@@ -30,7 +30,7 @@ import type {
   GenericPreparedTxEntry,
   PromotionPreparedTxEntry,
 } from '../src/store/prepareTypes.js';
-import type { RelayerContext } from '../src/context.js';
+import type { HostContext } from '../src/context.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
@@ -106,7 +106,7 @@ function makePromotionEntry(): PromotionPreparedTxEntry {
   };
 }
 
-function makeContext(overrides: Partial<RelayerContext> = {}): RelayerContext {
+function makeContext(overrides: Partial<HostContext> = {}): HostContext {
   return {
     network: 'testnet',
     settlementPayoutRecipientAddress: `0x${'33'.repeat(32)}`,
@@ -115,32 +115,32 @@ function makeContext(overrides: Partial<RelayerContext> = {}): RelayerContext {
     packageId: `0x${'66'.repeat(32)}`,
     deepbookPackageId: `0x${'77'.repeat(32)}`,
     vaultsTableId: undefined,
-    sui: {} as RelayerContext['sui'],
+    sui: {} as HostContext['sui'],
     prepareStore: {
       peek: vi.fn(),
       evictPreparedEntry: vi.fn(),
-    } as unknown as RelayerContext['prepareStore'],
+    } as unknown as HostContext['prepareStore'],
     sponsorPool: {
       checkin: vi.fn(),
-    } as unknown as RelayerContext['sponsorPool'],
-    abuseBlocker: {} as RelayerContext['abuseBlocker'],
+    } as unknown as HostContext['sponsorPool'],
+    abuseBlocker: {} as HostContext['abuseBlocker'],
     getConfig: vi.fn(),
     invalidateConfigCache: vi.fn(),
     onSponsorResult: undefined,
     ...overrides,
-  } as RelayerContext;
+  } as HostContext;
 }
 
 function makeSponsorOptions(
   input: {
-    ctx?: RelayerContext;
+    ctx?: HostContext;
     deps?: Partial<GenericExecutionPolicyDependencies>;
-    onSponsorResult?: RelayerContext['onSponsorResult'];
+    onSponsorResult?: HostContext['onSponsorResult'];
   } = {},
 ): GenericExecutionPolicyOptions {
   const ctx = input.ctx ?? makeContext({ onSponsorResult: input.onSponsorResult });
   return {
-    relayerContext: ctx,
+    hostContext: ctx,
     sponsor: {
       txBytes: TX_BYTES,
       userSignature: 'mock-user-signature',
@@ -152,13 +152,13 @@ function makeSponsorOptions(
 
 function makePrepareOptions(
   input: {
-    ctx?: RelayerContext;
+    ctx?: HostContext;
     deps?: Partial<GenericExecutionPolicyDependencies>;
   } = {},
 ): GenericExecutionPolicyOptions {
   const ctx = input.ctx ?? makeContext();
   return {
-    relayerContext: ctx,
+    hostContext: ctx,
     prepare: {
       params: {
         txKindBytes: 'mock-tx-kind-bytes',
@@ -302,7 +302,7 @@ describe('createGenericExecutionPolicy', () => {
     const ctx = makeContext({
       abuseBlocker: {
         recordSponsorFailure,
-      } as unknown as RelayerContext['abuseBlocker'],
+      } as unknown as HostContext['abuseBlocker'],
     });
     const { policy } = createGenericExecutionPolicy(
       makePrepareOptions({
@@ -394,7 +394,7 @@ describe('createGenericSponsorConsumeAdapter', () => {
     };
     const prepared = makePrepared();
     const adapter = createGenericSponsorConsumeAdapter({
-      relayerContext: makeContext(),
+      hostContext: makeContext(),
       clientIp: '127.0.0.1',
       state,
       errors,
@@ -408,10 +408,10 @@ describe('createGenericSponsorConsumeAdapter', () => {
   test('rejects promotion entries and checkins their committed slot', async () => {
     const checkin = vi.fn();
     const ctx = makeContext({
-      sponsorPool: { checkin } as unknown as RelayerContext['sponsorPool'],
+      sponsorPool: { checkin } as unknown as HostContext['sponsorPool'],
     });
     const adapter = createGenericSponsorConsumeAdapter({
-      relayerContext: ctx,
+      hostContext: ctx,
       clientIp: '127.0.0.1',
       state: {
         sponsor: {
@@ -432,7 +432,7 @@ describe('createGenericSponsorConsumeAdapter', () => {
   test('hash mismatch records IP-only tampering before returning the classified error', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const adapter = createGenericSponsorConsumeAdapter({
-      relayerContext: makeContext(),
+      hostContext: makeContext(),
       clientIp: '203.0.113.10',
       state: {
         sponsor: {
@@ -470,7 +470,7 @@ describe('generic sponsor preconsume priority', () => {
         prepareStore: {
           peek,
           evictPreparedEntry: vi.fn(),
-        } as unknown as RelayerContext['prepareStore'],
+        } as unknown as HostContext['prepareStore'],
       }),
       deps: { verifySenderSignature: vi.fn() },
     });
@@ -501,7 +501,7 @@ describe('generic sponsor preconsume priority', () => {
           prepareStore: {
             peek: vi.fn(async () => makePromotionEntry()),
             evictPreparedEntry: vi.fn(),
-          } as unknown as RelayerContext['prepareStore'],
+          } as unknown as HostContext['prepareStore'],
         }),
         deps: {
           verifySenderSignature:
@@ -538,7 +538,7 @@ describe('generic sponsor preconsume priority', () => {
           prepareStore: {
             peek: vi.fn(async () => makePromotionEntry()),
             evictPreparedEntry: vi.fn(),
-          } as unknown as RelayerContext['prepareStore'],
+          } as unknown as HostContext['prepareStore'],
         }),
         deps: {
           verifySenderSignature: vi.fn(async () => undefined),
