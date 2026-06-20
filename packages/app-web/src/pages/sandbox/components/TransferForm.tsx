@@ -53,8 +53,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const isBusy = status !== 'idle' && status !== 'error' && status !== 'success';
 
-  const settlementSwapPath = sdk?.getSettlementSwapPathForSettlementToken(settlementTokenType);
-  const SETTLEMENT_TOKEN_LABEL = settlementSwapPath?.settlementTokenSymbol ?? 'DEEP';
+  const settlementSwapPath = selectedSettlementSwapPath;
+  const SETTLEMENT_TOKEN_LABEL = settlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
 
   useEffect(() => {
     if (!sdk || !client || !settlementSwapPath) return;
@@ -71,10 +71,16 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
 
   // Sponsored fee estimate — sdk.estimateGas() auto-selects profile via queryUserCredit internally
   useEffect(() => {
-    if (!sdk || !account || !client) return;
+    if (!sdk || !account || !client || !settlementSwapPath) {
+      setGasEstimate(null);
+      return;
+    }
     let cancelled = false;
     sdk
-      .estimateGas(client, { addr: account.address, settlementToken: { type: settlementTokenType } })
+      .estimateGas(client, {
+        addr: account.address,
+        settlementToken: { type: settlementSwapPath.settlementTokenType },
+      })
       .then((est) => {
         if (!cancelled && (est.hasLiquidity || est.canSkipLiquidity))
           setGasEstimate({
@@ -91,7 +97,7 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
     return () => {
       cancelled = true;
     };
-  }, [sdk, account, client, settlementTokenType]);
+  }, [sdk, account, client, settlementSwapPath]);
 
   const handleTransfer = async () => {
     if (!account || !sdk || !settlementSwapPath) return;
@@ -320,6 +326,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
         onClick={handleTransfer}
         disabled={
           !account ||
+          !sdk ||
+          !settlementSwapPath ||
           isBusy ||
           !recipient ||
           (liquidity?.hasLiquidity === false && !gasEstimate?.canSkipLiquidity)
@@ -335,6 +343,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
           fontSize: 14,
           cursor:
             !account ||
+            !sdk ||
+            !settlementSwapPath ||
             isBusy ||
             !recipient ||
             (liquidity?.hasLiquidity === false && !gasEstimate?.canSkipLiquidity)
@@ -342,6 +352,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
               : 'pointer',
           opacity:
             !account ||
+            !sdk ||
+            !settlementSwapPath ||
             isBusy ||
             !recipient ||
             (liquidity?.hasLiquidity === false && !gasEstimate?.canSkipLiquidity)

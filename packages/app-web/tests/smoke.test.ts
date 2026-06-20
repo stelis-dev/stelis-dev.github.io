@@ -17,6 +17,20 @@ describe('relayApiEndpoint', () => {
     expect(mod.RELAY_API_BASE.endsWith('/relay')).toBe(true);
     expect(mod.RELAY_API_BASE).not.toBe('/relay');
   });
+
+  it('root frontend builds do not override deployment URLs', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const rootPackageJson = fs.readFileSync(path.resolve(__dirname, '../../../package.json'), 'utf-8');
+    expect(rootPackageJson).toContain('"build:app-web": "npm run build -w @stelis/app-web"');
+    expect(rootPackageJson).toContain('"build:app-admin": "npm run build -w @stelis/app-admin"');
+    expect(rootPackageJson).not.toContain(
+      '"build:app-web": "VITE_STELIS_RELAY_API_URL=http://localhost:3200/relay',
+    );
+    expect(rootPackageJson).not.toContain(
+      '"build:app-admin": "VITE_STELIS_API_URL=http://localhost:3200',
+    );
+  });
 });
 
 // ── SDK constants from @stelis/sdk ──────────────────────────────────────────
@@ -80,6 +94,23 @@ describe('Sandbox SDK wiring', () => {
       ],
     };
     expect(() => getSelectedSettlementSwapPath(mockSdk as never, 5)).toThrow('out of range');
+  });
+
+  it('sandbox UI does not render fake TOKEN or DEEP fallback labels', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const sandboxDir = path.resolve(__dirname, '../src/pages/sandbox');
+    const files = [
+      'components/SwapForm.tsx',
+      'components/ConnectCredit.tsx',
+      'components/TransferForm.tsx',
+      'components/CodePanel.tsx',
+    ];
+    const combined = files
+      .map((file) => fs.readFileSync(path.join(sandboxDir, file), 'utf-8'))
+      .join('\n');
+    expect(combined).not.toContain("?? 'TOKEN'");
+    expect(combined).not.toContain("?? 'DEEP'");
   });
 
   it('isSwapDemoSupported returns true for 1-hop whitelisted, false for hop count > 1', async () => {

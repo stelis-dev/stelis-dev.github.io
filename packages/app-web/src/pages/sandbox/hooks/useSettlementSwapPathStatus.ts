@@ -13,14 +13,20 @@ export interface SettlementSwapPathStatus {
 
 export function useSettlementSwapPathStatus(settlementSwapPathIndex = 0): SettlementSwapPathStatus {
   const client = useCurrentClient();
-  const { sdk } = useSDK();
+  const { sdk, error } = useSDK();
   const [midPrice, setMidPrice] = useState<number | null>(null);
   const [hasLiquidity, setHasLiquidity] = useState(false);
   const [rateDisplay, setRateDisplay] = useState('loading...');
   const [loading, setLoading] = useState(true);
 
   const fetchPrice = useCallback(async () => {
-    if (!sdk) return;
+    if (!sdk) {
+      setMidPrice(null);
+      setHasLiquidity(false);
+      setRateDisplay(error ? 'unavailable' : 'loading...');
+      setLoading(!error);
+      return;
+    }
     setLoading(true);
     try {
       const settlementSwapPath = getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex);
@@ -35,7 +41,7 @@ export function useSettlementSwapPathStatus(settlementSwapPathIndex = 0): Settle
     } finally {
       setLoading(false);
     }
-  }, [client, sdk, settlementSwapPathIndex]);
+  }, [client, error, sdk, settlementSwapPathIndex]);
 
   useEffect(() => {
     fetchPrice();

@@ -43,7 +43,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
   const settlementTokenType = selectedSettlementSwapPath?.settlementTokenType ?? '';
-  const settlementTokenLabel = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'TOKEN';
+  const settlementTokenLabel = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
   const testPair = settlementTokenType ? findTestSwapPair(network, settlementTokenType) : null;
   // Direct-swap demo scope gate (unsupported_hop_count / fee_bearing). See
   // sandbox/constants.ts. Fee-bearing paths require min-out/slippage UX that
@@ -189,7 +189,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     display: 'block',
   };
 
-  const swapDisabled = !account || isBusy || !testPair || demoRejectReason !== null;
+  const swapDisabled =
+    !account || !sdk || !selectedSettlementSwapPath || isBusy || !testPair || demoRejectReason !== null;
 
   return (
     <div style={SANDBOX_CARD_STYLE}>

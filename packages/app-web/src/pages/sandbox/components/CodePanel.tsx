@@ -88,7 +88,7 @@ export function CodePanel({
   const selectedSettlementSwapPath = sdk
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
-  const tokenSymbol = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'TOKEN';
+  const tokenSymbol = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
   const snippets = makeSnippets(tokenSymbol, settlementSwapPathIndex);
   const { title, code } = snippets[activeStep];
 

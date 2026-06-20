@@ -15,8 +15,8 @@
   "scripts": {
     "build": "npm run build -w @stelis/contracts && npm run build -w @stelis/core-relay && npm run build -w @stelis/core-api && npm run build -w @stelis/sdk && npm run build -w @stelis/app-api && npm run build:app-web && npm run build:app-admin && npm run build -w @stelis/mcp-server",
     "build:app-api:deploy": "npm run build -w @stelis/contracts && npm run build -w @stelis/core-relay && npm run build -w @stelis/core-api && npm run build -w @stelis/app-api",
-    "build:app-web": "VITE_STELIS_RELAY_API_URL=http://localhost:3200/relay npm run build -w @stelis/app-web",
-    "build:app-admin": "VITE_STELIS_API_URL=http://localhost:3200 npm run build -w @stelis/app-admin",
+    "build:app-web": "npm run build -w @stelis/app-web",
+    "build:app-admin": "npm run build -w @stelis/app-admin",
     "dev:app-api": "node scripts/dev-app-api.mjs",
     "dev:app-web": "npm run dev -w @stelis/app-web",
     "dev:app-admin": "npm run dev -w @stelis/app-admin",
