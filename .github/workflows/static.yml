@@ -19,7 +19,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      VITE_STELIS_RELAYER_URL: ${{ vars.VITE_STELIS_RELAYER_URL }}
+      VITE_STELIS_RELAY_API_URL: ${{ vars.VITE_STELIS_RELAY_API_URL }}
       VITE_STELIS_UI_MODE: relay
       VITE_REPO_DOCS_BASE_URL: https://github.com/${{ github.repository }}/blob/main
     steps:
@@ -37,8 +37,8 @@ jobs:
 
       - name: Check required build variables
         run: |
-          test -n "$VITE_STELIS_RELAYER_URL" || {
-            echo "Set the repository variable VITE_STELIS_RELAYER_URL to the app-api /relay URL."
+          test -n "$VITE_STELIS_RELAY_API_URL" || {
+            echo "Set the repository variable VITE_STELIS_RELAY_API_URL to the app-api /relay URL."
             exit 1
           }
 
