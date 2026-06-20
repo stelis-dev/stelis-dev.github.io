@@ -4,7 +4,7 @@ This document records the current formulas used by relay cost calculation and sp
 
 The implementation is in [`packages/core-relay/src/gasEstimate.ts`](../packages/core-relay/src/gasEstimate.ts) and [`packages/core-relay/src/validate/nonloss.ts`](../packages/core-relay/src/validate/nonloss.ts).
 
-## Relayer Cost Calculation
+## Gas Recovery Cost Calculation
 
 All values are in MIST.
 

@@ -1,21 +1,21 @@
 # @stelis/app-admin
 
-Stelis admin single-page app - Vite + React dashboard for operators.
+Stelis admin single-page app - Vite + React dashboard for Host operators.
 
-- Built for: host operators and promotion operators using the dashboard of a running host.
+- Built for: Host operators and promotion operators using the dashboard of a running Host.
 - Use for: viewing runtime status, managing admin actions, and operating promotion records.
 - Not for: public relay integration, SDK usage, API field definitions, or deployment policy.
 
 ## Start Here
 
-Use this package when you need the operator-facing dashboard for a running `@stelis/app-api` host.
-External host operators use this dashboard as part of the provided Stelis host release.
-Changing dashboard, host, SDK, or contract source code is a maintainer-only workflow.
-This dashboard does not publish or upgrade contracts; it only displays and operates against the configured IDs and runtime state exposed by the backing host.
+Use this package when you need the operator-facing dashboard for a running `@stelis/app-api` Host.
+External Host operators use this dashboard as part of the provided Stelis Host release.
+Changing dashboard, Host, SDK, or contract source code is a maintainer-only workflow.
+This dashboard does not publish or upgrade contracts; it only displays and operates against the configured IDs and runtime state exposed by the backing Host.
 
 - Promotion operation path: [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations)
 - Baseline runbook: [docs/operations.md](../../docs/operations.md)
-- Backing host package: [packages/app-api/README.md](../app-api/README.md)
+- Backing Host package: [packages/app-api/README.md](../app-api/README.md)
 
 ## Pages
 
@@ -30,12 +30,12 @@ This dashboard does not publish or upgrade contracts; it only displays and opera
 
 ## Host Dependencies
 
-`@stelis/app-admin` depends on a live `@stelis/app-api` host for:
+`@stelis/app-admin` depends on a live `@stelis/app-api` Host for:
 
 - `/auth/*` admin session flows
 - `/api/*` operator data and controls
 
-Configure the UI and host together when deploying the operator dashboard.
+Configure the UI and Host together when deploying the operator dashboard.
 
 ## Quick Start
 
@@ -70,5 +70,5 @@ The dashboard selects the matching public Sui RPC endpoint internally.
 
 - [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations) - Studio Operator runbook section
 - [docs/operations.md](../../docs/operations.md) - baseline Host Operator procedures
-- [packages/app-api/README.md](../app-api/README.md) - backing HTTP host entry
+- [packages/app-api/README.md](../app-api/README.md) - backing Host entry
 - [docs/repository-structure.md](../../docs/repository-structure.md) - package and dependency map

@@ -112,7 +112,7 @@ Sponsor operation timeouts are also required:
 - `SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS`
 - `SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS`
 
-Optional host configuration:
+Optional Host configuration:
 
 - `PORT`
 - `TRUSTED_PROXY_HOPS`
@@ -149,7 +149,7 @@ Optional Studio configuration:
 
 `@stelis/app-web` requires:
 
-- `VITE_STELIS_RELAYER_URL`
+- `VITE_STELIS_RELAY_API_URL`
 
 Optional `@stelis/app-web` configuration:
 

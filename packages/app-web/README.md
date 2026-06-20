@@ -1,18 +1,18 @@
 # @stelis/app-web
 
-Demo Vite + React SPA for evaluating a deployed Stelis relay host.
+Demo Vite + React SPA for evaluating a deployed Stelis Host.
 
-- Built for: app developers, service developers, and agent clients checking a live host before integration.
+- Built for: app developers, service developers, and agent clients checking a live Host before integration.
 - Use for: `/docs`, `/playground`, `/sandbox`, `/status`, and the static demo frontend bundle.
-- Not for: full HTTP field definitions, SDK integration guidance, relay server runtime, admin dashboard, or host operations policy.
+- Not for: full HTTP field definitions, SDK integration guidance, Host runtime, admin dashboard, or Host operations policy.
 
-> `Hosted relay`, `Studio`, `Host`, `relay host`, and `host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
+> `Host`, `Relay API`, `Admin app`, `Studio`, and `Host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
 
 ## Problem fit
 
-Use this package when you need a browser demo for a deployed relay host:
+Use this package when you need a browser demo for a deployed Host:
 
-- evaluate whether a host supports the payment tokens and network your integration needs
+- evaluate whether a Host supports the settlement tokens and network your integration needs
 - check whether USDC or another token is currently listed in `supportedSettlementSwapPaths` before writing integration code
 - test direct requests and error handling from `/playground`
 - run end-to-end sponsored transaction flows from `/sandbox`
@@ -31,9 +31,9 @@ npm run dev:app-web
 Create a `.env` file in this package directory:
 
 ```env
-# Required: relayer endpoint for the SDK (must end with /relay)
+# Required: Relay API endpoint for the SDK (must end with /relay)
 # Network (testnet/mainnet) is auto-detected from the API via GET /relay/config.
-VITE_STELIS_RELAYER_URL=https://your-relayer.example.com/relay
+VITE_STELIS_RELAY_API_URL=https://your-host.example.com/relay
 
 # Optional: repository docs base URL used by /docs deep links (GitHub links hidden if omitted)
 VITE_REPO_DOCS_BASE_URL=https://github.com/stelis-dev/stelis/blob/main
@@ -43,17 +43,17 @@ VITE_REPO_DOCS_BASE_URL=https://github.com/stelis-dev/stelis/blob/main
 # VITE_STELIS_UI_MODE=relay
 ```
 
-`VITE_STELIS_RELAYER_URL` is required. The app fails fast at runtime if it is missing.
-Network is auto-detected from the relayer API, and the sample page selects the matching public Sui RPC endpoint internally.
+`VITE_STELIS_RELAY_API_URL` is required. The app fails fast at runtime if it is missing.
+Network is auto-detected from the Relay API, and the sample page selects the matching public Sui RPC endpoint internally.
 
 ## Pages
 
 | Route         | Description                                               |
 | ------------- | --------------------------------------------------------- |
 | `/`           | Home — project overview                                   |
-| `/status`     | Live relayer status                                       |
-| `/docs`       | Public API and capability reference UI for deployed hosts |
-| `/playground` | Interactive request runner for direct host calls          |
+| `/status`     | Live Host status                                          |
+| `/docs`       | Public API and capability reference UI for deployed Hosts |
+| `/playground` | Interactive request runner for direct Host calls          |
 | `/sandbox`    | Full transaction sandbox with wallet integration          |
 | `/promotion`  | Studio-mode promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
 
@@ -62,7 +62,7 @@ Network is auto-detected from the relayer API, and the sample page selects the m
 - Need the current HTTP route and field reference: [`../../docs/api.md`](../../docs/api.md)
 - Need package-level integration guidance: [`../sdk/README.md`](../sdk/README.md)
 - Need prepare-sign-sponsor flow guidance: [`../../docs/integration.md`](../../docs/integration.md)
-- Need host deployment or operations: [`../../docs/getting-started.md`](../../docs/getting-started.md), [`../../docs/operations.md`](../../docs/operations.md)
+- Need Host deployment or operations: [`../../docs/getting-started.md`](../../docs/getting-started.md), [`../../docs/operations.md`](../../docs/operations.md)
 
 ## Build
 
@@ -100,10 +100,10 @@ Required build-time variables:
 
 | Variable                  | Required | Example                                          |
 | ------------------------- | -------- | ------------------------------------------------ |
-| `VITE_STELIS_RELAYER_URL` | ✅       | `https://your-app-api.vercel.app/relay`          |
+| `VITE_STELIS_RELAY_API_URL` | ✅       | `https://your-app-api.vercel.app/relay`          |
 | `VITE_REPO_DOCS_BASE_URL` | optional | `https://github.com/stelis-dev/stelis/blob/main` |
 
-> **Important**: `VITE_STELIS_RELAYER_URL` must point to your `app-api` deployment URL with the `/relay` suffix.
+> **Important**: `VITE_STELIS_RELAY_API_URL` must point to your `app-api` deployment URL with the `/relay` suffix.
 
 The sample page selects `https://fullnode.testnet.sui.io:443` or `https://fullnode.mainnet.sui.io:443` from the network returned by `GET /relay/config`.
 

@@ -42,7 +42,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | --- | --- | --- |
 | E-1 | `relayerClaim >= simGas + gasVarianceFixedMist + slippageBufferMist`. | Relay validation |
 | E-2 | Simulated gas must not exceed `max_claim_mist`. | Relay validation |
-| E-4 | Relayer claim must not exceed `max_claim_mist`. | Move and relay validation |
+| E-4 | relayer claim must not exceed `max_claim_mist`. | Move and relay validation |
 | E-7 | `max_claim_mist` must be greater than zero. | Move |
 | E-8 | `min_settle_mist` must be within the allowed range and no greater than `max_claim_mist`. | Move |
 | E-9 | The sponsor approval gate must preserve the non-loss condition for successful transactions. | Relay validation |
@@ -70,10 +70,10 @@ The IDs are used in code comments, tests, and package README files. They are sho
 
 | ID | Rule | Enforced by |
 | --- | --- | --- |
-| R-1 | A final relayer-built transaction must contain exactly one allowed settlement call. | Relay validation |
+| R-1 | A final Host-built transaction must contain exactly one allowed settlement call. | Relay validation |
 | R-2 | Sponsored transactions must not contain publish or upgrade commands. | Relay validation |
-| R-3 | The relayer recipient address in settlement arguments must match host configuration. | Relay validation |
-| R-7 | Settlement swap path identity must be present in the host's allowed settlement swap path list. | Relay validation |
+| R-3 | The relayer recipient address in settlement arguments must match Host configuration. | Relay validation |
+| R-7 | Settlement swap path identity must be present in the Host's allowed settlement swap path list. | Relay validation |
 | R-8 | Settlement swap path hop order must match the allowed settlement swap path exactly. | Relay validation |
 | R-9 | Payment-token funding must combine coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. It must not double-count the same funds inside one transaction. | Relay validation |
 | R-10 | Promotion-sponsored Move calls must match `STUDIO_ALLOWED_TARGETS`. | Promotion validation |
@@ -83,7 +83,7 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | R-14 | A user-supplied generic `User TransactionKind` must not include `FundsWithdrawal(Sponsor)`. | Relay validation |
 | R-15 | A malformed same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is rejected with `UNACCOUNTABLE_WITHDRAWAL`. | Relay validation |
 | R-16 | A bounded same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is allowed and subtracted from address-balance funding. | Relay validation |
-| R-17 | Each supported `paymentTokenType` maps to one host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
+| R-17 | Each supported `paymentTokenType` maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
 
 ## Code References
 

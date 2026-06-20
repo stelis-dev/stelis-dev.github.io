@@ -1,10 +1,10 @@
 # Sponsor Pools
 
-The API host uses sponsor keys to pay gas for sponsored transactions.
+The Host uses sponsor keys to pay gas for sponsored transactions.
 
 ## Current Model
 
-`SPONSOR_SECRET_KEY` can contain one or more sponsor keys. The host uses a Redis-backed sponsor pool to lease a sponsor slot during prepare and sign during sponsor.
+`SPONSOR_SECRET_KEY` can contain one or more sponsor keys. The Host uses a Redis-backed sponsor pool to lease a sponsor slot during prepare and sign during sponsor.
 
 `SPONSOR_REFILL_ACCOUNT_SECRET_KEY` is separate from sponsor keys. It is used for operational refill flows when refill is enabled.
 
@@ -14,7 +14,7 @@ Stelis uses these names for sponsor-related SUI state:
 
 - `Sponsor Refill Account`: the dedicated key from `SPONSOR_REFILL_ACCOUNT_SECRET_KEY`. It funds sponsor slots and signs refill and admin withdrawal transactions.
 - `Sponsor slot`: one sponsor key from `SPONSOR_SECRET_KEY`. A sponsor slot is leased during prepare and signs the sponsored transaction during sponsor.
-- `Relayer recipient`: the settlement payout address from `RELAYER_RECIPIENT_ADDRESS`. It receives `relayerClaim + quotedRelayerFeeMist` from on-chain settlement.
+- `relayer recipient`: the settlement payout address from `RELAYER_RECIPIENT_ADDRESS`. It receives `relayerClaim + quotedRelayerFeeMist` from on-chain settlement.
 - `SUI coin object`: an owned `Coin<SUI>` object.
 - `Address balance`: the Sui account balance that can be used by Sui address-balance gas payment or `FundsWithdrawal`.
 - `GasCoin`: the PTB argument that refers to the transaction gas payment during execution.
@@ -28,13 +28,13 @@ Sponsor slot SUI is gas inventory for sponsored transactions. Stelis sets the sp
 
 Sui SDK transaction build resolves gas payment for sponsor-slot transactions. For sponsor-slot transactions that do not reference `GasCoin`, the current Sui SDK resolver uses address-balance gas payment when the sponsor slot address balance covers the gas budget. The resolver selects valid SUI coin objects when address balance alone does not cover the gas budget. Sui execution applies gas payment rules, including gas smashing when multiple gas coin objects are selected.
 
-Sponsor slot SUI is only for sponsored transaction gas. It is not used for user payment-token funding, settlement swap payment funding, or relayer fee settlement. User-supplied transactions cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`.
+Sponsor slot SUI is only for sponsored transaction gas. It is not used for user settlement-token funding, settlement swap payment funding, or relayer fee settlement. User-supplied transactions cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`.
 
 ## SUI Transitions
 
-Settlement transfers `relayerClaim + quotedRelayerFeeMist` to the Relayer recipient. Protocol fees are paid to the protocol treasury, not to the Relayer recipient. Final settlement validation rejects a `relayer_recipient` that does not match the configured Relayer recipient.
+Settlement transfers `relayerClaim + quotedRelayerFeeMist` to the relayer recipient. Protocol fees are paid to the protocol treasury, not to the relayer recipient. Final settlement validation rejects a `relayer_recipient` that does not match the configured relayer recipient.
 
-If the Relayer recipient is the Sponsor Refill Account, a successful settlement payout becomes SUI held by the Sponsor Refill Account and can fund later sponsor slot refill. If the Relayer recipient is a separate address, settlement payout does not enter SponsorOperations refill state.
+If the relayer recipient is the Sponsor Refill Account, a successful settlement payout becomes SUI held by the Sponsor Refill Account and can fund later sponsor slot refill. If the relayer recipient is a separate address, settlement payout does not enter SponsorOperations refill state.
 
 External SUI deposits into the Sponsor Refill Account are outside Stelis transaction construction. Stelis does not add receive logic for those deposits.
 
@@ -52,7 +52,7 @@ Prepare routes require at least one healthy sponsor slot that is not currently l
 
 ## Refill Settings
 
-The host supports these refill-related settings:
+The Host supports these refill-related settings:
 
 - `SPONSOR_BALANCE_WARN_MIST`
 - `SPONSOR_OPERATIONS_REFILL_ENABLED`

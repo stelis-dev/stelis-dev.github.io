@@ -22,7 +22,7 @@ Before signing, the sponsor checks:
 
 1. the prepared transaction can still be found and consumed once;
 2. the submitted transaction bytes match the prepared record;
-3. settlement arguments still match current config and host policy;
+3. settlement arguments still match current config and Host policy;
 4. preflight simulation succeeds;
 5. non-loss math passes;
 6. the sponsor slot can sign and submit.
@@ -57,10 +57,10 @@ different question.
 
 | Layer | Owner | Current role | Shared primitives |
 | --- | --- | --- | --- |
-| Generic user `TransactionKind` gate | SDK prepare pre-check and generic `/relay/prepare` | Rejects a user-supplied `TransactionKind` before the host appends settlement. It requires zero settlement calls, applies the command cap, rejects `GasCoin`, rejects `FundsWithdrawal(Sponsor)`, and rejects unaccountable same-token `FundsWithdrawal(Sender)`. | `validateUserCommands`, `containsGasCoinReference`, `containsSponsorWithdrawal`, `extractPrefixWithdrawals` |
-| Generic final settlement transaction validation | Generic prepare self-check and `/relay/sponsor` revalidation | Validates the relayer-built final transaction after settlement is appended. It requires exactly one allowed settlement call and does not repeat user-prefix address-balance accounting, because the final transaction may contain relayer-created `FundsWithdrawal(Sender)` inputs for funding. | `validatePtbStructure`, `containsGasCoinReference` |
+| Generic user `TransactionKind` gate | SDK prepare pre-check and generic `/relay/prepare` | Rejects a user-supplied `TransactionKind` before the Host appends settlement. It requires zero settlement calls, applies the command cap, rejects `GasCoin`, rejects `FundsWithdrawal(Sponsor)`, and rejects unaccountable same-token `FundsWithdrawal(Sender)`. | `validateUserCommands`, `containsGasCoinReference`, `containsSponsorWithdrawal`, `extractPrefixWithdrawals` |
+| Generic final settlement transaction validation | Generic prepare self-check and `/relay/sponsor` revalidation | Validates the Host-built final transaction after settlement is appended. It requires exactly one allowed settlement call and does not repeat user-prefix address-balance accounting, because the final transaction may contain Host-created `FundsWithdrawal(Sender)` inputs for funding. | `validatePtbStructure`, `containsGasCoinReference` |
 | Promotion-sponsored policy | Promotion prepare and sponsor paths | Keeps promotion-specific rules separate from the generic validator. Promotion transactions must be MoveCall-only, must not reference `GasCoin`, and use promotion-owned target and entitlement checks. Prepare also rejects `FundsWithdrawal(Sponsor)`. | `containsGasCoinReference`, `containsSponsorWithdrawal`, `isMoveCall` |
-| SDK returned-transaction integrity verification | `@stelis/sdk` after the relayer returns transaction bytes | Verifies that returned transaction bytes preserve the user's prefix and append only the expected settlement suffix. This is a client-side integrity layer, not the user `TransactionKind` gate and not the server final-transaction validator. | `convertSdkCommands`, `containsGasCoinReference`, `isMoveCall`, `integrityCompare` |
+| SDK returned-transaction integrity verification | `@stelis/sdk` after the Host returns transaction bytes | Verifies that returned transaction bytes preserve the user's prefix and append only the expected settlement suffix. This is a client-side integrity layer, not the user `TransactionKind` gate and not the server final-transaction validator. | `convertSdkCommands`, `containsGasCoinReference`, `isMoveCall`, `integrityCompare` |
 | Funding evidence extraction | Generic prepare build | Reads user coin-object provenance and `FundsWithdrawal(Sender)` address-balance use so payment-source resolution can account for already-consumed address balance. This is not an admissibility gate replacement. | `classifyUserTxCoins`, `extractPrefixWithdrawals` |
 
 The phrase "source of truth" must name the layer. For example,
@@ -71,7 +71,7 @@ evidence extraction.
 
 The SDK returned-transaction integrity layer deliberately reuses core-relay
 primitives while keeping its own rule assembly. Its job is to check the bytes
-returned by the relayer before the SDK asks the user to sign them. If a future
-review finds that this layer should be refactored into a shared validator, that
-is a separate refactor task; current behavior is documented here without adding
-a compatibility path or alternate validation name.
+returned by the Host before the SDK asks the user to sign them. Refactoring this
+layer into a shared validator is a separate refactor task, not current behavior;
+the current behavior is documented here without adding a compatibility path or
+alternate validation name.

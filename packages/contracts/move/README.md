@@ -4,9 +4,9 @@ Move smart contracts for sponsored Sui transaction settlement.
 
 - Built for: maintainers, reviewers, and auditors inspecting or changing on-chain settlement behavior.
 - Use for: on-chain modules, contract entry functions, and links into Move implementation details.
-- Not for: host operation runbooks, package integration guidance, or off-chain host policy.
+- Not for: Host operation runbooks, package integration guidance, or off-chain Host policy.
 
-> Users can start with zero SUI. Relayers must not lose money on successful sponsored transactions. Protocol fees are collected during settlement.
+> Users can start with zero SUI. Host operators must not lose money on successful sponsored transactions. Protocol fees are collected during settlement.
 
 > [!NOTE]
 > Codes like `S-2`, `E-4` are invariant IDs defined in [invariants.md](../../../docs/invariants.md)
@@ -17,7 +17,7 @@ Move smart contracts for sponsored Sui transaction settlement.
 
 This package contains the on-chain settlement primitives for Stelis.
 External developer companies and agents do not modify or republish this package in the normal product path.
-They consume the deployed contracts through the SDK or the provided host packages.
+They consume the deployed contracts through the SDK or the provided Host packages.
 Contract changes and package publishing are maintainer-only workflows.
 
 Use it when you need to inspect or modify:
@@ -76,7 +76,7 @@ Leftover payment coin is returned to the sender automatically in swap variants. 
 ### Owned Object Protection
 
 `UserVault` is a Sui **Owned Object** with `key` ability only (soulbound) — it cannot be transferred externally to another address.
-Only the owner can include it in transactions. No third party (including relayers) can access it. Even during relayer downtime, users can call `withdraw()` directly.
+Only the owner can include it in transactions. No third party, including the Host operator, can access it. Even during Host downtime, users can call `withdraw()` directly.
 
 ---
 
@@ -263,12 +263,12 @@ Full invariant list: [invariants.md](../../../docs/invariants.md)
 | E (Economy)        | 8     | Non-loss economic model                                                                 |
 | P (Pause)          | 3     | Pause security                                                                          |
 | A (Admin)          | 7     | Admin safety rails                                                                      |
-| R (Relay)          | 17    | Off-chain relayer validation                                                            |
+| R (Relay)          | 17    | Off-chain Relay API validation                                                           |
 
 ## When Not to Start Here
 
 This package is not the best first read if you only need:
 
-- relayer API contract → see `docs/api.md`
-- relayer validation flow → see `packages/core-relay/README.md`
+- Relay API contract → see `docs/api.md`
+- transaction validation flow → see `packages/core-relay/README.md`
 - architecture overview → see `docs/architecture.md`

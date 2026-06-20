@@ -194,7 +194,7 @@ the coordination fields the sponsor lifecycle needs; settle-execution
 values (including `profile`) are read at sponsor time from
 `parseSettleArgs(txBytes)` exclusively. `composePreparedCommit`
 projects only coordination fields into the store entry; the
-effective profile the relayer used is returned in the `/prepare` response
+effective profile the Host used is returned in the `/prepare` response
 and is the source of the "profile" value the client UX shows.
 
 ### At /sponsor — re-derived from txBytes
@@ -334,7 +334,7 @@ The request carries:
 - `prepareAuthorizationRequestNonce`
 - `prepareAuthorizationSignature`
 
-The host recomputes `txKindBytesHash`, checks timestamp TTL and clock skew,
+The Host recomputes `txKindBytesHash`, checks timestamp TTL and clock skew,
 verifies the Sui personal-message signature against `senderAddress`, and claims
 the request nonce in `PrepareRequestNonceStore`. A reused request nonce or a
 signature from another address fails before prepare admission.
@@ -453,7 +453,7 @@ boundary is "quote-stats payload completeness", not "quote-RPC axis only".
 `run_prepare_pass_swap_amount_computed`, `pass1_5_slippage_measured`,
 `pass_aborted_post_solve`, and `two_pass_complete` carry the same three-field
 diagnostic so an operator can correlate downstream
-`INSUFFICIENT_BALANCE` (raised swap input vs. user payment-token funding)
+`INSUFFICIENT_BALANCE` (raised swap input vs. user settlement-token funding)
 or settlement surplus with the floor that triggered a target raise:
 
 - `bfq_floor_raised: bool` — `true` only on the `baseForQuote` (`_bfq`) settlement branch and only when the

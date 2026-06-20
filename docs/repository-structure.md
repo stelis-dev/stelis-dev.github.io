@@ -19,7 +19,7 @@ The repository uses npm workspaces for development. Product publishing and deplo
 | --- | --- | --- | --- |
 | `@stelis/sdk` | Published package | App and service developers | TypeScript SDK for sponsored transaction flows |
 | `@stelis/mcp-server` | Published package | Agent runtimes and Model Context Protocol clients | Model Context Protocol (MCP) server for agent-facing transaction workflows |
-| `@stelis/app-api` | Deployable package | Host operators | API host for relay, auth, admin, and promotion routes |
+| `@stelis/app-api` | Deployable package | Host operators | Host runtime for Relay API, auth, admin, and promotion HTTP APIs |
 | `@stelis/app-web` | Deployable package | Evaluators and app developers | Public static web app for docs, status, and evaluation flows |
 | `@stelis/app-admin` | Deployable package | Host operators | Static admin app |
 | `packages/contracts/move` | Move package | Protocol deployers and auditors | On-chain settlement, vault, config, and event modules |
@@ -46,7 +46,7 @@ stelis/
     core-api/           # server-side domain logic
     sdk/                # published TypeScript SDK
     mcp-server/         # published MCP server
-    app-api/            # deployable API host
+    app-api/            # deployable Host runtime
     app-web/            # deployable public web app
     app-admin/          # deployable admin web app
   docs/
@@ -67,7 +67,7 @@ graph TD
     CoreApi["@stelis/core-api\nserver domain logic"]
     Sdk["@stelis/sdk\napp and service SDK"]
     Mcp["@stelis/mcp-server\nMCP server"]
-    AppApi["@stelis/app-api\nAPI host"]
+    AppApi["@stelis/app-api\nHost runtime"]
     AppWeb["@stelis/app-web\npublic web app"]
     AppAdmin["@stelis/app-admin\nadmin web app"]
 
@@ -128,7 +128,7 @@ Public boundary names do not use generic words such as `Data`, `Payload`, `Info`
 | `@stelis/mcp-server` | `.` | Published MCP server entry point and CLI package |
 | `@stelis/contracts` | `.` | Private workspace export |
 | `@stelis/core-relay` | `.`, `./server`, `./browser` | Private workspace export used by SDK, API, and tests |
-| `@stelis/core-api` | `.`, `./prepareConfig`, `./admin`, `./studio`, `./testing/studio`, `./observability` | Private workspace export used by the API host and tests |
+| `@stelis/core-api` | `.`, `./prepareConfig`, `./admin`, `./studio`, `./testing/studio`, `./observability` | Private workspace export used by the Host runtime and tests |
 
 Do not add exports just for symmetry. Add an export only when a verified consumer needs it.
 
@@ -140,9 +140,9 @@ Do not add exports just for symmetry. Add an export only when a verified consume
 
 ### MCP Server
 
-`@stelis/mcp-server` is for agent clients. It exposes Stelis host endpoints as MCP tools. It does not hold keys, sign transactions, or create arbitrary transaction content by itself. Callers provide transaction-kind bytes and user signatures.
+`@stelis/mcp-server` is for agent clients. It exposes Stelis Host endpoints as MCP tools. It does not hold keys, sign transactions, or create arbitrary transaction content by itself. Callers provide transaction-kind bytes and user signatures.
 
-### API Host
+### Host Runtime
 
 `@stelis/app-api` is the deployable server. It mounts relay, auth, admin, and promotion routes. Server execution and store wiring belong here, while reusable domain logic belongs in `@stelis/core-api`.
 

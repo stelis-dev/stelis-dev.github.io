@@ -9,8 +9,8 @@ This document summarizes the current security boundaries that are visible in the
 | User assets | User vault assets are owned on-chain by the user. |
 | Sponsor gas | User commands must not reference `GasCoin` or use `FundsWithdrawal(Sponsor)`. |
 | User TransactionKind | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most `MAX_COMMANDS = 16` commands. |
-| Final relayer-built transaction | The host-built transaction must contain exactly one allowed settlement call. |
-| Payment-token funding | The host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
+| Final Host-built transaction | The Host-built transaction must contain exactly one allowed settlement call. |
+| Payment-token funding | The Host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
 | Prepare authorization | Generic prepare requires a sender personal-message signature over the transaction-kind hash and request fields. |
 | Settlement swap path | Relay validation accepts only configured settlement swap paths. Each supported `paymentTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
 | Prepare records | Prepare records are single-use and time-limited. |
@@ -24,10 +24,10 @@ Move contracts enforce vault ownership, settlement input checks, relayer claim c
 Relay validation adds off-chain checks before the sponsor signs:
 
 - user-supplied `User TransactionKind` checks
-- final relayer-built transaction shape checks
+- final Host-built transaction shape checks
 - settlement argument checks
 - settlement swap path authorization
-- payment-token funding checks using coin object provenance and `FundsWithdrawal(Sender)` address-balance accounting
+- settlement-token funding checks using coin object provenance and `FundsWithdrawal(Sender)` address-balance accounting
 - non-loss math
 - policy-hash binding
 - gas-owner and sponsor checks
@@ -38,15 +38,15 @@ Sponsor SUI state and transitions are defined in [`Sponsor Pools`](./architectur
 
 The sponsor slot is the `gasOwner` for sponsored transactions. User-supplied commands cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`. This protects both sponsor gas coin objects and sponsor address-balance gas.
 
-Final settlement validation rejects a `relayer_recipient` that does not match the configured Relayer recipient. This prevents a user-supplied transaction from redirecting settlement payout, including deployments where the Relayer recipient is also the Sponsor Refill Account.
+Final settlement validation rejects a `relayer_recipient` that does not match the configured relayer recipient. This prevents a user-supplied transaction from redirecting settlement payout, including deployments where the relayer recipient is also the Sponsor Refill Account.
 
-Failed sponsored execution can spend sponsor gas without producing settlement payout. The host uses preflight simulation, sponsor failure abuse recording, and blocked request checks to limit failed-execution gas griefing.
+Failed sponsored execution can spend sponsor gas without producing settlement payout. The Host uses preflight simulation, sponsor failure abuse recording, and blocked request checks to limit failed-execution gas griefing.
 
 Sponsor Refill Account withdrawal is privileged. The withdrawal route requires admin session validation, a signed single-use withdrawal nonce, admin-operation rate limiting, operation logging, dry-run, and runway guard checks.
 
 ## Web2 Security Policy (API and Infrastructure)
 
-The API host adds request and operations controls:
+The Host runtime adds request and operations controls:
 
 - Redis-backed prepare store
 - rate limiting
@@ -55,13 +55,13 @@ The API host adds request and operations controls:
 - sponsor operation health gate
 - admin session validation
 
-Generic `/relay/prepare` requires signed prepare authorization before the prepare state machine performs sponsor slot checkout, nonce reservation, on-chain reads, or transaction building. The host recomputes `txKindBytesHash`, verifies the sender personal-message signature, enforces the prepare authorization timestamp window, and rejects reused prepare authorization nonces.
+Generic `/relay/prepare` requires signed prepare authorization before the prepare state machine performs sponsor slot checkout, nonce reservation, on-chain reads, or transaction building. The Host recomputes `txKindBytesHash`, verifies the sender personal-message signature, enforces the prepare authorization timestamp window, and rejects reused prepare authorization nonces.
 
 Production deployments still place the API behind upstream traffic controls such as a WAF, CDN, or gateway rate limiter. The signed prepare boundary proves sender control, but it is not a perimeter replacement for traffic shaping.
 
 ## Studio Promotion Security
 
-Studio promotion routes use developer JWTs. The host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`.
+Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`.
 
 Promotion prepare and sponsor routes also check:
 

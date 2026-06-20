@@ -69,7 +69,7 @@
         },
         "paymentTokenType": {
           "type": "string",
-          "description": "Payment token coin type. Each paymentTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
+          "description": "Settlement token coin type. Each paymentTokenType appears once in supportedSettlementSwapPaths and selects the host's single active settlement swap path for that token."
         },
         "paymentTokenSymbol": {
           "type": "string"
@@ -126,7 +126,7 @@
         },
         "supportedSettlementSwapPaths": {
           "type": "array",
-          "description": "Host-supported payment tokens and their active one-hop settlement swap paths. Each paymentTokenType appears once.",
+          "description": "Host-supported settlement tokens and their active one-hop settlement swap paths. Each paymentTokenType appears once.",
           "items": {
             "$ref": "#/$defs/singleHopSettlementSwapPath"
           }
@@ -165,7 +165,7 @@
         },
         "paymentTokenType": {
           "type": "string",
-          "description": "Payment token coin type string from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for this token."
+          "description": "Settlement token coin type string from GET /relay/config.supportedSettlementSwapPaths. The host selects the single active settlement swap path for this token."
         },
         "txKindBytesHash": {
           "type": "string",

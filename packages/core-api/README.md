@@ -7,7 +7,7 @@ Framework-independent domain logic for Stelis relay, admin, and promotion featur
 - Not for: server startup, HTTP route mounting, API field reference text, or operator runbooks.
 
 This package contains **pure business logic** with no HTTP framework dependencies.
-Runtime host wiring (Hono routes, env parsing, server boot) belongs in `app-api`.
+Runtime Host wiring (Hono routes, env parsing, server boot) belongs in `app-api`.
 
 ## Subpath exports
 
@@ -36,15 +36,15 @@ This package **must not** contain:
 - HTTP framework code (Hono, Express, etc.)
 - Server boot / port binding logic
 
-All configuration is injected by the host layer (app-api).
+All configuration is injected by the Host layer (app-api).
 
-## Coordination adapters — host-injected only
+## Coordination adapters — Host-injected only
 
 `createRelayerContext()` requires every coordination adapter
 (`sponsorPool`, `prepareStore`, `prepareInflightLimiter`,
 `rateLimiter`, `abuseBlocker`) to be injected by the caller. There is
 no in-memory runtime default: missing inputs fail closed at context
-construction time. Production hosts (`app-api`) inject the
+construction time. Production Hosts (`app-api`) inject the
 Redis-backed adapters described in [`docs/operations.md → Sponsor Operations`](../../docs/operations.md#sponsor-operations). Memory
 adapters (`MemoryPrepareStore`, `MemoryPrepareInflight`,
 `MemoryRateLimiter`, `MemoryAbuseBlocker`, in-memory `SponsorPool`)

@@ -16,7 +16,7 @@ The schema file [`schemas/relay-api.schema.json`](./schemas/relay-api.schema.jso
 
 ## GET /health
 
-Returns host health:
+Returns Host health:
 
 ```json
 { "status": "ok", "mode": "generic" }
@@ -40,9 +40,9 @@ Returns runtime capability:
 - `protocolFlatFeeMist`
 - `integrityPolicyVersion`
 
-Clients treat `supportedSettlementSwapPaths` as the host's supported payment token list and settlement swap path list.
-Each `paymentTokenType` appears once and maps to one host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `paymentTokenType`; clients do not send a pool ID or path ID.
-The settlement swap path includes the DeepBook pool and `swapDirection` used by the host. `relayerRecipient` is an address, not the API host role or a sponsor signing account.
+Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement token list and settlement swap path list.
+Each `paymentTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `paymentTokenType`; clients do not send a pool ID or path ID.
+The settlement swap path includes the DeepBook pool and `swapDirection` used by the Host. `relayerRecipient` is an address, not the Host role or a sponsor signing account.
 
 ## POST /relay/prepare
 
@@ -52,7 +52,7 @@ Required fields:
 
 - `txKindBytes`: serialized transaction-kind bytes in base64
 - `senderAddress`: Sui address
-- `paymentTokenType`: payment token coin type from `GET /relay/config.supportedSettlementSwapPaths`
+- `paymentTokenType`: settlement token coin type from `GET /relay/config.supportedSettlementSwapPaths`
 - `txKindBytesHash`: SHA-256 hash of `txKindBytes`, encoded as hex
 - `prepareAuthorizationTimestampMs`: Unix timestamp in milliseconds included in the prepare authorization message
 - `prepareAuthorizationRequestNonce`: client-generated nonce included in the prepare authorization message
@@ -80,11 +80,11 @@ Minimal JSON body:
 
 ### User TransactionKind rules
 
-`txKindBytes` is a user-supplied `User TransactionKind`, not the final relayer-built transaction. The host validates it before sponsor slot checkout, nonce reservation, on-chain reads, or transaction building.
+`txKindBytes` is a user-supplied `User TransactionKind`, not the final Host-built transaction. The Host validates it before sponsor slot checkout, nonce reservation, on-chain reads, or transaction building.
 
 The user-supplied `User TransactionKind` must satisfy these rules:
 
-- It contains zero Stelis settlement calls. The host appends exactly one settlement call later.
+- It contains zero Stelis settlement calls. The Host appends exactly one settlement call later.
 - It contains at most `MAX_COMMANDS = 16` commands.
 - It does not reference `GasCoin` in command arguments.
 - It does not include `Publish` or `Upgrade`.
@@ -98,7 +98,7 @@ Funding resolution considers both coin object provenance and `FundsWithdrawal(Se
 The response includes transaction bytes for user signing and a `receiptId` for sponsor submission.
 The response cost fields include `relayerClaim`, which is the gas-recovery claim embedded in the settlement arguments. It is not the full relayer payout; on-chain settlement pays `relayerClaim + quotedRelayerFeeMist` to `relayerRecipient`.
 
-The prepare authorization message binds the sender to the transaction-kind hash, selected payment token type, optional cost fields, optional `orderId`, timestamp, and request nonce. The host recomputes `txKindBytesHash`, verifies the personal-message signature against `senderAddress`, rejects expired timestamps, and rejects reused prepare authorization nonces before entering the prepare state machine.
+The prepare authorization message binds the sender to the transaction-kind hash, selected settlement token type, optional cost fields, optional `orderId`, timestamp, and request nonce. The Host recomputes `txKindBytesHash`, verifies the personal-message signature against `senderAddress`, rejects expired timestamps, and rejects reused prepare authorization nonces before entering the prepare state machine.
 
 `prepareAuthorizationRequestNonce` is a request replay guard. It is separate from the on-chain settlement nonce returned in the prepare response.
 
@@ -145,7 +145,7 @@ Minimal JSON body:
 The route validates the prepared record, checks the transaction again, sponsor-signs, and submits.
 
 The submitted `txBytes` must match the prepared record bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, consumes the prepared record once, and then re-parses settlement fields from the hash-bound transaction bytes.
-The submitted `txBytes` is the final relayer-built transaction. It must contain exactly one allowed settlement call. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
+The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
 The `relayerClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
 ## Studio Promotion Routes

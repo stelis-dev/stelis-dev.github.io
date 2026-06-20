@@ -1,10 +1,10 @@
 # Operations
 
-This document describes current host operation facts that are supported by the code in this repository.
+This document describes current Host operation facts that are supported by the code in this repository.
 
 ## Baseline Host Operation
 
-The host package is `@stelis/app-api`.
+The Host package is `@stelis/app-api`.
 
 Required local files:
 
@@ -18,13 +18,13 @@ Ignored local runtime files must not be committed.
 
 RPC endpoints are configured in `packages/app-api/rpc.json`, not in environment variables.
 
-The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the host reads only the section selected by `NETWORK`, validates those endpoints against the selected network, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If the selected section is empty or no usable endpoint remains, boot fails.
+The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the Host reads only the section selected by `NETWORK`, validates those endpoints against the selected network, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If the selected section is empty or no usable endpoint remains, boot fails.
 
 ## Reverse Proxy and CORS
 
-`TRUSTED_PROXY_HOPS` controls how the host reads `X-Forwarded-For` for rate limiting and abuse checks.
+`TRUSTED_PROXY_HOPS` controls how the Host reads `X-Forwarded-For` for rate limiting and abuse checks.
 
-In deployed runtimes, `TRUSTED_PROXY_HOPS` must be set explicitly before the host starts. Use `TRUSTED_PROXY_HOPS=0` only when the API is directly exposed, or set it to the actual reverse-proxy hop count.
+In deployed runtimes, `TRUSTED_PROXY_HOPS` must be set explicitly before the Host starts. Use `TRUSTED_PROXY_HOPS=0` only when the API is directly exposed, or set it to the actual reverse-proxy hop count.
 
 In `development` and `test`, an unset `TRUSTED_PROXY_HOPS` defaults to `0` and uses the socket remote address.
 
@@ -52,7 +52,7 @@ Only admin can propose or cancel queued config, treasury, and pause updates. Aft
 
 `@stelis/app-api` wires Redis-backed adapters for prepare records, prepare in-flight limits, rate limits, abuse blocking, sponsor pool leasing, admin sessions, and Studio state.
 
-Memory adapters remain test fixtures. They are not runtime defaults for the deployable API host.
+Memory adapters remain test fixtures. They are not runtime defaults for the deployable Host.
 
 Default Redis namespaces are owned by their adapter modules:
 
@@ -87,7 +87,7 @@ Rejected Redis topology:
 - Instance-specific Redis databases, region-specific Redis databases, or split keyspaces for one sponsor account set.
 - Replica reads for admission, signing, refill dispatch, abuse decisions, admin sessions, or Studio budget decisions.
 
-At boot, `@stelis/app-api` probes `INFO server` through `REDIS_URL`. If Redis does not report `redis_mode:standalone`, or if the topology cannot be probed, the host fails closed before it accepts requests. The boot flow also writes the admin `not_before` key, so a read-only endpoint fails before startup completes.
+At boot, `@stelis/app-api` probes `INFO server` through `REDIS_URL`. If Redis does not report `redis_mode:standalone`, or if the topology cannot be probed, the Host fails closed before it accepts requests. The boot flow also writes the admin `not_before` key, so a read-only endpoint fails before startup completes.
 
 This policy matches current Redis key usage. Prepare store consumption uses Lua dynamic key access. Sponsor slot leasing, sponsor operation reads, refill locks, and Studio ledgers rely on one authoritative write path for their keys.
 
@@ -99,7 +99,7 @@ Sponsor SUI ownership, refill transitions, sponsor slot gas use, and Sponsor Ref
 
 The prepare in-flight limiter is Redis-backed and shared across all `app-api` instances that use the same Redis write authority. It limits concurrent expensive
 prepare work after cheap request validation and before build/simulation work completes.
-When `PREPARE_INFLIGHT_CAPACITY` is not set, the host uses `sponsor slot count * 2`.
+When `PREPARE_INFLIGHT_CAPACITY` is not set, the Host uses `sponsor slot count * 2`.
 `SPONSOR_SECRET_KEY` supports 1..256 comma-separated sponsor keys. Boot rejects deployments outside that range.
 
 ### Sponsor Capacity Policy
@@ -168,7 +168,7 @@ State writers use Redis server time for `lastObservedAtMs` and a per-entity `wri
 
 ## Studio Mode Operations
 
-Studio promotion routes are available when the host boots with all required Studio configuration:
+Studio promotion routes are available when the Host boots with all required Studio configuration:
 
 - `ADMIN_JWT_SECRET`
 - `ADMIN_ADDRESS`
@@ -177,11 +177,11 @@ Studio promotion routes are available when the host boots with all required Stud
 
 `STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional.
 
-When these variables are present, the host runs in dual mode: generic relay routes and Studio promotion routes are both active. Without the complete Studio configuration, the host runs the generic relay routes only.
+When these variables are present, the Host runs in dual mode: generic relay routes and Studio promotion routes are both active. Without the complete Studio configuration, the Host runs the generic relay routes only.
 
-`STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation rejects an empty list, malformed entries, and duplicates after canonicalization. The host precomputes target hashes and promotion prepare/sponsor requests must match those targets.
+`STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation rejects an empty list, malformed entries, and duplicates after canonicalization. The Host precomputes target hashes and promotion prepare/sponsor requests must match those targets.
 
-`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the host calls it after local JWT verification succeeds.
+`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds.
 
 Promotion execution uses Redis-backed promotion records, usage-event records, and the promotion execution ledger. The ledger reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
 
@@ -198,13 +198,13 @@ Optional admin settings:
 
 Boot validation requires `ADMIN_JWT_SECRET` to be at least 32 characters when it is configured. If `ADMIN_ADDRESS` is configured, the sponsor refill account address must be different from the admin address.
 
-<a id="payment-token-settlement-swap-path-onboarding-procedure"></a>
+<a id="settlement-token-onboarding-procedure"></a>
 
-## Payment Token Settlement Swap Path Onboarding Procedure
+## Settlement Token Onboarding Procedure
 
 Settlement swap path support is controlled by `packages/app-api/settlement-swap-paths.json`.
 
-The file is a network-keyed object with `testnet` and `mainnet` sections. The host reads only the section selected by `NETWORK`:
+The file is a network-keyed object with `testnet` and `mainnet` sections. The Host reads only the section selected by `NETWORK`:
 
 ```json
 {
@@ -217,11 +217,11 @@ The file is a network-keyed object with `testnet` and `mainnet` sections. The ho
 }
 ```
 
-At boot, the API host reads each pool ID in the active network section and derives settlement swap path metadata from on-chain data. Each pool must be `Pool<Token, SUI>` or `Pool<SUI, Token>`, so every configured entry resolves to one payment-token-to-SUI settlement swap path.
+At boot, the Host reads each pool ID in the active network section and derives settlement swap path metadata from on-chain data. Each pool must be `Pool<Token, SUI>` or `Pool<SUI, Token>`, so every configured entry resolves to one settlement-token-to-SUI settlement swap path.
 
-The product contract is one active 1-hop settlement swap path per `paymentTokenType`. `POST /relay/prepare` receives `paymentTokenType` and the host selects that token's registered path. Clients do not send a pool ID, path ID, or multi-hop path.
+The product contract is one active 1-hop settlement swap path per `paymentTokenType`. `POST /relay/prepare` receives `paymentTokenType` and the Host selects that token's registered path. Clients do not send a pool ID, path ID, or multi-hop path.
 
-If the file is missing, the selected network section is empty, or an entry is malformed, nested, duplicated by payment token, not SUI-adjacent, or cannot be verified, the host fails to start.
+If the file is missing, the selected network section is empty, or an entry is malformed, nested, duplicated by settlement token, not SUI-adjacent, or cannot be verified, the Host fails to start.
 
 ## Observability
 

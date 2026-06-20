@@ -6,11 +6,14 @@ This document defines the product terms used by SDK, web app, and API package do
 
 | Term | Meaning |
 | --- | --- |
-| Hosted relay | A deployed Stelis relay host that clients can use without operating their own host |
-| Host | A deployed `@stelis/app-api` runtime |
-| Host operator | The party that deploys and operates `@stelis/app-api` and related web apps |
-| Studio | Promotion and policy-controlled flows layered on the same host |
-| Relayer | The service that prepares, sponsor-signs, and submits sponsored transactions |
+| Host | A deployed `@stelis/app-api` execution environment that exposes the Relay API |
+| Relay API | The `/relay/*` HTTP interface exposed by a Host |
+| Host operator | The party that deploys and operates a Host and its Admin app |
+| Admin app | The operator tool used to manage Host settings, sponsor state, settlement swap paths, and operating policy |
+| Studio | Promotion and policy-controlled flows layered on the same Host |
+| settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `paymentTokenType` for the token's Sui coin type. |
+| User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned and is not Host-owned balance. |
+| relayer role | The internal Host role for execution, sponsorship, and settlement fields such as `relayerRecipient`, `relayerClaim`, and `relayerFee` |
 
 ## Generic Settlement Flow
 
@@ -41,5 +44,5 @@ These routes require a developer JWT. The promotion budget pays gas directly. Pr
 | --- | --- |
 | App or service developer | wallet UX, user signing, backend identity, and fulfillment |
 | Agent runtime | tool orchestration and user approval policy |
-| Host operator | deployed API host, sponsor funding, settlement swap path config, and operations |
-| Stelis packages | SDK, MCP server, API host, web apps, internal validation packages, and Move package |
+| Host operator | deployed Host runtime, sponsor funding, settlement swap path config, and operations |
+| Stelis packages | SDK, MCP server, Host runtime, web apps, internal validation packages, and Move package |
