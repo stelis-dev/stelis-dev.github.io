@@ -2,7 +2,7 @@
     "name": "@stelis/core-relay",
     "version": "0.1.0",
     "private": true,
-    "description": "Stelis relayer validation & quote library (pure TS, framework-independent)",
+    "description": "Stelis Host validation & quote library (pure TS, framework-independent)",
     "keywords": [
         "stelis",
         "sui",

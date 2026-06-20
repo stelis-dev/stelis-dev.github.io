@@ -223,7 +223,7 @@ function makeMockContext() {
       reserveNonce: vi.fn().mockResolvedValue(7n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -274,7 +274,7 @@ function mockSettleArgs(paymentInputTrace: unknown) {
   vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
     configObjectId: '0xCONFIG',
     registryObjectId: '0xREGISTRY',
-    settlementPayoutRecipient: '0xRELAYER',
+    settlementPayoutRecipient: '0xPAYOUT',
     executionCostClaim: 1_800_000n,
     policyHash: policyHashBytes(),
     orderIdHash: new Uint8Array(0),

@@ -172,8 +172,8 @@ export function DocsPage() {
             marginBottom: 20,
           }}
         >
-          Definitions of <code>Host</code>, <code>Relay API</code>, <code>Admin app</code>,{' '}
-          <code>Studio</code>, and <code>relayer role</code> live in{' '}
+          Definitions of <code>Host</code>, <code>Relay API</code>, <code>Admin app</code>, and{' '}
+          <code>Studio</code> live in{' '}
           {PAYMENT_PLATFORM_DOC_URL ? (
             <a href={PAYMENT_PLATFORM_DOC_URL} target="_blank" rel="noreferrer">
               docs/payment-platform.md → Product Family Terms

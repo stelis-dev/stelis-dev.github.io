@@ -45,7 +45,7 @@ describe('sponsoredExecution — derive known economics', () => {
   });
 
   it('promotion success: recovered === paid and no host fee → host net is exactly 0', () => {
-    // Promotion ledger.consume reimburses the relayer for `actualGasMist`,
+    // Promotion ledger.consume reimburses the Host for `actualGasMist`,
     // so consumedGasMist === actualGasMist on every successful promotion path.
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 4_321n,
@@ -57,7 +57,7 @@ describe('sponsoredExecution — derive known economics', () => {
 
   it('promotion ledger consume failure post-submit: recovered=0, paid=actual → loss', () => {
     // Only known-economics promotion failure path that produces a real loss
-    // — relayer paid gas onchain but the budget did not reimburse.
+    // — Host paid gas onchain but the budget did not reimburse.
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 0n,
       hostPaidGasMist: 12_345n,

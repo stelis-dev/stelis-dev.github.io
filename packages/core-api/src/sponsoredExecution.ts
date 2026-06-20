@@ -80,7 +80,7 @@ export function unknownSponsoredExecutionEconomics(
  *
  * `protocolFeeMist` is intentionally NOT subtracted from
  * `hostNetMist`. Protocol fee flows from user surplus to the
- * protocol treasury and is not the relayer's revenue (see
+ * protocol treasury and is not Host fee revenue (see
  * `docs/economics-formal.md` `Profit and Loss Equations`).
  */
 export function deriveSponsoredExecutionEconomics(input: {

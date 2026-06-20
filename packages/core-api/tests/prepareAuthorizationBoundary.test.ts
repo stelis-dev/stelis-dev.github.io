@@ -73,7 +73,7 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
       reserveNonce: vi.fn(),
       releaseReservation: vi.fn(),
     },
-    settlementPayoutRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     getConfig: vi.fn(),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue(null),

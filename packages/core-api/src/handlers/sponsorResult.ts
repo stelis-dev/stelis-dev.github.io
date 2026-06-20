@@ -46,7 +46,7 @@ export type SponsorResultRoute = 'generic' | 'promotion';
  *
  * `protocolFeeMist` is auxiliary context — recorder must NOT subtract
  * it from `hostNetMist`; protocol fee flows from user surplus to
- * protocol treasury, not to the relayer.
+ * protocol treasury, not to the Host.
  *
  * `economicsStatus = "unknown"` means the sponsor result path could not
  * prove both the recovered amount and the host-paid amount. When

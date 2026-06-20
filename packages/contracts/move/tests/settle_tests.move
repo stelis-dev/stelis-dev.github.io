@@ -140,7 +140,7 @@ module stelis::settle_tests {
             test_scenario::return_to_sender(&scenario, vault);
         };
 
-        // 3. Verify Relayer Receipt
+        // 3. Verify settlement payout receipt
         test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
@@ -365,7 +365,7 @@ module stelis::settle_tests {
             test_scenario::return_to_sender(&scenario, vault);
         };
 
-        // 4. Verify Relayer Receipt
+        // 4. Verify settlement payout receipt
         test_scenario::next_tx(&mut scenario, ADDR_SETTLEMENT_PAYOUT_RECIPIENT);
         {
             let coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);

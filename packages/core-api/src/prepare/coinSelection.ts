@@ -2,10 +2,10 @@
  * Coin selection utilities for /prepare.
  *
  * Adapted from sdk/src/sdk.ts L540-593 (coin querying, merging, splitting).
- * Server-owned — the relayer selects, merges, and splits coins on behalf of the user.
+ * Server-owned — the Host selects, merges, and splits coins on behalf of the user.
  *
  * User protection: the final txBytes is returned for user review and signature.
- * If the relayer makes malicious coin selections, the user can refuse to sign.
+ * If the Host makes malicious coin selections, the user can refuse to sign.
  *
  * R-9: When the user TX prefix already references coins of the same type,
  * coin selection must avoid double-consuming those coins. Callers pass

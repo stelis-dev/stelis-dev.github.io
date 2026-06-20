@@ -2,7 +2,7 @@
  * Transaction replay for /prepare — deserializes user txKindBytes.
  *
  * txKindBytes is a base64-encoded TransactionKind that contains
- * only user commands (no settle). The relayer decodes it, validates
+ * only user commands (no settle). The Host decodes it, validates
  * via P1, then replays the commands into a new Transaction that
  * also includes settle calls.
  *

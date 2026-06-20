@@ -102,7 +102,7 @@ function makeMockContext(overrides?: {
         inflight: 0,
         capacity: 10,
       },
-      settlementPayoutRecipientAddress: '0xRELAYER',
+      settlementPayoutRecipientAddress: '0xPAYOUT',
       getConfig: vi.fn().mockResolvedValue(onchainConfig),
     } as unknown as Parameters<typeof handlePrepare>[0],
     onchainConfig,

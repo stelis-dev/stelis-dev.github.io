@@ -1,7 +1,7 @@
 /**
- * Settle PTB Builders — server-side (relayer) settle command construction.
+ * Settle PTB Builders — server-side Host settle command construction.
  *
- * The relayer builds settle commands server-side.
+ * The Host builds settle commands server-side.
  *
  * Functions:
  *   buildSwapAndSettlePtb()    — swap settlement token → SUI + settle

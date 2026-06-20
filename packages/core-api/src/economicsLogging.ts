@@ -11,7 +11,7 @@ export interface SettlementEconomicsSnapshot {
   // `storageRebate > grossGas`; the snapshot preserves that raw value
   // so observability and recorder rows can keep the on-chain truth
   // separate from the derived clamped `netGas` (which IS clamped to 0
-  // because the relayer never pays the user — see canonical helper at
+  // because the Host never pays the user — see canonical helper at
   // `packages/core-relay/src/gasEstimate.ts:119-122`).
   storageRebate: bigint;
   netGas: bigint;
@@ -43,7 +43,7 @@ export function buildSettlementEconomicsSnapshot(input: {
   const storageRebate = parseGasUsedMist(input.gasUsed.storageRebate, 'storageRebate');
   // Canonical 0-clamp: net gas can be negative when storageRebate
   // exceeds computation + storage (e.g. a TX that deletes objects).
-  // The relayer never pays the user, so clamp to 0 — same semantics as
+  // The Host never pays the user, so clamp to 0 — same semantics as
   // `computeExecutionCostClaim(...).simGas` in
   // `packages/core-relay/src/gasEstimate.ts:119-122` and the recorder
   // formula in `docs/economics-formal.md#recorder-economics`. Without this clamp

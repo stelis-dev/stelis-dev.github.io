@@ -12,7 +12,7 @@
  * barrel intentionally keeps runtime helpers only; import shared
  * data/types from `@stelis/contracts` directly.
  *
- * Note: `computePolicyHash` and `PolicyFields` are owned by the relayer
+ * Note: `computePolicyHash` and `PolicyFields` are owned by the Host policy layer
  * server. They live in core-api's internal `src/policyHash.ts` server
  * module (no public package subpath; consumers within `core-api` import
  * via a relative path) and are not exported from this package at all.

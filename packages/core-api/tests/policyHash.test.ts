@@ -1,7 +1,7 @@
 /**
  * policyHash — golden tests for the server-only S-16 policy hash.
  *
- * The helper is the relayer's single owner of the hash; SDK consumers never
+ * The helper is the Host's single owner of the hash; SDK consumers never
  * compute it.
  */
 import { describe, it, expect } from 'vitest';

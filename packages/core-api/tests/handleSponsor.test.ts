@@ -76,7 +76,7 @@ const sponsorKeypair = Ed25519Keypair.generate();
 const SPONSOR_ADDRESS = sponsorKeypair.toSuiAddress();
 
 /**
- * Shared mock relayer config values.
+ * Shared mock Host config values.
  * Used by both makeMockContext (getConfig mock) and makePreparedEntry (feeSnapshot).
  * Must stay in sync: the fingerprint is only valid when both sides use the same values.
  */
@@ -2963,7 +2963,7 @@ describe('handleSponsor', () => {
         expect(probe.calls[0].economics.grossGasMist).toBe('800000');
         // Raw `storageRebateMist` is preserved verbatim from the
         // on-chain effects (NOT derived as `grossGas - netGas`).
-        // `netGas` is clamped to 0 because the relayer never pays the
+        // `netGas` is clamped to 0 because the Host never pays the
         // user, but the on-chain rebate is the auditable truth and the
         // recorder row must keep it. This was a real regression: the
         // earlier derivation `grossGas - netGas` collapsed to `grossGas`
@@ -3028,7 +3028,7 @@ describe('handleSponsor', () => {
       expect(log!['gross_gas']).toBe('800000');
       expect(log!['storage_rebate']).toBe('2000000');
       // Clamped host-paid-gas quantity. NOT raw `gross_gas - storage_rebate`
-      // (which would be -1_200_000n; the relayer never pays the user).
+      // (which would be -1_200_000n; the Host never pays the user).
       expect(log!['net_gas']).toBe('0');
       // payout_net derived from the clamped net_gas, so it equals
       // payout exactly. Test fixture's execution_cost_claim_mist + fee_charged.

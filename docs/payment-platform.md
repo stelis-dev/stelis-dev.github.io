@@ -13,7 +13,7 @@ This document defines the product terms used by SDK, web app, and API package do
 | Studio | Promotion and policy-controlled flows layered on the same Host |
 | settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `settlementTokenType` for the token's Sui coin type. |
 | User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned and is not Host-owned balance. |
-| relayer role | The internal Host role for execution, sponsorship, and settlement fields such as `settlementPayoutRecipient`, `executionCostClaim`, and `hostFee` |
+| Host execution role | The internal Host role for execution, sponsorship, and settlement fields such as `settlementPayoutRecipient`, `executionCostClaim`, and `hostFee` |
 
 ## Generic Settlement Flow
 

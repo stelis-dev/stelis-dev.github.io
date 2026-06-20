@@ -224,7 +224,7 @@ export const STELIS_CONTRACT_IDS: Record<SuiNetwork, StelisContractIds | null> =
  * — this is intentional to prevent hardcoded or intermediate values from
  * bypassing the shared contract constants.
  *
- * Data-adjacent pure lookup: no Node-only or browser-only side effects,
+ * Pure lookup: no Node-only or browser-only side effects,
  * no runtime state, tightly coupled to STELIS_CONTRACT_IDS / DEEPBOOK_IDS
  * above.
  *

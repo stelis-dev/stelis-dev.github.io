@@ -1920,7 +1920,7 @@ describe('admin routes', () => {
       expect(body.sponsorRefillAccountAddress).toBeUndefined();
       expect(body.sponsorRefillAccountBalance).toBeUndefined();
       expect(body.sponsorRefillAccountRefillsRemaining).toBeUndefined();
-      // Relayer-recipient balance is not part of the response contract.
+      // Settlement payout recipient balance is not part of the response contract.
       expect(body.settlementPayoutRecipientBalance).toBeUndefined();
     });
 

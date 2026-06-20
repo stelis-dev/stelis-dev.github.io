@@ -256,7 +256,7 @@ function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
     configId: '0xCFG',
     vaultRegistryId: '0xREG',
     deepbookPackageId: '0xabc',
-    settlementPayoutRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     maxClaimMist: 50_000_000n,
     minSettleMist: 100_000n,
     quotedHostFeeMist: 0n,
@@ -1073,7 +1073,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   // ── safeBuild: address balance overflow → INSUFFICIENT_BALANCE ────────
   // This captures the underlying runtime failure when user prefix and
-  // relayer suffix both request address-balance withdrawal and the combined amount exceeds the
+  // Host suffix both request address-balance withdrawal and the combined amount exceeds the
   // available balance, Sui runtime rejects with "Available amount in
   // account for object id ... is less than requested: X < Y".
   // safeBuild must catch this and classify as INSUFFICIENT_BALANCE.

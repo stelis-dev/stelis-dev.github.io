@@ -1,5 +1,5 @@
 /**
- * computePolicyHash — deterministic SHA-256 of relayer policy fields.
+ * computePolicyHash — deterministic SHA-256 of Host policy fields.
  *
  * Server-only owner of the S-16 policy hash. Both `/relay/prepare`
  * (issuance via `session/sponsoredExecution/genericExecutionPolicy.ts`) and
@@ -11,7 +11,7 @@
  * it through to the PTB. They do NOT need to compute it themselves and
  * the helper is intentionally not exposed on `@stelis/core-relay/browser`
  * or `@stelis/core-relay`. The Node `crypto.createHash` dependency is the
- * structural reason; the policy decision is that the relayer is the only
+ * structural reason; the policy decision is that the Host is the only
  * API allowed to compute the hash.
  */
 import { createHash } from 'crypto';

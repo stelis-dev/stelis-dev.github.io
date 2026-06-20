@@ -5,7 +5,7 @@
  * `@stelis/core-api`) into a `SponsoredExecutionLogEntry`
  * and writes it via the configured `SponsoredLogsStoreAdapter`.
  *
- * Outcome filter: only outcomes that the relayer paid (or could have
+ * Outcome filter: only outcomes that the Host paid (or could have
  * paid) gas for go into `Sponsored Executions`. The recorded set is
  * `success`, `onchain_revert`, plus the narrow `internal_error` subset
  * whose `economics.failureReason` starts with `submit_infra_unknown`.

@@ -40,10 +40,10 @@ export function validateGenericUserTransactionKind(
 }
 
 /**
- * Validate a relayer-built generic settlement transaction after settlement is appended.
+ * Validate a Host-built generic settlement transaction after settlement is appended.
  *
  * This is deliberately separate from user TransactionKind validation. The final
- * transaction may contain relayer-created FundsWithdrawal(Sender) inputs for
+ * transaction may contain Host-created FundsWithdrawal(Sender) inputs for
  * settlement funding, so prepare-time withdrawal accounting is not repeated here.
  */
 export function validateGenericSettlementTransaction(

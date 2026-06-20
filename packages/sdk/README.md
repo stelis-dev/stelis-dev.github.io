@@ -8,7 +8,7 @@ SDK for Sui apps that use sponsored transactions through a Host.
 
 > [!NOTE]
 > Codes like `S-10` are invariant IDs defined in [invariants.md](../../docs/invariants.md)
-> `Host`, `Relay API`, `Admin app`, `Studio`, `relayer role`, and `Host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
+> `Host`, `Relay API`, `Admin app`, `Studio`, `Host execution role`, and `Host operator` are defined in [docs/payment-platform.md → Product Family Terms](../../docs/payment-platform.md#product-family-terms).
 > PTB means Programmable Transaction Block, Sui's transaction-building format.
 
 ## Start Here

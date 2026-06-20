@@ -112,7 +112,7 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
   it('skips internal_error fall-through (no submit_infra_unknown marker — never burned gas)', async () => {
     // Generic catch-all `internal_error` whose `failureReason` does NOT
     // start with `submit_infra_unknown` — these are crashes that throw
-    // before sponsor signature, so the relayer never paid gas onchain.
+    // before sponsor signature, so the Host never paid gas onchain.
     // They belong to other audit views, not Sponsored Executions.
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });

@@ -11,7 +11,7 @@
  *      revalidation both use this function.
  *
  * `PolicyFields` type and `computePolicyHash()` live in
- * `./policyHash.ts` (server-only owner). The hash is the relayer's
+ * `./policyHash.ts` (server-only owner). The hash is the Host's
  * private S-16 binding; SDK and browser consumers receive it from the
  * `/relay/prepare` response and never compute it themselves.
  */

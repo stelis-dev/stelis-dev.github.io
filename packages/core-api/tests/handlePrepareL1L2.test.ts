@@ -98,7 +98,7 @@ function makeCtx() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xPAYOUT',
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',

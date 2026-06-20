@@ -1,5 +1,5 @@
 /**
- * Shared gas estimation helper for relayer cost formulas.
+ * Shared gas estimation helper for execution cost claim formulas.
  *
  * Used by:
  *   - core-api/prepare/build.ts  (server-side, actual dry-run)
@@ -16,7 +16,7 @@
  * slippageBufferMist covers DEX price movement (swap paths only; 0 for credit paths).
  *
  * ⚠️ Epoch boundary: if gas price rises between dry-run and execution,
- *    simGas may underestimate actual gas → relayer absorbs micro-loss.
+ *    simGas may underestimate actual gas → Host absorbs micro-loss.
  *    This is intentional — revenue comes from quotedHostFeeMist / protocol_fee.
  *
  * See docs/economics-formal.md for details.
@@ -100,7 +100,7 @@ function parseGasUsedAmount(value: string, field: keyof SimulationGasUsed): bigi
 // ─────────────────────────────────────────────
 
 /**
- * Compute relayer cost estimate from dry-run gas usage.
+ * Compute execution cost claim estimate from dry-run gas usage.
  *
  * Pure function — no I/O, no state, deterministic.
  * Both SDK and core-api import this to guarantee identical cost math.
@@ -117,7 +117,7 @@ export function computeExecutionCostClaim(
   const storageRebate = parseGasUsedAmount(gasUsed.storageRebate, 'storageRebate');
 
   // Net gas can be negative when storageRebate exceeds computation + storage
-  // (e.g. TX that deletes objects). Clamp to 0 — relayer never pays the user.
+  // (e.g. TX that deletes objects). Clamp to 0 — Host never pays the user.
   const rawSimGas = computationCost + storageCost - storageRebate;
   const simGas = rawSimGas > 0n ? rawSimGas : 0n;
   const grossGas = computationCost + storageCost;

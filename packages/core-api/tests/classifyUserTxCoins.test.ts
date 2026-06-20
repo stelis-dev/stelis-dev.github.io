@@ -332,7 +332,7 @@ describe('classifyUserTxCoins — FundsWithdrawal accounting gap', () => {
   });
 
   // Simulates the exact prefix + suffix same-token withdrawal scenario:
-  // user prefix `tx.withdrawal()` plus relayer suffix `tx.withdrawal()`
+  // user prefix `tx.withdrawal()` plus Host suffix `tx.withdrawal()`
   // on the same token when resolvePaymentSource chooses the address-balance path.
   it('prefix + suffix withdrawal on same token: classifier sees neither, PTB has both FundsWithdrawal inputs', () => {
     const tx = new Transaction();
@@ -340,7 +340,7 @@ describe('classifyUserTxCoins — FundsWithdrawal accounting gap', () => {
     // User prefix: withdraw 7_000_000 from AB
     tx.withdrawal({ amount: 7_000_000n, type: DUMMY_COIN_TYPE });
 
-    // Relayer suffix: withdraw 8_000_000 from AB for gas swap
+    // Host suffix: withdraw 8_000_000 from AB for gas swap
     // (mirrors build.ts L767: tx.withdrawal({ amount: swapAmountSmallest, type: pool.settlementTokenType }))
     tx.withdrawal({ amount: 8_000_000n, type: DUMMY_COIN_TYPE });
 

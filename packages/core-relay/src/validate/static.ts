@@ -71,7 +71,7 @@ export function containsGasCoinReference(args: unknown[]): boolean {
 // ─────────────────────────────────────────────
 
 /**
- * Validates that the PTB structure satisfies relayer policy.
+ * Validates that the PTB structure satisfies Host policy.
  *
  * Policy (swap_and_settle phase):
  *   - Stelis package: exactly 1 call in SETTLE_FUNCTIONS (1-hop variants)
@@ -139,11 +139,11 @@ export function validatePtbStructure(commands: PtbCommand[], env: HostValidation
 // ─────────────────────────────────────────────
 
 /**
- * Validates user-supplied commands before the relayer appends settle.
+ * Validates user-supplied commands before the Host appends settle.
  *
  * This is the `/prepare` counterpart of `validatePtbStructure()` (L1).
  * Identical policy EXCEPT:
- *   - Zero settle calls is expected (the relayer will add settle later)
+ *   - Zero settle calls is expected (the Host will add settle later)
  *   - Settle calls are actively rejected (user must not include them)
  *
  * Security checks inherited from L1:
@@ -175,12 +175,12 @@ export function validateUserCommands(commands: PtbCommand[], env: HostValidation
       const isStelisPkg = cmd.packageId === env.packageId;
 
       if (isStelisPkg) {
-        // Settle calls in user commands → reject (relayer will add settle)
+        // Settle calls in user commands → reject (Host will add settle)
         const isSwapAndSettle = cmd.module === SETTLE_MODULE && SETTLE_FUNCTIONS.has(cmd.function);
         if (isSwapAndSettle) {
           return fail(
             'P1_USER_SETTLE_FORBIDDEN',
-            `User commands must not contain settle calls — relayer will append settle`,
+            `User commands must not contain settle calls — Host will append settle`,
           );
         }
 
@@ -207,7 +207,7 @@ export function validateUserCommands(commands: PtbCommand[], env: HostValidation
 // ─────────────────────────────────────────────
 
 /**
- * Validates that settle() call arguments match relayer policy.
+ * Validates that settle() call arguments match Host policy.
  *
  * Checks (in order):
  *   1. Config object ID == env.configId

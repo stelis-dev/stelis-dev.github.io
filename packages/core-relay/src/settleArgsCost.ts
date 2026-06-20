@@ -155,7 +155,7 @@ export function extractCostFromTxBytes(
   packageId: string,
 ): SettleArgsCost | null {
   try {
-    // Try full transaction first (relayer-returned txBytes), then kind-only bytes
+    // Try full transaction first (Host-returned txBytes), then kind-only bytes
     let tx: Transaction;
     try {
       tx = Transaction.from(fromBase64(txBytesBase64));

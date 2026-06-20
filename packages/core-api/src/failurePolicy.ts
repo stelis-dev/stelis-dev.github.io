@@ -80,7 +80,7 @@ export type FailureCode =
  * Code-level classification (orthogonal to subcode-level carve-out).
  *
  * - `manipulation`: cryptographic/policy-violation evidence that the
- *   request was crafted to attack the relayer (TAMPERING_DETECTED,
+ *   request was crafted to attack the Host (TAMPERING_DETECTED,
  *   GasCoin/sponsor-withdrawal references, unauthorized route, JWT
  *   forgery, …). The blocker adapter applies a long-duration block via
  *   `setBlock` and returns immediately. Long-block enforcement is owned

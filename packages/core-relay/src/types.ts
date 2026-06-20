@@ -153,7 +153,7 @@ export interface SettleArgs {
    */
   policyHash: Uint8Array;
   /**
-   * Relayer's quoted fee (MIST) — exact value embedded in the PTB.
+   * Host's quoted fee (MIST) — exact value embedded in the PTB.
    * On-chain checks: quoted_host_fee_mist <= max_host_fee_mist (L2 EHostFeeCapExceeded).
    */
   quotedHostFeeMist: bigint;

@@ -15,7 +15,7 @@ import type { SettleArgs, OnchainConfig, HostValidationEnv } from '../src/types.
 
 const ENV: HostValidationEnv = {
   network: 'testnet',
-  settlementPayoutRecipientAddress: '0xRELAYER',
+  settlementPayoutRecipientAddress: '0xPAYOUT',
   configId: '0xCONFIG',
   vaultRegistryId: '0xREGISTRY',
   packageId: '0xPACKAGE',
@@ -358,7 +358,7 @@ describe('Layer 2: validateSettleArgs', () => {
   const validArgs: SettleArgs = {
     configObjectId: '0xCONFIG',
     registryObjectId: '0xREGISTRY',
-    settlementPayoutRecipient: '0xRELAYER',
+    settlementPayoutRecipient: '0xPAYOUT',
     executionCostClaim: 10_000_000n,
     policyHash: new Uint8Array(32), // 32-byte zero hash
     orderIdHash: new Uint8Array(0), // empty = no orderId
@@ -551,7 +551,7 @@ const POOL_2 = '0xpool2';
 const validArgs: SettleArgs = {
   configObjectId: '0xCONFIG',
   registryObjectId: '0xREGISTRY',
-  settlementPayoutRecipient: '0xRELAYER',
+  settlementPayoutRecipient: '0xPAYOUT',
   executionCostClaim: 5_000_000n,
   policyHash: new Uint8Array(32), // 32-byte zero hash
   orderIdHash: new Uint8Array(0), // empty = no orderId

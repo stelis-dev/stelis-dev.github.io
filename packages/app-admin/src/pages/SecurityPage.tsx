@@ -72,7 +72,7 @@ export function SecurityPage() {
   return (
     <>
       <h1 className="admin-page-title">Security</h1>
-      <p className="admin-page-sub">Abuse response controls for the relayer.</p>
+      <p className="admin-page-sub">Abuse response controls for the Host.</p>
 
       {msg && (
         <div

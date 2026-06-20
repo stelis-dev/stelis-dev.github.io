@@ -1,5 +1,5 @@
 /**
- * Address constraint validation for relayer configuration.
+ * Address constraint validation for Host configuration.
  *
  * Enforces address separation rules at startup:
  *   [1] Each sponsor address must be unique (pool concurrency)
