@@ -77,11 +77,11 @@ export interface PrepareHandlerConfig {
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths: AllowedSettlementSwapPath[];
   /**
-   * Relayer-quoted fee per TX (MIST) — set from RELAYER_FEE_MIST env var.
-   * Embedded in the settle PTB as `quoted_relayer_fee_mist`.
-   * On-chain validates this <= max_relayer_fee_mist (ERelayerFeeCapExceeded).
+   * Host-quoted fee per TX (MIST) — set from HOST_FEE_MIST env var.
+   * Embedded in the settle PTB as `quoted_host_fee_mist`.
+   * On-chain validates this <= max_host_fee_mist (EHostFeeCapExceeded).
    */
-  quotedRelayerFeeMist: bigint;
+  quotedHostFeeMist: bigint;
 }
 
 export interface PrepareResult {
@@ -99,12 +99,12 @@ export interface PrepareResult {
     gasVarianceFixedMist: string;
     /** Slippage buffer MIST (0 for credit-only settle) */
     slippageBufferMist: string;
-    /** Relayer-quoted fee per TX (MIST) */
-    quotedRelayerFee: string;
+    /** Host-quoted fee per TX (MIST) */
+    quotedHostFee: string;
     /** Protocol flat fee */
     protocolFee: string;
-    /** relayerClaim = simGas + gasVarianceFixedMist + slippageBufferMist (on-chain settle arg) */
-    relayerClaim: string;
+    /** executionCostClaim = simGas + gasVarianceFixedMist + slippageBufferMist (on-chain settle arg) */
+    executionCostClaim: string;
     /** grossGas = computation + storage (before rebate) */
     grossGas: string;
   };

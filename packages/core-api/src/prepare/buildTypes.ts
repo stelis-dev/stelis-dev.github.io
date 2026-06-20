@@ -13,15 +13,15 @@ export interface BuildContext {
   configId: string;
   vaultRegistryId: string;
   deepbookPackageId: string;
-  relayerRecipientAddress: string;
+  settlementPayoutRecipientAddress: string;
   maxClaimMist: bigint;
   /** On-chain min_settle_mist. Used for INSUFFICIENT_SETTLE_INPUT meta. */
   minSettleMist: bigint;
   /**
-   * Relayer-quoted fee (MIST) per TX, set from RELAYER_FEE_MIST.
-   * Embedded in settle PTB as `quoted_relayer_fee_mist`.
+   * Host-quoted fee (MIST) per TX, set from HOST_FEE_MIST.
+   * Embedded in settle PTB as `quoted_host_fee_mist`.
    */
-  quotedRelayerFeeMist: bigint;
+  quotedHostFeeMist: bigint;
   /** Protocol flat fee in MIST. Used for requiredTotalIn calculation. */
   protocolFlatFeeMist: bigint;
   /**
@@ -71,7 +71,7 @@ export interface GenericPrepareBuildOutput {
    * from being written into this field from outside
    * `core-api/src/internal/brand.ts`.
    */
-  relayerClaim: Mist;
+  executionCostClaim: Mist;
   /** Branded `Mist`. */
   simGas: Mist;
   /** Gas variance fixed component for on-chain embed. */

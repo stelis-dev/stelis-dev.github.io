@@ -6,7 +6,7 @@
  *
  * Shared references:
  *   - createRelayerContext → @stelis/core-api
- *   - resolvePrepareConfig, parseRelayerFeeEnv → @stelis/core-api/prepareConfig
+ *   - resolvePrepareConfig, parseHostFeeEnv → @stelis/core-api/prepareConfig
  *   - Redis store adapters → @stelis/core-api (RedisPrepareStore, RedisSponsorPool, etc.)
  *   - Studio adapters → @stelis/core-api/studio
  *   - Sponsor operations → app-api/src/sponsor-operations/{bootstrap,redisState,sponsorResultStateUpdater,refillWorker,gate}
@@ -51,7 +51,7 @@ import { parseChainBalanceMist } from './sponsor-operations/balanceParsing.js';
 import {
   createPrepareSettlementSwapPathDescriptorMap,
   resolvePrepareConfig,
-  parseRelayerFeeEnv,
+  parseHostFeeEnv,
 } from '@stelis/core-api/prepareConfig';
 import {
   logStructuredEvent,
@@ -321,7 +321,7 @@ async function initContext(): Promise<AppApiContext> {
       settlementSwapPaths,
       descriptors: settlementSwapPathDescriptors,
       deepbookPackageId: deepbookIds.packageId,
-      quotedRelayerFeeMist: parseRelayerFeeEnv(process.env.RELAYER_FEE_MIST),
+      quotedHostFeeMist: parseHostFeeEnv(process.env.HOST_FEE_MIST),
     });
 
     // ── 7. Prepare in-flight limiter (Redis-backed, shared across app instances) ──
@@ -349,7 +349,7 @@ async function initContext(): Promise<AppApiContext> {
       // shared contract constants without env override or synthetic
       // default.
       deepbookPackageId: deepbookIds.packageId,
-      relayerRecipientAddress: requireEnv('RELAYER_RECIPIENT_ADDRESS'),
+      settlementPayoutRecipientAddress: requireEnv('SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS'),
       sponsorPool,
       prepareStore,
       prepareRequestNonceStore,
@@ -502,7 +502,7 @@ async function initContext(): Promise<AppApiContext> {
       sui: relay.sui,
       state: sponsorOperationsState,
       sponsorRefillAccountAddress: sponsorRefillAccountAddress,
-      relayerRecipientAddress: relay.relayerRecipientAddress,
+      settlementPayoutRecipientAddress: relay.settlementPayoutRecipientAddress,
       slotBalanceTimeoutMs,
       sponsorRefillAccountBalanceTimeoutMs,
       warnThresholdMist: warnMist,

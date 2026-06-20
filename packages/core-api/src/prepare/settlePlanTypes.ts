@@ -142,18 +142,18 @@ export interface SettlementPlan {
  * Audit fields embedded in the settle PTB.
  *
  * These are the 13 fields from SETTLE_FIELD_SCHEMA, plus the
- * relayer recipient address. All values are determined at plan time
+ * settlement payout recipient address. All values are determined at plan time
  * and passed through to the PTB compiler without modification.
  */
 export interface SettlePlanAuditFields {
-  readonly relayerClaim: bigint;
-  readonly relayerRecipient: string;
+  readonly executionCostClaim: bigint;
+  readonly settlementPayoutRecipient: string;
   readonly receiptId: Uint8Array;
   readonly nonce: bigint;
   readonly simGasReported: bigint;
   readonly gasVarianceFixedMist: bigint;
   readonly slippageBufferMist: bigint;
-  readonly quotedRelayerFeeMist: bigint;
+  readonly quotedHostFeeMist: bigint;
   readonly expectedProtocolFeeMist: bigint;
   readonly expectedConfigVersion: bigint;
   readonly quoteTimestampMs: number;

@@ -463,11 +463,11 @@ export interface RelayerApiConfig {
    */
   suiClient?: SuiGrpcClient;
   /**
-   * Settlement payout recipient address for relayer claim plus quoted relayer fee (required).
+   * Settlement payout recipient address for execution cost claim plus quoted host fee (required).
    * Must differ from all sponsor addresses.
    * Canonicalized with normalizeSuiAddress at context creation.
    */
-  relayerRecipientAddress: string;
+  settlementPayoutRecipientAddress: string;
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths?: AllowedSettlementSwapPath[];
   /**
@@ -542,7 +542,7 @@ export interface RelayerContext {
    * Settlement payout recipient address (canonical form).
    * Always set — validated at context creation.
    */
-  relayerRecipientAddress: string;
+  settlementPayoutRecipientAddress: string;
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths: AllowedSettlementSwapPath[];
 
@@ -560,7 +560,7 @@ export interface RelayerContext {
    * createRelayerContext() is sync, so await cannot be used inside it.
    * Call `await ctx.warmUp()` immediately after context creation to:
    *   1. Validate Config object exists on-chain
-   *   2. Verify `max_relayer_fee_mist` / `protocol_flat_fee_mist` / `config_version` / `max_spread_bps` fields are present (fail-closed)
+   *   2. Verify `max_host_fee_mist` / `protocol_flat_fee_mist` / `config_version` / `max_spread_bps` fields are present (fail-closed)
    *   3. Pre-populate the cache so the first API request has no cold-start latency
    *
    * If warmUp() throws, the server should exit immediately.
@@ -647,15 +647,15 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
   }
   const sponsorPool = config.sponsorPool;
 
-  // Canonicalize + validate relayerRecipientAddress
+  // Canonicalize + validate settlementPayoutRecipientAddress
   const recipientAddr = canonicalizeAddress(
-    config.relayerRecipientAddress,
-    'relayerRecipientAddress',
+    config.settlementPayoutRecipientAddress,
+    'settlementPayoutRecipientAddress',
   );
   // [1] Sponsor uniqueness + [2] Sponsor != Recipient
   validateAddressConstraints({
     sponsorAddresses: sponsorPool.addresses(),
-    relayerRecipientAddress: recipientAddr,
+    settlementPayoutRecipientAddress: recipientAddr,
     // [3] Sponsor != SponsorRefillAccount is checked at boot time
   });
 
@@ -701,7 +701,7 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
         const objData = obj.object;
         /** Minimal shape of the on-chain Config object JSON fields */
         interface OnchainConfigFields {
-          max_relayer_fee_mist?: string | number | null;
+          max_host_fee_mist?: string | number | null;
           protocol_flat_fee_mist?: string | number | null;
           max_claim_mist?: string | number | null;
           min_settle_mist?: string | number | null;
@@ -717,7 +717,7 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
         // Fees are read from the on-chain Config.
         // Missing fields indicate a contract version mismatch and must block prepare/sponsor issuance.
         if (
-          fields.max_relayer_fee_mist == null ||
+          fields.max_host_fee_mist == null ||
           fields.protocol_flat_fee_mist == null ||
           fields.max_claim_mist == null ||
           fields.min_settle_mist == null ||
@@ -726,7 +726,7 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
         ) {
           throw new Error(
             `Config object ${config.configId} missing required fields ` +
-              `(max_relayer_fee_mist, protocol_flat_fee_mist, config_version, max_spread_bps). ` +
+              `(max_host_fee_mist, protocol_flat_fee_mist, config_version, max_spread_bps). ` +
               `Ensure the deployed Config was created with the current contract version.`,
           );
         }
@@ -736,9 +736,9 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
           configId: config.configId,
           maxClaimMist: parseOnchainNonNegativeBigInt(fields.max_claim_mist, 'max_claim_mist'),
           minSettleMist: parseOnchainNonNegativeBigInt(fields.min_settle_mist, 'min_settle_mist'),
-          maxRelayerFeeMist: parseOnchainNonNegativeBigInt(
-            fields.max_relayer_fee_mist,
-            'max_relayer_fee_mist',
+          maxHostFeeMist: parseOnchainNonNegativeBigInt(
+            fields.max_host_fee_mist,
+            'max_host_fee_mist',
           ),
           protocolFlatFeeMist: parseOnchainNonNegativeBigInt(
             fields.protocol_flat_fee_mist,
@@ -776,7 +776,7 @@ export function createRelayerContext(config: RelayerApiConfig): RelayerContext {
     prepareStore: config.prepareStore,
     prepareRequestNonceStore: config.prepareRequestNonceStore,
     prepareInflightLimiter: config.prepareInflightLimiter,
-    relayerRecipientAddress: recipientAddr,
+    settlementPayoutRecipientAddress: recipientAddr,
     allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
     vaultsTableId: null,
     getConfig,

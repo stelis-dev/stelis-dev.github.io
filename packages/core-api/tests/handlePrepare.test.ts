@@ -36,7 +36,7 @@ function makeMockContext(overrides?: {
     configId: '0xCONFIG',
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
-    maxRelayerFeeMist: 50_000n,
+    maxHostFeeMist: 50_000n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
   };
@@ -102,7 +102,7 @@ function makeMockContext(overrides?: {
         inflight: 0,
         capacity: 10,
       },
-      relayerRecipientAddress: '0xRELAYER',
+      settlementPayoutRecipientAddress: '0xRELAYER',
       getConfig: vi.fn().mockResolvedValue(onchainConfig),
     } as unknown as Parameters<typeof handlePrepare>[0],
     onchainConfig,
@@ -132,7 +132,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
   ];
   return {
     deepbookPackageId: '0xDEEPBOOK',
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',

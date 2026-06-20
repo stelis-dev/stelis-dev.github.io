@@ -41,8 +41,8 @@ function makeSettleEventBcs(overrides?: Record<string, unknown>) {
     sim_gas_reported: 1000n,
     gas_variance_fixed_mist: 500n,
     slippage_buffer_mist: 200n,
-    relayer_claim: 50000n,
-    quoted_relayer_fee_mist: 10000n,
+    execution_cost_claim_mist: 50000n,
+    quoted_host_fee_mist: 10000n,
     protocol_fee: 5000n,
     protocol_treasury: TREASURY_ADDR,
     payout: 60000n,
@@ -50,7 +50,7 @@ function makeSettleEventBcs(overrides?: Record<string, unknown>) {
     surplus_credited: 0n,
     config_version: 3n,
     user: USER_ADDR,
-    relayer_recipient: RELAYER_ADDR,
+    settlement_payout_recipient: RELAYER_ADDR,
     order_id_hash: sha256Bytes(ORDER_ID),
     ...overrides,
   };
@@ -109,7 +109,7 @@ describe('verifySettleEventAgainstExpected', () => {
 
     expect(result.receiptId).toBe(RECEIPT_ID_HEX);
     expect(result.user).toBe(USER_ADDR);
-    expect(result.relayerClaim).toBe('50000');
+    expect(result.executionCostClaim).toBe('50000');
     expect(result.execTimestampMs).toBe('1700000000000');
   });
 
@@ -189,24 +189,24 @@ describe('verifySettleEventAgainstExpected', () => {
     ).rejects.toThrow('user');
   });
 
-  it('throws on relayerClaim mismatch', async () => {
+  it('throws on executionCostClaim mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
         ...EXPECTED_BASE,
-        relayerClaimMist: '99999',
+        executionCostClaimMist: '99999',
       }),
-    ).rejects.toThrow('relayerClaimMist');
+    ).rejects.toThrow('executionCostClaimMist');
   });
 
-  it('throws on quotedRelayerFeeMist mismatch', async () => {
+  it('throws on quotedHostFeeMist mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
         ...EXPECTED_BASE,
-        quotedRelayerFeeMist: '99999',
+        quotedHostFeeMist: '99999',
       }),
-    ).rejects.toThrow('quotedRelayerFeeMist');
+    ).rejects.toThrow('quotedHostFeeMist');
   });
 
   it('throws on protocolFee mismatch', async () => {

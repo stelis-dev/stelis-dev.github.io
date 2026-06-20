@@ -87,7 +87,7 @@ const MOCK_CONFIG = {
   relayerAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
-  maxRelayerFeeMist: 100_000n,
+  maxHostFeeMist: 100_000n,
   protocolFlatFeeMist: 50_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
@@ -103,11 +103,11 @@ const MOCK_CONFIG = {
  * match these values — store copies are ignored.
  */
 const DEFAULT_TX_SETTLE_VALUES = {
-  relayerClaim: 5_250_000n,
+  executionCostClaim: 5_250_000n,
   simGasReported: 5_000_000n,
   gasVarianceFixedMist: 250_000n,
   slippageBufferMist: 0n,
-  quotedRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+  quotedHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
   nonce: 1n,
 } as const;
 
@@ -116,14 +116,14 @@ interface BuildValidTxOptions {
   packageId?: string;
   configId?: string;
   vaultRegistryId?: string;
-  relayerRecipient?: string;
+  settlementPayoutRecipient?: string;
   /** Override any of the 13 settle-field pure u64/vec<u8> values. */
   settleOverrides?: Partial<{
-    relayerClaim: bigint;
+    executionCostClaim: bigint;
     simGasReported: bigint;
     gasVarianceFixedMist: bigint;
     slippageBufferMist: bigint;
-    quotedRelayerFeeMist: bigint;
+    quotedHostFeeMist: bigint;
     nonce: bigint;
   }>;
   /** Override the tx.sender bound into the transaction bytes. */
@@ -155,16 +155,16 @@ async function buildValidTx(
 
   // Credit-only settlement layout:
   //   0: config, 1: registry, 2: clock, 3: vault, 4: useCreditAmount,
-  //   5: relayerClaim, 6: relayerRecipient, 7: receiptId, 8: nonce,
+  //   5: executionCostClaim, 6: settlementPayoutRecipient, 7: receiptId, 8: nonce,
   //   9: simGas, 10: gasVarianceFixedMist, 11: slippageBufferMist,
-  //   12: quotedRelayerFeeMist, 13: expectedProtocolFeeMist,
+  //   12: quotedHostFeeMist, 13: expectedProtocolFeeMist,
   //   14: expectedConfigVersion, 15: quoteTimestampMs,
   //   16: policyHash, 17: orderIdHash
   //
   // policyHash must match what sponsor.ts computes (computePolicyHash with MOCK_CONFIG fees).
   const policyHashHex = computePolicyHash({
     maxClaimMist: MOCK_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
     protocolFeeMist: MOCK_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -180,7 +180,7 @@ async function buildValidTx(
   const packageId = opts?.packageId ?? MOCK_CONFIG.packageId;
   const configId = opts?.configId ?? MOCK_CONFIG.configId;
   const vaultRegistryId = opts?.vaultRegistryId ?? MOCK_CONFIG.vaultRegistryId;
-  const relayerRecipient = opts?.relayerRecipient ?? MOCK_CONFIG.relayerAddress;
+  const settlementPayoutRecipient = opts?.settlementPayoutRecipient ?? MOCK_CONFIG.relayerAddress;
 
   tx.moveCall({
     target: `${packageId}::settle::${SETTLE_WITH_CREDIT_FUNCTION}`,
@@ -190,14 +190,14 @@ async function buildValidTx(
       objRef('0x6'), // 2: clock
       objRef('0x' + '04'.repeat(32)), // 3: vault (dummy)
       tx.pure(bcs.u64().serialize(1_000n)), // 4: useCreditAmount
-      tx.pure(bcs.u64().serialize(settleValues.relayerClaim)), // 5: relayerClaim
-      tx.pure(bcs.Address.serialize(relayerRecipient)), // 6: relayerRecipient
+      tx.pure(bcs.u64().serialize(settleValues.executionCostClaim)), // 5: executionCostClaim
+      tx.pure(bcs.Address.serialize(settlementPayoutRecipient)), // 6: settlementPayoutRecipient
       tx.pure(bcs.vector(bcs.u8()).serialize([])), // 7: receiptId
       tx.pure(bcs.u64().serialize(settleValues.nonce)), // 8: nonce
       tx.pure(bcs.u64().serialize(settleValues.simGasReported)), // 9: simGasReported
       tx.pure(bcs.u64().serialize(settleValues.gasVarianceFixedMist)), // 10: gasVarianceFixedMist
       tx.pure(bcs.u64().serialize(settleValues.slippageBufferMist)), // 11: slippageBufferMist
-      tx.pure(bcs.u64().serialize(settleValues.quotedRelayerFeeMist)), // 12: quotedRelayerFeeMist
+      tx.pure(bcs.u64().serialize(settleValues.quotedHostFeeMist)), // 12: quotedHostFeeMist
       tx.pure(bcs.u64().serialize(MOCK_CONFIG.protocolFlatFeeMist)), // 13: expectedProtocolFeeMist
       tx.pure(bcs.u64().serialize(MOCK_CONFIG.configVersion)), // 14: expectedConfigVersion
       tx.pure(bcs.u64().serialize(BigInt(Date.now()))), // 15: quoteTimestampMs
@@ -260,7 +260,7 @@ async function buildAddressBalanceSwapTx(
 
   const policyHashHex = computePolicyHash({
     maxClaimMist: MOCK_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
     protocolFeeMist: MOCK_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -292,14 +292,14 @@ async function buildAddressBalanceSwapTx(
           paymentCoin, // 5: payment
           tx.pure(bcs.u64().serialize(swapAmount)), // 6: swapAmount
           tx.pure(bcs.u64().serialize(400_000n)), // 7: minSuiOut
-          tx.pure(bcs.u64().serialize(5_250_000n)), // 8: relayerClaim
-          tx.pure(bcs.Address.serialize(MOCK_CONFIG.relayerAddress)), // 9: relayerRecipient
+          tx.pure(bcs.u64().serialize(5_250_000n)), // 8: executionCostClaim
+          tx.pure(bcs.Address.serialize(MOCK_CONFIG.relayerAddress)), // 9: settlementPayoutRecipient
           tx.pure(bcs.vector(bcs.u8()).serialize([])), // 10: receiptId
           tx.pure(bcs.u64().serialize(1n)), // 11: nonce
           tx.pure(bcs.u64().serialize(5_000_000n)), // 12: simGasReported
           tx.pure(bcs.u64().serialize(GAS_VARIANCE_FIXED_MIST)), // 13: gasVarianceFixedMist
           tx.pure(bcs.u64().serialize(0n)), // 14: slippageBufferMist
-          tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxRelayerFeeMist)), // 15: quotedRelayerFeeMist
+          tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxHostFeeMist)), // 15: quotedHostFeeMist
           tx.pure(bcs.u64().serialize(MOCK_CONFIG.protocolFlatFeeMist)), // 16: expectedProtocolFeeMist
           tx.pure(bcs.u64().serialize(MOCK_CONFIG.configVersion)), // 17: expectedConfigVersion
           tx.pure(bcs.u64().serialize(BigInt(Date.now()))), // 18: quoteTimestampMs
@@ -336,7 +336,7 @@ async function buildAddressBalanceSwapTx(
           tx.pure(bcs.u64().serialize(5_000_000n)),
           tx.pure(bcs.u64().serialize(GAS_VARIANCE_FIXED_MIST)),
           tx.pure(bcs.u64().serialize(0n)),
-          tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxRelayerFeeMist)),
+          tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxHostFeeMist)),
           tx.pure(bcs.u64().serialize(MOCK_CONFIG.protocolFlatFeeMist)),
           tx.pure(bcs.u64().serialize(MOCK_CONFIG.configVersion)),
           tx.pure(bcs.u64().serialize(BigInt(Date.now()))),
@@ -460,7 +460,7 @@ function makeMockSui(simResult?: unknown, execResult?: unknown) {
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: '100000',
+          max_host_fee_mist: '100000',
           protocol_flat_fee_mist: '50000',
           max_claim_mist: '50000000',
           min_settle_mist: '1000000',
@@ -500,14 +500,14 @@ function makeMockContext(
     rateLimiter: {} as RelayerContext['rateLimiter'],
     abuseBlocker: overrides.abuseBlocker ?? makeMockAbuseBlocker(),
     prepareStore: overrides.prepareStore ?? makeMockPrepareStore(),
-    relayerRecipientAddress: MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: MOCK_CONFIG.relayerAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: MOCK_CONFIG.packageId,
       configId: MOCK_CONFIG.configId,
       maxClaimMist: MOCK_CONFIG.maxClaimMist,
       minSettleMist: MOCK_CONFIG.minSettleMist,
-      maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
       protocolFlatFeeMist: MOCK_CONFIG.protocolFlatFeeMist,
       configVersion: MOCK_CONFIG.configVersion,
       maxSpreadBps: MOCK_CONFIG.maxSpreadBps,
@@ -614,7 +614,7 @@ describe('handleSponsor', () => {
       string,
       unknown
     >;
-    expect(logData['event']).toBe('RELAYER_ECONOMICS_EXECUTION');
+    expect(logData['event']).toBe('SETTLEMENT_ECONOMICS_EXECUTION');
     expect(logData['digest']).toBe('0xdigest123');
   });
 
@@ -832,7 +832,7 @@ describe('handleSponsor', () => {
   // economics logs use values from `parseSettleArgs(txBytes)`, not store
   // copies. These tests pin that contract.
 
-  it('response.relayerClaim is the tx-derived value from parseSettleArgs(txBytes)', async () => {
+  it('response.executionCostClaim is the tx-derived value from parseSettleArgs(txBytes)', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
@@ -848,7 +848,7 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.relayerClaim).toBe(DEFAULT_TX_SETTLE_VALUES.relayerClaim.toString());
+    expect(result.executionCostClaim).toBe(DEFAULT_TX_SETTLE_VALUES.executionCostClaim.toString());
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalledWith(
       CLIENT_IP,
       { kind: 'address', address: SENDER },
@@ -857,7 +857,7 @@ describe('handleSponsor', () => {
     );
   });
 
-  it('economics log fee_charged is the tx-derived quotedRelayerFeeMist from parseSettleArgs(txBytes)', async () => {
+  it('economics log fee_charged is the tx-derived quotedHostFeeMist from parseSettleArgs(txBytes)', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
@@ -882,10 +882,10 @@ describe('handleSponsor', () => {
     );
     const economicsLog = consoleInfoSpy.mock.calls
       .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'RELAYER_ECONOMICS_EXECUTION');
+      .find((entry) => entry['event'] === 'SETTLEMENT_ECONOMICS_EXECUTION');
     expect(economicsLog).toBeDefined();
     expect(economicsLog!['fee_charged']).toBe(
-      DEFAULT_TX_SETTLE_VALUES.quotedRelayerFeeMist.toString(),
+      DEFAULT_TX_SETTLE_VALUES.quotedHostFeeMist.toString(),
     );
   });
 
@@ -1600,7 +1600,7 @@ describe('handleSponsor', () => {
       configId: MOCK_CONFIG.configId,
       maxClaimMist: MOCK_CONFIG.maxClaimMist,
       minSettleMist: MOCK_CONFIG.minSettleMist,
-      maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
       protocolFlatFeeMist: MOCK_CONFIG.protocolFlatFeeMist + 1n, // drifted fee
       configVersion: MOCK_CONFIG.configVersion,
       maxSpreadBps: MOCK_CONFIG.maxSpreadBps,
@@ -1645,8 +1645,8 @@ describe('handleSponsor', () => {
       expectedSubcode: 'L2_WRONG_REGISTRY',
     },
     {
-      label: 'wrong relayer recipient',
-      buildOptions: { relayerRecipient: '0x' + '14'.repeat(32) },
+      label: 'wrong settlement payout recipient',
+      buildOptions: { settlementPayoutRecipient: '0x' + '14'.repeat(32) },
       expectedStage: 'l2_settle_args',
       expectedSubcode: 'L2_WRONG_RECIPIENT',
     },
@@ -1748,21 +1748,21 @@ describe('handleSponsor', () => {
   // ── 18: L3 nonloss failure from tx-derived values → L3_NONLOSS_VIOLATION ──
   //
   // L3 reads gasVarianceFixedMist, slippageBufferMist, and
-  // relayerClaim from the parsed settleArgs (tx-derived). This test proves
+  // executionCostClaim from the parsed settleArgs (tx-derived). This test proves
   // that the decision comes from the PTB itself — the store copy is set
   // to "correct" values so the only way L3 can fail is if the tx-derived
   // side of the check is authoritative.
 
-  it('rejects with L3_NONLOSS_VIOLATION when tx-derived relayerClaim is below required', async () => {
+  it('rejects with L3_NONLOSS_VIOLATION when tx-derived executionCostClaim is below required', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS, {
-      // tx-derived relayerClaim (10_000n) is far below preflight simGas
+      // tx-derived executionCostClaim (10_000n) is far below preflight simGas
       // (~4_500_000n from the mock) + gasVarianceFixed (250_000n) + slippage (0n).
-      settleOverrides: { relayerClaim: 10_000n },
+      settleOverrides: { executionCostClaim: 10_000n },
     });
     // Store copy is deliberately "correct" so that the failure can only
     // come from the tx-derived side of the check.
     const prepared = makePreparedEntry(txHash, {
-      relayerClaim: 5_250_000n,
+      executionCostClaim: 5_250_000n,
       simGas: 5_000_000n,
       gasVarianceFixedMist: 250_000n,
       slippageBufferMist: 0n,
@@ -1797,7 +1797,7 @@ describe('handleSponsor', () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
       // Forge store audit fields to zero — should be ignored.
-      relayerClaim: 0n,
+      executionCostClaim: 0n,
       gasVarianceFixedMist: 0n,
       slippageBufferMist: 0n,
     });
@@ -1853,7 +1853,7 @@ describe('handleSponsor', () => {
   it('clamps negative raw simGas to 0 and passes L3 (storageRebate > comp+storage)', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     // prepared with simGas=0, gasVariance=0 — edge case from rebate-heavy TX.
-    // relayerClaim must match txBytes settle value (5_250_000n) for equality binding.
+    // executionCostClaim must match txBytes settle value (5_250_000n) for equality binding.
     const prepared = makePreparedEntry(txHash, {
       simGas: 0n,
       gasVarianceFixedMist: 0n,
@@ -2273,7 +2273,7 @@ describe('handleSponsor', () => {
       issuedAt: Date.now(),
       receiptId: PAYMENT_ID,
       senderAddress: SENDER,
-      relayerClaim: 5_250_000n,
+      executionCostClaim: 5_250_000n,
       simGas: 5_000_000n,
       gasVarianceFixedMist: 250_000n,
       slippageBufferMist: 0n,
@@ -2703,7 +2703,7 @@ describe('handleSponsor', () => {
         expect(probe.calls[0].economics.grossGasMist).not.toBeNull();
         expect(probe.calls[0].economics.storageRebateMist).not.toBeNull();
         expect(probe.calls[0].economics.recoveredGasMist).toBeDefined();
-        expect(probe.calls[0].economics.relayerPaidGasMist).toBeDefined();
+        expect(probe.calls[0].economics.hostPaidGasMist).toBeDefined();
       }
       // Ordering: pool.checkin fires before callback.
       expect(order).toEqual(['checkin', 'callback']);
@@ -2915,14 +2915,14 @@ describe('handleSponsor', () => {
       }
     });
 
-    it('success path with rebate >= computation+storage clamps relayerPaidGasMist to 0 (canonical 0-clamp parity with computeRelayerCosts)', async () => {
+    it('success path with rebate >= computation+storage clamps hostPaidGasMist to 0 (canonical 0-clamp parity with computeExecutionCostClaim)', async () => {
       // Generic success-path economics regression. The success path
       // builds the recorder row from
-      // `buildRelayerEconomicsSnapshot({ gasUsed, ... }).netGas`. The
-      // canonical helper `computeRelayerCosts(...).simGas` clamps a
+      // `buildSettlementEconomicsSnapshot({ gasUsed, ... }).netGas`. The
+      // canonical helper `computeExecutionCostClaim(...).simGas` clamps a
       // negative net to 0; the snapshot builder must do the same so a
       // delete-objects-only success TX does not produce negative
-      // `relayerPaidGasMist` or an inflated `relayerNet`.
+      // `hostPaidGasMist` or an inflated `hostNet`.
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
@@ -2959,7 +2959,7 @@ describe('handleSponsor', () => {
       expect(probe.calls[0].outcome).toBe('success');
       expect(probe.calls[0].economics.economicsStatus).toBe('known');
       if (probe.calls[0].economics.economicsStatus === 'known') {
-        expect(probe.calls[0].economics.relayerPaidGasMist).toBe('0');
+        expect(probe.calls[0].economics.hostPaidGasMist).toBe('0');
         expect(probe.calls[0].economics.grossGasMist).toBe('800000');
         // Raw `storageRebateMist` is preserved verbatim from the
         // on-chain effects (NOT derived as `grossGas - netGas`).
@@ -2972,7 +2972,7 @@ describe('handleSponsor', () => {
       }
     });
 
-    it('RELAYER_ECONOMICS_EXECUTION structured event emits raw gross_gas + raw storage_rebate + clamped net_gas + clamped payout_net for rebate-heavy generic success', async () => {
+    it('SETTLEMENT_ECONOMICS_EXECUTION structured event emits raw gross_gas + raw storage_rebate + clamped net_gas + clamped payout_net for rebate-heavy generic success', async () => {
       // Structured-event payload regression. The earlier round added
       // `storage_rebate` to the log and clarified `net_gas` as the
       // clamped quantity. This test directly inspects the emitted log
@@ -2982,7 +2982,7 @@ describe('handleSponsor', () => {
       //   gross_gas = 800_000  (raw)
       //   storage_rebate = 2_000_000 (raw)
       //   net_gas = max(0, 800_000 - 2_000_000) = 0 (clamped)
-      //   payout = relayerClaim + feeCharged (test fixture defaults)
+      //   payout = executionCostClaim + feeCharged (test fixture defaults)
       //   payout_net = payout - net_gas = payout (against the clamped
       //                quantity, NOT raw gross-rebate)
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
@@ -3022,35 +3022,35 @@ describe('handleSponsor', () => {
             return null;
           }
         })
-        .find((entry) => entry && entry['event'] === 'RELAYER_ECONOMICS_EXECUTION');
+        .find((entry) => entry && entry['event'] === 'SETTLEMENT_ECONOMICS_EXECUTION');
       expect(log).toBeDefined();
       // Raw on-chain values preserved verbatim.
       expect(log!['gross_gas']).toBe('800000');
       expect(log!['storage_rebate']).toBe('2000000');
-      // Clamped relayer-paid-gas quantity. NOT raw `gross_gas - storage_rebate`
+      // Clamped host-paid-gas quantity. NOT raw `gross_gas - storage_rebate`
       // (which would be -1_200_000n; the relayer never pays the user).
       expect(log!['net_gas']).toBe('0');
       // payout_net derived from the clamped net_gas, so it equals
-      // payout exactly. Test fixture's relayer_claim + fee_charged.
+      // payout exactly. Test fixture's execution_cost_claim_mist + fee_charged.
       const payout = BigInt(log!['payout'] as string);
       expect(BigInt(log!['payout_net'] as string)).toBe(payout);
       // Sanity: the field set is exactly the documented structured-event
       // contract — operators can grep this assertion if the field shape
       // ever changes.
       expect(log).toMatchObject({
-        event: 'RELAYER_ECONOMICS_EXECUTION',
+        event: 'SETTLEMENT_ECONOMICS_EXECUTION',
         digest: 'tx-rebate-event-log',
       });
 
       consoleInfoSpy.mockRestore();
     });
 
-    it('on-chain revert with rebate >= computation+storage clamps relayerPaidGasMist to 0 (canonical 0-clamp parity with computeRelayerCosts)', async () => {
+    it('on-chain revert with rebate >= computation+storage clamps hostPaidGasMist to 0 (canonical 0-clamp parity with computeExecutionCostClaim)', async () => {
       // Generic on-chain-revert economics regression. The canonical
-      // helper `computeRelayerCosts(...).simGas` clamps a negative net
+      // helper `computeExecutionCostClaim(...).simGas` clamps a negative net
       // (storageRebate > computation + storage; e.g. delete-objects
       // revert) to 0; the recorder economics path must do the same so
-      // `relayerPaidGasMist` cannot go negative and `relayerNetMist`
+      // `hostPaidGasMist` cannot go negative and `hostNetMist`
       // cannot inflate by the rebate-overshoot amount on the loss row.
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
@@ -3090,11 +3090,11 @@ describe('handleSponsor', () => {
       expect(probe.calls[0].economics.economicsStatus).toBe('known');
       if (probe.calls[0].economics.economicsStatus === 'known') {
         expect(probe.calls[0].economics.recoveredGasMist).toBe('0');
-        expect(probe.calls[0].economics.relayerPaidGasMist).toBe('0');
+        expect(probe.calls[0].economics.hostPaidGasMist).toBe('0');
         expect(probe.calls[0].economics.failureReason).toBe('rebate-positive revert');
         // grossGasMist + storageRebateMist preserved verbatim from the
         // raw effects so operators can still read the actual on-chain
-        // numbers; only the derived `relayerPaidGasMist` is clamped.
+        // numbers; only the derived `hostPaidGasMist` is clamped.
         expect(probe.calls[0].economics.grossGasMist).toBe('1000000');
         expect(probe.calls[0].economics.storageRebateMist).toBe('1500000');
       }

@@ -81,7 +81,7 @@ export function assertPositiveMist(value: bigint, label: string): void {
 /**
  * Reject negative MIST values. Used on `consume(actualGasMist)` where
  * a successful zero-net revert produces `actualGasMist === 0n` (the
- * canonical 0-clamp from `computeRelayerCosts(...).simGas`).
+ * canonical 0-clamp from `computeExecutionCostClaim(...).simGas`).
  *
  * Error message stays exactly `"${label} must be non-negative"`.
  */

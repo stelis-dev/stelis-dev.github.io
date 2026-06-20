@@ -194,10 +194,10 @@ export type ExpectedSettleEventFields = {
   receiptId: string;
   /** User wallet address expected in the on-chain event. */
   user: string;
-  /** Expected relayer claim in MIST, when the integration tracks amounts. */
-  relayerClaimMist?: string;
-  /** Expected quoted relayer fee in MIST, when the integration tracks amounts. */
-  quotedRelayerFeeMist?: string;
+  /** Expected execution cost claim in MIST, when the integration tracks amounts. */
+  executionCostClaimMist?: string;
+  /** Expected quoted host fee in MIST, when the integration tracks amounts. */
+  quotedHostFeeMist?: string;
   /** Expected protocol fee in MIST, when the integration tracks amounts. */
   protocolFeeMist?: string;
 } & ({ orderId: string; orderIdHash?: never } | { orderId?: never; orderIdHash: string });

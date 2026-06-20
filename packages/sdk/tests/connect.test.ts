@@ -69,7 +69,7 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
   return {
     network: 'testnet',
     packageId: CANONICAL_PKG,
-    relayerRecipient: '0x' + 'e'.repeat(64),
+    settlementPayoutRecipient: '0x' + 'e'.repeat(64),
     supportedSettlementSwapPaths: [
       {
         hops: [
@@ -90,7 +90,7 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: '100000',
+    quotedHostFeeMist: '100000',
     protocolFlatFeeMist: '20000',
     integrityPolicyVersion: 1,
     ...overrides,
@@ -210,12 +210,12 @@ describe('StelisSDK — integrityPolicyVersion handshake', () => {
     );
   });
 
-  it('config without quotedRelayerFeeMist is rejected at connect', async () => {
+  it('config without quotedHostFeeMist is rejected at connect', async () => {
     const invalid = { ...makeConfig() };
-    delete (invalid as Record<string, unknown>).quotedRelayerFeeMist;
+    delete (invalid as Record<string, unknown>).quotedHostFeeMist;
     stubConfig(invalid);
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'quotedRelayerFeeMist must be a non-negative integer string',
+      'quotedHostFeeMist must be a non-negative integer string',
     );
   });
 

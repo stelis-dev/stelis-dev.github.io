@@ -56,7 +56,7 @@ const ONCHAIN_CONFIG: OnchainConfig = {
   configId: CONFIG,
   maxClaimMist: 50_000_000n,
   minSettleMist: 100_000n,
-  maxRelayerFeeMist: 500_000n,
+  maxHostFeeMist: 500_000n,
   protocolFlatFeeMist: 20_004n,
   configVersion: 5n,
   maxSpreadBps: 500n,
@@ -89,14 +89,14 @@ const SHARED_PARAMS = {
   paymentCoinId: PAYMENT_COIN,
   swapAmount: 1_000_000n,
   minSuiOut: 0n,
-  relayerClaim: 5_000_000n,
-  relayerRecipient: RECIPIENT,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 1n,
   simGasReported: 5_000_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 50_000n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 1n,
   quoteTimestampMs: 1741680000000,
@@ -227,14 +227,14 @@ describe('buildSwapAndSettlePtb — type argument wiring per SettlementSwapDirec
 
 /** Distinct values for all 13 settle fields. Each bigint is unique. */
 const ROUNDTRIP_VALUES = {
-  relayerClaim: 7_777_777n,
-  relayerRecipient: ROUNDTRIP_RECIPIENT,
+  executionCostClaim: 7_777_777n,
+  settlementPayoutRecipient: ROUNDTRIP_RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xdd),
   nonce: 42n,
   simGasReported: 3_000_000n,
   gasVarianceFixedMist: 200_001n,
   slippageBufferMist: 50_002n,
-  quotedRelayerFeeMist: 100_003n,
+  quotedHostFeeMist: 100_003n,
   expectedProtocolFeeMist: 20_004n,
   expectedConfigVersion: 5n,
   quoteTimestampMs: 1741680099000,
@@ -258,14 +258,14 @@ describe('builder → parser settle field roundtrip', () => {
     parsed: ReturnType<typeof parseSettleArgs>,
     expected = ROUNDTRIP_VALUES,
   ): void {
-    expect(parsed.relayerClaim).toBe(expected.relayerClaim);
-    expect(parsed.relayerRecipient).toBe(expected.relayerRecipient);
+    expect(parsed.executionCostClaim).toBe(expected.executionCostClaim);
+    expect(parsed.settlementPayoutRecipient).toBe(expected.settlementPayoutRecipient);
     expect(parsed.receiptId).toEqual(expected.receiptId);
     expect(parsed.nonce).toBe(expected.nonce);
     expect(parsed.simGasReported).toBe(expected.simGasReported);
     expect(parsed.gasVarianceFixedMist).toBe(expected.gasVarianceFixedMist);
     expect(parsed.slippageBufferMist).toBe(expected.slippageBufferMist);
-    expect(parsed.quotedRelayerFeeMist).toBe(expected.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(expected.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(expected.expectedProtocolFeeMist);
     expect(parsed.expectedConfigVersion).toBe(expected.expectedConfigVersion);
     expect(parsed.quoteTimestampMs).toBe(BigInt(expected.quoteTimestampMs));

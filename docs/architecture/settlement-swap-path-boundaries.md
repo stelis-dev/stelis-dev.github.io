@@ -16,9 +16,9 @@ Clients use `GET /relay/config` to discover:
 
 - network
 - package ID
-- relayer settlement payout recipient
+- settlement payout recipient
 - supported settlement swap paths
-- quoted relayer fee
+- quoted host fee
 - protocol flat fee
 - integrity policy version
 

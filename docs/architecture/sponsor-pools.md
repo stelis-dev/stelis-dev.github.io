@@ -14,13 +14,13 @@ Stelis uses these names for sponsor-related SUI state:
 
 - `Sponsor Refill Account`: the dedicated key from `SPONSOR_REFILL_ACCOUNT_SECRET_KEY`. It funds sponsor slots and signs refill and admin withdrawal transactions.
 - `Sponsor slot`: one sponsor key from `SPONSOR_SECRET_KEY`. A sponsor slot is leased during prepare and signs the sponsored transaction during sponsor.
-- `relayer recipient`: the settlement payout address from `RELAYER_RECIPIENT_ADDRESS`. It receives `relayerClaim + quotedRelayerFeeMist` from on-chain settlement.
+- `settlement payout recipient`: the settlement payout address from `SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS`. It receives `executionCostClaim + quotedHostFeeMist` from on-chain settlement.
 - `SUI coin object`: an owned `Coin<SUI>` object.
 - `Address balance`: the Sui account balance that can be used by Sui address-balance gas payment or `FundsWithdrawal`.
 - `GasCoin`: the PTB argument that refers to the transaction gas payment during execution.
 - `FundsWithdrawal`: a PTB input that withdraws a token amount from an address balance.
 
-The Sponsor Refill Account can receive SUI from external deposits. It also receives settlement payout when `RELAYER_RECIPIENT_ADDRESS` equals the Sponsor Refill Account address. Stelis does not control whether external SUI arrives as SUI coin objects or address balance, and it does not keep a coin-object inventory for the Sponsor Refill Account.
+The Sponsor Refill Account can receive SUI from external deposits. It also receives settlement payout when `SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS` equals the Sponsor Refill Account address. Stelis does not control whether external SUI arrives as SUI coin objects or address balance, and it does not keep a coin-object inventory for the Sponsor Refill Account.
 
 Stelis observes the Sponsor Refill Account through total SUI balance reads for health, refill runway, and admin display. It uses this account for sponsor slot refill and admin withdrawal.
 
@@ -28,13 +28,13 @@ Sponsor slot SUI is gas inventory for sponsored transactions. Stelis sets the sp
 
 Sui SDK transaction build resolves gas payment for sponsor-slot transactions. For sponsor-slot transactions that do not reference `GasCoin`, the current Sui SDK resolver uses address-balance gas payment when the sponsor slot address balance covers the gas budget. The resolver selects valid SUI coin objects when address balance alone does not cover the gas budget. Sui execution applies gas payment rules, including gas smashing when multiple gas coin objects are selected.
 
-Sponsor slot SUI is only for sponsored transaction gas. It is not used for user settlement-token funding, settlement swap payment funding, or relayer fee settlement. User-supplied transactions cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`.
+Sponsor slot SUI is only for sponsored transaction gas. It is not used for user settlement-token funding, settlement swap payment funding, or host fee settlement. User-supplied transactions cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`.
 
 ## SUI Transitions
 
-Settlement transfers `relayerClaim + quotedRelayerFeeMist` to the relayer recipient. Protocol fees are paid to the protocol treasury, not to the relayer recipient. Final settlement validation rejects a `relayer_recipient` that does not match the configured relayer recipient.
+Settlement transfers `executionCostClaim + quotedHostFeeMist` to the settlement payout recipient. Protocol fees are paid to the protocol treasury, not to the settlement payout recipient. Final settlement validation rejects a `settlement_payout_recipient` that does not match the configured settlement payout recipient.
 
-If the relayer recipient is the Sponsor Refill Account, a successful settlement payout becomes SUI held by the Sponsor Refill Account and can fund later sponsor slot refill. If the relayer recipient is a separate address, settlement payout does not enter SponsorOperations refill state.
+If the settlement payout recipient is the Sponsor Refill Account, a successful settlement payout becomes SUI held by the Sponsor Refill Account and can fund later sponsor slot refill. If the settlement payout recipient is a separate address, settlement payout does not enter SponsorOperations refill state.
 
 External SUI deposits into the Sponsor Refill Account are outside Stelis transaction construction. Stelis does not add receive logic for those deposits.
 

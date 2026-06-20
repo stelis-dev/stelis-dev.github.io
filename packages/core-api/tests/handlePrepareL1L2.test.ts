@@ -49,7 +49,7 @@ function makeCtx() {
     configId: '0xCONFIG',
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
-    maxRelayerFeeMist: 500_000n,
+    maxHostFeeMist: 500_000n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
   };
@@ -98,7 +98,7 @@ function makeCtx() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xRELAYER',
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',
@@ -149,7 +149,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: 50_000n,
+    quotedHostFeeMist: 50_000n,
   };
 }
 
@@ -230,7 +230,7 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 350_000n,
       slippageBufferMist: 150_000n,
-      relayerClaim: 1_800_000n,
+      executionCostClaim: 1_800_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
@@ -261,8 +261,8 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 1_800_000n,
-      quotedRelayerFee: 50_000n,
+      executionCostClaim: 1_800_000n,
+      quotedHostFee: 50_000n,
       protocolFee: 10_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',
@@ -292,8 +292,8 @@ describe('handlePrepare — L1/L2 rejection', () => {
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
-      relayerClaim: 1_800_000n,
-      quotedRelayerFee: 50_000n,
+      executionCostClaim: 1_800_000n,
+      quotedHostFee: 50_000n,
       protocolFee: 10_000n,
       profile: 'new_user',
       paymentInputSource: 'coin_object',

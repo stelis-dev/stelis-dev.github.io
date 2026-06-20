@@ -23,7 +23,7 @@ const MOCK_CONFIG: OnchainConfig = {
   configId: '0xCONFIG',
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
-  maxRelayerFeeMist: 50_000n,
+  maxHostFeeMist: 50_000n,
   protocolFlatFeeMist: 0n,
   configVersion: 1n,
   maxSpreadBps: 500n,
@@ -33,7 +33,7 @@ describe('buildPolicyFields', () => {
   it('maps OnchainConfig → PolicyFields with correct field names', () => {
     const pf = buildPolicyFields(MOCK_CONFIG);
     expect(pf.maxClaimMist).toBe(MOCK_CONFIG.maxClaimMist);
-    expect(pf.maxRelayerFeeMist).toBe(MOCK_CONFIG.maxRelayerFeeMist);
+    expect(pf.maxHostFeeMist).toBe(MOCK_CONFIG.maxHostFeeMist);
     expect(pf.protocolFeeMist).toBe(MOCK_CONFIG.protocolFlatFeeMist);
   });
 

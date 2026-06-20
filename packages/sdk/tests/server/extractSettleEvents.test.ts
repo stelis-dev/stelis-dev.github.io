@@ -33,8 +33,8 @@ function createMockSettleEventBcs(
     sim_gas_reported: BigInt(100),
     gas_variance_fixed_mist: BigInt(10),
     slippage_buffer_mist: BigInt(5),
-    relayer_claim: BigInt(50),
-    quoted_relayer_fee_mist: BigInt(60),
+    execution_cost_claim_mist: BigInt(50),
+    quoted_host_fee_mist: BigInt(60),
     protocol_fee: BigInt(20),
     protocol_treasury: '0x' + '00'.repeat(32),
     payout: BigInt(900),
@@ -42,7 +42,7 @@ function createMockSettleEventBcs(
     surplus_credited: BigInt(0),
     config_version: BigInt(1),
     user: overrides.user ?? '0x' + 'ab'.repeat(32),
-    relayer_recipient: '0x' + 'cc'.repeat(32),
+    settlement_payout_recipient: '0x' + 'cc'.repeat(32),
     order_id_hash: overrides.orderIdHash ?? Array.from({ length: 32 }, () => 0xff),
   }).toBytes();
 }

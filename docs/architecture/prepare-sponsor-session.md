@@ -28,7 +28,7 @@ SettlementPlan                         prepare/settlePlanTypes.ts
         │   → Pass 2 final PTB)
         ▼
 GenericPrepareBuildOutput              prepare/build.ts
-  (txBytes, txBytesHash, relayerClaim, simGas,
+  (txBytes, txBytesHash, executionCostClaim, simGas,
    gasVarianceFixedMist, slippageBufferMist,
    grossGas, profile, paymentInputSource)
         │
@@ -57,7 +57,7 @@ PreparedTxEntry                        store/prepareTypes.ts
         ▼
 ExtractedSettleArgs                    prepare/extractSettleArgs.ts
   └─ authoritative for every sponsor-side settle field:
-     relayerClaim, nonce, quotedRelayerFeeMist, receiptId,
+     executionCostClaim, nonce, quotedHostFeeMist, receiptId,
      simGasReported, gasVarianceFixedMist, slippageBufferMist,
      expectedProtocolFeeMist, expectedConfigVersion, quoteTimestampMs,
      policyHash, orderIdHash, extractedSettlementSwapPath
@@ -98,7 +98,7 @@ are authoritative.
 | `executionPathKey`, `clientIp`, `issuedAt` | structured log / TTL observability                                                                                                                                         |
 
 The store entry carries no settle-value copies. Every settle-execution
-field (relayerClaim, fee components, profile, policyHash, quoteTimestampMs)
+field (executionCostClaim, fee components, profile, policyHash, quoteTimestampMs)
 is read at sponsor time from `parseSettleArgs(txBytes)` exclusively;
 `consume()` proves byte-equality between the submitted bytes and the
 /prepare commit, so the parsed values are authoritative without any
@@ -286,10 +286,10 @@ ctx.vaultsTableId ?? undefined)`. If the vault now exists →
    every other carve-out subcode.
 10. Preflight simulation → L3 `validateGenericSponsorNonloss` — fed
     `settleArgs.gasVarianceFixedMist`, `settleArgs.slippageBufferMist`, and
-    `settleArgs.relayerClaim`; no store copies participate in the L3 decision.
+    `settleArgs.executionCostClaim`; no store copies participate in the L3 decision.
 11. `signAndSubmit` via sponsor pool.
-12. Economics log built from `settleArgs.relayerClaim` and
-    `settleArgs.quotedRelayerFeeMist` (tx-derived); `protocolFee` from fresh
+12. Economics log built from `settleArgs.executionCostClaim` and
+    `settleArgs.quotedHostFeeMist` (tx-derived); `protocolFee` from fresh
     on-chain config.
 
 Stored fields still read at `/sponsor` (coordination-only, never execution authority):
@@ -303,7 +303,7 @@ Stored fields still read at `/sponsor` (coordination-only, never execution autho
 | `executionPathKey`         | `ONCHAIN_REVERT` log key                                                          |
 
 Settle observability fields **not persisted** in the store:
-`relayerClaim`, `quotedRelayerFeeMist`, `gasVarianceFixedMist`,
+`executionCostClaim`, `quotedHostFeeMist`, `gasVarianceFixedMist`,
 `slippageBufferMist`, `simGas`, `grossGas`, `policyHash`,
 `quoteTimestampMs`, `profile`. Sponsor obtains each value from
 `ExtractedSettleArgs` (parsed from the hash-bound PTB).

@@ -57,6 +57,6 @@ Required expected fields are:
 - `user`
 - exactly one of `orderId` or `orderIdHash`
 
-Amount-sensitive backends should also pass expected `relayerClaimMist`, `quotedRelayerFeeMist`, and `protocolFeeMist`.
+Amount-sensitive backends should also pass expected `executionCostClaimMist`, `quotedHostFeeMist`, and `protocolFeeMist`.
 
 Use `extractSettleEvents` only for reconciliation scans. It decodes matching events but does not prove application payment completion by itself.

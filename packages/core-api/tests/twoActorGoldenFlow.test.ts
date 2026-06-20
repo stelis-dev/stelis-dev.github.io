@@ -119,13 +119,13 @@ const GENERIC_MOCK_CONFIG = {
   relayerAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
-  maxRelayerFeeMist: 100_000n,
+  maxHostFeeMist: 100_000n,
   protocolFlatFeeMist: 50_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
 } as const;
 
-const GENERIC_QUOTED_RELAYER_FEE = GENERIC_MOCK_CONFIG.maxRelayerFeeMist;
+const GENERIC_QUOTED_HOST_FEE = GENERIC_MOCK_CONFIG.maxHostFeeMist;
 
 /**
  * Build a real, BCS-valid credit-only settlement transaction with sender +
@@ -175,14 +175,14 @@ async function buildCreditTx(opts: {
       objRef('0x6'), // 2: clock
       objRef('0x' + '04'.repeat(32)), // 3: vault
       tx.pure(bcs.u64().serialize(1_000n)), // 4: useCreditAmount
-      tx.pure(bcs.u64().serialize(5_250_000n)), // 5: relayerClaim
-      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.relayerAddress)), // 6: relayerRecipient
+      tx.pure(bcs.u64().serialize(5_250_000n)), // 5: executionCostClaim
+      tx.pure(bcs.Address.serialize(GENERIC_MOCK_CONFIG.relayerAddress)), // 6: settlementPayoutRecipient
       tx.pure(bcs.vector(bcs.u8()).serialize([])), // 7: receiptId (empty for fixture)
       tx.pure(bcs.u64().serialize(opts.nonce ?? 1n)), // 8: nonce
       tx.pure(bcs.u64().serialize(5_000_000n)), // 9: simGasReported
       tx.pure(bcs.u64().serialize(GAS_VARIANCE_FIXED_MIST)), // 10: gasVarianceFixedMist
       tx.pure(bcs.u64().serialize(0n)), // 11: slippageBufferMist
-      tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.maxRelayerFeeMist)), // 12: quotedRelayerFeeMist
+      tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.maxHostFeeMist)), // 12: quotedHostFeeMist
       tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.protocolFlatFeeMist)), // 13: expectedProtocolFeeMist
       tx.pure(bcs.u64().serialize(GENERIC_MOCK_CONFIG.configVersion)), // 14: expectedConfigVersion
       tx.pure(bcs.u64().serialize(BigInt(opts.quoteTimestampMs))), // 15: quoteTimestampMs
@@ -233,7 +233,7 @@ function genericMockSui() {
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist.toString(),
+          max_host_fee_mist: GENERIC_MOCK_CONFIG.maxHostFeeMist.toString(),
           protocol_flat_fee_mist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist.toString(),
           max_claim_mist: GENERIC_MOCK_CONFIG.maxClaimMist.toString(),
           min_settle_mist: GENERIC_MOCK_CONFIG.minSettleMist.toString(),
@@ -290,7 +290,7 @@ function makeGenericHarness(): GenericHarness {
       supportedSettlementSwapPaths,
     ),
     allowedSettlementSwapPaths: [],
-    quotedRelayerFeeMist: GENERIC_QUOTED_RELAYER_FEE,
+    quotedHostFeeMist: GENERIC_QUOTED_HOST_FEE,
   };
 
   const ctx: RelayerContext = {
@@ -308,14 +308,14 @@ function makeGenericHarness(): GenericHarness {
       claim: vi.fn().mockResolvedValue('ok'),
     },
     prepareInflightLimiter: prepareInflight,
-    relayerRecipientAddress: GENERIC_MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: GENERIC_MOCK_CONFIG.relayerAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: GENERIC_MOCK_CONFIG.packageId,
       configId: GENERIC_MOCK_CONFIG.configId,
       maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
       minSettleMist: GENERIC_MOCK_CONFIG.minSettleMist,
-      maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
       protocolFlatFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
       configVersion: GENERIC_MOCK_CONFIG.configVersion,
       maxSpreadBps: GENERIC_MOCK_CONFIG.maxSpreadBps,
@@ -342,7 +342,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
 }> {
   const policyHashHex = computePolicyHash({
     maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
     protocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -360,7 +360,7 @@ async function drivePrepare(harness: GenericHarness): Promise<{
   mockPrepareBuildPipeline.mockResolvedValueOnce({
     txBytes: built.txBytes,
     txBytesHash: built.txBytesHash,
-    relayerClaim: 5_250_000n,
+    executionCostClaim: 5_250_000n,
     simGas: 5_000_000n,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
     slippageBufferMist: 0n,
@@ -376,11 +376,11 @@ async function drivePrepare(harness: GenericHarness): Promise<{
   vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
     configObjectId: GENERIC_MOCK_CONFIG.configId,
     registryObjectId: GENERIC_MOCK_CONFIG.vaultRegistryId,
-    relayerRecipient: GENERIC_MOCK_CONFIG.relayerAddress,
-    relayerClaim: 5_250_000n,
+    settlementPayoutRecipient: GENERIC_MOCK_CONFIG.relayerAddress,
+    executionCostClaim: 5_250_000n,
     policyHash: policyHashBytes,
     orderIdHash: new Uint8Array(0),
-    quotedRelayerFeeMist: GENERIC_QUOTED_RELAYER_FEE,
+    quotedHostFeeMist: GENERIC_QUOTED_HOST_FEE,
     expectedProtocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
     expectedConfigVersion: GENERIC_MOCK_CONFIG.configVersion,
     nonce: 1n,
@@ -461,7 +461,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     // filler is enough to change the BCS encoding.
     const policyHashHex = computePolicyHash({
       maxClaimMist: GENERIC_MOCK_CONFIG.maxClaimMist,
-      maxRelayerFeeMist: GENERIC_MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: GENERIC_MOCK_CONFIG.maxHostFeeMist,
       protocolFeeMist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist,
       quoteTtlMs: PREPARE_TTL_MS,
       gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -656,7 +656,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
       minSettleMist: 0n,
-      maxRelayerFeeMist: 0n,
+      maxHostFeeMist: 0n,
       protocolFlatFeeMist: 0n,
       configVersion: 1n,
       maxSpreadBps: 500n,

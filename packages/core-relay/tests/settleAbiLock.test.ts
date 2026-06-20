@@ -7,7 +7,7 @@
  *   2. `SETTLE_FIELD_SCHEMA` + `VARIANT_LAYOUTS` TS reference
  *      (packages/core-relay/src/settlePayloadContract.ts).
  *   3. The 5 production settlement entry points — presence, non-test status,
- *      variant-class mapping, and the `relayer_claim` parameter position that
+ *      variant-class mapping, and the `execution_cost_claim_mist` parameter position that
  *      must equal `VARIANT_LAYOUTS[class].settleStartIndex`.
  *
  * Any drift on either the Move side or the TS side that is not reflected in
@@ -194,15 +194,15 @@ describe('Settle ABI lock — production entry points', () => {
         expect(variantClassFromFnName(entryName)).toBe(entry.variantClass);
       });
 
-      it(`relayer_claim parameter position equals VARIANT_LAYOUTS.${entry.variantClass}.settleStartIndex`, () => {
+      it(`execution_cost_claim_mist parameter position equals VARIANT_LAYOUTS.${entry.variantClass}.settleStartIndex`, () => {
         const params = extractMoveFunctionParams(moveSrc, entryName);
-        const relayerClaimIdx = params.findIndex((p) => p.name === 'relayer_claim');
+        const executionCostClaimIdx = params.findIndex((p) => p.name === 'execution_cost_claim_mist');
         expect(
-          relayerClaimIdx,
-          `'relayer_claim' not found in ${entry.contractKey} parameters`,
+          executionCostClaimIdx,
+          `'execution_cost_claim_mist' not found in ${entry.contractKey} parameters`,
         ).toBeGreaterThanOrEqual(0);
         const expectedIdx = golden.variantLayouts[entry.variantClass].settleStartIndex;
-        expect(relayerClaimIdx).toBe(expectedIdx);
+        expect(executionCostClaimIdx).toBe(expectedIdx);
       });
 
       for (const g of golden.settleBlock.fields) {

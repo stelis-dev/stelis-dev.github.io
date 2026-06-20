@@ -23,11 +23,11 @@ vi.mock('@stelis/core-api', async () => {
       txBytes: 'mock-tx-bytes',
       nonce: '1',
       cost: {
-        relayerClaim: '500',
+        executionCostClaim: '500',
         simGas: '200',
         gasVarianceFixedMist: '100',
         slippageBufferMist: '0',
-        quotedRelayerFee: '100',
+        quotedHostFee: '100',
         protocolFee: '50',
         grossGas: '300',
       },
@@ -38,7 +38,7 @@ vi.mock('@stelis/core-api', async () => {
     handleSponsor: vi.fn().mockResolvedValue({
       digest: 'mock-digest',
       effects: {},
-      relayerClaim: '500',
+      executionCostClaim: '500',
     }),
     checkBlockedRequest: vi.fn().mockResolvedValue({ blocked: false }),
     toBlockedError: vi.fn().mockReturnValue({ error: 'blocked' }),
@@ -86,7 +86,7 @@ function createMockCtx(): AppApiContext {
     relay: {
       network: 'testnet',
       packageId: '0xPKG',
-      relayerRecipientAddress: '0xRECIPIENT',
+      settlementPayoutRecipientAddress: '0xRECIPIENT',
       abuseBlocker: {} as never,
       rateLimiter: {
         check: vi.fn().mockResolvedValue({ allowed: true }),
@@ -104,7 +104,7 @@ function createMockCtx(): AppApiContext {
       dispose: vi.fn(),
     } as never,
     prepareConfig: {
-      quotedRelayerFeeMist: BigInt(500),
+      quotedHostFeeMist: BigInt(500),
       supportedSettlementSwapPaths: [
         {
           hops: [
@@ -268,7 +268,7 @@ describe('relay routes', () => {
       const body = await res.json();
       expect(body.network).toBe('testnet');
       expect(body.packageId).toBe('0xPKG');
-      expect(body.relayerRecipient).toBe('0xRECIPIENT');
+      expect(body.settlementPayoutRecipient).toBe('0xRECIPIENT');
       expect(body.supportedSettlementSwapPaths).toHaveLength(1);
       const pool = body.supportedSettlementSwapPaths[0];
       expect(pool.settlementSwapDirection).toBe('baseForQuote');
@@ -277,7 +277,7 @@ describe('relay routes', () => {
       expect(pool.hops[0].swapDirection).toBe('baseForQuote');
       expect(pool.lotSize).toBe(1);
       expect(pool.minSize).toBe(1);
-      expect(body.quotedRelayerFeeMist).toBe('500');
+      expect(body.quotedHostFeeMist).toBe('500');
       expect(body.protocolFlatFeeMist).toBe('100');
       expect(body.integrityPolicyVersion).toBeDefined();
 

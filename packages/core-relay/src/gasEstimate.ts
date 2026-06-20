@@ -10,14 +10,14 @@
  *   grossGas            = computationCost + storageCost
  *   gasVarianceFixedMist = GAS_VARIANCE_FIXED_MIST (fixed constant)
  *   slippageBufferMist  = DEX slippage buffer (swap paths only; 0 for credit paths)
- *   relayerClaim        = simGas + gasVarianceFixedMist + slippageBufferMist
+ *   executionCostClaim        = simGas + gasVarianceFixedMist + slippageBufferMist
  *
  * GAS_VARIANCE_FIXED_MIST covers gas price variance between dry-run and execution.
  * slippageBufferMist covers DEX price movement (swap paths only; 0 for credit paths).
  *
  * ⚠️ Epoch boundary: if gas price rises between dry-run and execution,
  *    simGas may underestimate actual gas → relayer absorbs micro-loss.
- *    This is intentional — revenue comes from quotedRelayerFeeMist / protocol_fee.
+ *    This is intentional — revenue comes from quotedHostFeeMist / protocol_fee.
  *
  * See docs/economics-formal.md for details.
  */
@@ -66,14 +66,14 @@ export interface SimulationGasUsed {
   storageRebate: string;
 }
 
-/** Options for computeRelayerCosts. */
-export interface ComputeRelayerCostsOpts {
+/** Options for computeExecutionCostClaim. */
+export interface ComputeExecutionCostClaimOpts {
   /** Slippage buffer in MIST (swap paths only). Default: `DEFAULT_SLIPPAGE_BUFFER_MIST`. */
   slippageBufferMist?: bigint;
 }
 
 /** Result of gas estimation — all amounts in MIST. */
-export interface RelayerCostEstimate {
+export interface ExecutionCostClaimEstimate {
   /** Net gas: max(0, computation + storage − rebate) */
   simGas: bigint;
   /** Gross gas: computation + storage (no rebate) */
@@ -82,8 +82,8 @@ export interface RelayerCostEstimate {
   gasVarianceFixedMist: bigint;
   /** DEX slippage buffer (0 for credit paths) */
   slippageBufferMist: bigint;
-  /** Relayer claim: simGas + gasVarianceFixedMist + slippageBufferMist */
-  relayerClaim: bigint;
+  /** Execution cost claim: simGas + gasVarianceFixedMist + slippageBufferMist */
+  executionCostClaim: bigint;
 }
 
 const DECIMAL_U64_RE = /^(?:0|[1-9]\d*)$/;
@@ -108,10 +108,10 @@ function parseGasUsedAmount(value: string, field: keyof SimulationGasUsed): bigi
  * @param gasUsed - Gas usage fields from simulateTransaction response
  * @param opts    - Optional: slippageBufferMist for swap paths
  */
-export function computeRelayerCosts(
+export function computeExecutionCostClaim(
   gasUsed: SimulationGasUsed,
-  opts?: ComputeRelayerCostsOpts,
-): RelayerCostEstimate {
+  opts?: ComputeExecutionCostClaimOpts,
+): ExecutionCostClaimEstimate {
   const computationCost = parseGasUsedAmount(gasUsed.computationCost, 'computationCost');
   const storageCost = parseGasUsedAmount(gasUsed.storageCost, 'storageCost');
   const storageRebate = parseGasUsedAmount(gasUsed.storageRebate, 'storageRebate');
@@ -126,13 +126,13 @@ export function computeRelayerCosts(
   const slippageBufferMist = opts?.slippageBufferMist ?? DEFAULT_SLIPPAGE_BUFFER_MIST;
   const effectiveSlippage = slippageBufferMist > 0n ? slippageBufferMist : 0n;
 
-  const relayerClaim = simGas + gasVarianceFixedMist + effectiveSlippage;
+  const executionCostClaim = simGas + gasVarianceFixedMist + effectiveSlippage;
 
   return {
     simGas,
     grossGas,
     gasVarianceFixedMist,
     slippageBufferMist: effectiveSlippage,
-    relayerClaim,
+    executionCostClaim,
   };
 }

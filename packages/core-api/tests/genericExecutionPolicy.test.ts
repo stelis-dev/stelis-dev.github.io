@@ -109,7 +109,7 @@ function makePromotionEntry(): PromotionPreparedTxEntry {
 function makeContext(overrides: Partial<RelayerContext> = {}): RelayerContext {
   return {
     network: 'testnet',
-    relayerRecipientAddress: `0x${'33'.repeat(32)}`,
+    settlementPayoutRecipientAddress: `0x${'33'.repeat(32)}`,
     configId: `0x${'44'.repeat(32)}`,
     vaultRegistryId: `0x${'55'.repeat(32)}`,
     packageId: `0x${'66'.repeat(32)}`,
@@ -175,7 +175,7 @@ function makePrepareOptions(
         supportedSettlementSwapPaths: [],
         settlementSwapPathDescriptors: new Map(),
         allowedSettlementSwapPaths: [],
-        quotedRelayerFeeMist: 0n,
+        quotedHostFeeMist: 0n,
       },
     },
     deps: input.deps,
@@ -261,8 +261,8 @@ function seedSponsorState(
       } as NonNullable<GenericExecutionPolicyState['sponsor']>['revalidation']['freshConfig'],
       settleArgs: {
         nonce: 7n,
-        relayerClaim: 5_000n,
-        quotedRelayerFeeMist: 100n,
+        executionCostClaim: 5_000n,
+        quotedHostFeeMist: 100n,
         orderIdHash: new Uint8Array(32).fill(1),
       } as NonNullable<GenericExecutionPolicyState['sponsor']>['revalidation']['settleArgs'],
       isNewUserSettle: false,
@@ -706,7 +706,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     expect(projected).toEqual({
       digest: '0xok',
       effects: { status: 'ok' },
-      relayerClaim: '5000',
+      executionCostClaim: '5000',
       orderId: 'order-1',
     });
     expect(onSponsorResult).toHaveBeenCalledWith(

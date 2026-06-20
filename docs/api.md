@@ -34,15 +34,15 @@ Returns runtime capability:
 
 - `network`
 - `packageId`
-- `relayerRecipient`: settlement payout recipient address for `relayerClaim` plus `quotedRelayerFeeMist`
+- `settlementPayoutRecipient`: settlement payout recipient address for `executionCostClaim` plus `quotedHostFeeMist`
 - `supportedSettlementSwapPaths`
-- `quotedRelayerFeeMist`
+- `quotedHostFeeMist`
 - `protocolFlatFeeMist`
 - `integrityPolicyVersion`
 
 Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement token list and settlement swap path list.
 Each `paymentTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `paymentTokenType`; clients do not send a pool ID or path ID.
-The settlement swap path includes the DeepBook pool and `swapDirection` used by the Host. `relayerRecipient` is an address, not the Host role or a sponsor signing account.
+The settlement swap path includes the DeepBook pool and `swapDirection` used by the Host. `settlementPayoutRecipient` is an address, not the Host role or a sponsor signing account.
 
 ## POST /relay/prepare
 
@@ -96,7 +96,7 @@ The user-supplied `User TransactionKind` must satisfy these rules:
 Funding resolution considers both coin object provenance and `FundsWithdrawal(Sender)` address-balance accounting. The current funding source outcomes are `coin_object`, `address_balance`, and `mixed_topup`. The current funding failure codes are `INSUFFICIENT_BALANCE` and `PAYMENT_COIN_CONFLICT`.
 
 The response includes transaction bytes for user signing and a `receiptId` for sponsor submission.
-The response cost fields include `relayerClaim`, which is the gas-recovery claim embedded in the settlement arguments. It is not the full relayer payout; on-chain settlement pays `relayerClaim + quotedRelayerFeeMist` to `relayerRecipient`.
+The response cost fields include `executionCostClaim`, which is the gas-recovery claim embedded in the settlement arguments. It is not the full settlement payout; on-chain settlement pays `executionCostClaim + quotedHostFeeMist` to `settlementPayoutRecipient`.
 
 The prepare authorization message binds the sender to the transaction-kind hash, selected settlement token type, optional cost fields, optional `orderId`, timestamp, and request nonce. The Host recomputes `txKindBytesHash`, verifies the personal-message signature against `senderAddress`, rejects expired timestamps, and rejects reused prepare authorization nonces before entering the prepare state machine.
 
@@ -146,7 +146,7 @@ The route validates the prepared record, checks the transaction again, sponsor-s
 
 The submitted `txBytes` must match the prepared record bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, consumes the prepared record once, and then re-parses settlement fields from the hash-bound transaction bytes.
 The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
-The `relayerClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
+The `executionCostClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
 ## Studio Promotion Routes
 

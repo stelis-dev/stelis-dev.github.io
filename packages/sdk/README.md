@@ -154,11 +154,11 @@ npm install @stelis/sdk
 
 ## Quick Start — StelisSDK (Recommended)
 
-`StelisSDK.connect()` fetches Host config (`network`, `packageId`, `relayerRecipient`,
+`StelisSDK.connect()` fetches Host config (`network`, `packageId`, `settlementPayoutRecipient`,
 `supportedSettlementSwapPaths`) from `/relay/config`, and resolves contract addresses (`configId`,
 `vaultRegistryId`, `deepbookPackageId`, `deepType`) from SDK built-in constants
 (bundled at build time from the shared internal contract package).
-`relayerRecipient` is the settlement payout recipient address for `relayerClaim` plus the quoted relayer fee.
+`settlementPayoutRecipient` is the settlement payout recipient address for `executionCostClaim` plus the quoted host fee.
 
 `supportedSettlementSwapPaths` contains one active settlement swap path per `paymentTokenType`.
 SDK calls choose a settlement token with `paymentToken.type`; they do not send a pool ID or path ID.
@@ -403,8 +403,8 @@ const settlement = await verifySettleEventAgainstExpected(
     receiptId,
     user: userAddress,
     orderId: 'invoice-2026-001',
-    relayerClaimMist: prepared.cost.relayerClaim,
-    quotedRelayerFeeMist: prepared.cost.quotedRelayerFee,
+    executionCostClaimMist: prepared.cost.executionCostClaim,
+    quotedHostFeeMist: prepared.cost.quotedHostFee,
     protocolFeeMist: prepared.cost.protocolFee,
   },
 );
@@ -591,7 +591,7 @@ import type {
   ExecuteSponsoredResult,
   GasEstimateResult,
   ExecuteSuiFirstResult,
-  RelayConfigResponse, // /relay/config response: network, packageId, relayerRecipient, supportedSettlementSwapPaths, quotedRelayerFeeMist, protocolFlatFeeMist, integrityPolicyVersion
+  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist, integrityPolicyVersion
   SingleHopSettlementSwapPath, // settlement swap path config (1-hop only)
   DeepBookPoolHop, // config for a single pool hop
   PrepareResponse,
@@ -644,14 +644,14 @@ Choose monorepo source helpers instead when:
 | Code | Constant                 | Description                                                                         |
 | ---- | ------------------------ | ----------------------------------------------------------------------------------- |
 | 100  | `EPaused`                | Settlement is paused by admin                                                       |
-| 101  | `EClaimTooHigh`          | relayer claim exceeds maximum allowed                                               |
+| 101  | `EClaimTooHigh`          | execution cost claim exceeds maximum allowed                                               |
 | 102  | `ETotalInTooLow`         | SUI from swap below settlement minimum (swap amount too small or no pool liquidity) |
-| 103  | `EInsufficientFunds`     | Not enough funds for relayer claim + fees                                           |
+| 103  | `EInsufficientFunds`     | Not enough funds for execution cost claim + fees                                           |
 | 104  | `EInvalidReceiptId`      | Receipt ID invalid or malformed                                                     |
 | 105  | `EInvalidPolicyHash`     | Policy hash mismatch                                                                |
 | 106  | `EConfigVersionMismatch` | L2 tamper detection: config version mismatch                                        |
 | 107  | `EProtocolFeeMismatch`   | L2 tamper detection: protocol fee mismatch                                          |
-| 108  | `ERelayerFeeCapExceeded` | L2 tamper detection: relayer fee cap exceeded                                       |
+| 108  | `EHostFeeCapExceeded` | L2 tamper detection: host fee cap exceeded                                       |
 | 109  | `EInvalidOrderIdHash`    | L2 tamper detection: order ID hash invalid                                          |
 | 110  | `ESpreadTooWide`         | Spread guard: bid-ask spread exceeds max or book is empty/crossed                   |
 
@@ -671,7 +671,7 @@ Choose monorepo source helpers instead when:
 
 When `paymentToken.amount` is omitted, the SDK auto-calculates swap amount:
 
-1. **Needed SUI** = `relayerClaim + fee + protocolFee` (from the prepare response)
+1. **Needed SUI** = `executionCostClaim + fee + protocolFee` (from the prepare response)
 2. **Payment amount** = `neededSuiMist × FLOAT_SCALING(1e9) / midPrice × margin`
    - `midPrice` is DeepBook's raw u64: `quote_smallest × 1e9 / base_smallest`
    - `baseForQuote` (e.g. DEEP→SUI): `microDEEP = neededMist × 1e9 / midPrice`

@@ -40,7 +40,7 @@ export const PREPARE_TTL_MS = 60_000;
 export function buildPolicyFields(config: OnchainConfig): PolicyFields {
   return {
     maxClaimMist: config.maxClaimMist,
-    maxRelayerFeeMist: config.maxRelayerFeeMist,
+    maxHostFeeMist: config.maxHostFeeMist,
     protocolFeeMist: config.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,

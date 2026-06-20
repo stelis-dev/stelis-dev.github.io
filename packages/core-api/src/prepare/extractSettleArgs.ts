@@ -5,7 +5,7 @@
  * Maps ParseSettleArgsError → PrepareValidationError('L2_EXTRACT_FAILED').
  * Non-parser errors are re-thrown so prepare.ts L1_PARSE_FAILED can handle them.
  *
- * IMPORTANT: relayerClaim and relayerRecipient are decoded from
+ * IMPORTANT: executionCostClaim and settlementPayoutRecipient are decoded from
  * built TX Pure inputs — NOT from builder input values.
  * This enables independent L2 validation that catches builder encoding bugs.
  *

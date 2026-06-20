@@ -107,9 +107,9 @@
       "required": [
         "network",
         "packageId",
-        "relayerRecipient",
+        "settlementPayoutRecipient",
         "supportedSettlementSwapPaths",
-        "quotedRelayerFeeMist",
+        "quotedHostFeeMist",
         "protocolFlatFeeMist",
         "integrityPolicyVersion"
       ],
@@ -120,9 +120,9 @@
         "packageId": {
           "$ref": "#/$defs/hexString"
         },
-        "relayerRecipient": {
+        "settlementPayoutRecipient": {
           "$ref": "#/$defs/hexString",
-          "description": "Settlement payout recipient address for relayerClaim plus quotedRelayerFeeMist."
+          "description": "Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist."
         },
         "supportedSettlementSwapPaths": {
           "type": "array",
@@ -131,7 +131,7 @@
             "$ref": "#/$defs/singleHopSettlementSwapPath"
           }
         },
-        "quotedRelayerFeeMist": {
+        "quotedHostFeeMist": {
           "$ref": "#/$defs/mistString"
         },
         "protocolFlatFeeMist": {
@@ -214,9 +214,9 @@
         "simGas",
         "gasVarianceFixedMist",
         "slippageBufferMist",
-        "quotedRelayerFee",
+        "quotedHostFee",
         "protocolFee",
-        "relayerClaim",
+        "executionCostClaim",
         "grossGas"
       ],
       "properties": {
@@ -229,15 +229,15 @@
         "slippageBufferMist": {
           "$ref": "#/$defs/mistString"
         },
-        "quotedRelayerFee": {
+        "quotedHostFee": {
           "$ref": "#/$defs/mistString"
         },
         "protocolFee": {
           "$ref": "#/$defs/mistString"
         },
-        "relayerClaim": {
+        "executionCostClaim": {
           "$ref": "#/$defs/mistString",
-          "description": "Gas-recovery claim in settlement arguments. The full relayer payout is relayerClaim plus quotedRelayerFeeMist."
+          "description": "Gas-recovery claim in settlement arguments. The full settlement payout is executionCostClaim plus quotedHostFeeMist."
         },
         "grossGas": {
           "$ref": "#/$defs/mistString"
@@ -309,7 +309,7 @@
     "sponsorResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["digest", "effects", "relayerClaim"],
+      "required": ["digest", "effects", "executionCostClaim"],
       "properties": {
         "digest": {
           "type": "string"
@@ -317,7 +317,7 @@
         "effects": {
           "type": "object"
         },
-        "relayerClaim": {
+        "executionCostClaim": {
           "$ref": "#/$defs/mistString",
           "description": "Transaction-derived gas-recovery claim from the settlement arguments."
         },
@@ -407,7 +407,7 @@
         "L2_WRONG_REGISTRY",
         "L2_WRONG_RECIPIENT",
         "L2_EXCESSIVE_CLAIM",
-        "L2_RELAYER_FEE_CAP",
+        "L2_HOST_FEE_CAP",
         "L2_PROTOCOL_FEE_MISMATCH",
         "L2_CONFIG_VERSION_MISMATCH",
         "L2_CREDIT_SLIPPAGE_NONZERO",

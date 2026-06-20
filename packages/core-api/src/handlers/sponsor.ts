@@ -33,7 +33,7 @@ export interface SponsorParams {
 export interface SponsorResult {
   digest: string;
   effects: unknown;
-  relayerClaim: string;
+  executionCostClaim: string;
   /** Echoed orderId from /prepare (undefined if not provided). */
   orderId?: string;
 }

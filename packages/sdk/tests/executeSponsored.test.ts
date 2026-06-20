@@ -100,7 +100,7 @@ const DEEP_TYPE = `${PKG}::deep::DEEP`;
 const RELAYER_CONFIG: RelayerConfig = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipient: '0x' + 'b'.repeat(64),
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -121,7 +121,7 @@ const RELAYER_CONFIG: RelayerConfig = {
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -170,9 +170,9 @@ describe('StelisSDK.executeSponsored', () => {
         simGas: '5000000',
         gasVarianceFixedMist: '200000',
         slippageBufferMist: '50000',
-        quotedRelayerFee: '100000',
+        quotedHostFee: '100000',
         protocolFee: '20000',
-        relayerClaim: '5250000',
+        executionCostClaim: '5250000',
         grossGas: '7000000',
       },
       profile: 'new_user',
@@ -287,7 +287,7 @@ describe('StelisSDK.executeSponsored', () => {
 
   // ── 5b: SPONSOR_PREFLIGHT_FAILED + subcode INSUFFICIENT_FUNDS → INSUFFICIENT_FUNDS ──
   // settle.move EInsufficientFunds (S-4 non-loss assert): total_in covers
-  // min_settle but not relayer_claim + fees. User-visible exhaustion class —
+  // min_settle but not execution_cost_claim_mist + fees. User-visible exhaustion class —
   // collapse with INSUFFICIENT_SETTLE_INPUT under the same SDK code.
   it('normalizes SPONSOR_PREFLIGHT_FAILED with subcode INSUFFICIENT_FUNDS', async () => {
     const { StelisApiException } = await import('../src/client.js');
@@ -479,9 +479,9 @@ describe('StelisSDK.executeSponsored', () => {
         simGas: '5000000',
         gasVarianceFixedMist: '200000',
         slippageBufferMist: '50000',
-        quotedRelayerFee: '100000',
+        quotedHostFee: '100000',
         protocolFee: '20000',
-        relayerClaim: '5250000',
+        executionCostClaim: '5250000',
         grossGas: '7000000',
       },
       profile: 'new_user',

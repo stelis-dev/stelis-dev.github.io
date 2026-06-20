@@ -26,7 +26,7 @@ const CONFIG: OnchainConfig = {
   configId: '0xCONFIG',
   maxClaimMist: 50_000_000n,
   minSettleMist: 100_000n,
-  maxRelayerFeeMist: 500_000n,
+  maxHostFeeMist: 500_000n,
   protocolFlatFeeMist: 100_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
@@ -358,11 +358,11 @@ describe('Layer 2: validateSettleArgs', () => {
   const validArgs: SettleArgs = {
     configObjectId: '0xCONFIG',
     registryObjectId: '0xREGISTRY',
-    relayerRecipient: '0xRELAYER',
-    relayerClaim: 10_000_000n,
+    settlementPayoutRecipient: '0xRELAYER',
+    executionCostClaim: 10_000_000n,
     policyHash: new Uint8Array(32), // 32-byte zero hash
     orderIdHash: new Uint8Array(0), // empty = no orderId
-    quotedRelayerFeeMist: 500_000n,
+    quotedHostFeeMist: 500_000n,
     expectedProtocolFeeMist: 100_000n,
     expectedConfigVersion: 1n,
     nonce: 1n,
@@ -383,9 +383,9 @@ describe('Layer 2: validateSettleArgs', () => {
     if (!result.ok) expect(result.code).toBe('L2_WRONG_CONFIG');
   });
 
-  it('fail — relayer recipient mismatch', () => {
+  it('fail — settlement payout recipient mismatch', () => {
     const result = validateSettleArgs(
-      { ...validArgs, relayerRecipient: '0xATTACKER' },
+      { ...validArgs, settlementPayoutRecipient: '0xATTACKER' },
       CONFIG,
       ENV,
     );
@@ -403,19 +403,19 @@ describe('Layer 2: validateSettleArgs', () => {
     if (!result.ok) expect(result.code).toBe('L2_WRONG_REGISTRY');
   });
 
-  it('fail — relayer_claim > max_claim_mist', () => {
-    const result = validateSettleArgs({ ...validArgs, relayerClaim: 50_000_001n }, CONFIG, ENV);
+  it('fail — execution_cost_claim_mist > max_claim_mist', () => {
+    const result = validateSettleArgs({ ...validArgs, executionCostClaim: 50_000_001n }, CONFIG, ENV);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('L2_EXCESSIVE_CLAIM');
   });
 
-  it('boundary — relayer_claim == max_claim_mist passes', () => {
-    const result = validateSettleArgs({ ...validArgs, relayerClaim: 50_000_000n }, CONFIG, ENV);
+  it('boundary — execution_cost_claim_mist == max_claim_mist passes', () => {
+    const result = validateSettleArgs({ ...validArgs, executionCostClaim: 50_000_000n }, CONFIG, ENV);
     expect(result).toEqual({ ok: true });
   });
 
-  it('boundary — relayer_claim == 0 passes', () => {
-    const result = validateSettleArgs({ ...validArgs, relayerClaim: 0n }, CONFIG, ENV);
+  it('boundary — execution_cost_claim_mist == 0 passes', () => {
+    const result = validateSettleArgs({ ...validArgs, executionCostClaim: 0n }, CONFIG, ENV);
     expect(result).toEqual({ ok: true });
   });
 
@@ -474,24 +474,24 @@ describe('Layer 2: validateSettleArgs', () => {
   });
 
   // ── L2 tamper-detection mirror tests (parallel to on-chain 106/107/108) ───
-  // Mirror on-chain ERelayerFeeCapExceeded / EProtocolFeeMismatch /
+  // Mirror on-chain EHostFeeCapExceeded / EProtocolFeeMismatch /
   // EConfigVersionMismatch. Reject drift in off-chain /prepare before a TX is
   // ever built.
 
-  it('fail — L2_RELAYER_FEE_CAP: quoted_relayer_fee_mist exceeds on-chain cap', () => {
-    // CONFIG.maxRelayerFeeMist = 500_000n; 500_001n exceeds cap by 1.
+  it('fail — L2_HOST_FEE_CAP: quoted_host_fee_mist exceeds on-chain cap', () => {
+    // CONFIG.maxHostFeeMist = 500_000n; 500_001n exceeds cap by 1.
     const result = validateSettleArgs(
-      { ...validArgs, quotedRelayerFeeMist: 500_001n },
+      { ...validArgs, quotedHostFeeMist: 500_001n },
       CONFIG,
       ENV,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.code).toBe('L2_RELAYER_FEE_CAP');
+    if (!result.ok) expect(result.code).toBe('L2_HOST_FEE_CAP');
   });
 
-  it('boundary — quoted_relayer_fee_mist == max_relayer_fee_mist passes', () => {
+  it('boundary — quoted_host_fee_mist == max_host_fee_mist passes', () => {
     const result = validateSettleArgs(
-      { ...validArgs, quotedRelayerFeeMist: 500_000n },
+      { ...validArgs, quotedHostFeeMist: 500_000n },
       CONFIG,
       ENV,
     );
@@ -551,11 +551,11 @@ const POOL_2 = '0xpool2';
 const validArgs: SettleArgs = {
   configObjectId: '0xCONFIG',
   registryObjectId: '0xREGISTRY',
-  relayerRecipient: '0xRELAYER',
-  relayerClaim: 5_000_000n,
+  settlementPayoutRecipient: '0xRELAYER',
+  executionCostClaim: 5_000_000n,
   policyHash: new Uint8Array(32), // 32-byte zero hash
   orderIdHash: new Uint8Array(0), // empty = no orderId
-  quotedRelayerFeeMist: 500_000n,
+  quotedHostFeeMist: 500_000n,
   expectedProtocolFeeMist: 100_000n,
   expectedConfigVersion: 1n,
   nonce: 1n,

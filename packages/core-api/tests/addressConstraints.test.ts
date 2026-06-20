@@ -23,7 +23,7 @@ describe('validateAddressConstraints', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_A, ADDR_B],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
         sponsorRefillAccountAddress: ADDR_C,
       }),
     ).not.toThrow();
@@ -33,25 +33,25 @@ describe('validateAddressConstraints', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_A, ADDR_A],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
       }),
     ).toThrow(/Duplicate sponsor address/);
   });
 
-  it('[2] throws when sponsor == relayerRecipient', () => {
+  it('[2] throws when sponsor == settlementPayoutRecipient', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_R],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
       }),
-    ).toThrow(/must not equal RELAYER_RECIPIENT_ADDRESS/);
+    ).toThrow(/must not equal SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS/);
   });
 
   it('[3] throws when sponsor == sponsorRefillAccount (explicit)', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_A],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
         sponsorRefillAccountAddress: ADDR_A,
       }),
     ).toThrow(/must not equal sponsor refill account/);
@@ -61,17 +61,17 @@ describe('validateAddressConstraints', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_A],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
         sponsorRefillAccountAddress: undefined,
       }),
     ).not.toThrow();
   });
 
-  it('[4] sponsorRefillAccount == relayerRecipient is allowed', () => {
+  it('[4] sponsorRefillAccount == settlementPayoutRecipient is allowed', () => {
     expect(() =>
       validateAddressConstraints({
         sponsorAddresses: [ADDR_A],
-        relayerRecipientAddress: ADDR_R,
+        settlementPayoutRecipientAddress: ADDR_R,
         sponsorRefillAccountAddress: ADDR_R, // same as recipient — OK
       }),
     ).not.toThrow();

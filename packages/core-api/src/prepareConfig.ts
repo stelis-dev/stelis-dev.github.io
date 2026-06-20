@@ -9,22 +9,22 @@ import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/
 import type { PrepareHandlerConfig } from './handlers/prepare.js';
 
 /**
- * Parse the RELAYER_FEE_MIST environment variable into a bigint.
+ * Parse the HOST_FEE_MIST environment variable into a bigint.
  *
  * Centralises env parsing so the host app uses the same
  * logic. Throws a descriptive error at boot time (not request time) if
  * the value is set but invalid.
  *
- * @param envValue  process.env.RELAYER_FEE_MIST (string | undefined)
+ * @param envValue  process.env.HOST_FEE_MIST (string | undefined)
  * @returns 0n when not set, parsed bigint when set
  * @throws Error with human-readable message when set to a non-integer string
  */
-export function parseRelayerFeeEnv(envValue: string | undefined): bigint {
+export function parseHostFeeEnv(envValue: string | undefined): bigint {
   if (!envValue) return 0n;
   if (!/^(?:0|[1-9]\d*)$/.test(envValue)) {
     throw new Error(
-      `[RELAYER_FEE_MIST] Invalid value "${envValue}": expected a non-negative integer string. ` +
-        `Set to 0 or remove the env var to disable the relayer fee.`,
+      `[HOST_FEE_MIST] Invalid value "${envValue}": expected a non-negative integer string. ` +
+        `Set to 0 or remove the env var to disable the host fee.`,
     );
   }
   try {
@@ -33,8 +33,8 @@ export function parseRelayerFeeEnv(envValue: string | undefined): bigint {
     return parsed;
   } catch {
     throw new Error(
-      `[RELAYER_FEE_MIST] Invalid value "${envValue}": expected a non-negative integer string. ` +
-        `Set to 0 or remove the env var to disable the relayer fee.`,
+      `[HOST_FEE_MIST] Invalid value "${envValue}": expected a non-negative integer string. ` +
+        `Set to 0 or remove the env var to disable the host fee.`,
     );
   }
 }
@@ -223,10 +223,10 @@ export function resolvePrepareConfig(opts: {
   descriptors: StaticSettlementSwapPathDescriptorMap;
   deepbookPackageId: string;
   /**
-   * Relayer-quoted fee per TX (MIST) — from RELAYER_FEE_MIST env var.
-   * 0n when not set (no relayer fee).
+   * Host-quoted fee per TX (MIST) — from HOST_FEE_MIST env var.
+   * 0n when not set (no host fee).
    */
-  quotedRelayerFeeMist?: bigint;
+  quotedHostFeeMist?: bigint;
 }): PrepareHandlerConfig {
   assertSettlementSwapPathDescriptorCoverage(opts.settlementSwapPaths, opts.descriptors);
 
@@ -235,6 +235,6 @@ export function resolvePrepareConfig(opts: {
     supportedSettlementSwapPaths: opts.settlementSwapPaths,
     settlementSwapPathDescriptors: opts.descriptors,
     allowedSettlementSwapPaths: deriveAllowedSettlementSwapPaths(opts.settlementSwapPaths),
-    quotedRelayerFeeMist: opts.quotedRelayerFeeMist ?? 0n,
+    quotedHostFeeMist: opts.quotedHostFeeMist ?? 0n,
   };
 }

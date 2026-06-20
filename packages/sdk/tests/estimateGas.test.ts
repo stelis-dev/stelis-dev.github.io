@@ -2,7 +2,7 @@
  * estimateGas — unit tests for StelisSDK.estimateGas()
  *
  * Tests verify:
- *   1. Budget-based gas estimation using computeRelayerCosts + fees
+ *   1. Budget-based gas estimation using computeExecutionCostClaim + fees
  *   2. Three profile branches (no vault / credit sufficient / credit insufficient)
  *   3. canSkipLiquidity logic (credit_general only)
  *   4. paymentToken is required for estimateGas()
@@ -69,7 +69,7 @@ const SUI_TYPE = '0x2::sui::SUI';
 const BASE_CONFIG: RelayerConfig = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: RELAYER,
+  settlementPayoutRecipient: RELAYER,
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -90,7 +90,7 @@ const BASE_CONFIG: RelayerConfig = {
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -116,9 +116,9 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     _midPrice = 27_000_000_000n;
   });
 
-  // ── 1: Budget-based estimation uses computeRelayerCosts + fees ──────
+  // ── 1: Budget-based estimation uses computeExecutionCostClaim + fees ──────
 
-  it('computes totalCost using computeRelayerCosts + quotedRelayerFee + protocolFee', async () => {
+  it('computes totalCost using computeExecutionCostClaim + quotedHostFee + protocolFee', async () => {
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
@@ -126,8 +126,8 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     });
 
     // Default budget = 5_000_000
-    // computeRelayerCosts({ computationCost: '5000000', storageCost: '0', storageRebate: '0' })
-    // → relayerClaim depends on the formula, but suiAmountHuman should be non-zero
+    // computeExecutionCostClaim({ computationCost: '5000000', storageCost: '0', storageRebate: '0' })
+    // → executionCostClaim depends on the formula, but suiAmountHuman should be non-zero
     expect(result.suiAmountHuman).not.toBe('0');
     expect(result.displayUnit).toBe('DEEP'); // no vault → new_user → payment token
     expect(result.profile).toBe('new_user');

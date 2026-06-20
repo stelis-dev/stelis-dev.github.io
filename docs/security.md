@@ -19,7 +19,7 @@ This document summarizes the current security boundaries that are visible in the
 
 ## Web3 Security Policy
 
-Move contracts enforce vault ownership, settlement input checks, relayer claim caps, pause behavior, and admin-only config changes.
+Move contracts enforce vault ownership, settlement input checks, execution cost claim caps, pause behavior, and admin-only config changes.
 
 Relay validation adds off-chain checks before the sponsor signs:
 
@@ -38,7 +38,7 @@ Sponsor SUI state and transitions are defined in [`Sponsor Pools`](./architectur
 
 The sponsor slot is the `gasOwner` for sponsored transactions. User-supplied commands cannot use sponsor SUI through `GasCoin` or `FundsWithdrawal(Sponsor)`. This protects both sponsor gas coin objects and sponsor address-balance gas.
 
-Final settlement validation rejects a `relayer_recipient` that does not match the configured relayer recipient. This prevents a user-supplied transaction from redirecting settlement payout, including deployments where the relayer recipient is also the Sponsor Refill Account.
+Final settlement validation rejects a `settlement_payout_recipient` that does not match the configured settlement payout recipient. This prevents a user-supplied transaction from redirecting settlement payout, including deployments where the settlement payout recipient is also the Sponsor Refill Account.
 
 Failed sponsored execution can spend sponsor gas without producing settlement payout. The Host uses preflight simulation, sponsor failure abuse recording, and blocked request checks to limit failed-execution gas griefing.
 

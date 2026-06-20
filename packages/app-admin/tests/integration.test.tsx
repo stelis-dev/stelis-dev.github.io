@@ -50,7 +50,7 @@ const VALID_SESSION = {
 const POOL_DATA = {
   network: 'testnet',
   primaryAddress: '0x' + 'd'.repeat(64),
-  relayerRecipientAddress: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipientAddress: '0x' + 'b'.repeat(64),
   rpcFleet: {
     endpoints: [
       {
@@ -89,7 +89,7 @@ const POOL_DATA = {
     },
   },
   feeConfig: {
-    maxRelayerFeeMist: '100000',
+    maxHostFeeMist: '100000',
     protocolFlatFeeMist: '50000',
     maxClaimMist: '500000',
     minSettleMist: '10000',
@@ -330,7 +330,7 @@ describe('DashboardPage integration', () => {
             mode: 'all',
             sponsoredExecutions: '1250000',
             lossCount: '3',
-            cumulativeRelayerNetMist: '1000000000',
+            cumulativeHostNetMist: '1000000000',
             cumulativeLossMist: '-3000000',
           },
         },

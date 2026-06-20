@@ -8,11 +8,11 @@ The relay computes:
 
 ```text
 simGas = max(0, computationCost + storageCost - storageRebate)
-relayerClaim = simGas + gasVarianceFixedMist + slippageBufferMist
+executionCostClaim = simGas + gasVarianceFixedMist + slippageBufferMist
 ```
 
 Current `gasVarianceFixedMist` is `100000`.
-`relayerClaim` is the gas-recovery claim in the settlement arguments. The full relayer payout is `relayerClaim + quotedRelayerFeeMist`, paid to the configured relayer recipient address during Move settlement.
+`executionCostClaim` is the gas-recovery claim in the settlement arguments. The full settlement payout is `executionCostClaim + quotedHostFeeMist`, paid to the configured settlement payout recipient address during Move settlement.
 
 ## Sponsor Approval Flow
 
@@ -45,8 +45,8 @@ Client guidance:
 | Layer | Checks |
 | --- | --- |
 | User-command validation | command count, forbidden command kinds, `GasCoin` references, direct Stelis calls |
-| Settlement validation | config object, vault registry object, relayer recipient address, settlement swap path authorization, fee caps |
-| Non-loss validation | relayer claim, gas budget, simulated gas cap |
+| Settlement validation | config object, vault registry object, settlement payout recipient address, settlement swap path authorization, fee caps |
+| Non-loss validation | execution cost claim, gas budget, simulated gas cap |
 | Move validation | vault ownership, settlement minimums, pause state, admin-only config |
 
 ## PTB Validation Layer Contract

@@ -120,7 +120,7 @@ describe('API client', () => {
           lastError: null,
         },
       },
-      relayerRecipientAddress: '0xR',
+      settlementPayoutRecipientAddress: '0xR',
     };
     vi.stubGlobal(
       'fetch',

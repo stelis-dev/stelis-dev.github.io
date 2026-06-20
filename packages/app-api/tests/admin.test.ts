@@ -111,7 +111,7 @@ function createMockCtx(): AppApiContext {
     relay: {
       network: 'testnet',
       packageId: '0xPKG',
-      relayerRecipientAddress: '0xRECIPIENT',
+      settlementPayoutRecipientAddress: '0xRECIPIENT',
       sponsorPool: {
         addresses: () => ['0xSPONSOR1'],
         size: 1,
@@ -127,7 +127,7 @@ function createMockCtx(): AppApiContext {
         getTransaction: vi.fn().mockResolvedValue({ digest: 'mock-digest', effects: {} }),
       },
       getConfig: vi.fn().mockResolvedValue({
-        maxRelayerFeeMist: 1000n,
+        maxHostFeeMist: 1000n,
         protocolFlatFeeMist: 100n,
         maxClaimMist: 500n,
         minSettleMist: 50n,
@@ -136,7 +136,7 @@ function createMockCtx(): AppApiContext {
       dispose: vi.fn(),
     } as never,
     prepareConfig: {
-      quotedRelayerFeeMist: 500n,
+      quotedHostFeeMist: 500n,
       supportedSettlementSwapPaths: [
         {
           paymentTokenType: '0xdeeb::deep::DEEP',
@@ -217,7 +217,7 @@ function createMockCtx(): AppApiContext {
         mode: 'all',
         sponsoredExecutions: '0',
         lossCount: '0',
-        cumulativeRelayerNetMist: '0',
+        cumulativeHostNetMist: '0',
         cumulativeLossMist: '0',
       }),
       getRecent: vi.fn().mockResolvedValue([]),
@@ -355,7 +355,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '5',
         lossCount: '1',
-        cumulativeRelayerNetMist: '12345',
+        cumulativeHostNetMist: '12345',
         cumulativeLossMist: '-1000',
       };
       (mockCtx.sponsoredLogsStore.getSummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
@@ -386,7 +386,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '2',
         lossCount: '0',
-        cumulativeRelayerNetMist: '4000',
+        cumulativeHostNetMist: '4000',
         cumulativeLossMist: '0',
       };
       const entries = [
@@ -397,9 +397,9 @@ describe('admin routes', () => {
           outcome: 'success',
           receiptId: 'r1',
           economicsStatus: 'known',
-          relayerFeeMist: '1000',
+          hostFeeMist: '1000',
           protocolFeeMist: '50',
-          relayerNetMist: '4000',
+          hostNetMist: '4000',
         },
       ];
       (mockCtx.sponsoredLogsStore.getSummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
@@ -449,7 +449,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '2',
         lossCount: '1',
-        cumulativeRelayerNetMist: '-12345',
+        cumulativeHostNetMist: '-12345',
         cumulativeLossMist: '-12345',
       });
       (mockCtx.sponsoredLogsStore.getRecent as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
@@ -462,9 +462,9 @@ describe('admin routes', () => {
           economicsStatus: 'unknown',
           // unknown row: every numeric field is null (no zero coercion).
           recoveredGasMist: null,
-          relayerPaidGasMist: null,
-          relayerNetMist: null,
-          relayerFeeMist: null,
+          hostPaidGasMist: null,
+          hostNetMist: null,
+          hostFeeMist: null,
           protocolFeeMist: null,
           grossGasMist: null,
           storageRebateMist: null,
@@ -477,9 +477,9 @@ describe('admin routes', () => {
           outcome: 'success',
           receiptId: 'r-ledger',
           economicsStatus: 'known',
-          relayerFeeMist: '0',
+          hostFeeMist: '0',
           protocolFeeMist: '0',
-          relayerNetMist: '-12345',
+          hostNetMist: '-12345',
           failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED: budget_unavailable',
         },
       ]);
@@ -496,21 +496,21 @@ describe('admin routes', () => {
       );
 
       // Numeric honesty lock at the API response: an unknown row carries
-      // `relayerFeeMist: null` (no zero coercion); a known row carries
+      // `hostFeeMist: null` (no zero coercion); a known row carries
       // the exact MIST decimal string ("0" only when the fee is
       // explicitly zero). The two cases must round-trip through the
       // route without one being silently coerced into the other.
       expect(body.entries[0].economicsStatus).toBe('unknown');
-      expect(body.entries[0].relayerFeeMist).toBeNull();
+      expect(body.entries[0].hostFeeMist).toBeNull();
       expect(body.entries[0].protocolFeeMist).toBeNull();
       expect(body.entries[0].recoveredGasMist).toBeNull();
-      expect(body.entries[0].relayerPaidGasMist).toBeNull();
-      expect(body.entries[0].relayerNetMist).toBeNull();
+      expect(body.entries[0].hostPaidGasMist).toBeNull();
+      expect(body.entries[0].hostNetMist).toBeNull();
 
       expect(body.entries[1].economicsStatus).toBe('known');
-      expect(body.entries[1].relayerFeeMist).toBe('0');
+      expect(body.entries[1].hostFeeMist).toBe('0');
       expect(body.entries[1].protocolFeeMist).toBe('0');
-      expect(body.entries[1].relayerNetMist).toBe('-12345');
+      expect(body.entries[1].hostNetMist).toBe('-12345');
     });
   });
 
@@ -1921,7 +1921,7 @@ describe('admin routes', () => {
       expect(body.sponsorRefillAccountBalance).toBeUndefined();
       expect(body.sponsorRefillAccountRefillsRemaining).toBeUndefined();
       // Relayer-recipient balance is not part of the response contract.
-      expect(body.relayerRecipientBalance).toBeUndefined();
+      expect(body.settlementPayoutRecipientBalance).toBeUndefined();
     });
 
     it('returns boot-derived configuration fields and the cached feeConfig', async () => {
@@ -1931,13 +1931,13 @@ describe('admin routes', () => {
 
       expect(body.network).toBe('testnet');
       expect(body.primaryAddress).toBe('0xSPONSOR1');
-      expect(body.relayerRecipientAddress).toBe('0xRECIPIENT');
+      expect(body.settlementPayoutRecipientAddress).toBe('0xRECIPIENT');
       expect(typeof body.sponsorBalanceWarnMist).toBe('string');
       expect(typeof body.sponsorBalanceRefillTargetMist).toBe('string');
       expect(typeof body.refillEnabled).toBe('boolean');
-      expect(typeof body.quotedRelayerFeeMist).toBe('string');
+      expect(typeof body.quotedHostFeeMist).toBe('string');
       expect(body.feeConfig).toMatchObject({
-        maxRelayerFeeMist: '1000',
+        maxHostFeeMist: '1000',
         protocolFlatFeeMist: '100',
         maxClaimMist: '500',
         minSettleMist: '50',

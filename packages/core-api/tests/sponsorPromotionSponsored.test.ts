@@ -129,7 +129,7 @@ function createMockSui(opts?: {
    * non-positive `simGas` (rebate >= computation + storage — e.g. a
    * delete-objects-only TX that reverts post-effects). The handler
    * must still classify this as `onchain_revert` (gasUsed present;
-   * 0-clamp via `computeRelayerCosts.simGas`), NOT
+   * 0-clamp via `computeExecutionCostClaim.simGas`), NOT
    * `onchain_revert_gas_unknown`.
    */
   zeroNetRevert?: boolean;
@@ -343,7 +343,7 @@ describe('handlePromotionSponsor', () => {
     await ctx.prepareStore.store(genericReceiptId, {
       issuedAt: Date.now(),
       receiptId: genericReceiptId,
-      relayerClaim: 2_000_000n,
+      executionCostClaim: 2_000_000n,
       simGas: 1_300_000n,
       gasVarianceFixedMist: 100_000n,
       slippageBufferMist: 0n,
@@ -351,7 +351,7 @@ describe('handlePromotionSponsor', () => {
       profile: 'credit_general',
       quoteTimestampMs: Date.now(),
       policyHash: '',
-      quotedRelayerFeeMist: 0n,
+      quotedHostFeeMist: 0n,
       txBytesHash: signed.txHash,
       senderAddress: USER_ADDR,
       slotId: 'fake-slot',
@@ -2033,10 +2033,10 @@ describe('handlePromotionSponsor', () => {
     expect(probe.calls[0].economics.economicsStatus).toBe('known');
     if (probe.calls[0].economics.economicsStatus === 'known') {
       expect(probe.calls[0].economics.recoveredGasMist).toBe(
-        probe.calls[0].economics.relayerPaidGasMist,
+        probe.calls[0].economics.hostPaidGasMist,
       );
-      expect(probe.calls[0].economics.relayerNetMist).toBe('0');
-      expect(BigInt(probe.calls[0].economics.relayerPaidGasMist)).toBeGreaterThan(0n);
+      expect(probe.calls[0].economics.hostNetMist).toBe('0');
+      expect(BigInt(probe.calls[0].economics.hostPaidGasMist)).toBeGreaterThan(0n);
     }
     // Ordering: safeSlotCheckin runs before callback.
     expect(probe.order).toEqual(['checkin', 'callback']);

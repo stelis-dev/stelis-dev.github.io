@@ -58,9 +58,9 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
     throw new Error('Invalid /relay/config response: packageId must be a non-empty string');
   }
 
-  const relayerRecipient = raw.relayerRecipient;
-  if (typeof relayerRecipient !== 'string' || relayerRecipient.length === 0) {
-    throw new Error('Invalid /relay/config response: relayerRecipient must be a non-empty string');
+  const settlementPayoutRecipient = raw.settlementPayoutRecipient;
+  if (typeof settlementPayoutRecipient !== 'string' || settlementPayoutRecipient.length === 0) {
+    throw new Error('Invalid /relay/config response: settlementPayoutRecipient must be a non-empty string');
   }
 
   const supportedSettlementSwapPaths = raw.supportedSettlementSwapPaths;
@@ -70,10 +70,10 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
     );
   }
 
-  const quotedRelayerFeeMist = raw.quotedRelayerFeeMist;
-  if (typeof quotedRelayerFeeMist !== 'string' || !MIST_STRING_RE.test(quotedRelayerFeeMist)) {
+  const quotedHostFeeMist = raw.quotedHostFeeMist;
+  if (typeof quotedHostFeeMist !== 'string' || !MIST_STRING_RE.test(quotedHostFeeMist)) {
     throw new Error(
-      'Invalid /relay/config response: quotedRelayerFeeMist must be a non-negative integer string',
+      'Invalid /relay/config response: quotedHostFeeMist must be a non-negative integer string',
     );
   }
   const protocolFlatFeeMist = raw.protocolFlatFeeMist;
@@ -129,9 +129,9 @@ export function parseRelayerConfig(data: unknown): RelayerConfig {
   return {
     network,
     packageId,
-    relayerRecipient,
+    settlementPayoutRecipient,
     supportedSettlementSwapPaths: parsedSettlementSwapPaths,
-    quotedRelayerFeeMist,
+    quotedHostFeeMist,
     protocolFlatFeeMist,
     integrityPolicyVersion,
   };

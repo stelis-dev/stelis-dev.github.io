@@ -10,7 +10,7 @@
  *      (core-api SponsoredExecution boundary) into a generic prepared entry.
  *   5. Assert that the parsed PTB args, the GenericPrepareBuildOutput-projected store
  *      entry, and the original audit input all agree on the canonical
- *      facts: relayerClaim, nonce, quotedRelayerFeeMist, profile, and the
+ *      facts: executionCostClaim, nonce, quotedHostFeeMist, profile, and the
  *      route shape.
  *
  * This proves:
@@ -38,21 +38,21 @@ const ADDR_REGISTRY = '0x' + '3'.repeat(64);
 const ADDR_POOL = '0x' + '4'.repeat(64);
 const ADDR_PAYMENT_COIN = '0x' + '5'.repeat(64);
 const ADDR_VAULT = '0x' + '7'.repeat(64);
-const ADDR_RELAYER = '0x' + 'b'.repeat(64);
+const ADDR_SETTLEMENT_PAYOUT_RECIPIENT = '0x' + 'b'.repeat(64);
 
 const PAYMENT_TYPE = `${ADDR_PKG}::token::TOKEN`;
 
 // ─── Audit field fixture ─────────────────────────────────────────────────
 
 const AUDIT_FIELDS = {
-  relayerClaim: 5_000_000n,
-  relayerRecipient: ADDR_RELAYER,
+  executionCostClaim: 5_000_000n,
+  settlementPayoutRecipient: ADDR_SETTLEMENT_PAYOUT_RECIPIENT,
   receiptId: new Uint8Array(32).fill(0xaa),
   nonce: 7n,
   simGasReported: 4_000_000n,
   gasVarianceFixedMist: 200_000n,
   slippageBufferMist: 50_000n,
-  quotedRelayerFeeMist: 100_000n,
+  quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 1n,
   quoteTimestampMs: 1_741_680_000_000,
@@ -171,7 +171,7 @@ function makeGenericPrepareBuildOutput(
   return {
     txBytes: new Uint8Array([0x01]),
     txBytesHash: 'fake-hash-' + profile,
-    relayerClaim: audit.relayerClaim,
+    executionCostClaim: audit.executionCostClaim,
     simGas: audit.simGasReported,
     gasVarianceFixedMist: audit.gasVarianceFixedMist,
     slippageBufferMist: audit.slippageBufferMist,
@@ -229,13 +229,13 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     const tx = buildNewUser1HopPtb();
     const parsed = parseFromTx(tx);
 
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(parsed.quotedRelayerFeeMist).toBe(AUDIT_FIELDS.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(AUDIT_FIELDS.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(AUDIT_FIELDS.expectedProtocolFeeMist);
     expect(parsed.slippageBufferMist).toBe(AUDIT_FIELDS.slippageBufferMist);
     expect(parsed.expectedConfigVersion).toBe(AUDIT_FIELDS.expectedConfigVersion);
-    expect(parsed.relayerRecipient).toBe(AUDIT_FIELDS.relayerRecipient);
+    expect(parsed.settlementPayoutRecipient).toBe(AUDIT_FIELDS.settlementPayoutRecipient);
     expect(parsed.policyHash).toEqual(AUDIT_FIELDS.policyHash);
     expect(parsed.extractedSettlementSwapPath?.tokenType).toBe(PAYMENT_TYPE);
     expect(parsed.extractedSettlementSwapPath?.settlementSwapDirection).toBe('baseForQuote');
@@ -258,14 +258,14 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     });
 
     // The store entry is coordination-only. Settle facts
-    // (relayerClaim, fee components, profile, policyHash, etc.) live in
+    // (executionCostClaim, fee components, profile, policyHash, etc.) live in
     // the PTB and are read by sponsor via parseSettleArgs(txBytes); the
     // round-trip lock for those facts lives in `extractSettleArgs.test.ts`
     // via ARG_INDEX_MAP. This test only verifies the build→store
     // projection contract (txBytesHash + coordination fields).
     expect(entry.txBytesHash).toBe(buildResult.txBytesHash);
     expect(entry.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(entry).not.toHaveProperty('relayerClaim');
+    expect(entry).not.toHaveProperty('executionCostClaim');
     expect(entry).not.toHaveProperty('profile');
   });
 
@@ -275,7 +275,7 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     const tx = buildWithVault1HopPtb();
     const parsed = parseFromTx(tx);
 
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
     expect(parsed.extractedSettlementSwapPath?.settlementSwapDirection).toBe('baseForQuote');
     // The with_vault function name embeds the vault path; parseSettleArgs
@@ -288,9 +288,9 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     const tx = buildCreditOnlyPtb();
     const parsed = parseFromTx(tx);
 
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(parsed.quotedRelayerFeeMist).toBe(AUDIT_FIELDS.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(AUDIT_FIELDS.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(AUDIT_FIELDS.expectedProtocolFeeMist);
     expect(parsed.slippageBufferMist).toBe(0n);
     // credit-only path has no extracted settlement swap path.
@@ -317,7 +317,7 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     // entry carries only coordination fields.
     expect(entry.txBytesHash).toBe(buildResult.txBytesHash);
     expect(entry.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(entry).not.toHaveProperty('relayerClaim');
+    expect(entry).not.toHaveProperty('executionCostClaim');
     expect(entry).not.toHaveProperty('profile');
     expect(entry).not.toHaveProperty('slippageBufferMist');
   });
@@ -328,12 +328,12 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     const tx = build1HopQfbNewUserPtb();
     const parsed = parseFromTx(tx);
 
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(parsed.quotedRelayerFeeMist).toBe(AUDIT_FIELDS.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(AUDIT_FIELDS.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(AUDIT_FIELDS.expectedProtocolFeeMist);
     expect(parsed.expectedConfigVersion).toBe(AUDIT_FIELDS.expectedConfigVersion);
-    expect(parsed.relayerRecipient).toBe(AUDIT_FIELDS.relayerRecipient);
+    expect(parsed.settlementPayoutRecipient).toBe(AUDIT_FIELDS.settlementPayoutRecipient);
     expect(parsed.policyHash).toEqual(AUDIT_FIELDS.policyHash);
     expect(parsed.extractedSettlementSwapPath?.tokenType).toBe(PAYMENT_TYPE);
     expect(parsed.extractedSettlementSwapPath?.settlementSwapDirection).toBe('quoteForBase');
@@ -344,12 +344,12 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     const tx = build1HopQfbWithVaultPtb();
     const parsed = parseFromTx(tx);
 
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(parsed.quotedRelayerFeeMist).toBe(AUDIT_FIELDS.quotedRelayerFeeMist);
+    expect(parsed.quotedHostFeeMist).toBe(AUDIT_FIELDS.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(AUDIT_FIELDS.expectedProtocolFeeMist);
     expect(parsed.expectedConfigVersion).toBe(AUDIT_FIELDS.expectedConfigVersion);
-    expect(parsed.relayerRecipient).toBe(AUDIT_FIELDS.relayerRecipient);
+    expect(parsed.settlementPayoutRecipient).toBe(AUDIT_FIELDS.settlementPayoutRecipient);
     expect(parsed.policyHash).toEqual(AUDIT_FIELDS.policyHash);
     expect(parsed.extractedSettlementSwapPath?.tokenType).toBe(PAYMENT_TYPE);
     expect(parsed.extractedSettlementSwapPath?.settlementSwapDirection).toBe('quoteForBase');
@@ -379,7 +379,7 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
 
     // Canonical settle fields still round-trip correctly.
     const parsed = parseFromTx(tx);
-    expect(parsed.relayerClaim).toBe(AUDIT_FIELDS.relayerClaim);
+    expect(parsed.executionCostClaim).toBe(AUDIT_FIELDS.executionCostClaim);
     expect(parsed.nonce).toBe(AUDIT_FIELDS.nonce);
 
     // Tail credit is outside the 13-field settle block — verified via test-only BCS decoder.
@@ -405,12 +405,12 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
       swapAmount: 1_000_000n,
       minSuiOut: 0n,
       ...AUDIT_FIELDS,
-      relayerClaim: 9_999_999n, // overridden
+      executionCostClaim: 9_999_999n, // overridden
       nonce: 42n, // overridden
     });
 
     const parsed = parseFromTx(tx);
-    expect(parsed.relayerClaim).toBe(9_999_999n);
+    expect(parsed.executionCostClaim).toBe(9_999_999n);
     expect(parsed.nonce).toBe(42n);
   });
 });

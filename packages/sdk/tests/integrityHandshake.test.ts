@@ -60,7 +60,7 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
   return {
     network: 'testnet',
     packageId: CANONICAL_PKG,
-    relayerRecipient: '0x' + 'e'.repeat(64),
+    settlementPayoutRecipient: '0x' + 'e'.repeat(64),
     supportedSettlementSwapPaths: [
       {
         hops: [
@@ -81,7 +81,7 @@ function makeConfig(overrides: Partial<RelayerConfig> = {}): RelayerConfig {
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
-    quotedRelayerFeeMist: '100000',
+    quotedHostFeeMist: '100000',
     protocolFlatFeeMist: '20000',
     integrityPolicyVersion: 1,
     ...overrides,
@@ -100,9 +100,9 @@ const MOCK_PREPARE_RESPONSE: PrepareResponse = {
     simGas: '5000000',
     gasVarianceFixedMist: '200000',
     slippageBufferMist: '50000',
-    quotedRelayerFee: '100000',
+    quotedHostFee: '100000',
     protocolFee: '20000',
-    relayerClaim: '5250000',
+    executionCostClaim: '5250000',
     grossGas: '7000000',
   },
   profile: 'new_user',

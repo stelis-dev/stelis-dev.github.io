@@ -3,7 +3,7 @@
  *
  * Section order (by operator priority):
  * §1: Sponsor Operations — refill controls and thresholds
- * §2: Fee Config — relayer + on-chain fee parameters
+ * §2: Fee Config — host + on-chain fee parameters
  * §3: Studio Settings — JWT/API key config status (studio-only)
  * §4: Supported Settlement Swap Paths — payment token settlement
  * §5: On-chain IDs — contract reference (rarely changes)
@@ -153,18 +153,18 @@ export function ConfigPage() {
                     letterSpacing: '0.05em',
                   }}
                 >
-                  Relayer Settings
+                  Host Fee Settings
                 </td>
               </tr>
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Fee charged by the relayer per sponsored transaction. Added to user's payment token cost (env: RELAYER_FEE_MIST)"
+                  title="Fee charged by the Host per sponsored transaction. Added to user's payment token cost (env: HOST_FEE_MIST)"
                 >
-                  Relayer Fee
+                  Host Fee
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.quotedRelayerFeeMist ?? '0'} />
+                  <SuiAmount mist={data.quotedHostFeeMist ?? '0'} />
                 </td>
               </tr>
               <tr>
@@ -185,12 +185,12 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="On-chain maximum relayer fee. Transactions exceeding this cap are rejected by the contract"
+                  title="On-chain maximum host fee. Transactions exceeding this cap are rejected by the contract"
                 >
-                  Relayer Fee Cap
+                  Host Fee Cap
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.feeConfig.maxRelayerFeeMist} />
+                  <SuiAmount mist={data.feeConfig.maxHostFeeMist} />
                 </td>
               </tr>
               <tr>

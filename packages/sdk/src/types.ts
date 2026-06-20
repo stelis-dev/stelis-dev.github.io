@@ -87,12 +87,12 @@ export interface PrepareResponse {
     gasVarianceFixedMist: string;
     /** Slippage buffer: 0 for credit-only settle (MIST) */
     slippageBufferMist: string;
-    /** Relayer-quoted fee per TX (MIST) */
-    quotedRelayerFee: string;
+    /** Host-quoted fee per TX (MIST) */
+    quotedHostFee: string;
     /** Protocol flat fee (MIST) */
     protocolFee: string;
     /** Gas-recovery claim in settlement arguments: simGas + gasVarianceFixedMist + slippageBufferMist (MIST). */
-    relayerClaim: string;
+    executionCostClaim: string;
     /** grossGas = computation + storage before rebate (MIST) */
     grossGas: string;
   };
@@ -125,7 +125,7 @@ export interface SponsorResponse {
   /** Transaction effects (raw) */
   effects: unknown;
   /** Transaction-derived gas-recovery claim in MIST. */
-  relayerClaim: string;
+  executionCostClaim: string;
   /** Echoed orderId if provided during /prepare. */
   orderId?: string;
 }
@@ -155,12 +155,12 @@ export interface RelayerConfig {
    * Not used for construction; SDK reads contract IDs from @stelis/contracts.
    */
   packageId: string;
-  /** Settlement payout recipient address for relayerClaim plus quotedRelayerFeeMist. */
-  relayerRecipient: string;
+  /** Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist. */
+  settlementPayoutRecipient: string;
   /** One active settlement swap path per paymentTokenType. */
   supportedSettlementSwapPaths: SingleHopSettlementSwapPath[];
-  /** Relayer-quoted fee per TX in MIST (from RELAYER_FEE_MIST env). */
-  quotedRelayerFeeMist: string;
+  /** Host-quoted fee per TX in MIST (from HOST_FEE_MIST env). */
+  quotedHostFeeMist: string;
   /** Protocol flat fee in MIST (from on-chain Config). */
   protocolFlatFeeMist: string;
   /** S-16: Integrity policy version for client-side PTB verification handshake. Integer >= 1. */
@@ -236,7 +236,7 @@ export interface PrepareSponsoredOptions {
    * Called after gas cost is determined from /prepare response, before signing.
    * Use to show the user the total cost.
    *
-   * @param amount - Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee)
+   * @param amount - Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee)
    * @param amountHuman - Total cost in SUI, human-readable (e.g. '0.005370000')
    * @param symbol - Always 'SUI' (native unit)
    */
@@ -259,7 +259,7 @@ export interface ExecuteSponsoredResult {
   cost: PrepareResponse['cost'];
   /** Vault object ID if user has one, null if new user */
   vaultId: string | null;
-  /** Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee) */
+  /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */
   totalCostSui: string;
@@ -289,7 +289,7 @@ export interface PrepareSponsoredResult {
   profile: SettleProfile;
   /** Vault object ID if user has one (null = new user, vault will be created on-chain) */
   vaultId: string | null;
-  /** Total cost in MIST (relayerClaim + quotedRelayerFee + protocolFee) */
+  /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */
   totalCostSui: string;

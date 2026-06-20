@@ -8,8 +8,8 @@ import type { SettleArgs, ValidationResult } from './types.js';
 
 export interface SettleTransactionFields {
   settleFunction: string;
-  relayerClaimMist: bigint;
-  quotedRelayerFeeMist: bigint;
+  executionCostClaimMist: bigint;
+  quotedHostFeeMist: bigint;
   expectedProtocolFeeMist: bigint;
   policyHash: Uint8Array;
   orderIdHash: Uint8Array;
@@ -18,8 +18,8 @@ export interface SettleTransactionFields {
 }
 
 export interface ExpectedSettleTransactionFields {
-  relayerClaimMist: bigint;
-  quotedRelayerFeeMist: bigint;
+  executionCostClaimMist: bigint;
+  quotedHostFeeMist: bigint;
   expectedProtocolFeeMist: bigint;
   policyHash: Uint8Array;
   orderIdHash: Uint8Array;
@@ -35,8 +35,8 @@ export class SettleTransactionFieldsError extends Error {
 function projectSettleFields(settleFunction: string, args: SettleArgs): SettleTransactionFields {
   return {
     settleFunction,
-    relayerClaimMist: args.relayerClaim,
-    quotedRelayerFeeMist: args.quotedRelayerFeeMist,
+    executionCostClaimMist: args.executionCostClaim,
+    quotedHostFeeMist: args.quotedHostFeeMist,
     expectedProtocolFeeMist: args.expectedProtocolFeeMist,
     policyHash: args.policyHash,
     orderIdHash: args.orderIdHash,
@@ -61,16 +61,16 @@ export function validateSettleTransactionFields(
   actual: SettleTransactionFields,
   expected: ExpectedSettleTransactionFields,
 ): ValidationResult {
-  if (actual.relayerClaimMist !== expected.relayerClaimMist) {
+  if (actual.executionCostClaimMist !== expected.executionCostClaimMist) {
     return fail(
-      'SETTLE_RELAYER_CLAIM_MISMATCH',
-      `relayerClaimMist ${actual.relayerClaimMist} != expected ${expected.relayerClaimMist}`,
+      'SETTLE_EXECUTION_COST_CLAIM_MISMATCH',
+      `executionCostClaimMist ${actual.executionCostClaimMist} != expected ${expected.executionCostClaimMist}`,
     );
   }
-  if (actual.quotedRelayerFeeMist !== expected.quotedRelayerFeeMist) {
+  if (actual.quotedHostFeeMist !== expected.quotedHostFeeMist) {
     return fail(
-      'SETTLE_RELAYER_FEE_MISMATCH',
-      `quotedRelayerFeeMist ${actual.quotedRelayerFeeMist} != expected ${expected.quotedRelayerFeeMist}`,
+      'SETTLE_HOST_FEE_MISMATCH',
+      `quotedHostFeeMist ${actual.quotedHostFeeMist} != expected ${expected.quotedHostFeeMist}`,
     );
   }
   if (actual.expectedProtocolFeeMist !== expected.expectedProtocolFeeMist) {

@@ -61,7 +61,7 @@ const MOCK_CONFIG = {
   relayerAddress: '0x' + 'ff'.repeat(32),
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
-  maxRelayerFeeMist: 100_000n,
+  maxHostFeeMist: 100_000n,
   protocolFlatFeeMist: 50_000n,
   configVersion: 1n,
   maxSpreadBps: 500n,
@@ -91,7 +91,7 @@ async function buildValidTx(): Promise<{
 
   const policyHashHex = computePolicyHash({
     maxClaimMist: MOCK_CONFIG.maxClaimMist,
-    maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+    maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
     protocolFeeMist: MOCK_CONFIG.protocolFlatFeeMist,
     quoteTtlMs: PREPARE_TTL_MS,
     gasVarianceFixedMist: GAS_VARIANCE_FIXED_MIST,
@@ -114,7 +114,7 @@ async function buildValidTx(): Promise<{
       tx.pure(bcs.u64().serialize(5_000_000n)),
       tx.pure(bcs.u64().serialize(GAS_VARIANCE_FIXED_MIST)),
       tx.pure(bcs.u64().serialize(0n)),
-      tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxRelayerFeeMist)),
+      tx.pure(bcs.u64().serialize(MOCK_CONFIG.maxHostFeeMist)),
       tx.pure(bcs.u64().serialize(MOCK_CONFIG.protocolFlatFeeMist)),
       tx.pure(bcs.u64().serialize(MOCK_CONFIG.configVersion)),
       tx.pure(bcs.u64().serialize(BigInt(Date.now()))),
@@ -161,7 +161,7 @@ function makeMockSui() {
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: '100000',
+          max_host_fee_mist: '100000',
           protocol_flat_fee_mist: '50000',
           max_claim_mist: '50000000',
           min_settle_mist: '1000000',
@@ -210,14 +210,14 @@ async function buildHarness(): Promise<E2EHarness> {
     rateLimiter: {} as RelayerContext['rateLimiter'],
     abuseBlocker: new MemoryAbuseBlocker() as unknown as RelayerContext['abuseBlocker'],
     prepareStore,
-    relayerRecipientAddress: MOCK_CONFIG.relayerAddress,
+    settlementPayoutRecipientAddress: MOCK_CONFIG.relayerAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
       packageId: MOCK_CONFIG.packageId,
       configId: MOCK_CONFIG.configId,
       maxClaimMist: MOCK_CONFIG.maxClaimMist,
       minSettleMist: MOCK_CONFIG.minSettleMist,
-      maxRelayerFeeMist: MOCK_CONFIG.maxRelayerFeeMist,
+      maxHostFeeMist: MOCK_CONFIG.maxHostFeeMist,
       protocolFlatFeeMist: MOCK_CONFIG.protocolFlatFeeMist,
       configVersion: MOCK_CONFIG.configVersion,
       maxSpreadBps: MOCK_CONFIG.maxSpreadBps,

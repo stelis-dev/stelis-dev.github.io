@@ -302,7 +302,7 @@ export function runLedgerConformanceTests(
 
     it('rejects actualGasMist > MAX_PROMOTION_LEDGER_VALUE_MIST on consume (defensive ledger-boundary lock; mirrors the reserve-side cap)', async () => {
       // Promotion sponsor-time `consume(receiptId, actualGasMist)` is
-      // normally fed `computeRelayerCosts(...).simGas` (clamped to ≥ 0
+      // normally fed `computeExecutionCostClaim(...).simGas` (clamped to ≥ 0
       // and dominated by Sui-runtime gas ceilings far below the bound).
       // This conformance case exercises the defensive guard so any
       // out-of-band caller that hands the ledger an absurd `actualGasMist`

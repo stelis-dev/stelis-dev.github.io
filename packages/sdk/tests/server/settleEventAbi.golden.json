@@ -19,8 +19,8 @@
     { "index": 5,  "name": "sim_gas_reported",        "moveType": "u64" },
     { "index": 6,  "name": "gas_variance_fixed_mist", "moveType": "u64" },
     { "index": 7,  "name": "slippage_buffer_mist",    "moveType": "u64" },
-    { "index": 8,  "name": "relayer_claim",           "moveType": "u64" },
-    { "index": 9,  "name": "quoted_relayer_fee_mist", "moveType": "u64" },
+    { "index": 8,  "name": "execution_cost_claim_mist",           "moveType": "u64" },
+    { "index": 9,  "name": "quoted_host_fee_mist", "moveType": "u64" },
     { "index": 10, "name": "protocol_fee",            "moveType": "u64" },
     { "index": 11, "name": "protocol_treasury",       "moveType": "address" },
     { "index": 12, "name": "payout",                  "moveType": "u64" },
@@ -28,7 +28,7 @@
     { "index": 14, "name": "surplus_credited",        "moveType": "u64" },
     { "index": 15, "name": "config_version",          "moveType": "u64" },
     { "index": 16, "name": "user",                    "moveType": "address" },
-    { "index": 17, "name": "relayer_recipient",       "moveType": "address" },
+    { "index": 17, "name": "settlement_payout_recipient",       "moveType": "address" },
     { "index": 18, "name": "order_id_hash",           "moveType": "vector<u8>" }
   ]
 }

@@ -10,7 +10,7 @@ import type { PolicyFields } from '../src/policyHash.js';
 
 const BASE: PolicyFields = {
   maxClaimMist: 50_000_000n,
-  maxRelayerFeeMist: 50_000n,
+  maxHostFeeMist: 50_000n,
   protocolFeeMist: 0n,
   quoteTtlMs: 60_000,
   gasVarianceFixedMist: 100_000n,
@@ -33,9 +33,9 @@ describe('computePolicyHash', () => {
     expect(h1).not.toBe(h2);
   });
 
-  it('changes when any field changes — maxRelayerFeeMist', () => {
+  it('changes when any field changes — maxHostFeeMist', () => {
     expect(computePolicyHash(BASE)).not.toBe(
-      computePolicyHash({ ...BASE, maxRelayerFeeMist: 100_000n }),
+      computePolicyHash({ ...BASE, maxHostFeeMist: 100_000n }),
     );
   });
 
@@ -62,7 +62,7 @@ describe('computePolicyHash', () => {
   it('key insertion order does not affect hash (explicit sort guarantee)', () => {
     const fieldsA: PolicyFields = {
       maxClaimMist: 50_000_000n,
-      maxRelayerFeeMist: 50_000n,
+      maxHostFeeMist: 50_000n,
       protocolFeeMist: 0n,
       quoteTtlMs: 60_000,
       gasVarianceFixedMist: 100_000n,
@@ -73,7 +73,7 @@ describe('computePolicyHash', () => {
       gasVarianceFixedMist: 100_000n,
       quoteTtlMs: 60_000,
       protocolFeeMist: 0n,
-      maxRelayerFeeMist: 50_000n,
+      maxHostFeeMist: 50_000n,
       maxClaimMist: 50_000_000n,
     };
     expect(computePolicyHash(fieldsA)).toBe(computePolicyHash(fieldsB));
@@ -84,7 +84,7 @@ describe('computePolicyHash', () => {
   it('all-zero fields produce a stable hash', () => {
     const zero: PolicyFields = {
       maxClaimMist: 0n,
-      maxRelayerFeeMist: 0n,
+      maxHostFeeMist: 0n,
       protocolFeeMist: 0n,
       quoteTtlMs: 0,
       gasVarianceFixedMist: 0n,

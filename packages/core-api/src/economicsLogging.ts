@@ -4,7 +4,7 @@ export interface GasUsedLike {
   storageRebate: string;
 }
 
-export interface RelayerEconomicsSnapshot {
+export interface SettlementEconomicsSnapshot {
   grossGas: bigint;
   // Storage rebate verbatim from the Sui effects, NOT clamped against
   // `grossGas`. A delete-objects-only TX can produce
@@ -15,7 +15,7 @@ export interface RelayerEconomicsSnapshot {
   // `packages/core-relay/src/gasEstimate.ts:119-122`).
   storageRebate: bigint;
   netGas: bigint;
-  relayerClaim: bigint;
+  executionCostClaim: bigint;
   feeCharged: bigint;
   protocolFee: bigint;
   payout: bigint;
@@ -31,12 +31,12 @@ function parseGasUsedMist(value: string, field: keyof GasUsedLike): bigint {
   return BigInt(value);
 }
 
-export function buildRelayerEconomicsSnapshot(input: {
+export function buildSettlementEconomicsSnapshot(input: {
   gasUsed: GasUsedLike;
-  relayerClaim: bigint;
+  executionCostClaim: bigint;
   feeCharged: bigint;
   protocolFee: bigint;
-}): RelayerEconomicsSnapshot {
+}): SettlementEconomicsSnapshot {
   const grossGas =
     parseGasUsedMist(input.gasUsed.computationCost, 'computationCost') +
     parseGasUsedMist(input.gasUsed.storageCost, 'storageCost');
@@ -44,24 +44,24 @@ export function buildRelayerEconomicsSnapshot(input: {
   // Canonical 0-clamp: net gas can be negative when storageRebate
   // exceeds computation + storage (e.g. a TX that deletes objects).
   // The relayer never pays the user, so clamp to 0 — same semantics as
-  // `computeRelayerCosts(...).simGas` in
+  // `computeExecutionCostClaim(...).simGas` in
   // `packages/core-relay/src/gasEstimate.ts:119-122` and the recorder
   // formula in `docs/economics-formal.md#recorder-economics`. Without this clamp
-  // `relayerNetMist = relayerClaim + feeCharged - netGas` would
+  // `hostNetMist = executionCostClaim + feeCharged - netGas` would
   // inflate by the rebate-overshoot amount on rebate-heavy TXs. The
   // raw `storageRebate` is preserved verbatim on the snapshot so
   // observability outputs (recorder row, structured event log) can
   // record the on-chain truth without losing it to the clamp.
   const rawNet = grossGas - storageRebate;
   const netGas = rawNet > 0n ? rawNet : 0n;
-  const payout = input.relayerClaim + input.feeCharged;
+  const payout = input.executionCostClaim + input.feeCharged;
   const payoutNet = payout - netGas;
 
   return {
     grossGas,
     storageRebate,
     netGas,
-    relayerClaim: input.relayerClaim,
+    executionCostClaim: input.executionCostClaim,
     feeCharged: input.feeCharged,
     protocolFee: input.protocolFee,
     payout,

@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildRelayerEconomicsSnapshot } from '../src/economicsLogging.js';
+import { buildSettlementEconomicsSnapshot } from '../src/economicsLogging.js';
 
 describe('economics logging snapshot', () => {
   it('computes gross_gas, net_gas, payout, and payout_net consistently', () => {
-    const snapshot = buildRelayerEconomicsSnapshot({
+    const snapshot = buildSettlementEconomicsSnapshot({
       gasUsed: {
         computationCost: '800000',
         storageCost: '200000',
         storageRebate: '300000',
       },
-      relayerClaim: 1_200_000n,
+      executionCostClaim: 1_200_000n,
       feeCharged: 100_000n,
       protocolFee: 20_000n,
     });
@@ -25,18 +25,18 @@ describe('economics logging snapshot', () => {
   it('preserves raw storageRebate verbatim even when storageRebate >= grossGas (netGas clamps to 0; rebate does NOT)', () => {
     // Regression: a delete-objects-only TX produces rebate-heavy
     // effects. The canonical 0-clamp at `gasEstimate.ts:119-122`
-    // applies to `netGas` (the relayer-paid amount); the raw
+    // applies to `netGas` (the host-paid amount); the raw
     // `storageRebate` is on-chain truth and must be preserved
     // verbatim on the snapshot so observability outputs (recorder
     // row, structured event log) keep the actual rebate even when
     // `netGas` reads 0.
-    const snapshot = buildRelayerEconomicsSnapshot({
+    const snapshot = buildSettlementEconomicsSnapshot({
       gasUsed: {
         computationCost: '500000',
         storageCost: '300000',
         storageRebate: '2000000',
       },
-      relayerClaim: 1_200_000n,
+      executionCostClaim: 1_200_000n,
       feeCharged: 100_000n,
       protocolFee: 20_000n,
     });
@@ -53,13 +53,13 @@ describe('economics logging snapshot', () => {
 
   it('rejects non-canonical gas amount strings', () => {
     expect(() =>
-      buildRelayerEconomicsSnapshot({
+      buildSettlementEconomicsSnapshot({
         gasUsed: {
           computationCost: '1000',
           storageCost: '0x10',
           storageRebate: '0',
         },
-        relayerClaim: 1_200_000n,
+        executionCostClaim: 1_200_000n,
         feeCharged: 100_000n,
         protocolFee: 20_000n,
       }),

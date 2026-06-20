@@ -23,7 +23,7 @@ import {
 } from './integrity.js';
 import { assertNoGasPreset } from '@stelis/core-relay/browser';
 import {
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   DEFAULT_GAS_MARGIN_BPS,
   encodePrepareAuthorizationMessage,
   extractSettleTransactionFieldsFromTxBytes,
@@ -151,9 +151,9 @@ export class StelisSDK {
   get deepType() {
     return this._deepType;
   }
-  /** Settlement payout recipient address for relayerClaim plus quoted relayer fee. */
-  get relayerRecipient() {
-    return this._relayerConfig.relayerRecipient;
+  /** Settlement payout recipient address for executionCostClaim plus quoted host fee. */
+  get settlementPayoutRecipient() {
+    return this._relayerConfig.settlementPayoutRecipient;
   }
   /** Supported settlement swap paths (from /relay/config) */
   get supportedSettlementSwapPaths(): SingleHopSettlementSwapPath[] {
@@ -322,7 +322,7 @@ export class StelisSDK {
    * **Non-authoritative UX hint.** This estimate does not include the settle TX
    * that `/prepare` appends. Server `/prepare` dry-runs the full TX and is authoritative.
    *
-   * Uses `computeRelayerCosts` from `@stelis/core-relay` for consistency with
+   * Uses `computeExecutionCostClaim` from `@stelis/core-relay` for consistency with
    * the server-side calculation, plus on-chain fees from `/relay/config`.
    *
    * Profile logic (UX classification — not authoritative eligibility check):
@@ -352,22 +352,22 @@ export class StelisSDK {
     const gasMarginBps = opts.gasMarginBps ?? DEFAULT_GAS_MARGIN_BPS;
 
     // 1. Compute gas costs using the browser-safe core-relay subset.
-    const costs = computeRelayerCosts({
+    const costs = computeExecutionCostClaim({
       computationCost: intentGasBudget.toString(),
       storageCost: '0',
       storageRebate: '0',
     });
 
     // 2. Add fees from /relay/config (strict required fields)
-    const quotedRelayerFee = parseDecimalBigInt(
-      this._relayerConfig.quotedRelayerFeeMist,
-      'quotedRelayerFeeMist',
+    const quotedHostFee = parseDecimalBigInt(
+      this._relayerConfig.quotedHostFeeMist,
+      'quotedHostFeeMist',
     );
     const protocolFee = parseDecimalBigInt(
       this._relayerConfig.protocolFlatFeeMist,
       'protocolFlatFeeMist',
     );
-    const totalCostMist = costs.relayerClaim + quotedRelayerFee + protocolFee;
+    const totalCostMist = costs.executionCostClaim + quotedHostFee + protocolFee;
     const suiAmountHuman = formatSmallestUnitDecimal(totalCostMist, SUI_DECIMALS, 4);
 
     if (!opts.paymentToken) {
@@ -490,7 +490,7 @@ export class StelisSDK {
       userTx,
       {
         network: this._relayerConfig.network,
-        relayerAddress: this._relayerConfig.relayerRecipient,
+        relayerAddress: this._relayerConfig.settlementPayoutRecipient,
         configId: this._configId,
         vaultRegistryId: this._vaultRegistryId,
         packageId: this._packageId,
@@ -579,10 +579,10 @@ export class StelisSDK {
       ? await sha256Bytes(new TextEncoder().encode(opts.orderId))
       : new Uint8Array(0);
     const settleFieldValidation = validateSettleTransactionFields(settleFields, {
-      relayerClaimMist: parseDecimalBigInt(prepareRes.cost.relayerClaim, 'relayerClaim'),
-      quotedRelayerFeeMist: parseDecimalBigInt(
-        prepareRes.cost.quotedRelayerFee,
-        'quotedRelayerFee',
+      executionCostClaimMist: parseDecimalBigInt(prepareRes.cost.executionCostClaim, 'executionCostClaim'),
+      quotedHostFeeMist: parseDecimalBigInt(
+        prepareRes.cost.quotedHostFee,
+        'quotedHostFee',
       ),
       expectedProtocolFeeMist: parseDecimalBigInt(prepareRes.cost.protocolFee, 'protocolFee'),
       policyHash: hexToBytes(prepareRes.policyHash, 'policyHash'),
@@ -594,8 +594,8 @@ export class StelisSDK {
 
     // Notify gas estimate callback — totalCost in MIST + 'SUI'
     const totalCost =
-      parseDecimalBigInt(prepareRes.cost.relayerClaim, 'relayerClaim') +
-      parseDecimalBigInt(prepareRes.cost.quotedRelayerFee, 'quotedRelayerFee') +
+      parseDecimalBigInt(prepareRes.cost.executionCostClaim, 'executionCostClaim') +
+      parseDecimalBigInt(prepareRes.cost.quotedHostFee, 'quotedHostFee') +
       parseDecimalBigInt(prepareRes.cost.protocolFee, 'protocolFee');
     const totalCostSui = formatSmallestUnitDecimal(totalCost, SUI_DECIMALS, 9);
     opts.onGasEstimate?.(totalCost, totalCostSui, 'SUI');
@@ -772,7 +772,7 @@ export class StelisSDK {
     const gasUsed = sim.Transaction.effects?.gasUsed;
     if (!gasUsed)
       throw new Error('[StelisSDK] Simulation returned no gasUsed — cannot determine gas budget');
-    const { grossGas } = computeRelayerCosts(gasUsed);
+    const { grossGas } = computeExecutionCostClaim(gasUsed);
     const gasBudget = (grossGas * BigInt(10000 + DEFAULT_GAS_MARGIN_BPS)) / 10000n;
 
     // ── Step 3a: SUI sufficient — execute directly ────────────────────────

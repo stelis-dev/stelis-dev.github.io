@@ -59,7 +59,7 @@ describe('getConfig singleflight', () => {
               resolve({
                 object: {
                   json: {
-                    max_relayer_fee_mist: '100000',
+                    max_host_fee_mist: '100000',
                     protocol_flat_fee_mist: '50000',
                     max_claim_mist: '50000000',
                     min_settle_mist: '1000',
@@ -85,7 +85,7 @@ describe('getConfig singleflight', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0, // disable cache so every call goes through singleflight
     });
 
@@ -111,7 +111,7 @@ describe('getConfig singleflight', () => {
       return Promise.resolve({
         object: {
           json: {
-            max_relayer_fee_mist: '100000',
+            max_host_fee_mist: '100000',
             protocol_flat_fee_mist: '50000',
             max_claim_mist: '50000000',
             min_settle_mist: '1000',
@@ -134,7 +134,7 @@ describe('getConfig singleflight', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0,
     });
 
@@ -163,7 +163,7 @@ describe('suiClient injection', () => {
     const injectedGetObject = vi.fn().mockResolvedValue({
       object: {
         json: {
-          max_relayer_fee_mist: '200000',
+          max_host_fee_mist: '200000',
           protocol_flat_fee_mist: '10000',
           max_claim_mist: '50000000',
           min_settle_mist: '1000',
@@ -191,7 +191,7 @@ describe('suiClient injection', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
       configCacheTtlMs: 0,
     });
 
@@ -217,7 +217,7 @@ describe('suiClient injection', () => {
       packageId: '0x' + '01'.repeat(32),
       configId: '0x' + '02'.repeat(32),
       vaultRegistryId: '0x' + '03'.repeat(32),
-      relayerRecipientAddress: RECIPIENT_ADDR,
+      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
     });
 
     // ctx.sui should exist and be a real SuiGrpcClient (not undefined)

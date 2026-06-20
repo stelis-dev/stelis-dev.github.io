@@ -27,9 +27,9 @@ function makeKnownEntry(
     promotionId: overrides.promotionId ?? null,
     userId: overrides.userId ?? null,
     recoveredGasMist: overrides.recoveredGasMist ?? '12000',
-    relayerPaidGasMist: overrides.relayerPaidGasMist ?? '8000',
-    relayerNetMist: overrides.relayerNetMist ?? '5000',
-    relayerFeeMist: overrides.relayerFeeMist ?? '1000',
+    hostPaidGasMist: overrides.hostPaidGasMist ?? '8000',
+    hostNetMist: overrides.hostNetMist ?? '5000',
+    hostFeeMist: overrides.hostFeeMist ?? '1000',
     protocolFeeMist: overrides.protocolFeeMist ?? '50',
     grossGasMist: overrides.grossGasMist ?? '9500',
     storageRebateMist: overrides.storageRebateMist ?? '1500',
@@ -59,9 +59,9 @@ function makeUnknownEntry(
     promotionId: overrides.promotionId ?? null,
     userId: overrides.userId ?? null,
     recoveredGasMist: null,
-    relayerPaidGasMist: null,
-    relayerNetMist: null,
-    relayerFeeMist: null,
+    hostPaidGasMist: null,
+    hostNetMist: null,
+    hostFeeMist: null,
     protocolFeeMist: null,
     grossGasMist: null,
     storageRebateMist: null,
@@ -84,27 +84,27 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       makeKnownEntry({
         receiptId: 'r1',
         mode: 'generic',
-        relayerNetMist: '5000',
+        hostNetMist: '5000',
       }),
     );
 
     const generic = await store.getSummary('generic');
     expect(generic.sponsoredExecutions).toBe('1');
     expect(generic.lossCount).toBe('0');
-    expect(generic.cumulativeRelayerNetMist).toBe('5000');
+    expect(generic.cumulativeHostNetMist).toBe('5000');
     expect(generic.cumulativeLossMist).toBe('0');
 
     const all = await store.getSummary('all');
     expect(all.sponsoredExecutions).toBe('1');
     expect(all.lossCount).toBe('0');
-    expect(all.cumulativeRelayerNetMist).toBe('5000');
+    expect(all.cumulativeHostNetMist).toBe('5000');
     expect(all.cumulativeLossMist).toBe('0');
 
     const promotion = await store.getSummary('promotion');
     expect(promotion.sponsoredExecutions).toBe('0');
   });
 
-  it('counts a loss only when known economics has relayerNet < 0', async () => {
+  it('counts a loss only when known economics has hostNet < 0', async () => {
     const store = new MemorySponsoredLogsStore();
     // Loss entry: recovered=0, paid=7000 → net -7000
     await store.append(
@@ -112,10 +112,10 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
         receiptId: 'r-loss',
         mode: 'generic',
         outcome: 'onchain_revert',
-        relayerNetMist: '-7000',
+        hostNetMist: '-7000',
         recoveredGasMist: '0',
-        relayerPaidGasMist: '7000',
-        relayerFeeMist: '0',
+        hostPaidGasMist: '7000',
+        hostFeeMist: '0',
         protocolFeeMist: '0',
       }),
     );
@@ -124,10 +124,10 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       makeKnownEntry({
         receiptId: 'r-zero',
         mode: 'promotion',
-        relayerNetMist: '0',
+        hostNetMist: '0',
         recoveredGasMist: '5000',
-        relayerPaidGasMist: '5000',
-        relayerFeeMist: '0',
+        hostPaidGasMist: '5000',
+        hostFeeMist: '0',
         protocolFeeMist: '0',
       }),
     );
@@ -135,7 +135,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     const all = await store.getSummary('all');
     expect(all.sponsoredExecutions).toBe('2');
     expect(all.lossCount).toBe('1');
-    expect(all.cumulativeRelayerNetMist).toBe('-7000');
+    expect(all.cumulativeHostNetMist).toBe('-7000');
     expect(all.cumulativeLossMist).toBe('-7000');
 
     const generic = await store.getSummary('generic');
@@ -157,7 +157,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     const all = await store.getSummary('all');
     expect(all.sponsoredExecutions).toBe('1');
     expect(all.lossCount).toBe('0');
-    expect(all.cumulativeRelayerNetMist).toBe('0');
+    expect(all.cumulativeHostNetMist).toBe('0');
     expect(all.cumulativeLossMist).toBe('0');
   });
 
@@ -183,7 +183,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     const early = makeKnownEntry({
       receiptId: 'r-early',
       mode: 'generic',
-      relayerNetMist: '1',
+      hostNetMist: '1',
     });
     await store.append(early);
     // Roll the recent list well past the cap so the early row is
@@ -193,7 +193,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
         makeKnownEntry({
           receiptId: `r-fill-${i}`,
           mode: 'generic',
-          relayerNetMist: '1',
+          hostNetMist: '1',
         }),
       );
     }
@@ -203,7 +203,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
 
     const all = await store.getSummary('all');
     expect(all.sponsoredExecutions).toBe('11'); // 1 + 10, no double-count
-    expect(all.cumulativeRelayerNetMist).toBe('11');
+    expect(all.cumulativeHostNetMist).toBe('11');
   });
 
   it('different outcomes for same receiptId are NOT deduped', async () => {
@@ -214,13 +214,13 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
         receiptId: 'r-mix',
         mode: 'generic',
         outcome: 'onchain_revert',
-        relayerNetMist: '-100',
+        hostNetMist: '-100',
       }),
     );
     const all = await store.getSummary('all');
     expect(all.sponsoredExecutions).toBe('2');
     expect(all.lossCount).toBe('1');
-    expect(all.cumulativeRelayerNetMist).toBe('4900');
+    expect(all.cumulativeHostNetMist).toBe('4900');
   });
 
   it('all-mode aggregate equals sum of per-mode aggregates', async () => {
@@ -230,10 +230,10 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       makeKnownEntry({
         receiptId: 'r-p',
         mode: 'promotion',
-        relayerNetMist: '0',
+        hostNetMist: '0',
         recoveredGasMist: '3000',
-        relayerPaidGasMist: '3000',
-        relayerFeeMist: '0',
+        hostPaidGasMist: '3000',
+        hostFeeMist: '0',
         protocolFeeMist: '0',
       }),
     );
@@ -245,8 +245,8 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(BigInt(all.sponsoredExecutions)).toBe(
       BigInt(generic.sponsoredExecutions) + BigInt(promotion.sponsoredExecutions),
     );
-    expect(BigInt(all.cumulativeRelayerNetMist)).toBe(
-      BigInt(generic.cumulativeRelayerNetMist) + BigInt(promotion.cumulativeRelayerNetMist),
+    expect(BigInt(all.cumulativeHostNetMist)).toBe(
+      BigInt(generic.cumulativeHostNetMist) + BigInt(promotion.cumulativeHostNetMist),
     );
     expect(BigInt(all.cumulativeLossMist)).toBe(
       BigInt(generic.cumulativeLossMist) + BigInt(promotion.cumulativeLossMist),
@@ -262,10 +262,10 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       makeKnownEntry({
         receiptId: 'r-big-pos',
         mode: 'generic',
-        relayerNetMist: big,
+        hostNetMist: big,
         recoveredGasMist: big,
-        relayerPaidGasMist: '0',
-        relayerFeeMist: '0',
+        hostPaidGasMist: '0',
+        hostFeeMist: '0',
         protocolFeeMist: '0',
       }),
     );
@@ -274,16 +274,16 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
         receiptId: 'r-big-neg',
         mode: 'generic',
         outcome: 'onchain_revert',
-        relayerNetMist: `-${big}`,
+        hostNetMist: `-${big}`,
         recoveredGasMist: '0',
-        relayerPaidGasMist: big,
-        relayerFeeMist: '0',
+        hostPaidGasMist: big,
+        hostFeeMist: '0',
         protocolFeeMist: '0',
       }),
     );
 
     const generic = await store.getSummary('generic');
-    expect(generic.cumulativeRelayerNetMist).toBe('0');
+    expect(generic.cumulativeHostNetMist).toBe('0');
     expect(generic.cumulativeLossMist).toBe(`-${big}`);
     expect(generic.lossCount).toBe('1');
   });
@@ -292,7 +292,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     const store = new MemorySponsoredLogsStore();
     const bad: SponsoredExecutionLogEntry = {
       ...makeKnownEntry({ receiptId: 'r-bad', mode: 'generic' }),
-      relayerNetMist: null,
+      hostNetMist: null,
     };
     await expect(store.append(bad)).rejects.toThrow(/known economics entry missing/);
   });
@@ -301,7 +301,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     const store = new MemorySponsoredLogsStore();
     const bad: SponsoredExecutionLogEntry = {
       ...makeKnownEntry({ receiptId: 'r-bad-str', mode: 'generic' }),
-      relayerNetMist: 'not-a-number',
+      hostNetMist: 'not-a-number',
     };
     await expect(store.append(bad)).rejects.toThrow();
   });
@@ -316,29 +316,29 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       ...makeKnownEntry({
         receiptId: 'r-retry',
         mode: 'generic',
-        relayerNetMist: '4000',
+        hostNetMist: '4000',
       }),
-      relayerNetMist: 'not-a-number',
+      hostNetMist: 'not-a-number',
     };
     await expect(store.append(malformed)).rejects.toThrow();
 
     // Aggregate must be untouched by the rejected append.
     const beforeRetry = await store.getSummary('all');
     expect(beforeRetry.sponsoredExecutions).toBe('0');
-    expect(beforeRetry.cumulativeRelayerNetMist).toBe('0');
+    expect(beforeRetry.cumulativeHostNetMist).toBe('0');
 
     // Same (mode, receiptId, outcome) tuple, well-formed payload —
     // must record into aggregate AND recent.
     const wellFormed = makeKnownEntry({
       receiptId: 'r-retry',
       mode: 'generic',
-      relayerNetMist: '4000',
+      hostNetMist: '4000',
     });
     await store.append(wellFormed);
 
     const after = await store.getSummary('all');
     expect(after.sponsoredExecutions).toBe('1');
-    expect(after.cumulativeRelayerNetMist).toBe('4000');
+    expect(after.cumulativeHostNetMist).toBe('4000');
 
     const recent = await store.getRecent('all', 10);
     expect(recent).toHaveLength(1);

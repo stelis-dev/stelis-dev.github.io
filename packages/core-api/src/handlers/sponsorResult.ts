@@ -41,15 +41,15 @@ export type SponsorResultRoute = 'generic' | 'promotion';
  * host recorder does persist the row, monetary fields and aggregates
  * are derived strictly from this block.
  *
- * Numeric fields are exact MIST decimal strings (`relayerNetMist` is
+ * Numeric fields are exact MIST decimal strings (`hostNetMist` is
  * signed and may be negative).
  *
  * `protocolFeeMist` is auxiliary context — recorder must NOT subtract
- * it from `relayerNetMist`; protocol fee flows from user surplus to
+ * it from `hostNetMist`; protocol fee flows from user surplus to
  * protocol treasury, not to the relayer.
  *
  * `economicsStatus = "unknown"` means the sponsor result path could not
- * prove both the recovered amount and the relayer-paid amount. When
+ * prove both the recovered amount and the host-paid amount. When
  * the host recorder writes such a row, every monetary field on it is
  * `null` and the row is excluded from net/loss aggregates. Whether
  * such a row is written at all is the recorder's outcome-filter
@@ -67,9 +67,9 @@ export type SponsorResultEconomics =
   | {
       readonly economicsStatus: 'known';
       readonly recoveredGasMist: string;
-      readonly relayerPaidGasMist: string;
-      readonly relayerFeeMist: string;
-      readonly relayerNetMist: string;
+      readonly hostPaidGasMist: string;
+      readonly hostFeeMist: string;
+      readonly hostNetMist: string;
       readonly grossGasMist: string | null;
       readonly storageRebateMist: string | null;
       readonly protocolFeeMist: string | null;

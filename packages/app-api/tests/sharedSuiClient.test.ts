@@ -43,7 +43,7 @@ vi.mock('@stelis/core-api', async () => {
         rateLimiter: config.rateLimiter,
         abuseBlocker: config.abuseBlocker,
         prepareStore: config.prepareStore,
-        relayerRecipientAddress: config.relayerRecipientAddress,
+        settlementPayoutRecipientAddress: config.settlementPayoutRecipientAddress,
         allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
         vaultsTableId: null,
         getConfig: vi.fn(),
@@ -99,9 +99,9 @@ vi.mock('@stelis/core-api/prepareConfig', () => ({
     deepbookPackageId: '0xDEEPBOOK',
     deepType: '0xDEEP',
     allowedSettlementSwapPaths: [],
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
   }),
-  parseRelayerFeeEnv: vi.fn().mockReturnValue(0n),
+  parseHostFeeEnv: vi.fn().mockReturnValue(0n),
 }));
 
 // ── Test setup ──────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ beforeEach(async () => {
   process.env.REDIS_URL = 'redis://mock';
   process.env.NETWORK = 'testnet';
   process.env.SPONSOR_SECRET_KEY = 'suiprivkey1mock';
-  process.env.RELAYER_RECIPIENT_ADDRESS = '0x' + 'ff'.repeat(32);
+  process.env.SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS = '0x' + 'ff'.repeat(32);
   process.env.SPONSOR_REFILL_ACCOUNT_SECRET_KEY = 'suiprivkey1sponsorrefillaccount';
   // Sponsor pool construction requires an HMAC secret (≥32 chars).
   // Boot validation normally enforces this, but the unit test exercises

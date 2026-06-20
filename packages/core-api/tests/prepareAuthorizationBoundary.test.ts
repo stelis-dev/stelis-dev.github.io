@@ -73,7 +73,7 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
       reserveNonce: vi.fn(),
       releaseReservation: vi.fn(),
     },
-    relayerRecipientAddress: '0xRELAYER',
+    settlementPayoutRecipientAddress: '0xRELAYER',
     getConfig: vi.fn(),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue(null),
@@ -106,7 +106,7 @@ function makeExtraCfg(): PrepareHandlerConfig {
   ];
   return {
     deepbookPackageId: '0xDEEPBOOK',
-    quotedRelayerFeeMist: 0n,
+    quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
         tokenType: '0xDEEP::deep::DEEP',

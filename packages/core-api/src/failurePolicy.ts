@@ -561,8 +561,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: IP_ONLY,
     bodyFields: NO_BODY_EXTRAS,
   },
-  L2_RELAYER_FEE_CAP: {
-    code: 'L2_RELAYER_FEE_CAP',
+  L2_HOST_FEE_CAP: {
+    code: 'L2_HOST_FEE_CAP',
     classification: 'normal',
     httpStatus: 422,
     abuseImpact: IP_ONLY,

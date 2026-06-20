@@ -89,7 +89,7 @@ export async function runBootValidation(): Promise<BootResult> {
     'SPONSOR_SECRET_KEY',
     'NETWORK',
     'REDIS_URL',
-    'RELAYER_RECIPIENT_ADDRESS',
+    'SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS',
     'SPONSOR_LEASE_HMAC_SECRET',
   ] as const;
 
@@ -207,8 +207,8 @@ export async function runBootValidation(): Promise<BootResult> {
   const sponsorKeys = parseSponsorKeys(requireEnv('SPONSOR_SECRET_KEY'));
   const sponsorAddrs = sponsorKeys.map((kp) => kp.toSuiAddress());
   const recipientAddr = canonicalizeAddress(
-    requireEnv('RELAYER_RECIPIENT_ADDRESS'),
-    'RELAYER_RECIPIENT_ADDRESS',
+    requireEnv('SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS'),
+    'SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS',
   );
   const sponsorRefillAccountAddress = parseSponsorKey(
     sponsorRefillAccountSecretKey,
@@ -216,7 +216,7 @@ export async function runBootValidation(): Promise<BootResult> {
   ).toSuiAddress();
   validateAddressConstraints({
     sponsorAddresses: sponsorAddrs,
-    relayerRecipientAddress: recipientAddr,
+    settlementPayoutRecipientAddress: recipientAddr,
     sponsorRefillAccountAddress: sponsorRefillAccountAddress,
   });
 

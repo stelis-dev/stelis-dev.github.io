@@ -19,7 +19,7 @@ import {
   CreditQueryInconsistentStateError,
   DEFAULT_GAS_MARGIN_BPS,
   DEFAULT_SLIPPAGE_BPS,
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   queryUserCredit,
   sha256Bytes,
   validateNonlossSponsor,
@@ -45,7 +45,7 @@ import type { GenericPrepareBuildOutput } from '../../prepare/build.js';
 import { buildPolicyFields } from '../../preparePolicy.js';
 import { computePolicyHash } from '../../policyHash.js';
 import { checkBlockedRequest, recordSponsorFailureForAbuse } from '../../abuseBlocking.js';
-import { buildRelayerEconomicsSnapshot } from '../../economicsLogging.js';
+import { buildSettlementEconomicsSnapshot } from '../../economicsLogging.js';
 import {
   SERIALIZED_UNKNOWN_ECONOMICS,
   deriveSponsoredExecutionEconomics,
@@ -56,8 +56,8 @@ import { logStructuredEvent } from '../../structuredEventLog.js';
 import {
   PREPARE_ENTRY_CORRUPT,
   PREPARE_STAGE,
-  RELAYER_ECONOMICS_EXECUTION,
-  RELAYER_ECONOMICS_LOG_FAILED,
+  SETTLEMENT_ECONOMICS_EXECUTION,
+  SETTLEMENT_ECONOMICS_LOG_FAILED,
   SPONSOR_EXEC_GAS_USED_MISSING,
   SPONSOR_SENDER_STORE_DIVERGENCE,
   SPONSOR_RESULT_CALLBACK_FAILED,
@@ -118,7 +118,7 @@ export interface GenericPreparePolicyConfig {
   readonly supportedSettlementSwapPaths: readonly SingleHopSettlementSwapPath[];
   readonly settlementSwapPathDescriptors: StaticSettlementSwapPathDescriptorMap;
   readonly allowedSettlementSwapPaths: readonly AllowedSettlementSwapPath[];
-  readonly quotedRelayerFeeMist: bigint;
+  readonly quotedHostFeeMist: bigint;
 }
 
 export interface GenericSponsorErrorFactory {
@@ -230,9 +230,9 @@ export interface GenericPreparePolicyResult {
     readonly simGas: string;
     readonly gasVarianceFixedMist: string;
     readonly slippageBufferMist: string;
-    readonly quotedRelayerFee: string;
+    readonly quotedHostFee: string;
     readonly protocolFee: string;
-    readonly relayerClaim: string;
+    readonly executionCostClaim: string;
     readonly grossGas: string;
   };
   readonly profile: SettleProfile;
@@ -325,7 +325,7 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
         const prepareState = requirePrepareState(state);
         const buildResult = requireValue(prepareState.buildResult, 'prepare buildResult');
         logPrepareStage('response_ready', {
-          relayer_claim_mist: buildResult.relayerClaim.toString(),
+          execution_cost_claim_mist: buildResult.executionCostClaim.toString(),
         });
       },
       DecodeSponsorSubmission: async (ctx) =>
@@ -449,9 +449,9 @@ export function projectGenericPrepareResult(
       simGas: buildResult.simGas.toString(),
       gasVarianceFixedMist: buildResult.gasVarianceFixedMist.toString(),
       slippageBufferMist: buildResult.slippageBufferMist.toString(),
-      quotedRelayerFee: prepare.config.quotedRelayerFeeMist.toString(),
+      quotedHostFee: prepare.config.quotedHostFeeMist.toString(),
       protocolFee: config.protocolFlatFeeMist.toString(),
-      relayerClaim: buildResult.relayerClaim.toString(),
+      executionCostClaim: buildResult.executionCostClaim.toString(),
       grossGas: buildResult.grossGas.toString(),
     },
     profile: buildResult.profile,
@@ -467,7 +467,7 @@ export function projectGenericSponsorResult(
 ): {
   readonly digest: string;
   readonly effects: unknown;
-  readonly relayerClaim: string;
+  readonly executionCostClaim: string;
   readonly orderId?: string;
 } {
   requireSponsor(options);
@@ -478,7 +478,7 @@ export function projectGenericSponsorResult(
   return {
     digest: result.digest,
     effects: result.effects,
-    relayerClaim: revalidation.settleArgs.relayerClaim.toString(),
+    executionCostClaim: revalidation.settleArgs.executionCostClaim.toString(),
     orderId: prepared.orderId ?? undefined,
   };
 }
@@ -691,10 +691,10 @@ async function runGenericGasBoundBuild(
       configId: config.configId,
       vaultRegistryId: options.relayerContext.vaultRegistryId,
       deepbookPackageId: prepare.config.deepbookPackageId,
-      relayerRecipientAddress: options.relayerContext.relayerRecipientAddress,
+      settlementPayoutRecipientAddress: options.relayerContext.settlementPayoutRecipientAddress,
       maxClaimMist: config.maxClaimMist,
       minSettleMist: config.minSettleMist,
-      quotedRelayerFeeMist: prepare.config.quotedRelayerFeeMist,
+      quotedHostFeeMist: prepare.config.quotedHostFeeMist,
       protocolFlatFeeMist: config.protocolFlatFeeMist,
       configVersion: config.configVersion,
     },
@@ -719,7 +719,7 @@ async function runGenericGasBoundBuild(
   state.buildResult = buildResult;
 
   logPrepareStage('two_pass_build_done', {
-    relayer_claim_mist: buildResult.relayerClaim.toString(),
+    execution_cost_claim_mist: buildResult.executionCostClaim.toString(),
     sim_gas_mist: buildResult.simGas.toString(),
     gas_variance_fixed_mist: buildResult.gasVarianceFixedMist.toString(),
     slippage_buffer_mist: buildResult.slippageBufferMist.toString(),
@@ -1165,16 +1165,16 @@ async function classifyGenericSponsorResult(
   }
 
   try {
-    const economics = buildRelayerEconomicsSnapshot({
+    const economics = buildSettlementEconomicsSnapshot({
       gasUsed: result.gasUsed,
-      relayerClaim: revalidation.settleArgs.relayerClaim,
-      feeCharged: revalidation.settleArgs.quotedRelayerFeeMist,
+      executionCostClaim: revalidation.settleArgs.executionCostClaim,
+      feeCharged: revalidation.settleArgs.quotedHostFeeMist,
       protocolFee: revalidation.freshConfig.protocolFlatFeeMist,
     });
-    logStructuredEvent(RELAYER_ECONOMICS_EXECUTION, {
+    logStructuredEvent(SETTLEMENT_ECONOMICS_EXECUTION, {
       digest: result.digest,
       sponsorAddress: prepared.sponsorAddress,
-      relayer_claim: economics.relayerClaim.toString(),
+      execution_cost_claim_mist: economics.executionCostClaim.toString(),
       fee_charged: economics.feeCharged.toString(),
       protocol_fee: economics.protocolFee.toString(),
       gross_gas: economics.grossGas.toString(),
@@ -1185,9 +1185,9 @@ async function classifyGenericSponsorResult(
     });
     state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
       deriveSponsoredExecutionEconomics({
-        recoveredGasMist: economics.relayerClaim,
-        relayerPaidGasMist: economics.netGas,
-        relayerFeeMist: economics.feeCharged,
+        recoveredGasMist: economics.executionCostClaim,
+        hostPaidGasMist: economics.netGas,
+        hostFeeMist: economics.feeCharged,
         grossGasMist: economics.grossGas,
         storageRebateMist: economics.storageRebate,
         protocolFeeMist: economics.protocolFee,
@@ -1195,7 +1195,7 @@ async function classifyGenericSponsorResult(
     );
   } catch (err) {
     logStructuredEvent(
-      RELAYER_ECONOMICS_LOG_FAILED,
+      SETTLEMENT_ECONOMICS_LOG_FAILED,
       {
         digest: result.digest,
         error: err instanceof Error ? err.message : String(err),
@@ -1298,8 +1298,8 @@ function deriveOnchainRevertEconomics(
     return serializeSponsoredExecutionEconomics(
       deriveSponsoredExecutionEconomics({
         recoveredGasMist: 0n,
-        relayerPaidGasMist: netGas,
-        relayerFeeMist: 0n,
+        hostPaidGasMist: netGas,
+        hostFeeMist: 0n,
         grossGasMist: grossGas,
         storageRebateMist: storageRebate,
         protocolFeeMist: null,
@@ -1327,7 +1327,7 @@ function setValidationFailure(state: GenericSponsorRuntimeState, message: string
 function buildPrepareEnv(ctx: RelayerContext): RelayerEnv {
   return {
     network: ctx.network,
-    relayerAddress: ctx.relayerRecipientAddress,
+    relayerAddress: ctx.settlementPayoutRecipientAddress,
     configId: ctx.configId,
     vaultRegistryId: ctx.vaultRegistryId,
     packageId: ctx.packageId,
@@ -1445,14 +1445,14 @@ function validateGenericSponsorNonloss(
   gasBudget: Mist,
   onchainConfig: OnchainConfig,
 ): void {
-  const simGas: Mist = mist(computeRelayerCosts(gasUsed).simGas);
-  const relayerClaim: Mist = mist(settleArgs.relayerClaim);
+  const simGas: Mist = mist(computeExecutionCostClaim(gasUsed).simGas);
+  const executionCostClaim: Mist = mist(settleArgs.executionCostClaim);
   const l3 = validateNonlossSponsor(
     {
       simGas,
       gasVarianceFixedMist: settleArgs.gasVarianceFixedMist,
       slippageBufferMist: settleArgs.slippageBufferMist,
-      relayerClaim,
+      executionCostClaim,
       gasBudget,
     },
     onchainConfig,

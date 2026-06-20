@@ -97,7 +97,7 @@ export function logout(): Promise<void> {
 // ── Pool / Dashboard ───────────────────────────────────────────────────────
 
 interface FeeConfig {
-  maxRelayerFeeMist: string;
+  maxHostFeeMist: string;
   protocolFlatFeeMist: string;
   maxClaimMist: string;
   minSettleMist: string;
@@ -110,7 +110,7 @@ export interface PoolAdminStatus {
   // concrete payload.
   sponsorOperations: SponsorOperationsStatus;
   primaryAddress: string | null;
-  relayerRecipientAddress: string;
+  settlementPayoutRecipientAddress: string;
   network: string;
   sponsorBalanceWarnMist?: string;
   sponsorBalanceRefillTargetMist?: string;
@@ -133,7 +133,7 @@ export interface PoolAdminStatus {
     >
   >;
   // Config-page fields (also returned by /api/pool)
-  quotedRelayerFeeMist?: string;
+  quotedHostFeeMist?: string;
   onChainIds?: {
     packageId: string | null;
     configId: string | null;
@@ -296,9 +296,9 @@ export interface SponsoredExecutionAggregate {
   sponsoredExecutions: string;
   /** Unsigned decimal count. */
   lossCount: string;
-  /** Sum of known relayer net rows. */
-  cumulativeRelayerNetMist: string;
-  /** Sum of negative known relayer net rows. */
+  /** Sum of known host net rows. */
+  cumulativeHostNetMist: string;
+  /** Sum of negative known host net rows. */
   cumulativeLossMist: string;
 }
 
@@ -320,15 +320,15 @@ export interface SponsoredExecutionLogEntry {
   promotionId: string | null;
   userId: string | null;
   recoveredGasMist: string | null;
-  relayerPaidGasMist: string | null;
-  relayerNetMist: string | null;
+  hostPaidGasMist: string | null;
+  hostNetMist: string | null;
   /**
    * Unsigned decimal MIST string for known rows (`"0"` when fee is
    * explicitly zero). `null` when `economicsStatus === "unknown"`.
    */
-  relayerFeeMist: string | null;
+  hostFeeMist: string | null;
   /**
-   * Protocol fee is protocol revenue and does not enter relayer net.
+   * Protocol fee is protocol revenue and does not enter host net.
    * Kept on the row for audit/debugging; not shown in the default log table.
    */
   protocolFeeMist: string | null;

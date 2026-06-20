@@ -212,9 +212,9 @@ export function validateUserCommands(commands: PtbCommand[], env: RelayerEnv): V
  * Checks (in order):
  *   1. Config object ID == env.configId
  *   2. VaultRegistry object ID == env.vaultRegistryId
- *   3. relayer_recipient == env.relayerAddress
- *   4. relayer_claim <= config.maxClaimMist
- *   5. quoted_relayer_fee_mist <= config.maxRelayerFeeMist (L2_RELAYER_FEE_CAP)
+ *   3. settlement_payout_recipient == env.relayerAddress
+ *   4. execution_cost_claim_mist <= config.maxClaimMist
+ *   5. quoted_host_fee_mist <= config.maxHostFeeMist (L2_HOST_FEE_CAP)
  *   6. expected_protocol_fee_mist == config.protocolFlatFeeMist (L2_PROTOCOL_FEE_MISMATCH)
  *   7. expected_config_version == config.configVersion (L2_CONFIG_VERSION_MISMATCH)
  *   8. Settlement swap path validation (if extractedSettlementSwapPath is present):
@@ -254,27 +254,27 @@ export function validateSettleArgs(
     }
   }
 
-  // (3) Relayer recipient check
-  if (args.relayerRecipient !== env.relayerAddress) {
+  // (3) Settlement payout recipient check
+  if (args.settlementPayoutRecipient !== env.relayerAddress) {
     return fail(
       'L2_WRONG_RECIPIENT',
-      `Relayer recipient mismatch: got ${args.relayerRecipient}, expected ${env.relayerAddress}`,
+      `Settlement payout recipient mismatch: got ${args.settlementPayoutRecipient}, expected ${env.relayerAddress}`,
     );
   }
 
   // (4) Claim upper bound check
-  if (args.relayerClaim > config.maxClaimMist) {
+  if (args.executionCostClaim > config.maxClaimMist) {
     return fail(
       'L2_EXCESSIVE_CLAIM',
-      `relayer_claim ${args.relayerClaim} exceeds max_claim_mist ${config.maxClaimMist}`,
+      `execution_cost_claim_mist ${args.executionCostClaim} exceeds max_claim_mist ${config.maxClaimMist}`,
     );
   }
 
-  // (5) L2: Quoted relayer fee cap (mirrors on-chain ERelayerFeeCapExceeded)
-  if (args.quotedRelayerFeeMist > config.maxRelayerFeeMist) {
+  // (5) L2: Quoted host fee cap (mirrors on-chain EHostFeeCapExceeded)
+  if (args.quotedHostFeeMist > config.maxHostFeeMist) {
     return fail(
-      'L2_RELAYER_FEE_CAP',
-      `quoted_relayer_fee_mist ${args.quotedRelayerFeeMist} exceeds max_relayer_fee_mist ${config.maxRelayerFeeMist}`,
+      'L2_HOST_FEE_CAP',
+      `quoted_host_fee_mist ${args.quotedHostFeeMist} exceeds max_host_fee_mist ${config.maxHostFeeMist}`,
     );
   }
 

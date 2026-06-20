@@ -85,7 +85,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: 1_000_000_000n,
@@ -111,7 +111,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: 1_000_000_000n,
@@ -131,7 +131,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -152,7 +152,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -176,7 +176,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -207,7 +207,7 @@ describe('createSponsorResultStateUpdater — slot probe', () => {
       sui: makeStubSui({ getBalance: async () => '0' }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -224,7 +224,7 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
     stub = makeStubState();
   });
 
-  it('probes sponsor refill account when the sponsor refill account is the relayer recipient and outcome is success', async () => {
+  it('probes sponsor refill account when the sponsor refill account is the settlement payout recipient and outcome is success', async () => {
     const callback = createSponsorResultStateUpdater({
       sui: makeStubSui({
         getBalance: async (owner) =>
@@ -232,7 +232,7 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS, // sponsor refill account == recipient
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS, // sponsor refill account == recipient
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: 1_000_000_000n,
@@ -255,7 +255,7 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
       sui: makeStubSui({ getBalance }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -269,12 +269,12 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
     );
   });
 
-  it('does NOT probe sponsor refill account when it is not the relayer recipient', async () => {
+  it('does NOT probe sponsor refill account when it is not the settlement payout recipient', async () => {
     const callback = createSponsorResultStateUpdater({
       sui: makeStubSui({ getBalance: async () => '5000000000' }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xdifferent', // sponsor refill account != recipient
+      settlementPayoutRecipientAddress: '0xdifferent', // sponsor refill account != recipient
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -295,7 +295,7 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -315,7 +315,7 @@ describe('createSponsorResultStateUpdater — sponsor-refill-account refresh', (
       sui: makeStubSui({ getBalance: async () => '10000000000' }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -377,7 +377,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       }),
       state: stub.state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -414,7 +414,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -446,7 +446,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       sui: makeStubSui({ getBalance: async () => '0' }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -486,7 +486,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS, // sponsor refill account == recipient triggers the sponsor-refill-account path
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS, // sponsor refill account == recipient triggers the sponsor-refill-account path
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -541,7 +541,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: '0xrecipient',
+      settlementPayoutRecipientAddress: '0xrecipient',
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,
@@ -603,7 +603,7 @@ describe('createSponsorResultStateUpdater — SPONSOR_OPERATIONS_STATE_WRITE_FAI
       }),
       state,
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      relayerRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      settlementPayoutRecipientAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       slotBalanceTimeoutMs: 500,
       sponsorRefillAccountBalanceTimeoutMs: 500,
       refillTargetMist: null,

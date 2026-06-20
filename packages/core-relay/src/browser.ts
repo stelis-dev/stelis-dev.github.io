@@ -66,15 +66,15 @@ export type {
 
 // ── Gas estimation ──────────────────────────────────────────────────────────
 export {
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   GAS_VARIANCE_FIXED_MIST,
   CONVERGENCE_TOLERANCE_BPS,
   DEFAULT_GAS_MARGIN_BPS,
 } from './gasEstimate.js';
 export type {
   SimulationGasUsed,
-  RelayerCostEstimate,
-  ComputeRelayerCostsOpts,
+  ExecutionCostClaimEstimate,
+  ComputeExecutionCostClaimOpts,
 } from './gasEstimate.js';
 
 // ── Credit query ────────────────────────────────────────────────────────────

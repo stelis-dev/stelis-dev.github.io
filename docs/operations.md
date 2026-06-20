@@ -157,7 +157,7 @@ Optional refill variables:
 - `SPONSOR_OPERATIONS_REFILL_ENABLED`
 - `SPONSOR_BALANCE_REFILL_TARGET_MIST`
 
-`RELAYER_FEE_MIST` is optional. When unset, the quoted relayer fee defaults to zero.
+`HOST_FEE_MIST` is optional. When unset, the quoted host fee defaults to zero.
 `PREPARE_INFLIGHT_CAPACITY` is optional. When set, it must be a positive integer and becomes the shared prepare in-flight capacity for one Redis write authority.
 
 Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
@@ -236,7 +236,7 @@ Current structured event families:
 | Family | Representative events |
 | --- | --- |
 | Prepare pipeline | `PREPARE_STAGE`, `PREPARE_BUILD_STAGE`, `PREPARE_INFLIGHT_REJECTED`, `PREPARE_ENTRY_CORRUPT`, `PREPARE_SLOT_EXHAUSTED` |
-| Sponsor runtime | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `RELAYER_ECONOMICS_EXECUTION` |
+| Sponsor runtime | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `SETTLEMENT_ECONOMICS_EXECUTION` |
 | Sponsor pool and sponsor operations | `SPONSOR_POOL_LEASE_CHECKOUT`, `SPONSOR_POOL_LEASE_COMMITTED`, `SPONSOR_POOL_LEASE_RELEASE_FAILED`, `SPONSOR_RESULT_CALLBACK_FAILED`, `SPONSOR_OPERATIONS_STATE_WRITE_FAILED` |
 | Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
 | Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_LEDGER_CONSUME_FAILED`, `PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION` |

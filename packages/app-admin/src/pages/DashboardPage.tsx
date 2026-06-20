@@ -502,14 +502,14 @@ export function DashboardPage() {
           </thead>
           <tbody>
             <tr>
-              <td>Relayer Recipient</td>
+              <td>Settlement Payout Recipient</td>
               <td
                 style={{ fontFamily: 'monospace', fontSize: 13 }}
-                title={data.relayerRecipientAddress}
+                title={data.settlementPayoutRecipientAddress}
               >
-                {data.relayerRecipientAddress ? truncateAddress(data.relayerRecipientAddress) : '—'}{' '}
-                {data.relayerRecipientAddress && (
-                  <CopyButton value={data.relayerRecipientAddress} />
+                {data.settlementPayoutRecipientAddress ? truncateAddress(data.settlementPayoutRecipientAddress) : '—'}{' '}
+                {data.settlementPayoutRecipientAddress && (
+                  <CopyButton value={data.settlementPayoutRecipientAddress} />
                 )}
               </td>
               <td style={{ color: '#64748b', fontStyle: 'italic' }}>n/a</td>

@@ -154,7 +154,7 @@ export interface PromotionExecutionLedger {
    * returned to both budget and entitlement. If actualGasMist > reserved
    * (overrun), extra is deducted from remaining. `actualGasMist === 0n`
    * is permitted (delete-objects-only revert; failure-path callers feed
-   * the canonical 0-clamp via `computeRelayerCosts`); the full reserved
+   * the canonical 0-clamp via `computeExecutionCostClaim`); the full reserved
    * amount delta-releases as surplus.
    *
    * Used by both the success path (`actualGasMist` from successful

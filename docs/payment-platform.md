@@ -13,7 +13,7 @@ This document defines the product terms used by SDK, web app, and API package do
 | Studio | Promotion and policy-controlled flows layered on the same Host |
 | settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `paymentTokenType` for the token's Sui coin type. |
 | User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned and is not Host-owned balance. |
-| relayer role | The internal Host role for execution, sponsorship, and settlement fields such as `relayerRecipient`, `relayerClaim`, and `relayerFee` |
+| relayer role | The internal Host role for execution, sponsorship, and settlement fields such as `settlementPayoutRecipient`, `executionCostClaim`, and `hostFee` |
 
 ## Generic Settlement Flow
 
@@ -22,7 +22,7 @@ The generic flow uses:
 - `POST /relay/prepare`
 - `POST /relay/sponsor`
 
-It can include `orderId` tracking. Backends that track `receiptId` can verify the resulting on-chain `SettleEvent` with `verifySettleEventAgainstExpected` from `@stelis/sdk/server` by passing application-owned expected fields: `receiptId`, `user`, and `orderId` or `orderIdHash`. Amount-sensitive integrations also pass expected relayer and protocol fee values.
+It can include `orderId` tracking. Backends that track `receiptId` can verify the resulting on-chain `SettleEvent` with `verifySettleEventAgainstExpected` from `@stelis/sdk/server` by passing application-owned expected fields: `receiptId`, `user`, and `orderId` or `orderIdHash`. Amount-sensitive integrations also pass expected host and protocol fee values.
 
 A `SettleEvent` is settlement evidence. Application payment completion is decided by comparing the event with the application's expected fields.
 

@@ -23,8 +23,8 @@ export interface VerifiedSettleEvent {
   nonce: string;
   orderIdHash: string;
   user: string;
-  relayerClaim: string;
-  quotedRelayerFeeMist: string;
+  executionCostClaim: string;
+  quotedHostFeeMist: string;
   protocolFee: string;
   payout: string;
   totalIn: string;
@@ -63,7 +63,7 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
     throw new Error('[Stelis] expected must include exactly one of orderId or orderIdHash');
   }
 
-  for (const field of ['relayerClaimMist', 'quotedRelayerFeeMist', 'protocolFeeMist']) {
+  for (const field of ['executionCostClaimMist', 'quotedHostFeeMist', 'protocolFeeMist']) {
     const value = candidate[field];
     if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
       throw new Error(`[Stelis] expected.${field} must be a non-empty MIST string`);
@@ -84,8 +84,8 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
  *   - exactly one of orderId or orderIdHash
  *
  * Optional amount fields are compared when provided:
- *   - relayerClaimMist
- *   - quotedRelayerFeeMist
+ *   - executionCostClaimMist
+ *   - quotedHostFeeMist
  *   - protocolFeeMist
  *
  * @param client - SuiGrpcClient instance from `@mysten/sui/grpc`
@@ -137,8 +137,8 @@ export async function verifySettleEventAgainstExpected(
     nonce: String(decoded.nonce),
     orderIdHash: onChainOrderIdHash,
     user: decoded.user,
-    relayerClaim: String(decoded.relayer_claim),
-    quotedRelayerFeeMist: String(decoded.quoted_relayer_fee_mist),
+    executionCostClaim: String(decoded.execution_cost_claim_mist),
+    quotedHostFeeMist: String(decoded.quoted_host_fee_mist),
     protocolFee: String(decoded.protocol_fee),
     payout: String(decoded.payout),
     totalIn: String(decoded.total_in),
@@ -168,20 +168,20 @@ export async function verifySettleEventAgainstExpected(
   }
 
   if (
-    expected.relayerClaimMist !== undefined &&
-    expected.relayerClaimMist !== String(decoded.relayer_claim)
+    expected.executionCostClaimMist !== undefined &&
+    expected.executionCostClaimMist !== String(decoded.execution_cost_claim_mist)
   ) {
     mismatches.push(
-      `relayerClaimMist: expected ${expected.relayerClaimMist}, on-chain ${decoded.relayer_claim}`,
+      `executionCostClaimMist: expected ${expected.executionCostClaimMist}, on-chain ${decoded.execution_cost_claim_mist}`,
     );
   }
 
   if (
-    expected.quotedRelayerFeeMist !== undefined &&
-    expected.quotedRelayerFeeMist !== String(decoded.quoted_relayer_fee_mist)
+    expected.quotedHostFeeMist !== undefined &&
+    expected.quotedHostFeeMist !== String(decoded.quoted_host_fee_mist)
   ) {
     mismatches.push(
-      `quotedRelayerFeeMist: expected ${expected.quotedRelayerFeeMist}, on-chain ${decoded.quoted_relayer_fee_mist}`,
+      `quotedHostFeeMist: expected ${expected.quotedHostFeeMist}, on-chain ${decoded.quoted_host_fee_mist}`,
     );
   }
 

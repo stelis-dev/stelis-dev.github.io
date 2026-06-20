@@ -63,9 +63,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       return c.json({
         network: relay.network,
         packageId: relay.packageId,
-        relayerRecipient: relay.relayerRecipientAddress,
+        settlementPayoutRecipient: relay.settlementPayoutRecipientAddress,
         supportedSettlementSwapPaths: jsonSafePools,
-        quotedRelayerFeeMist: ctx.prepareConfig.quotedRelayerFeeMist.toString(),
+        quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         protocolFlatFeeMist: config.protocolFlatFeeMist.toString(),
         integrityPolicyVersion: INTEGRITY_POLICY_VERSION,
       });

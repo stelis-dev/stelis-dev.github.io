@@ -239,7 +239,7 @@ function classifyKnownPrepareFailure(
   if (subcode === 'CLAIM_WOULD_EXCEED_MAX') {
     return new PrepareValidationError(
       'CLAIM_WOULD_EXCEED_MAX',
-      `Computed relayer claim exceeds configured max: ${reason}`,
+      `Computed execution cost claim exceeds configured max: ${reason}`,
       meta,
     );
   }
@@ -345,16 +345,16 @@ export async function safeBuild(
 
 /**
  * Build diagnostic meta for INSUFFICIENT_SETTLE_INPUT and related errors.
- * @param isEstimate true = pass1 (relayerClaim not yet confirmed), false = pass2 (confirmed)
+ * @param isEstimate true = pass1 (executionCostClaim not yet confirmed), false = pass2 (confirmed)
  */
 export function buildSettleMeta(
   minSettleMist: bigint,
-  quotedRelayerFeeMist: bigint,
+  quotedHostFeeMist: bigint,
   protocolFlatFeeMist: bigint,
   claimEstimate: bigint,
   isEstimate: boolean,
 ): Record<string, string> {
-  const totalNeeded = claimEstimate + quotedRelayerFeeMist + protocolFlatFeeMist;
+  const totalNeeded = claimEstimate + quotedHostFeeMist + protocolFlatFeeMist;
   const required = minSettleMist > totalNeeded ? minSettleMist : totalNeeded;
   return {
     minSettleMist: minSettleMist.toString(),

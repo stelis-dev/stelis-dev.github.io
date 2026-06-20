@@ -61,7 +61,7 @@ export const SPONSORED_LOGS_RECENT_DEFAULT_CAP = 200;
 
 /**
  * Signed-decimal MIST string regex. Allows leading `-` for negatives;
- * `-0` is rejected. Adapters use this to validate `relayerNetMist`
+ * `-0` is rejected. Adapters use this to validate `hostNetMist`
  * before BigInt accumulation — store-side
  * defence against a malformed HTTP string entering aggregate math.
  */

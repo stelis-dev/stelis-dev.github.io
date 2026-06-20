@@ -441,7 +441,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       try {
         const cfg = await relay.getConfig();
         feeConfig = {
-          maxRelayerFeeMist: cfg.maxRelayerFeeMist.toString(),
+          maxHostFeeMist: cfg.maxHostFeeMist.toString(),
           protocolFlatFeeMist: cfg.protocolFlatFeeMist.toString(),
           maxClaimMist: cfg.maxClaimMist.toString(),
           minSettleMist: cfg.minSettleMist.toString(),
@@ -463,12 +463,12 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       return c.json({
         sponsorOperations,
         primaryAddress: relay.sponsorPool.primaryAddress,
-        relayerRecipientAddress: relay.relayerRecipientAddress,
+        settlementPayoutRecipientAddress: relay.settlementPayoutRecipientAddress,
         network: relay.network,
         sponsorBalanceWarnMist: warnMist.toString(),
         sponsorBalanceRefillTargetMist: refillTargetMist.toString(),
         refillEnabled: process.env.SPONSOR_OPERATIONS_REFILL_ENABLED === 'true',
-        quotedRelayerFeeMist: ctx.prepareConfig.quotedRelayerFeeMist.toString(),
+        quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         feeConfig,
         supportedSettlementSwapPaths,
         onChainIds: {

@@ -79,7 +79,7 @@ const DEEP_TYPE = `${PKG}::deep::DEEP`;
 const RELAYER_CONFIG: RelayerConfig = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: '0x' + 'b'.repeat(64),
+  settlementPayoutRecipient: '0x' + 'b'.repeat(64),
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -100,7 +100,7 @@ const RELAYER_CONFIG: RelayerConfig = {
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };

@@ -1,7 +1,7 @@
 /**
  * settleArgsCost — lightweight settle cost extractor for SDK cost cross-validation.
  *
- * Extracts relayerClaimMist, quotedRelayerFeeMist and expectedProtocolFeeMist
+ * Extracts executionCostClaimMist, quotedHostFeeMist and expectedProtocolFeeMist
  * from a built Transaction's settle MoveCall, without throwing.
  * Returns null on any failure.
  *
@@ -22,8 +22,8 @@ import { ARG_INDEX_MAP } from './parseSettleArgs.js';
 // ─────────────────────────────────────────────
 
 export interface SettleArgsCost {
-  relayerClaimMist: bigint;
-  quotedRelayerFeeMist: bigint;
+  executionCostClaimMist: bigint;
+  quotedHostFeeMist: bigint;
   expectedProtocolFeeMist: bigint;
 }
 
@@ -31,17 +31,17 @@ export interface SettleArgsCost {
 // Minimal arg index map (fee fields only)
 // ─────────────────────────────────────────────
 
-/** claim, quotedRelayerFee and expectedProtocolFee arg indices, derived from ARG_INDEX_MAP.
+/** claim, quotedHostFee and expectedProtocolFee arg indices, derived from ARG_INDEX_MAP.
  *  Keeps this extractor in sync with the full parser — no separate hardcoding. */
 const COST_ARG_INDICES: Record<
   string,
-  { claim: number; quotedRelayerFee: number; expectedProtocolFee: number }
+  { claim: number; quotedHostFee: number; expectedProtocolFee: number }
 > = Object.fromEntries(
   Object.entries(ARG_INDEX_MAP).map(([fn, m]) => [
     fn,
     {
       claim: m.claim,
-      quotedRelayerFee: m.quotedRelayerFee,
+      quotedHostFee: m.quotedHostFee,
       expectedProtocolFee: m.expectedProtocolFee,
     },
   ]),
@@ -121,18 +121,18 @@ export function extractCostFromTxData(
       const args = mc.arguments as unknown[] | undefined;
       if (!args) return null;
 
-      const relayerClaimMist = decodePureU64Safe(args[indices.claim], inputs);
-      const quotedRelayerFeeMist = decodePureU64Safe(args[indices.quotedRelayerFee], inputs);
+      const executionCostClaimMist = decodePureU64Safe(args[indices.claim], inputs);
+      const quotedHostFeeMist = decodePureU64Safe(args[indices.quotedHostFee], inputs);
       const expectedProtocolFeeMist = decodePureU64Safe(args[indices.expectedProtocolFee], inputs);
 
       if (
-        relayerClaimMist === null ||
-        quotedRelayerFeeMist === null ||
+        executionCostClaimMist === null ||
+        quotedHostFeeMist === null ||
         expectedProtocolFeeMist === null
       )
         return null;
 
-      return { relayerClaimMist, quotedRelayerFeeMist, expectedProtocolFeeMist };
+      return { executionCostClaimMist, quotedHostFeeMist, expectedProtocolFeeMist };
     }
 
     // No settle command found
@@ -143,7 +143,7 @@ export function extractCostFromTxData(
 }
 
 /**
- * Extract relayerClaimMist, quotedRelayerFeeMist and expectedProtocolFeeMist from txBytes.
+ * Extract executionCostClaimMist, quotedHostFeeMist and expectedProtocolFeeMist from txBytes.
  * Null-returning (best-effort): returns null on any parse/BCS failure.
  *
  * @param txBytesBase64 - base64 of the built transaction returned by /prepare

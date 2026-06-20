@@ -47,7 +47,7 @@ const endpoints: EndpointOverview[] = [
     detail:
       'The SDK calls this during connect() to fetch network metadata, settlement swap path support, and integrity-handshake fields.',
     highlights: [
-      'Returns packageId, relayerRecipient payout address, supportedSettlementSwapPaths, quoted fee fields, and integrityPolicyVersion',
+      'Returns packageId, settlementPayoutRecipient payout address, supportedSettlementSwapPaths, quoted fee fields, and integrityPolicyVersion',
       'Use this before constructing production client assumptions',
     ],
     docHref: `${API_DOC_URL}#get-relay-config`,
@@ -220,11 +220,11 @@ export function DocsPage() {
     A[computation + storage - rebate] --> B[simGas]
     C[GAS_VARIANCE_FIXED_MIST] --> D[gasVarianceFixedMist]
     E[measured slippage buffer] --> F[slippageBufferMist]
-    B --> G[relayerClaim]
+    B --> G[executionCostClaim]
     D --> G
     F --> G
     G --> H[relayer_payout]
-    I[quotedRelayerFeeMist] --> H
+    I[quotedHostFeeMist] --> H
     H --> J[total_deduction]
     K[protocol_fee] --> J
 `}

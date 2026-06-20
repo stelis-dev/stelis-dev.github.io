@@ -30,7 +30,7 @@ function validateSettleInput(params: {
   receiptId: Uint8Array;
   policyHash: Uint8Array;
   orderIdHash: Uint8Array;
-  relayerClaim: bigint;
+  executionCostClaim: bigint;
 }): void {
   const pidLen = params.receiptId.length;
   if (pidLen !== 0 && pidLen !== 32) {
@@ -44,8 +44,8 @@ function validateSettleInput(params: {
   if (oidLen !== 0 && oidLen !== 32) {
     throw new Error(`orderIdHash must be 0 or 32 bytes, got ${oidLen}`);
   }
-  if (params.relayerClaim < 0n) {
-    throw new Error(`relayerClaim must be non-negative, got ${params.relayerClaim}`);
+  if (params.executionCostClaim < 0n) {
+    throw new Error(`executionCostClaim must be non-negative, got ${params.executionCostClaim}`);
   }
 }
 
@@ -78,16 +78,16 @@ interface SwapAndSettleSharedParams {
   swapAmount: bigint;
   /** Minimum SUI output (0 = no slippage guard, on-chain u64) */
   minSuiOut: bigint;
-  relayerClaim: bigint;
-  relayerRecipient: string;
+  executionCostClaim: bigint;
+  settlementPayoutRecipient: string;
   receiptId: Uint8Array;
   /** S-14: monotonic nonce for on-chain replay prevention */
   nonce: bigint;
   simGasReported: bigint;
   gasVarianceFixedMist: bigint;
   slippageBufferMist: bigint;
-  /** Relayer-quoted fee (MIST) — exact value embedded in PTB. */
-  quotedRelayerFeeMist: bigint;
+  /** Host-quoted fee (MIST) — exact value embedded in PTB. */
+  quotedHostFeeMist: bigint;
   /** Expected on-chain protocol fee at quote time — tamper detection. */
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */
@@ -140,7 +140,7 @@ function buildSettlePureArgs(tx: Transaction, values: SettleFieldValues) {
 /**
  * Builds a single-MoveCall PTB that atomically:
  *   1. Swaps payment token → SUI via DeepBook
- *   2. Settles: validates vault, deducts relayer fees, deposits surplus
+ *   2. Settles: validates vault, deducts host fees, deposits surplus
  *
  * settlementSwapDirection determines which Move function suffix to call
  * (`_bfq` for `baseForQuote`, `_qfb` for `quoteForBase`).
@@ -200,16 +200,16 @@ export interface SettleWithCreditPtbParams {
   vaultId: string;
   /** Amount of credit (MIST) to withdraw from vault for settlement (on-chain u64) */
   useCreditAmount: bigint;
-  relayerClaim: bigint;
-  relayerRecipient: string;
+  executionCostClaim: bigint;
+  settlementPayoutRecipient: string;
   receiptId: Uint8Array;
   /** S-14: monotonic nonce for on-chain replay prevention */
   nonce: bigint;
   simGasReported: bigint;
   gasVarianceFixedMist: bigint;
   slippageBufferMist: bigint;
-  /** Relayer-quoted fee (MIST) — exact value embedded in PTB. */
-  quotedRelayerFeeMist: bigint;
+  /** Host-quoted fee (MIST) — exact value embedded in PTB. */
+  quotedHostFeeMist: bigint;
   /** Expected on-chain protocol fee at quote time — tamper detection. */
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */

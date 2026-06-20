@@ -99,7 +99,7 @@ const SUI_TYPE = '0x2::sui::SUI';
 const RELAYER_CONFIG: RelayerConfig = {
   network: 'testnet',
   packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
-  relayerRecipient: RELAYER,
+  settlementPayoutRecipient: RELAYER,
   supportedSettlementSwapPaths: [
     {
       hops: [
@@ -120,7 +120,7 @@ const RELAYER_CONFIG: RelayerConfig = {
       settlementSwapDirection: 'baseForQuote' as const,
     },
   ],
-  quotedRelayerFeeMist: '100000',
+  quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
   integrityPolicyVersion: 1,
 };
@@ -133,9 +133,9 @@ const MOCK_PREPARE_RESPONSE: PrepareResponse = {
     simGas: '5000000',
     gasVarianceFixedMist: '200000',
     slippageBufferMist: '50000',
-    quotedRelayerFee: '100000',
+    quotedHostFee: '100000',
     protocolFee: '20000',
-    relayerClaim: '5250000',
+    executionCostClaim: '5250000',
     grossGas: '7000000',
   },
   profile: 'new_user',
@@ -211,7 +211,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(mockValidateGenericUserTx).toHaveBeenCalledTimes(1);
     expect(mockValidateGenericUserTx.mock.calls[0][1]).toEqual({
       network: RELAYER_CONFIG.network,
-      relayerAddress: RELAYER_CONFIG.relayerRecipient,
+      relayerAddress: RELAYER_CONFIG.settlementPayoutRecipient,
       configId: STELIS_CONTRACT_IDS.testnet!.configId,
       vaultRegistryId: STELIS_CONTRACT_IDS.testnet!.vaultRegistryId,
       packageId: STELIS_CONTRACT_IDS.testnet!.packageId,
@@ -288,7 +288,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
   // ── 5: Calls onGasEstimate with totalCost from prepare ───────────────
 
-  it('calls onGasEstimate callback with totalCost (relayerClaim + quotedRelayerFee + protocolFee) in SUI', async () => {
+  it('calls onGasEstimate callback with totalCost (executionCostClaim + quotedHostFee + protocolFee) in SUI', async () => {
     const sdk = await createSDK();
     const onGasEstimate = vi.fn();
 
@@ -301,7 +301,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     });
 
     expect(onGasEstimate).toHaveBeenCalledTimes(1);
-    // totalCost = relayerClaim(5250000) + quotedRelayerFee(100000) + protocolFee(20000) = 5370000
+    // totalCost = executionCostClaim(5250000) + quotedHostFee(100000) + protocolFee(20000) = 5370000
     expect(onGasEstimate).toHaveBeenCalledWith(5_370_000n, '0.005370000', 'SUI');
   });
 
@@ -316,7 +316,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
       prepareAuthorizationSigner,
     });
 
-    // totalCost = relayerClaim(5250000) + quotedRelayerFee(100000) + protocolFee(20000) = 5370000
+    // totalCost = executionCostClaim(5250000) + quotedHostFee(100000) + protocolFee(20000) = 5370000
     expect(result.totalCostSui).toBe('0.005370000');
     expect(result.totalCostMist).toBe(5_370_000n);
   });

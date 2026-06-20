@@ -38,7 +38,7 @@ const sdk = await StelisSDK.connect('https://your-relayer/relay');
 const sdk = await StelisSDK.connect('https://your-relayer/relay');
 
 console.log(sdk.network);              // 'testnet' | 'mainnet'
-console.log(sdk.relayerRecipient);     // '0x...'`,
+console.log(sdk.settlementPayoutRecipient);     // '0x...'`,
     },
     transfer: {
       title: `Step 3: Sponsored Transfer (${tokenSymbol})`,

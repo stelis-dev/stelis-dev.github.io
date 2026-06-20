@@ -21,7 +21,7 @@
  * belong to other audit views.
  *
  * Numeric honesty: every field on an `unknown`-economics row is `null`,
- * including `relayerFeeMist`. The recorder MUST NOT coerce an unknown
+ * including `hostFeeMist`. The recorder MUST NOT coerce an unknown
  * fee to `"0"` — that would manufacture a value the sponsor result path could
  * not prove.
  *
@@ -167,10 +167,10 @@ function buildLogEntry(
       promotionId: metadata.promotionId,
       userId: metadata.userId,
       recoveredGasMist: econ.recoveredGasMist,
-      relayerPaidGasMist: econ.relayerPaidGasMist,
-      relayerFeeMist: econ.relayerFeeMist,
+      hostPaidGasMist: econ.hostPaidGasMist,
+      hostFeeMist: econ.hostFeeMist,
       protocolFeeMist: econ.protocolFeeMist,
-      relayerNetMist: econ.relayerNetMist,
+      hostNetMist: econ.hostNetMist,
       grossGasMist: econ.grossGasMist,
       storageRebateMist: econ.storageRebateMist,
       economicsStatus: 'known',
@@ -192,10 +192,10 @@ function buildLogEntry(
     promotionId: metadata.promotionId,
     userId: metadata.userId,
     recoveredGasMist: null,
-    relayerPaidGasMist: null,
-    relayerFeeMist: null,
+    hostPaidGasMist: null,
+    hostFeeMist: null,
     protocolFeeMist: null,
-    relayerNetMist: null,
+    hostNetMist: null,
     grossGasMist: null,
     storageRebateMist: null,
     economicsStatus: 'unknown',

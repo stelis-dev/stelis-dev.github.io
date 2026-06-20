@@ -25,7 +25,7 @@ These values are written by `packages/contracts/move/sources/config.move` at pac
 
 | Field | Initial value | Notes |
 | --- | ---: | --- |
-| `max_relayer_fee_mist` | `0` | Admin can queue an update, bounded by fee-cap checks. |
+| `max_host_fee_mist` | `0` | Admin can queue an update, bounded by fee-cap checks. |
 | `protocol_flat_fee_mist` | `0` | Admin can queue an update. |
 | `max_claim_mist` | `75000000` | Starts from `INITIAL_MAX_CLAIM_MIST`; cannot exceed `MAX_CLAIM_MIST`. |
 | `min_settle_mist` | `100000` | Cannot be set below `MIN_SETTLE_MIST`. |
@@ -94,7 +94,7 @@ Prepare authorization request nonces are temporary replay guards for signed prep
 - `SPONSOR_SECRET_KEY`
 - `SPONSOR_REFILL_ACCOUNT_SECRET_KEY`
 - `NETWORK`
-- `RELAYER_RECIPIENT_ADDRESS`
+- `SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS`
 - `SPONSOR_LEASE_HMAC_SECRET`
 - `packages/app-api/settlement-swap-paths.json`, with a non-empty section for the selected `NETWORK`
 - `packages/app-api/rpc.json`, with a non-empty endpoint section for the selected `NETWORK`
@@ -118,7 +118,7 @@ Optional Host configuration:
 - `TRUSTED_PROXY_HOPS`
 - `CORS_ORIGINS`
 - `NODE_ENV`
-- `RELAYER_FEE_MIST`
+- `HOST_FEE_MIST`
 - `PREPARE_INFLIGHT_CAPACITY`
 - `SPONSOR_BALANCE_WARN_MIST`
 - `SPONSOR_OPERATIONS_REFILL_ENABLED`

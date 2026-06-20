@@ -52,7 +52,7 @@ The Relay API is the `/relay/*` HTTP interface exposed by a Host.
 
 A client connects to a Host. The Host advertises its supported settlement swap paths through `/relay/config`, and the SDK selects the compatible path for the requested settlement token.
 
-The relayer role is internal to a Host. It appears in settlement fields and implementation names such as `relayerRecipient`, `relayerClaim`, `relayerFee`, and internal execution flow. Stelis does not present the relayer as the public product unit.
+The relayer role is internal to a Host. It appears in settlement fields and implementation names such as `settlementPayoutRecipient`, `executionCostClaim`, `hostFee`, and internal execution flow. Stelis does not present the relayer as the public product unit.
 
 The Admin app is the tool a Host operator uses to manage Host settings, sponsor state, settlement swap paths, and operating policy.
 

@@ -16,7 +16,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { toBase64 } from '@mysten/sui/utils';
 import {
-  computeRelayerCosts,
+  computeExecutionCostClaim,
   convertSdkCommands,
   GAS_VARIANCE_FIXED_MIST,
 } from '@stelis/core-relay';
@@ -609,7 +609,7 @@ async function runStudioGasBoundBuild(
     include: { effects: true },
   });
   const simGasUsed = readDryRunGasUsed(simResult);
-  const { simGas } = computeRelayerCosts(simGasUsed);
+  const { simGas } = computeExecutionCostClaim(simGasUsed);
   const reserveAmount: Mist = mist(simGas + GAS_VARIANCE_FIXED_MIST);
 
   if (reserveAmount > config.maxClaimMist) {
@@ -1007,8 +1007,8 @@ async function classifyStudioSponsorResult(
       state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
         deriveSponsoredExecutionEconomics({
           recoveredGasMist: revert.actualMist,
-          relayerPaidGasMist: revert.actualMist,
-          relayerFeeMist: 0n,
+          hostPaidGasMist: revert.actualMist,
+          hostFeeMist: 0n,
           grossGasMist: revert.grossGasMist,
           storageRebateMist: revert.storageRebateMist,
           protocolFeeMist: null,
@@ -1075,7 +1075,7 @@ async function classifyStudioSponsorResult(
     );
   }
 
-  const actualGasMist: Mist = mist(computeRelayerCosts(result.gasUsed).simGas);
+  const actualGasMist: Mist = mist(computeExecutionCostClaim(result.gasUsed).simGas);
   state.actualGasMist = actualGasMist;
   const grossGasMist = BigInt(result.gasUsed.computationCost) + BigInt(result.gasUsed.storageCost);
   const storageRebateMist = BigInt(result.gasUsed.storageRebate);
@@ -1114,8 +1114,8 @@ async function classifyStudioSponsorResult(
     state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
       deriveSponsoredExecutionEconomics({
         recoveredGasMist: 0n,
-        relayerPaidGasMist: actualGasMist,
-        relayerFeeMist: 0n,
+        hostPaidGasMist: actualGasMist,
+        hostFeeMist: 0n,
         grossGasMist,
         storageRebateMist,
         protocolFeeMist: null,
@@ -1172,8 +1172,8 @@ async function classifyStudioSponsorResult(
   state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
     deriveSponsoredExecutionEconomics({
       recoveredGasMist: actualGasMist,
-      relayerPaidGasMist: actualGasMist,
-      relayerFeeMist: 0n,
+      hostPaidGasMist: actualGasMist,
+      hostFeeMist: 0n,
       grossGasMist,
       storageRebateMist,
       protocolFeeMist: null,
@@ -1493,7 +1493,7 @@ function computeRevertAccounting(
   try {
     const grossGasMist = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost);
     const storageRebateMist = BigInt(gasUsed.storageRebate);
-    const actualMist = computeRelayerCosts(gasUsed).simGas;
+    const actualMist = computeExecutionCostClaim(gasUsed).simGas;
     return {
       grossGasMist,
       storageRebateMist,
