@@ -23,6 +23,7 @@ import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import { getClientIp } from '../clientIp.js';
 import { requireEnv } from '../env.js';
 import { safeErrorSummary, writeAdminAuditLog } from '../adminAuditLog.js';
+import { mapError, respondMapped } from '../errorMap.js';
 
 const NONCE_TTL_SECONDS = 60;
 
@@ -48,6 +49,8 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
       await redis.set(`stelis:admin:nonce:${nonce}`, '1', { ex: NONCE_TTL_SECONDS });
       return c.json({ nonce });
     } catch (err) {
+      const mapped = mapError(err);
+      if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[app-api] /auth/nonce failed', safeErrorSummary(err));
       return c.json({ error: 'Internal server error' }, 500);
@@ -56,9 +59,10 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── POST /auth/verify ──────────────────────────────────────────────
   app.post('/verify', async (c) => {
+    let ip: string | null = null;
     try {
       const redis = await getAdminRedis(getCtx);
-      const ip = getClientIp(c);
+      ip = getClientIp(c);
       // Atomic rate-limit check at entry — counts all verify attempts
       const rateCheck = await checkAndIncrement(redis, ip);
       if (!rateCheck.allowed) {
@@ -124,13 +128,17 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
     } catch (err) {
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
+      const mapped = mapError(err);
+      if (mapped) return respondMapped(c, mapped);
       try {
-        const r = await getAdminRedis(getCtx);
-        await writeAdminAuditLog(r, {
-          event: 'ADMIN_LOGIN_ERROR',
-          ip: getClientIp(c),
-          error: safeErrorSummary(err),
-        });
+        if (ip !== null) {
+          const r = await getAdminRedis(getCtx);
+          await writeAdminAuditLog(r, {
+            event: 'ADMIN_LOGIN_ERROR',
+            ip,
+            error: safeErrorSummary(err),
+          });
+        }
       } catch {
         /* Redis unavailable — audit log best-effort */
       }
@@ -140,9 +148,10 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── POST /auth/renew ───────────────────────────────────────────────
   app.post('/renew', async (c) => {
+    let ip: string | null = null;
     try {
       const redis = await getAdminRedis(getCtx);
-      const ip = getClientIp(c);
+      ip = getClientIp(c);
       // Atomic rate-limit check at entry — counts all renew attempts
       const rateCheck = await checkAndIncrement(redis, ip);
       if (!rateCheck.allowed) {
@@ -205,13 +214,17 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
     } catch (err) {
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
+      const mapped = mapError(err);
+      if (mapped) return respondMapped(c, mapped);
       try {
-        const r = await getAdminRedis(getCtx);
-        await writeAdminAuditLog(r, {
-          event: 'ADMIN_RENEW_ERROR',
-          ip: getClientIp(c),
-          error: safeErrorSummary(err),
-        });
+        if (ip !== null) {
+          const r = await getAdminRedis(getCtx);
+          await writeAdminAuditLog(r, {
+            event: 'ADMIN_RENEW_ERROR',
+            ip,
+            error: safeErrorSummary(err),
+          });
+        }
       } catch {
         /* Redis unavailable — audit log best-effort */
       }

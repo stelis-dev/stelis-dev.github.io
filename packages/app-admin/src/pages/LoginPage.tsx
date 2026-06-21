@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getNonce, verifySignature } from '../api/client';
+import { buildApiUrl, getNonce, verifySignature } from '../api/client';
 import {
   createDAppKit,
   DAppKitProvider,
@@ -31,10 +31,7 @@ function isValidNetwork(v: unknown): v is AppAdminNetwork {
 
 /** Fetch network from /relay/config, matching app-web. */
 async function fetchNetwork(): Promise<AppAdminNetwork> {
-  const base = import.meta.env.DEV
-    ? ''
-    : (import.meta.env.VITE_STELIS_API_URL?.replace(/\/+$/, '') ?? '');
-  const res = await fetch(`${base}/relay/config`, {
+  const res = await fetch(buildApiUrl('/relay/config'), {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`/relay/config returned ${res.status}`);

@@ -94,7 +94,11 @@ This repository also includes a temporary root `index.js` entry point for Vercel
 
 Vercel runs that entry point as a function, not as the long-running Node server used by `npm run start -w @stelis/app-api`. Background behavior such as sponsor refill work is not guaranteed to stay active between requests.
 
-Use Vercel only as a temporary demo path. Move stable API hosting to Cloud Run or another long-running Node/OCI host, then remove the root `index.js` file and `packages/app-api/src/vercel.ts`.
+This is not a serverless-native Host runtime. It still uses the normal Host boot path, Redis dependency, and Sui RPC validation when a function instance starts.
+
+For this temporary Vercel path, set `TRUSTED_PROXY_HOPS=0`. The Vercel adapter supplies the client public IP from Vercel's overwritten `x-forwarded-for` header as the Host's direct client-IP source. Do not use a guessed proxy-hop count for Vercel.
+
+Use Vercel only as a temporary demo path. Move stable API hosting to Cloud Run or another long-running Node/OCI host, then remove the root `index.js` file, `packages/app-api/src/vercel.ts`, and `packages/app-api/src/vercelClientIp.ts`.
 
 For a full local Host bring-up, follow [docs/getting-started.md](../../docs/getting-started.md).
 For operator policy, sponsor management, Studio mode, and incident handling, use [docs/operations.md](../../docs/operations.md).

@@ -9,6 +9,10 @@
  * or another long-running Node/OCI host.
  */
 import { createApp } from './app.js';
+import { setClientIpSourceProviderForRuntime } from './clientIp.js';
+import { getVercelClientIpSource } from './vercelClientIp.js';
+
+setClientIpSourceProviderForRuntime(getVercelClientIpSource);
 
 const { app } = await createApp();
 

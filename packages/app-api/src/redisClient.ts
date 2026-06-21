@@ -26,6 +26,11 @@ interface RedisRuntimeClient extends RawRedisClient {
   sendCommand?(args: string[]): Promise<unknown>;
 }
 
+function isClientClosedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'ClientClosedError' || /client is closed/i.test(error.message);
+}
+
 async function loadRedisModule(): Promise<{
   createClient: (options: { url: string }) => RedisRuntimeClient;
 }> {
@@ -59,9 +64,43 @@ export interface RedisClient extends RedisClientLike {
 export async function createRedisClient(redisUrl: string): Promise<RedisClient> {
   const { createClient } = await loadRedisModule();
   const client = createClient({ url: redisUrl });
+  let reconnectPromise: Promise<void> | null = null;
 
-  if (!client.isOpen) {
-    await client.connect();
+  async function connectAndProbe(): Promise<void> {
+    if (!client.isOpen) {
+      await client.connect();
+    }
+
+    try {
+      await assertSupportedRedisTopology(client);
+    } catch (err) {
+      // Clean up the connected client before propagating the failure.
+      // Prevents connection leak in boot-failure-retry environments and keeps
+      // reconnect attempts fail-closed if the endpoint changes under us.
+      if (client.isOpen) {
+        await client.quit().catch(() => {});
+      }
+      throw err;
+    }
+  }
+
+  async function ensureOpen(): Promise<void> {
+    if (client.isOpen) return;
+    reconnectPromise ??= connectAndProbe().finally(() => {
+      reconnectPromise = null;
+    });
+    await reconnectPromise;
+  }
+
+  async function withOpenClient<T>(operation: () => Promise<T>): Promise<T> {
+    await ensureOpen();
+    try {
+      return await operation();
+    } catch (err) {
+      if (!isClientClosedError(err)) throw err;
+      await ensureOpen();
+      return operation();
+    }
   }
 
   // ── Topology probe (fail-closed) ─────────────────────────────────
@@ -69,47 +108,81 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
   // RedisPrepareStore.consume() uses dynamic Lua key access that Redis
   // Multi-key Lua scripts require one writable Redis data endpoint. Boot must reject
   // unsupported topologies rather than relying on operator memory.
-  try {
-    await assertSupportedRedisTopology(client);
-  } catch (err) {
-    // Clean up the connected client before propagating the failure.
-    // Prevents connection leak in boot-failure-retry environments.
-    if (client.isOpen) {
-      await client.quit().catch(() => {});
-    }
-    throw err;
+  await connectAndProbe();
+
+  const commandClient: RawRedisClient = {
+    get(key) {
+      return withOpenClient(() => client.get(key));
+    },
+    set(key, value, options) {
+      return withOpenClient(() => client.set(key, value, options));
+    },
+    del(...keys) {
+      return withOpenClient(() => client.del(...keys));
+    },
+    incr(key) {
+      return withOpenClient(() => client.incr(key));
+    },
+    pExpire(key, ttlMs) {
+      return withOpenClient(() => client.pExpire(key, ttlMs));
+    },
+    eval(script, options) {
+      return withOpenClient(() => client.eval(script, options));
+    },
+    hGetAll(key) {
+      return withOpenClient(() => client.hGetAll(key));
+    },
+  };
+  if (client.scanIterator) {
+    commandClient.scanIterator = (options) =>
+      (async function* scanWithOpenClient() {
+        await ensureOpen();
+        for await (const key of client.scanIterator!(options)) {
+          yield key;
+        }
+      })();
+  }
+  if (client.ping) {
+    commandClient.ping = () => withOpenClient(() => client.ping!());
+  }
+  if (client.quit) {
+    commandClient.quit = async () => {
+      if (client.isOpen) {
+        await client.quit();
+      }
+    };
   }
 
-  const wrapped = wrapRedisClient(client);
+  const wrapped = wrapRedisClient(commandClient);
 
   return {
     ...wrapped,
     ttl(key) {
-      return client.ttl(key);
+      return withOpenClient(() => client.ttl(key));
     },
     lrange(key, start, stop) {
-      return client.lRange(key, start, stop);
+      return withOpenClient(() => client.lRange(key, start, stop));
     },
     lpush(key, value) {
-      return client.lPush(key, value);
+      return withOpenClient(() => client.lPush(key, value));
     },
     ltrim(key, start, stop) {
-      return client.lTrim(key, start, stop);
+      return withOpenClient(() => client.lTrim(key, start, stop));
     },
     hincrby(key, field, increment) {
-      return client.hIncrBy(key, field, increment);
+      return withOpenClient(() => client.hIncrBy(key, field, increment));
     },
     hset(key, field, value) {
-      return client.hSet(key, field, value);
+      return withOpenClient(() => client.hSet(key, field, value));
     },
     sadd(key, ...members) {
-      return client.sAdd(key, ...members);
+      return withOpenClient(() => client.sAdd(key, ...members));
     },
     smembers(key) {
-      return client.sMembers(key);
+      return withOpenClient(() => client.sMembers(key));
     },
     srem(key, ...members) {
-      return client.sRem(key, ...members);
+      return withOpenClient(() => client.sRem(key, ...members));
     },
     async dispose() {
       if (client.isOpen) {

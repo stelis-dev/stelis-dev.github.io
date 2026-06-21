@@ -63,6 +63,13 @@ import type { AppApiContext } from '../src/context.js';
 import { requireAdminSessionFromContext } from '../src/requireAdminSession.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 
+function clientIpResolutionError(): Error {
+  return Object.assign(new Error('Client IP could not be resolved'), {
+    name: 'ClientIpResolutionError',
+    code: 'CLIENT_IP_UNRESOLVED',
+  });
+}
+
 describe('auth routes', () => {
   let app: Hono;
   let mockGetCtx: ReturnType<typeof vi.fn>;
@@ -97,6 +104,24 @@ describe('auth routes', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'Too many requests. Try again in 15 minutes.',
       });
+    });
+
+    it('returns 400 without issuing a nonce when client IP cannot be resolved', async () => {
+      const { checkAndIncrement } = await import('@stelis/core-api/admin');
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/auth/nonce');
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(checkAndIncrement).not.toHaveBeenCalled();
+      expect(mockRedis.set).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
     it('logs unexpected nonce errors without exposing internals to clients', async () => {
@@ -182,6 +207,31 @@ describe('auth routes', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'Too many requests. Try again in 15 minutes.',
       });
+    });
+
+    it('returns 400 without rate-limit or audit writes when client IP cannot be resolved', async () => {
+      const { checkAndIncrement } = await import('@stelis/core-api/admin');
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nonce: 'test-nonce',
+          signature: 'sig',
+          address: '0x' + 'a'.repeat(64),
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(checkAndIncrement).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
     it('calls resetAttempts on successful verify', async () => {
@@ -272,6 +322,31 @@ describe('auth routes', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'Too many requests. Try again in 15 minutes.',
       });
+    });
+
+    it('returns 400 without rate-limit or audit writes when client IP cannot be resolved', async () => {
+      const { checkAndIncrement } = await import('@stelis/core-api/admin');
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/auth/renew', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nonce: 'test-nonce',
+          signature: 'sig',
+          address: '0x' + 'a'.repeat(64),
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(checkAndIncrement).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
     it('calls resetAttempts on successful renew', async () => {

@@ -51,6 +51,16 @@ vi.mock('redis', () => ({
       incr: vi.fn().mockResolvedValue(1),
       pExpire: vi.fn().mockResolvedValue(1),
       eval: vi.fn().mockResolvedValue(null),
+      hGetAll: vi.fn().mockResolvedValue({}),
+      ttl: vi.fn().mockResolvedValue(60),
+      lRange: vi.fn().mockResolvedValue([]),
+      lPush: vi.fn().mockResolvedValue(1),
+      lTrim: vi.fn().mockResolvedValue(undefined),
+      hIncrBy: vi.fn().mockResolvedValue(1),
+      hSet: vi.fn().mockResolvedValue(1),
+      sAdd: vi.fn().mockResolvedValue(1),
+      sMembers: vi.fn().mockResolvedValue([]),
+      sRem: vi.fn().mockResolvedValue(1),
     };
     // sendCommand is conditionally present based on test scenario
     if (mockHasSendCommand) {
@@ -81,6 +91,44 @@ describe('Redis topology probe (createRedisClient)', () => {
     expect(client).toBeDefined();
     expect(client.get).toBeDefined();
     expect(mockSendCommand).toHaveBeenCalledWith(['INFO', 'server']);
+    await client.dispose();
+  });
+
+  it('reconnects and re-probes before commands when the cached client was closed', async () => {
+    mockSendCommand = vi.fn().mockResolvedValue(STANDALONE_INFO);
+
+    const client = await createRedisClient('redis://localhost');
+    expect(lastMockClient!.connect).toHaveBeenCalledTimes(1);
+    expect(mockSendCommand).toHaveBeenCalledTimes(1);
+
+    lastMockClient!.isOpen = false;
+    await client.eval('return 1', ['stelis:test:key'], ['900000']);
+
+    expect(lastMockClient!.connect).toHaveBeenCalledTimes(2);
+    expect(mockSendCommand).toHaveBeenCalledTimes(2);
+    expect(lastMockClient!.eval).toHaveBeenCalledWith('return 1', {
+      keys: ['stelis:test:key'],
+      arguments: ['900000'],
+    });
+    await client.dispose();
+  });
+
+  it('reconnects once when a command observes a closed client race', async () => {
+    mockSendCommand = vi.fn().mockResolvedValue(STANDALONE_INFO);
+
+    const client = await createRedisClient('redis://localhost');
+    const closedError = new Error('The client is closed');
+    closedError.name = 'ClientClosedError';
+    (lastMockClient!.eval as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      lastMockClient!.isOpen = false;
+      throw closedError;
+    });
+
+    await client.eval('return 1', ['stelis:test:key'], ['900000']);
+
+    expect(lastMockClient!.connect).toHaveBeenCalledTimes(2);
+    expect(mockSendCommand).toHaveBeenCalledTimes(2);
+    expect(lastMockClient!.eval).toHaveBeenCalledTimes(2);
     await client.dispose();
   });
 

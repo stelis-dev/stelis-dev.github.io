@@ -74,6 +74,28 @@ describe('API client', () => {
     );
   });
 
+  it('renewSession sends POST /auth/renew with body through the shared API client', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({}),
+      }),
+    );
+
+    const { renewSession } = await import('../src/api/client');
+    await renewSession({ nonce: 'n', signature: 's', address: '0x1' });
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/auth/renew',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        body: JSON.stringify({ nonce: 'n', signature: 's', address: '0x1' }),
+      }),
+    );
+  });
+
   it('throws ApiError on non-ok response', async () => {
     vi.stubGlobal(
       'fetch',

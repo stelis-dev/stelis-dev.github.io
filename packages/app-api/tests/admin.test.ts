@@ -101,6 +101,13 @@ import { createAdminRoutes } from '../src/routes/admin.js';
 import type { AppApiContext } from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 
+function clientIpResolutionError(): Error {
+  return Object.assign(new Error('Client IP could not be resolved'), {
+    name: 'ClientIpResolutionError',
+    code: 'CLIENT_IP_UNRESOLVED',
+  });
+}
+
 function createMockCtx(): AppApiContext {
   return {
     host: {
@@ -517,6 +524,22 @@ describe('admin routes', () => {
       expect(typeof body.nonce).toBe('string');
       expect(body.expiresAt).toBeDefined();
     });
+
+    it('returns 400 without issuing a nonce when client IP cannot be resolved', async () => {
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/api/sponsor-refill-account/withdraw');
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(mockRedis.set).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
+    });
   });
 
   describe('POST /api/sponsor-refill-account/withdraw', () => {
@@ -608,6 +631,27 @@ describe('admin routes', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'Too many withdrawal attempts. Try again in 15 minutes.',
       });
+    });
+
+    it('returns 400 before rate-limit or audit writes when client IP cannot be resolved', async () => {
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(mockCheckAndIncrementAdminOperationAttempt).not.toHaveBeenCalled();
+      expect(mockReadJsonBodyWithLimit).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
     it('returns 422 when dry-run simulation fails', async () => {
@@ -774,6 +818,25 @@ describe('admin routes', () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(503);
+    });
+
+    it('POST /api/promotions returns 400 before body parsing when client IP cannot be resolved', async () => {
+      const { getClientIp } = await import('../src/clientIp.js');
+      vi.mocked(getClientIp).mockImplementationOnce(() => {
+        throw clientIpResolutionError();
+      });
+
+      const res = await app.request('/api/promotions', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'CLIENT_IP_UNRESOLVED',
+      });
+      expect(mockReadJsonBodyWithLimit).not.toHaveBeenCalled();
+      expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
     describe('with promotionStore enabled', () => {

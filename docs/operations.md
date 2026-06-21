@@ -26,6 +26,8 @@ The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays.
 
 In deployed runtimes, `TRUSTED_PROXY_HOPS` must be set explicitly before the Host starts. Use `TRUSTED_PROXY_HOPS=0` only when the API is directly exposed, or set it to the actual reverse-proxy hop count.
 
+The temporary Vercel demo adapter is an exception to the proxy-hop model. Vercel overwrites `x-forwarded-for` with the client public IP, and `packages/app-api/src/vercel.ts` installs an adapter-local source provider before the Host app is created. For that temporary Vercel path, set `TRUSTED_PROXY_HOPS=0`; do not set a guessed proxy-hop count.
+
 In `development` and `test`, an unset `TRUSTED_PROXY_HOPS` defaults to `0` and uses the socket remote address.
 
 `/relay/*` and `/studio/*` allow all origins. `/auth/*` and `/api/*` allow only origins listed in `CORS_ORIGINS`.

@@ -42,6 +42,7 @@ import { getClientIp } from '../clientIp.js';
 import { requireEnv, parseOptionalBooleanEnv, parseOptionalPositiveBigIntEnv } from '../env.js';
 import { parseChainBalanceMist } from '../sponsor-operations/balanceParsing.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
+import { mapError, respondMapped } from '../errorMap.js';
 
 /**
  * Enrich a Promotion with derived totalRequiredBudgetMist.
@@ -490,28 +491,34 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── GET /api/sponsor-refill-account/withdraw — issue withdraw nonce ─────────────────
   app.get('/sponsor-refill-account/withdraw', async (c) => {
-    const ip = getClientIp(c);
+    let ip: string | null = null;
     try {
+      ip = getClientIp(c);
       const redis = await getAdminRedis(getCtx);
       const nonce = `stelis-withdraw:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(`${WITHDRAW_NONCE_PREFIX}${nonce}`, '1', { ex: WITHDRAW_NONCE_TTL_SECONDS });
       const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_SECONDS * 1000).toISOString();
       return c.json({ nonce, expiresAt });
     } catch (err) {
-      await writeAdminAuditLog(await getAdminRedis(getCtx), {
-        event: 'WITHDRAW_NONCE_ERROR',
-        ts: new Date().toISOString(),
-        ip,
-        detail: safeErrorSummary(err),
-      }).catch(() => undefined);
+      const mapped = mapError(err);
+      if (mapped) return respondMapped(c, mapped);
+      if (ip !== null) {
+        await writeAdminAuditLog(await getAdminRedis(getCtx), {
+          event: 'WITHDRAW_NONCE_ERROR',
+          ts: new Date().toISOString(),
+          ip,
+          detail: safeErrorSummary(err),
+        }).catch(() => undefined);
+      }
       return c.json({ error: 'Internal server error' }, 500);
     }
   });
 
   // ── POST /api/sponsor-refill-account/withdraw — execute withdrawal ──────────────────
   app.post('/sponsor-refill-account/withdraw', async (c) => {
+    let ip: string | null = null;
     try {
-      const ip = getClientIp(c);
+      ip = getClientIp(c);
       const ts = () => new Date().toISOString();
       const redis = await getAdminRedis(getCtx);
       // Atomic ops rate-limit check at entry
@@ -718,18 +725,22 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
         remainingBalanceMist,
       });
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
+      const mapped = mapError(err);
+      if (mapped) return respondMapped(c, mapped);
+      // eslint-disable-next-line no-console
+      console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
       try {
-        const r = await getAdminRedis(getCtx);
-        await writeAdminAuditLog(r, {
-          event: 'WITHDRAWAL_ERROR',
-          ts: new Date().toISOString(),
-          ip: getClientIp(c),
-          detail: safeErrorSummary(err),
-        });
+        if (ip !== null) {
+          const r = await getAdminRedis(getCtx);
+          await writeAdminAuditLog(r, {
+            event: 'WITHDRAWAL_ERROR',
+            ts: new Date().toISOString(),
+            ip,
+            detail: safeErrorSummary(err),
+          });
+        }
       } catch {
         /* Redis unavailable — audit log best-effort */
       }
@@ -812,8 +823,9 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── POST /api/promotions ─────────────────────────────────────────
   app.post('/promotions', async (c) => {
-    const ip = getClientIp(c);
+    let ip: string | null = null;
     try {
+      ip = getClientIp(c);
       const ctx = await getCtx();
       if (!ctx.promotionStore) {
         return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
@@ -863,6 +875,8 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       if (mapped) return mapped;
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
+      const publicError = mapError(err);
+      if (publicError) return respondMapped(c, publicError);
       return c.json({ error: 'Internal server error' }, 500);
     }
   });

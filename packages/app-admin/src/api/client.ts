@@ -28,6 +28,10 @@ const API_BASE = import.meta.env.DEV
   ? ''
   : (import.meta.env.VITE_STELIS_API_URL?.replace(/\/+$/, '') ?? '');
 
+export function buildApiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 // ── Typed fetch wrapper ────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -42,7 +46,7 @@ export class ApiError extends Error {
 }
 
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetch(buildApiUrl(url), {
     ...init,
     credentials: 'include',
     headers: {
@@ -85,6 +89,17 @@ export function verifySignature(data: {
   address: string;
 }): Promise<void> {
   return apiFetch('/auth/verify', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function renewSession(data: {
+  nonce: string;
+  signature: string;
+  address: string;
+}): Promise<void> {
+  return apiFetch('/auth/renew', {
     method: 'POST',
     body: JSON.stringify(data),
   });
