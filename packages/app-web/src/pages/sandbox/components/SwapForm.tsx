@@ -10,6 +10,11 @@ import {
   getSwapDemoRejectMessage,
 } from '../constants';
 import { findTestSwapPair, type SupportedNetwork } from '../testSwapPairs';
+import {
+  DIRECT_SWAP_SLIPPAGE_BPS,
+  quoteDirectSwapOutput,
+  type DirectSwapQuote,
+} from '../deepbookDirectSwap';
 import { useAppConfig } from '../../../AppConfigContext';
 import { SANDBOX_CARD_STYLE } from './cardStyles';
 import {
@@ -22,6 +27,18 @@ interface SwapFormProps {
   onTxSuccess?: () => void;
   settlementSwapPathIndex?: number;
 }
+
+type DirectSwapQuoteState =
+  | { status: 'idle'; message: string }
+  | { status: 'checking'; message: string }
+  | {
+      status: 'ready';
+      expectedOutput: bigint;
+      minOutput: bigint;
+      expectedDisplay: string;
+      minDisplay: string;
+    }
+  | { status: 'unavailable'; message: string };
 
 /**
  * Sandbox helper: swap SUI → settlement token of the selected settlement swap path
@@ -47,8 +64,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     selectedSettlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
   const testPair = settlementTokenType ? findTestSwapPair(network, settlementTokenType) : null;
   // Direct-swap demo scope gate (unsupported_hop_count / fee_bearing). See
-  // sandbox/constants.ts. Fee-bearing paths require min-out/slippage UX that
-  // the demo intentionally does not implement.
+  // sandbox/constants.ts. Fee-bearing paths require additional DeepBook input
+  // fee handling beyond the positive-output/min-output guard implemented here.
   const demoRejectReason = selectedSettlementSwapPath
     ? swapDemoRejectReason(selectedSettlementSwapPath)
     : null;
@@ -64,19 +81,25 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
   const [digest, setDigest] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
   const [gasEstimate, setGasEstimate] = useState<string | null>(null);
+  const [directSwapQuote, setDirectSwapQuote] = useState<DirectSwapQuoteState>({
+    status: 'idle',
+    message: 'Enter a SUI amount to quote the direct swap.',
+  });
 
   const addLog = (msg: string) =>
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const isBusy = status !== 'idle' && status !== 'error' && status !== 'success';
 
-  const buildSwapTx = () => {
+  const parseSuiAmountMist = () =>
+    parseDecimalToSmallestUnit(suiAmount, SUI_DECIMALS, 'SUI amount');
+
+  const buildSwapTx = (suiMist: bigint, quote: DirectSwapQuote) => {
     if (!account || !sdk) throw new Error('Not ready');
     if (!testPair) {
       throw new Error(
         `No hardcoded DeepBook pair registered for ${settlementTokenLabel} on ${network}`,
       );
     }
-    const suiMist = parseDecimalToSmallestUnit(suiAmount, SUI_DECIMALS, 'SUI amount');
     if (suiMist <= 0n) throw new Error('SUI amount must be greater than 0');
     const tx = new Transaction();
     const [suiCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(suiMist)]);
@@ -91,7 +114,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
         tx.object(testPair.poolId),
         suiCoin,
         deepFeeCoin,
-        tx.pure.u64(0),
+        tx.pure.u64(quote.minOutputSmallest),
         tx.object('0x6'),
       ],
     });
@@ -100,14 +123,81 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
   };
 
   useEffect(() => {
-    if (!sdk || !client || !account || !testPair || demoRejectReason !== null) {
+    if (
+      !sdk ||
+      !client ||
+      !account ||
+      !selectedSettlementSwapPath ||
+      !testPair ||
+      demoRejectReason !== null
+    ) {
+      setDirectSwapQuote({
+        status: 'idle',
+        message: 'Direct swap quote is unavailable for the selected settlement swap path.',
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setDirectSwapQuote({ status: 'checking', message: 'Checking direct DeepBook output...' });
+
+    (async () => {
+      try {
+        const suiMist = parseSuiAmountMist();
+        const quote = await quoteDirectSwapOutput({
+          client,
+          deepbookPackageId: sdk.deepbookPackageId,
+          testPair,
+          inputAmountSmallest: suiMist,
+          slippageBps: DIRECT_SWAP_SLIPPAGE_BPS,
+        });
+        if (cancelled) return;
+        const decimals = selectedSettlementSwapPath.settlementTokenDecimals;
+        const fractionDigits = Math.min(4, decimals);
+        setDirectSwapQuote({
+          status: 'ready',
+          expectedOutput: quote.expectedOutputSmallest,
+          minOutput: quote.minOutputSmallest,
+          expectedDisplay: formatSmallestUnitDecimal(
+            quote.expectedOutputSmallest,
+            decimals,
+            fractionDigits,
+          ),
+          minDisplay: formatSmallestUnitDecimal(quote.minOutputSmallest, decimals, fractionDigits),
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setDirectSwapQuote({
+          status: 'unavailable',
+          message: err instanceof Error ? err.message : 'Direct DeepBook quote is unavailable',
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sdk, client, account, selectedSettlementSwapPath, testPair, demoRejectReason, suiAmount]);
+
+  useEffect(() => {
+    if (
+      !sdk ||
+      !client ||
+      !account ||
+      !testPair ||
+      demoRejectReason !== null ||
+      directSwapQuote.status !== 'ready'
+    ) {
       setGasEstimate(null);
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const tx = buildSwapTx();
+        const tx = buildSwapTx(parseSuiAmountMist(), {
+          expectedOutputSmallest: directSwapQuote.expectedOutput,
+          minOutputSmallest: directSwapQuote.minOutput,
+        });
         tx.setSender(account.address);
         const txBytes = await tx.build({ client });
         const simResult = await client.simulateTransaction({
@@ -138,10 +228,19 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     return () => {
       cancelled = true;
     };
-  }, [sdk, client, account, testPair, demoRejectReason, suiAmount]);
+  }, [sdk, client, account, testPair, demoRejectReason, suiAmount, directSwapQuote]);
 
   const handleSwap = async () => {
-    if (!account || !sdk || !testPair || demoRejectReason !== null) return;
+    if (
+      !account ||
+      !sdk ||
+      !client ||
+      !selectedSettlementSwapPath ||
+      !testPair ||
+      demoRejectReason !== null
+    ) {
+      return;
+    }
     setStatus('building');
     setErrorMsg('');
     setDigest('');
@@ -149,7 +248,31 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     addLog(`Swapping ${suiAmount} SUI → ${settlementTokenLabel}...`);
 
     try {
-      const tx = buildSwapTx();
+      const suiMist = parseSuiAmountMist();
+      const freshQuote = await quoteDirectSwapOutput({
+        client,
+        deepbookPackageId: sdk.deepbookPackageId,
+        testPair,
+        inputAmountSmallest: suiMist,
+        slippageBps: DIRECT_SWAP_SLIPPAGE_BPS,
+      });
+      const decimals = selectedSettlementSwapPath.settlementTokenDecimals;
+      const fractionDigits = Math.min(4, decimals);
+      addLog(
+        `Expected output: ${formatSmallestUnitDecimal(
+          freshQuote.expectedOutputSmallest,
+          decimals,
+          fractionDigits,
+        )} ${settlementTokenLabel}`,
+      );
+      addLog(
+        `Minimum accepted: ${formatSmallestUnitDecimal(
+          freshQuote.minOutputSmallest,
+          decimals,
+          fractionDigits,
+        )} ${settlementTokenLabel}`,
+      );
+      const tx = buildSwapTx(suiMist, freshQuote);
       setStatus('executing');
       addLog('Signing & executing with SUI gas...');
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
@@ -197,6 +320,9 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     isBusy ||
     !testPair ||
     demoRejectReason !== null;
+  const swapQuoteUnavailable =
+    demoRejectReason === null && Boolean(testPair) && directSwapQuote.status !== 'ready';
+  const swapDisabledWithQuote = swapDisabled || swapQuoteUnavailable;
 
   return (
     <div style={SANDBOX_CARD_STYLE}>
@@ -247,8 +373,30 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
         }}
       >
         ⚡ Direct DeepBook swap: pay gas in SUI. Use this to acquire {settlementTokenLabel} tokens
-        for testing.
+        for testing. The swap is disabled when DeepBook cannot quote a positive output.
       </div>
+
+      {testPair && demoRejectReason === null && (
+        <div
+          style={{
+            fontSize: 12,
+            color:
+              directSwapQuote.status === 'ready'
+                ? 'var(--success, #22c55e)'
+                : directSwapQuote.status === 'checking'
+                  ? 'var(--text-secondary, #aaa)'
+                  : '#f44336',
+            marginBottom: 12,
+            padding: '6px 10px',
+            background: 'rgba(255,255,255,0.03)',
+            borderRadius: 6,
+          }}
+        >
+          {directSwapQuote.status === 'ready'
+            ? `Estimated received: ${directSwapQuote.expectedDisplay} ${settlementTokenLabel} (minimum ${directSwapQuote.minDisplay})`
+            : directSwapQuote.message}
+        </div>
+      )}
 
       <div style={{ marginBottom: 12 }}>
         <label style={labelStyle}>SUI Amount</label>
@@ -268,7 +416,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
         <strong>
           {gasEstimate
             ? `~${gasEstimate} SUI`
-            : sdk && account && testPair
+            : sdk && account && testPair && directSwapQuote.status === 'ready'
               ? 'calculating...'
               : '—'}
         </strong>
@@ -276,7 +424,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
 
       <button
         onClick={handleSwap}
-        disabled={swapDisabled}
+        disabled={swapDisabledWithQuote}
         style={{
           width: '100%',
           padding: '10px',
@@ -286,8 +434,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           color: '#fff',
           fontWeight: 600,
           fontSize: 14,
-          cursor: swapDisabled ? 'not-allowed' : 'pointer',
-          opacity: swapDisabled ? 0.5 : 1,
+          cursor: swapDisabledWithQuote ? 'not-allowed' : 'pointer',
+          opacity: swapDisabledWithQuote ? 0.5 : 1,
         }}
       >
         {isBusy ? status.toUpperCase() : `⚡ Swap ${suiAmount} SUI → ${settlementTokenLabel}`}
