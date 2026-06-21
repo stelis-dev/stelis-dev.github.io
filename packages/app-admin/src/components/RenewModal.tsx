@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getWallets } from '@mysten/wallet-standard';
 import type { SuiSignPersonalMessageFeature } from '../types';
+import { getNonce, renewSession } from '../api/client';
 
 type RenewState = 'idle' | 'signing' | 'verifying' | 'error';
 
@@ -116,13 +117,7 @@ export function RenewModal({
       const suiAccount = suiWallet.accounts.find((a) => a.address === address);
       if (!suiAccount) throw new Error('Admin account not found in connected wallet.');
 
-      // Fetch nonce
-      const nonceRes = await fetch('/auth/nonce', { credentials: 'include' });
-      if (!nonceRes.ok) {
-        const body = (await nonceRes.json()) as { error?: string };
-        throw new Error(body.error ?? 'Failed to fetch nonce');
-      }
-      const { nonce } = (await nonceRes.json()) as { nonce: string };
+      const { nonce } = await getNonce();
 
       // Sign
       const { signature } = await signFeature.signPersonalMessage({
@@ -132,16 +127,7 @@ export function RenewModal({
 
       // Renew
       setState('verifying');
-      const renewRes = await fetch('/auth/renew', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nonce, signature, address }),
-      });
-      if (!renewRes.ok) {
-        const body = (await renewRes.json()) as { error?: string };
-        throw new Error(body.error ?? 'Renewal failed');
-      }
+      await renewSession({ nonce, signature, address });
 
       onSuccess();
     } catch (err) {
