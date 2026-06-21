@@ -17,11 +17,6 @@ interface RedisRuntimeClient extends RawRedisClient {
   lRange(key: string, start: number, stop: number): Promise<string[]>;
   lPush(key: string, ...values: string[]): Promise<number>;
   lTrim(key: string, start: number, stop: number): Promise<void>;
-  hIncrBy(key: string, field: string, increment: number): Promise<number>;
-  hSet(key: string, field: string, value: string): Promise<number>;
-  sAdd(key: string, ...members: string[]): Promise<number>;
-  sMembers(key: string): Promise<string[]>;
-  sRem(key: string, ...members: string[]): Promise<number>;
   /** Raw command execution — used for topology probe before wrapping. */
   sendCommand?(args: string[]): Promise<unknown>;
 }
@@ -53,11 +48,6 @@ export interface RedisClient extends RedisClientLike {
   lrange(key: string, start: number, stop: number): Promise<string[]>;
   lpush(key: string, value: string): Promise<number>;
   ltrim(key: string, start: number, stop: number): Promise<void>;
-  hincrby(key: string, field: string, increment: number): Promise<number>;
-  hset(key: string, field: string, value: string): Promise<number>;
-  sadd(key: string, ...members: string[]): Promise<number>;
-  smembers(key: string): Promise<string[]>;
-  srem(key: string, ...members: string[]): Promise<number>;
   dispose(): Promise<void>;
 }
 
@@ -120,12 +110,6 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
     del(...keys) {
       return withOpenClient(() => client.del(...keys));
     },
-    incr(key) {
-      return withOpenClient(() => client.incr(key));
-    },
-    pExpire(key, ttlMs) {
-      return withOpenClient(() => client.pExpire(key, ttlMs));
-    },
     eval(script, options) {
       return withOpenClient(() => client.eval(script, options));
     },
@@ -168,21 +152,6 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
     },
     ltrim(key, start, stop) {
       return withOpenClient(() => client.lTrim(key, start, stop));
-    },
-    hincrby(key, field, increment) {
-      return withOpenClient(() => client.hIncrBy(key, field, increment));
-    },
-    hset(key, field, value) {
-      return withOpenClient(() => client.hSet(key, field, value));
-    },
-    sadd(key, ...members) {
-      return withOpenClient(() => client.sAdd(key, ...members));
-    },
-    smembers(key) {
-      return withOpenClient(() => client.sMembers(key));
-    },
-    srem(key, ...members) {
-      return withOpenClient(() => client.sRem(key, ...members));
     },
     async dispose() {
       if (client.isOpen) {

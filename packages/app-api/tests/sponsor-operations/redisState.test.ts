@@ -48,12 +48,6 @@ class StubRedis implements RedisClientLike {
     }
     return n;
   }
-  async incr(_k: string): Promise<number> {
-    return 0;
-  }
-  async pexpire(_k: string, _t: number): Promise<boolean> {
-    return true;
-  }
   async scan(_p: string): Promise<string[]> {
     return [];
   }

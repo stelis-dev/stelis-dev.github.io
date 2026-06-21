@@ -26,9 +26,8 @@ function makeUnusedRawShell(): Omit<RawRedisClient, 'scanIterator'> {
     get: fail('get'),
     set: fail('set'),
     del: fail('del'),
-    incr: fail('incr'),
-    pExpire: fail('pExpire'),
     eval: fail('eval'),
+    hGetAll: fail('hGetAll'),
   };
 }
 

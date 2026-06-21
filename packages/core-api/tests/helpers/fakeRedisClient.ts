@@ -9,8 +9,9 @@ interface FakeRedisEntry {
  * Minimal in-memory Redis implementation for adapter unit tests.
  *
  * It intentionally supports only the subset used by Stelis adapters:
- * `GET`, `SET NX PX`, `DEL`, `INCR`, `PEXPIRE`, and the small Lua scripts
- * embedded in the Redis-backed stores.
+ * `GET`, `SET NX PX`, `DEL`, `HGETALL`, `SCAN`, and the small Lua scripts
+ * embedded in the Redis-backed stores. Counter and TTL mutations inside Lua
+ * scripts are emulated by private helpers, not exposed on RedisClientLike.
  *
  * This is not production Redis semantics evidence. Real Redis conformance
  * lives in `*.redis.test.ts` and runs through `test:redis`.
@@ -46,7 +47,7 @@ export class FakeRedisClient implements RedisClientLike {
     return deleted;
   }
 
-  async incr(key: string): Promise<number> {
+  private incrementForLua(key: string): number {
     this.evictIfExpired(key);
     const entry = this._store.get(key);
     const current = entry ? Number(entry.value) : 0;
@@ -58,7 +59,7 @@ export class FakeRedisClient implements RedisClientLike {
     return next;
   }
 
-  async pexpire(key: string, ttlMs: number): Promise<boolean> {
+  private setExpiryForLua(key: string, ttlMs: number): boolean {
     this.evictIfExpired(key);
     const entry = this._store.get(key);
     if (!entry) return false;
@@ -129,9 +130,9 @@ export class FakeRedisClient implements RedisClientLike {
     if (script.includes("redis.call('INCR'")) {
       const key = keys[0];
       const ttlMs = Number(args[0]);
-      const current = await this.incr(key);
+      const current = this.incrementForLua(key);
       if (current === 1) {
-        await this.pexpire(key, ttlMs);
+        this.setExpiryForLua(key, ttlMs);
       }
       const ttl = this.pttl(key);
       return [current, ttl];

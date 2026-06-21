@@ -8,9 +8,8 @@
  * are atomic per emit. This mirrors `RedisPromotionExecutionLedger`'s
  * Lua-atomic money update pattern.
  *
- * Reads also go through `eval` so the adapter only depends on
- * `RedisClientLike.eval`. No additional Redis API (lrange / hincrby /
- * lpush) is required from the client interface.
+ * Reads also go through `eval`, so this adapter only depends on
+ * `RedisClientLike.eval`.
  *
  * Key layout:
  *   stelis:sponsored_logs:agg:{all|generic|promotion}     HASH
