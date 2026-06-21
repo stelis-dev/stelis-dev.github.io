@@ -34,12 +34,6 @@ class StubRedis implements RedisClientLike {
     for (const k of keys) if (this.store.delete(k)) n += 1;
     return n;
   }
-  async incr(_k: string): Promise<number> {
-    return 0;
-  }
-  async pexpire(_k: string, _t: number): Promise<boolean> {
-    return true;
-  }
   async scan(_p: string): Promise<string[]> {
     return [];
   }

@@ -16,8 +16,6 @@ export interface RedisClientLike {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, options?: RedisSetOptions): Promise<'OK' | null>;
   del(...keys: string[]): Promise<number>;
-  incr(key: string): Promise<number>;
-  pexpire(key: string, ttlMs: number): Promise<boolean>;
   eval(script: string, keys: string[], args: string[]): Promise<unknown>;
   /** HGETALL — returns the hash as `{field: value}`. Empty hash returns `{}`. */
   hgetall(key: string): Promise<Record<string, string>>;
@@ -32,17 +30,14 @@ export interface RedisClientLike {
 /**
  * Structural shape of a raw `redis` v4 client (camelCase API).
  *
- * The `redis` package uses `pExpire` (camelCase) and
- * `eval(script, { keys, arguments })` (object form).
- * `RedisClientLike` normalises these to `pexpire` (lowercase)
- * and `eval(script, keys, args)` (positional form).
+ * The `redis` package uses `eval(script, { keys, arguments })` (object form).
+ * `RedisClientLike` normalises this to `eval(script, keys, args)`
+ * (positional form).
  */
 export interface RawRedisClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, options?: Record<string, unknown>): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
-  incr(key: string): Promise<number>;
-  pExpire(key: string, ttlMs: number): Promise<number | boolean>;
   eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
   hGetAll(key: string): Promise<Record<string, string>>;
   /** Raw redis v4 SCAN — returns { cursor, keys }. */
@@ -55,7 +50,6 @@ export interface RawRedisClient {
  * Wrap a raw `redis` v4 client into a `RedisClientLike`.
  *
  * Normalises:
- *   - `pExpire` → `pexpire` (lowercase, returns boolean)
  *   - `eval(script, { keys, arguments })` → `eval(script, keys, args)`
  *   - `set()` return → `'OK' | null`
  */
@@ -74,13 +68,6 @@ export function wrapRedisClient(raw: RawRedisClient): RedisClientLike {
     },
     del(...keys) {
       return raw.del(...keys);
-    },
-    incr(key) {
-      return raw.incr(key);
-    },
-    async pexpire(key, ttlMs) {
-      const result = await raw.pExpire(key, ttlMs);
-      return Boolean(result);
     },
     eval(script, keys, args) {
       return raw.eval(script, { keys, arguments: args });

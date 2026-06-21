@@ -26,14 +26,6 @@ const {
     lrange: vi.fn(),
     lpush: vi.fn(),
     ltrim: vi.fn(),
-    hincrby: vi.fn(),
-    hgetall: vi.fn(),
-    hset: vi.fn(),
-    sadd: vi.fn(),
-    smembers: vi.fn(),
-    srem: vi.fn(),
-    incr: vi.fn(),
-    expire: vi.fn(),
   },
   mockRequireAdminSessionFromContext: vi.fn(),
   mockCheckAndIncrementAdminOperationAttempt: vi.fn(),
@@ -239,14 +231,6 @@ function resetMockDefaults(): void {
   mockRedis.lrange.mockResolvedValue([]);
   mockRedis.lpush.mockResolvedValue(1);
   mockRedis.ltrim.mockResolvedValue(undefined);
-  mockRedis.hincrby.mockResolvedValue(1);
-  mockRedis.hgetall.mockResolvedValue({});
-  mockRedis.hset.mockResolvedValue(1);
-  mockRedis.sadd.mockResolvedValue(1);
-  mockRedis.smembers.mockResolvedValue([]);
-  mockRedis.srem.mockResolvedValue(1);
-  mockRedis.incr.mockResolvedValue(1);
-  mockRedis.expire.mockResolvedValue(true);
 
   // Admin module defaults
   mockCheckAndIncrementAdminOperationAttempt.mockResolvedValue({

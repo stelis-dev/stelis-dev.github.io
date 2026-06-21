@@ -25,7 +25,7 @@ import { requireEnv } from '../env.js';
 import { safeErrorSummary, writeAdminAuditLog } from '../adminAuditLog.js';
 import { mapError, respondMapped } from '../errorMap.js';
 
-const NONCE_TTL_SECONDS = 60;
+const NONCE_TTL_MS = 60_000;
 
 async function getAdminRedis(getCtx: () => Promise<AppApiContext>): Promise<AdminRedisClient> {
   return createAdminRedisAdapter((await getCtx()).redis);
@@ -46,7 +46,7 @@ export function createAuthRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       const nonce = `stelis-admin-login:${crypto.randomUUID()}:${Date.now()}`;
-      await redis.set(`stelis:admin:nonce:${nonce}`, '1', { ex: NONCE_TTL_SECONDS });
+      await redis.set(`stelis:admin:nonce:${nonce}`, '1', { px: NONCE_TTL_MS });
       return c.json({ nonce });
     } catch (err) {
       const mapped = mapError(err);

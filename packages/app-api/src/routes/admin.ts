@@ -236,7 +236,7 @@ function tryPromotionErrorResponse(c: Parameters<typeof tryBodyErrorResponse>[0]
 const IP_PREFIX = 'stelis:abuse:block:ip:';
 const ADDR_PREFIX = 'stelis:abuse:block:address:';
 const WITHDRAW_NONCE_PREFIX = 'stelis:admin:withdraw_nonce:';
-const WITHDRAW_NONCE_TTL_SECONDS = 60;
+const WITHDRAW_NONCE_TTL_MS = 60_000;
 const WITHDRAW_GAS_BUFFER_MIST = 50_000_000n;
 const AMOUNT_MIST_REGEX = /^(?:0|[1-9]\d*)$/;
 
@@ -496,8 +496,10 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       ip = getClientIp(c);
       const redis = await getAdminRedis(getCtx);
       const nonce = `stelis-withdraw:${crypto.randomUUID()}:${Date.now()}`;
-      await redis.set(`${WITHDRAW_NONCE_PREFIX}${nonce}`, '1', { ex: WITHDRAW_NONCE_TTL_SECONDS });
-      const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_SECONDS * 1000).toISOString();
+      await redis.set(`${WITHDRAW_NONCE_PREFIX}${nonce}`, '1', {
+        px: WITHDRAW_NONCE_TTL_MS,
+      });
+      const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_MS).toISOString();
       return c.json({ nonce, expiresAt });
     } catch (err) {
       const mapped = mapError(err);

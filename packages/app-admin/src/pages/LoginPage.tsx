@@ -109,7 +109,6 @@ function AdminLoginForm({ network }: { network: AppAdminNetwork }) {
   return (
     <div className="login-page">
       <div className="login-card">
-        <div className="login-logo">⬡</div>
         <h1 className="login-title">Stelis Admin</h1>
         <p className="login-subtitle">Sign with your admin wallet to continue</p>
         <p style={{ fontSize: 11, color: '#64748b', margin: '-4px 0 12px', textAlign: 'center' }}>
@@ -186,7 +185,6 @@ export function LoginPage() {
     return (
       <div className="login-page">
         <div className="login-card">
-          <div className="login-logo">⬡</div>
           <h1 className="login-title">Stelis Admin</h1>
           <p style={{ color: '#f87171', fontSize: 13, textAlign: 'center' }}>{error}</p>
           <button
@@ -209,7 +207,6 @@ export function LoginPage() {
     return (
       <div className="login-page">
         <div className="login-card">
-          <div className="login-logo">⬡</div>
           <h1 className="login-title">Stelis Admin</h1>
           <p className="login-subtitle" style={{ opacity: 0.6 }}>
             Loading configuration…

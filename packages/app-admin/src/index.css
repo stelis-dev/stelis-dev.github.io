@@ -59,11 +59,6 @@ body {
     border-bottom: 1px solid #1e2330;
 }
 
-.admin-logo {
-    font-size: 22px;
-    color: #6366f1;
-}
-
 .admin-nav {
     flex: 1;
     padding: 12px 10px;
@@ -325,7 +320,6 @@ body {
     text-align: center;
 }
 
-.login-logo { font-size: 40px; color: #6366f1; margin-bottom: 16px; display: block; }
 .login-title { font-size: 22px; font-weight: 700; color: #f1f5f9; margin: 0 0 8px; }
 .login-subtitle { font-size: 13.5px; color: #64748b; margin: 0 0 28px; }
 

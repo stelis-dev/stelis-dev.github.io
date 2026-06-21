@@ -71,8 +71,6 @@ function makeMockRedis(): {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(0),
-    incr: vi.fn().mockResolvedValue(1),
-    pexpire: vi.fn().mockResolvedValue(true),
     hgetall: vi.fn().mockResolvedValue({}),
     scan: vi.fn().mockResolvedValue([]),
   };

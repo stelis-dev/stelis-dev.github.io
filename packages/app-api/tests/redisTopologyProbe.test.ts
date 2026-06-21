@@ -48,19 +48,12 @@ vi.mock('redis', () => ({
       get: vi.fn().mockResolvedValue(null),
       set: vi.fn().mockResolvedValue('OK'),
       del: vi.fn().mockResolvedValue(0),
-      incr: vi.fn().mockResolvedValue(1),
-      pExpire: vi.fn().mockResolvedValue(1),
       eval: vi.fn().mockResolvedValue(null),
       hGetAll: vi.fn().mockResolvedValue({}),
       ttl: vi.fn().mockResolvedValue(60),
       lRange: vi.fn().mockResolvedValue([]),
       lPush: vi.fn().mockResolvedValue(1),
       lTrim: vi.fn().mockResolvedValue(undefined),
-      hIncrBy: vi.fn().mockResolvedValue(1),
-      hSet: vi.fn().mockResolvedValue(1),
-      sAdd: vi.fn().mockResolvedValue(1),
-      sMembers: vi.fn().mockResolvedValue([]),
-      sRem: vi.fn().mockResolvedValue(1),
     };
     // sendCommand is conditionally present based on test scenario
     if (mockHasSendCommand) {

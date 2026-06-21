@@ -8,11 +8,10 @@
 import type { AdminRedisClient } from '@stelis/core-api/admin';
 import type { RedisClient } from './redisClient.js';
 
-function secondsToMilliseconds(seconds: number, label: string): number {
-  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
-    throw new Error(`[app-api] ${label} must be a positive integer number of seconds`);
+function assertPositiveTtlMs(ttlMs: number): void {
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new Error('[app-api] admin Redis PX must be a positive integer number of milliseconds');
   }
-  return seconds * 1000;
 }
 
 export function createAdminRedisAdapter(redis: RedisClient): AdminRedisClient {
@@ -21,13 +20,10 @@ export function createAdminRedisAdapter(redis: RedisClient): AdminRedisClient {
       return redis.get(key);
     },
     async set(key, value, options) {
-      await redis.set(
-        key,
-        value,
-        options?.ex != null
-          ? { px: secondsToMilliseconds(options.ex, 'admin Redis EX') }
-          : undefined,
-      );
+      if (options?.px != null) {
+        assertPositiveTtlMs(options.px);
+      }
+      await redis.set(key, value, options);
     },
     del(key) {
       return redis.del(key);
@@ -46,30 +42,6 @@ export function createAdminRedisAdapter(redis: RedisClient): AdminRedisClient {
     },
     ltrim(key, start, stop) {
       return redis.ltrim(key, start, stop);
-    },
-    hincrby(key, field, increment) {
-      return redis.hincrby(key, field, increment);
-    },
-    hgetall(key) {
-      return redis.hgetall(key);
-    },
-    hset(key, field, value) {
-      return redis.hset(key, field, value);
-    },
-    sadd(key, ...members) {
-      return redis.sadd(key, ...members);
-    },
-    smembers(key) {
-      return redis.smembers(key);
-    },
-    srem(key, ...members) {
-      return redis.srem(key, ...members);
-    },
-    incr(key) {
-      return redis.incr(key);
-    },
-    expire(key, seconds) {
-      return redis.pexpire(key, secondsToMilliseconds(seconds, 'admin Redis EXPIRE'));
     },
     eval(script, keys, args) {
       return redis.eval(script, keys, args);

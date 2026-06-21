@@ -12,14 +12,6 @@ function makeRedis(): AdminRedisClient {
     lrange: vi.fn(),
     lpush: vi.fn().mockResolvedValue(1),
     ltrim: vi.fn().mockResolvedValue(undefined),
-    hincrby: vi.fn(),
-    hgetall: vi.fn(),
-    hset: vi.fn(),
-    sadd: vi.fn(),
-    smembers: vi.fn(),
-    srem: vi.fn(),
-    incr: vi.fn(),
-    expire: vi.fn(),
     eval: vi.fn(),
   } as unknown as AdminRedisClient;
 }

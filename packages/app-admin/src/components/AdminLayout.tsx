@@ -133,7 +133,6 @@ export function AdminLayout() {
       <div className="admin-shell">
         <aside className="admin-sidebar">
           <div className="admin-sidebar-brand">
-            <span className="admin-logo">⬡</span>
             <span>Stelis Admin</span>
           </div>
           <nav className="admin-nav">
