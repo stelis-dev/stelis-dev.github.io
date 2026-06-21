@@ -49,7 +49,7 @@ Tools also accept `relayApiUrl`, which overrides `STELIS_RELAY_API_URL` for that
 
 ## Tool Model
 
-The server follows the Stelis API agent tier model:
+The server uses this credential and signing model:
 
 - capability discovery requires no credential
 - generic prepare requires caller-provided `txKindBytes`, `senderAddress`, `settlementTokenType`, and prepare authorization fields signed by the sender wallet
