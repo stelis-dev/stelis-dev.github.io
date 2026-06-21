@@ -93,7 +93,10 @@ export async function claimPromotion(
 
 export async function preparePromotionSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayApiScopedInput & { developerJwt: string; promotionId: string } & PromotionPrepareRequest,
+  input: RelayApiScopedInput & {
+    developerJwt: string;
+    promotionId: string;
+  } & PromotionPrepareRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
     relayApiUrl: input.relayApiUrl,
@@ -111,7 +114,10 @@ export async function preparePromotionSponsoredTransaction(
 
 export async function submitPromotionSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayApiScopedInput & { developerJwt: string; promotionId: string } & PromotionSponsorRequest,
+  input: RelayApiScopedInput & {
+    developerJwt: string;
+    promotionId: string;
+  } & PromotionSponsorRequest,
 ): Promise<JsonObject> {
   return requestJson<JsonObject>(config, {
     relayApiUrl: input.relayApiUrl,

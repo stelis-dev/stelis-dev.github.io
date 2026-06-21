@@ -702,7 +702,10 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
 
     const pass2CreditCall = mockBuildSettleWithCreditPtb.mock.calls[
       mockBuildSettleWithCreditPtb.mock.calls.length - 1
-    ] as [unknown, { executionCostClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint }];
+    ] as [
+      unknown,
+      { executionCostClaim: bigint; slippageBufferMist: bigint; useCreditAmount: bigint },
+    ];
     expect(pass2CreditCall[1].executionCostClaim).toBe(3_000_000n);
     expect(pass2CreditCall[1].slippageBufferMist).toBe(0n);
     expect(pass2CreditCall[1].useCreditAmount).toBe(4_500_000n);

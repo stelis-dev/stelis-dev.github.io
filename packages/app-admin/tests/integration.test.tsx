@@ -758,7 +758,7 @@ describe('SecurityPage integration', () => {
       () => {
         expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Security');
         expect(screen.getByText('Abuse Blocklist')).toBeDefined();
-        expect(screen.getByText('Auth Audit')).toBeDefined();
+        expect(screen.getByText('Admin Audit')).toBeDefined();
         expect(screen.getByText('admin_login_success')).toBeDefined();
         expect(screen.queryByText('Sponsor Operations Gate')).toBeNull();
       },

@@ -396,7 +396,12 @@ export function extractPaymentInputTrace(
   const paymentRef = parseCommandRef(settleCmd.arguments[paymentCoinIndex]);
   const refKind = paymentCoinRefKind(paymentRef);
 
-  const directRedeem = tryExtractDirectRedeemTrace(paymentRef, commands, inputs, settlementTokenType);
+  const directRedeem = tryExtractDirectRedeemTrace(
+    paymentRef,
+    commands,
+    inputs,
+    settlementTokenType,
+  );
   if (directRedeem) {
     if (refKind !== 'result' && refKind !== 'nested_result') {
       throw new Error(`Address-balance payment coin must be a command result, got ${refKind}`);

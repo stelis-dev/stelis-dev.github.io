@@ -196,7 +196,9 @@ describe('Settle ABI lock — production entry points', () => {
 
       it(`execution_cost_claim_mist parameter position equals VARIANT_LAYOUTS.${entry.variantClass}.settleStartIndex`, () => {
         const params = extractMoveFunctionParams(moveSrc, entryName);
-        const executionCostClaimIdx = params.findIndex((p) => p.name === 'execution_cost_claim_mist');
+        const executionCostClaimIdx = params.findIndex(
+          (p) => p.name === 'execution_cost_claim_mist',
+        );
         expect(
           executionCostClaimIdx,
           `'execution_cost_claim_mist' not found in ${entry.contractKey} parameters`,

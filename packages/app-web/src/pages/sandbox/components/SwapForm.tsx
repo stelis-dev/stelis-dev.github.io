@@ -43,7 +43,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
     ? getSelectedSettlementSwapPath(sdk, settlementSwapPathIndex)
     : null;
   const settlementTokenType = selectedSettlementSwapPath?.settlementTokenType ?? '';
-  const settlementTokenLabel = selectedSettlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
+  const settlementTokenLabel =
+    selectedSettlementSwapPath?.settlementTokenSymbol ?? 'settlement token';
   const testPair = settlementTokenType ? findTestSwapPair(network, settlementTokenType) : null;
   // Direct-swap demo scope gate (unsupported_hop_count / fee_bearing). See
   // sandbox/constants.ts. Fee-bearing paths require min-out/slippage UX that
@@ -190,7 +191,12 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
   };
 
   const swapDisabled =
-    !account || !sdk || !selectedSettlementSwapPath || isBusy || !testPair || demoRejectReason !== null;
+    !account ||
+    !sdk ||
+    !selectedSettlementSwapPath ||
+    isBusy ||
+    !testPair ||
+    demoRejectReason !== null;
 
   return (
     <div style={SANDBOX_CARD_STYLE}>
@@ -224,7 +230,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
             border: '1px solid rgba(245,158,11,0.2)',
           }}
         >
-          No hardcoded DeepBook pair is registered for {settlementTokenLabel} on {network}. Add one in
+          No hardcoded DeepBook pair is registered for {settlementTokenLabel} on {network}. Add one
+          in
           <code style={{ margin: '0 4px' }}>testSwapPairs.ts</code>to enable direct acquisition.
         </div>
       )}
@@ -239,8 +246,8 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           borderRadius: 6,
         }}
       >
-        ⚡ Direct DeepBook swap: pay gas in SUI. Use this to acquire {settlementTokenLabel} tokens for
-        testing.
+        ⚡ Direct DeepBook swap: pay gas in SUI. Use this to acquire {settlementTokenLabel} tokens
+        for testing.
       </div>
 
       <div style={{ marginBottom: 12 }}>

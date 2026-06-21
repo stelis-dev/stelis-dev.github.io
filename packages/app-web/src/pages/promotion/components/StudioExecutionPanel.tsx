@@ -225,8 +225,8 @@ export function StudioExecutionPanel({
       <h3 className="promo-panel-title">🚀 Promotion Sponsored Execution</h3>
       <p className="promo-panel-desc">
         Execute a promotion-sponsored transaction. Uses <code>sdk.preparePromotionSponsored()</code>{' '}
-        and <code>sdk.sponsorPromotionSponsored()</code>. No settlement token or settlement swap path
-        needed — promotion budget covers gas. Builds a MoveCall-only TX (
+        and <code>sdk.sponsorPromotionSponsored()</code>. No settlement token or settlement swap
+        path needed — promotion budget covers gas. Builds a MoveCall-only TX (
         <code>coin::zero&lt;SUI&gt;</code>).
       </p>
 

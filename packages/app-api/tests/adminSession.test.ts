@@ -29,15 +29,6 @@ const { mockRedis } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@stelis/core-api/admin', async (importOriginal) => {
-  const actual = (await importOriginal()) as typeof import('@stelis/core-api/admin');
-  return {
-    ...actual,
-    // Only mock Redis — keep real JWT sign/verify
-    getRedisForAdmin: vi.fn().mockResolvedValue(mockRedis),
-  };
-});
-
 // ── Mock env ────────────────────────────────────────────────────────────────
 const TEST_JWT_SECRET = 'test-admin-jwt-secret-at-least-32-chars!!';
 
@@ -139,7 +130,7 @@ describe('cookie parsing', () => {
     app = new Hono();
     // Test route that exercises requireAdminSession directly
     app.get('/test-session', async (c) => {
-      const session = await requireAdminSession(c);
+      const session = await requireAdminSession(c, mockRedis);
       if (!session) return c.json({ ok: false }, 401);
       return c.json({ ok: true, address: session.address });
     });
@@ -205,7 +196,7 @@ describe('not_before enforcement', () => {
     vi.clearAllMocks();
     app = new Hono();
     app.get('/test-session', async (c) => {
-      const session = await requireAdminSession(c);
+      const session = await requireAdminSession(c, mockRedis);
       if (!session) return c.json({ ok: false }, 401);
       return c.json({ ok: true, address: session.address });
     });
@@ -276,7 +267,7 @@ describe('fail-closed behavior', () => {
     vi.clearAllMocks();
     app = new Hono();
     app.get('/test-session', async (c) => {
-      const session = await requireAdminSession(c);
+      const session = await requireAdminSession(c, mockRedis);
       if (!session) return c.json({ ok: false }, 401);
       return c.json({ ok: true, address: session.address });
     });

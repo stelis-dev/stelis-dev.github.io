@@ -103,9 +103,7 @@ export function SponsoredLogsKpi({ summary, loading }: SponsoredLogsKpiProps) {
         >
           {cumulativeLossSui} SUI
         </div>
-        <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
-          sum of negative host net
-        </div>
+        <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>sum of negative host net</div>
       </div>
 
       <div className="admin-card">

@@ -11,9 +11,7 @@ import { buildSponsorRefillAccountWithdrawMessage } from '@stelis/contracts';
 // ── Hoisted mocks ───────────────────────────────────────────────────────
 const {
   mockRedis,
-  mockRequireAdminSession,
-  mockGetRedisForAdmin,
-  mockPushAdminOperationLog,
+  mockRequireAdminSessionFromContext,
   mockCheckAndIncrementAdminOperationAttempt,
   mockVerifySignedMessage,
   mockParseSponsorKey,
@@ -37,9 +35,7 @@ const {
     incr: vi.fn(),
     expire: vi.fn(),
   },
-  mockRequireAdminSession: vi.fn(),
-  mockGetRedisForAdmin: vi.fn(),
-  mockPushAdminOperationLog: vi.fn(),
+  mockRequireAdminSessionFromContext: vi.fn(),
   mockCheckAndIncrementAdminOperationAttempt: vi.fn(),
   mockVerifySignedMessage: vi.fn(),
   mockParseSponsorKey: vi.fn(),
@@ -47,14 +43,12 @@ const {
 }));
 
 vi.mock('@stelis/core-api/admin', () => ({
-  getRedisForAdmin: mockGetRedisForAdmin,
-  pushAdminOperationLog: mockPushAdminOperationLog,
   checkAndIncrementAdminOperationAttempt: mockCheckAndIncrementAdminOperationAttempt,
   verifySignedMessage: mockVerifySignedMessage,
 }));
 
 vi.mock('../src/requireAdminSession.js', () => ({
-  requireAdminSession: mockRequireAdminSession,
+  requireAdminSessionFromContext: mockRequireAdminSessionFromContext,
 }));
 
 vi.mock('../src/clientIp.js', () => ({
@@ -105,6 +99,7 @@ vi.mock('@mysten/sui/transactions', () => {
 
 import { createAdminRoutes } from '../src/routes/admin.js';
 import type { AppApiContext } from '../src/context.js';
+import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 
 function createMockCtx(): AppApiContext {
   return {
@@ -181,7 +176,7 @@ function createMockCtx(): AppApiContext {
       }),
     },
     rpcEndpointUrls: ['https://fullnode.testnet.sui.io:443'],
-    redis: {} as never,
+    redis: mockRedis as never,
     sponsorOperations: {
       // Default returns a healthy single-slot state. Individual tests
       // override via `(ctx.sponsorOperations.readState as Mock).mockResolvedValue(...)`.
@@ -247,8 +242,6 @@ function resetMockDefaults(): void {
   mockRedis.expire.mockResolvedValue(true);
 
   // Admin module defaults
-  mockGetRedisForAdmin.mockResolvedValue(mockRedis);
-  mockPushAdminOperationLog.mockResolvedValue(undefined);
   mockCheckAndIncrementAdminOperationAttempt.mockResolvedValue({
     allowed: true,
     current: 1,
@@ -257,7 +250,7 @@ function resetMockDefaults(): void {
   mockVerifySignedMessage.mockResolvedValue(true);
 
   // Session
-  mockRequireAdminSession.mockResolvedValue({
+  mockRequireAdminSessionFromContext.mockResolvedValue({
     address: '0xADMIN',
     iat: 1000,
     exp: 2000,
@@ -290,7 +283,7 @@ describe('admin routes', () => {
 
   describe('auth guard middleware', () => {
     it('returns 401 when requireAdminSession returns null', async () => {
-      mockRequireAdminSession.mockResolvedValueOnce(null);
+      mockRequireAdminSessionFromContext.mockResolvedValueOnce(null);
       const res = await app.request('/api/blocklist');
       expect(res.status).toBe(401);
     });
@@ -346,6 +339,7 @@ describe('admin routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.logs).toEqual(['log1', 'log2']);
+      expect(mockRedis.lrange).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
     });
   });
 
@@ -827,14 +821,14 @@ describe('admin routes', () => {
         expect(body.promotion.type).toBe('gas_sponsorship');
       });
 
-      it('POST /api/promotions success emits a PROMOTION_CREATE ops-log entry', async () => {
+      it('POST /api/promotions success emits a PROMOTION_CREATE audit entry', async () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Audited Promo',
           maxParticipants: 42,
           perUserGasAllowanceMist: '2500000',
         });
-        mockPushAdminOperationLog.mockClear();
+        mockRedis.lpush.mockClear();
 
         const res = await app.request('/api/promotions', {
           method: 'POST',
@@ -846,16 +840,18 @@ describe('admin routes', () => {
           promotion: { promotionId: string; maxParticipants: number };
         };
 
-        const createCalls = mockPushAdminOperationLog.mock.calls.filter(
-          (call) => (call[1] as { event?: string }).event === 'PROMOTION_CREATE',
-        );
-        expect(createCalls.length).toBe(1);
-        const entry = createCalls[0]![1] as {
+        const createCalls = mockRedis.lpush.mock.calls
+          .filter((call) => call[0] === ADMIN_AUDIT_LOG_KEY)
+          .map((call) => JSON.parse(call[1] as string) as { event?: string; detail?: string })
+          .filter((entry) => entry.event === 'PROMOTION_CREATE');
+        expect(createCalls).toHaveLength(1);
+        const entry = createCalls[0]! as {
           event: string;
           ts: string;
           ip: string;
           detail: string;
         };
+        expect(mockRedis.ltrim).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
         expect(entry.event).toBe('PROMOTION_CREATE');
         expect(entry.ts).toMatch(/\d{4}-\d{2}-\d{2}T/);
         expect(entry.ip).toBe('127.0.0.1');
@@ -1946,18 +1942,6 @@ describe('admin routes', () => {
       expect(mockCtx.host.getConfig).toHaveBeenCalled();
       expect(body.onChainIds).toBeDefined();
       expect(typeof body.studioEnabled).toBe('boolean');
-    });
-  });
-
-  describe('Redis acquire failure', () => {
-    it('POST /api/sponsor-refill-account/withdraw returns 500 when getAdminRedis rejects', async () => {
-      mockGetRedisForAdmin.mockRejectedValueOnce(new Error('Redis unavailable'));
-      const res = await app.request('/api/sponsor-refill-account/withdraw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amountMist: '1000', nonce: 'n', signature: 's' }),
-      });
-      expect(res.status).toBe(500);
     });
   });
 });

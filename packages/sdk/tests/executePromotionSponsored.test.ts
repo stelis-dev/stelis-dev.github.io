@@ -113,12 +113,16 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(
+    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
+  );
   return StelisSDK.connect('http://studio.local/relay', { studioEndpoint: true });
 }
 
 async function createNonStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(
+    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
+  );
   return StelisSDK.connect('http://relay.local/relay');
 }
 

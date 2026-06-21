@@ -138,7 +138,9 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(
+    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
+  );
   return StelisSDK.connect('http://mock.local/api');
 }
 

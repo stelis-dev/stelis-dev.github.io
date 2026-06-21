@@ -14,8 +14,6 @@ import {
   type SponsorOperationsStatus,
 } from '@stelis/contracts';
 import {
-  getRedisForAdmin,
-  pushAdminOperationLog,
   checkAndIncrementAdminOperationAttempt,
   verifySignedMessage,
   type AdminRedisClient,
@@ -30,9 +28,16 @@ import {
   SPONSOR_BALANCE_WARN_MIST,
   SPONSOR_BALANCE_REFILL_TARGET_MIST,
 } from '../sponsor-operations/defaults.js';
+import { createAdminRedisAdapter } from '../adminRedis.js';
+import {
+  ADMIN_AUDIT_LOG_KEY,
+  ADMIN_AUDIT_LOG_MAX_ENTRIES,
+  safeErrorSummary,
+  writeAdminAuditLog,
+} from '../adminAuditLog.js';
 import { deriveSponsorAvailabilitySummary } from '../sponsor-operations/gate.js';
 import type { AppApiContext } from '../context.js';
-import { requireAdminSession } from '../requireAdminSession.js';
+import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import { getClientIp } from '../clientIp.js';
 import { requireEnv, parseOptionalBooleanEnv, parseOptionalPositiveBigIntEnv } from '../env.js';
 import { parseChainBalanceMist } from '../sponsor-operations/balanceParsing.js';
@@ -229,8 +234,6 @@ function tryPromotionErrorResponse(c: Parameters<typeof tryBodyErrorResponse>[0]
 
 const IP_PREFIX = 'stelis:abuse:block:ip:';
 const ADDR_PREFIX = 'stelis:abuse:block:address:';
-const ADMIN_LOGS_KEY = 'stelis:admin:logs';
-const ADMIN_LOGS_MAX = 200;
 const WITHDRAW_NONCE_PREFIX = 'stelis:admin:withdraw_nonce:';
 const WITHDRAW_NONCE_TTL_SECONDS = 60;
 const WITHDRAW_GAS_BUFFER_MIST = 50_000_000n;
@@ -259,8 +262,8 @@ function parseSponsoredLogsLimit(raw: string | undefined): number | null {
   return n;
 }
 
-async function getAdminRedis(): Promise<AdminRedisClient> {
-  return getRedisForAdmin(requireEnv('REDIS_URL'));
+async function getAdminRedis(getCtx: () => Promise<AppApiContext>): Promise<AdminRedisClient> {
+  return createAdminRedisAdapter((await getCtx()).redis);
 }
 
 export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
@@ -268,7 +271,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── Auth guard middleware — all admin routes require session ───────
   app.use('*', async (c, next) => {
-    const session = await requireAdminSession(c);
+    const session = await requireAdminSessionFromContext(c, getCtx);
     if (!session) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
@@ -279,7 +282,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
   // ── GET /api/blocklist ────────────────────────────────────────────
   app.get('/blocklist', async (c) => {
     try {
-      const redis = await getAdminRedis();
+      const redis = await getAdminRedis(getCtx);
       const [ipKeys, addrKeys] = await Promise.all([
         redis.scan(`${IP_PREFIX}*`),
         redis.scan(`${ADDR_PREFIX}*`),
@@ -313,7 +316,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
         return c.json({ error: 'Unauthorized key prefix' }, 403);
       }
 
-      const redis = await getAdminRedis();
+      const redis = await getAdminRedis(getCtx);
       await redis.del(body.key);
       return c.json({ ok: true, deleted: body.key });
     } catch (err) {
@@ -326,8 +329,8 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
   // ── GET /api/logs ─────────────────────────────────────────────────
   app.get('/logs', async (c) => {
     try {
-      const redis = await getAdminRedis();
-      const entries = await redis.lrange(ADMIN_LOGS_KEY, 0, ADMIN_LOGS_MAX - 1);
+      const redis = await getAdminRedis(getCtx);
+      const entries = await redis.lrange(ADMIN_AUDIT_LOG_KEY, 0, ADMIN_AUDIT_LOG_MAX_ENTRIES - 1);
       return c.json({ logs: entries });
     } catch {
       return c.json({ error: 'Internal server error' }, 500);
@@ -489,17 +492,17 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
   app.get('/sponsor-refill-account/withdraw', async (c) => {
     const ip = getClientIp(c);
     try {
-      const redis = await getAdminRedis();
+      const redis = await getAdminRedis(getCtx);
       const nonce = `stelis-withdraw:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(`${WITHDRAW_NONCE_PREFIX}${nonce}`, '1', { ex: WITHDRAW_NONCE_TTL_SECONDS });
       const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_SECONDS * 1000).toISOString();
       return c.json({ nonce, expiresAt });
     } catch (err) {
-      await pushAdminOperationLog(await getAdminRedis(), {
+      await writeAdminAuditLog(await getAdminRedis(getCtx), {
         event: 'WITHDRAW_NONCE_ERROR',
         ts: new Date().toISOString(),
         ip,
-        detail: String(err),
+        detail: safeErrorSummary(err),
       }).catch(() => undefined);
       return c.json({ error: 'Internal server error' }, 500);
     }
@@ -510,11 +513,11 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
     try {
       const ip = getClientIp(c);
       const ts = () => new Date().toISOString();
-      const redis = await getAdminRedis();
+      const redis = await getAdminRedis(getCtx);
       // Atomic ops rate-limit check at entry
       const rateCheck = await checkAndIncrementAdminOperationAttempt(redis, ip);
       if (!rateCheck.allowed) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_RATE_LIMITED',
           ts: ts(),
           ip,
@@ -531,7 +534,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       };
       const { amountMist, nonce, signature } = body;
       if (!amountMist || !nonce || !signature) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
@@ -543,7 +546,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       // amountMist validation
       const isMax = amountMist === 'max';
       if (!isMax && !isValidAmountMist(amountMist)) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
@@ -559,7 +562,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       const nonceKey = `${WITHDRAW_NONCE_PREFIX}${nonce}`;
       const nonceDeleted = await redis.del(nonceKey);
       if (nonceDeleted === 0) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
@@ -573,7 +576,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       const message = buildSponsorRefillAccountWithdrawMessage(amountMist, nonce);
       const sigValid = await verifySignedMessage({ message, signature, adminAddress });
       if (!sigValid) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
@@ -617,7 +620,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
           const postWithdrawBalance =
             sponsorRefillAccountBalanceMist - BigInt(amountMist) - WITHDRAW_GAS_BUFFER_MIST;
           if (postWithdrawBalance < minRunwayMist) {
-            await pushAdminOperationLog(redis, {
+            await writeAdminAuditLog(redis, {
               event: 'WITHDRAWAL_BLOCKED',
               ts: ts(),
               ip,
@@ -632,7 +635,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
           }
         }
       } else if (refillEnabled && isMax) {
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_RUNWAY_BYPASS',
           ts: ts(),
           ip,
@@ -661,7 +664,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       const simTx = simResult.Transaction;
       if (!simTx || !simTx.status?.success) {
         const errMsg = simTx?.status?.error ?? 'dry-run failed';
-        await pushAdminOperationLog(redis, {
+        await writeAdminAuditLog(redis, {
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
@@ -694,7 +697,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
         /* non-critical */
       }
 
-      await pushAdminOperationLog(redis, {
+      await writeAdminAuditLog(redis, {
         event: 'WITHDRAWAL_SUCCESS',
         ts: ts(),
         ip,
@@ -716,16 +719,16 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       });
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error('[sponsor-refill-account/withdraw] Unexpected error:', err);
+      console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
       try {
-        const r = await getAdminRedis();
-        await pushAdminOperationLog(r, {
+        const r = await getAdminRedis(getCtx);
+        await writeAdminAuditLog(r, {
           event: 'WITHDRAWAL_ERROR',
           ts: new Date().toISOString(),
           ip: getClientIp(c),
-          detail: String(err),
+          detail: safeErrorSummary(err),
         });
       } catch {
         /* Redis unavailable — audit log best-effort */
@@ -848,7 +851,7 @@ export function createAdminRoutes(getCtx: () => Promise<AppApiContext>) {
       // Durable admin audit trail: emit the same operation-log event shape used by
       // every other admin write path so `/api/logs` and `app-admin` can
       // attribute promotion creation without bespoke sink wiring.
-      await pushAdminOperationLog(await getAdminRedis(), {
+      await writeAdminAuditLog(await getAdminRedis(getCtx), {
         event: 'PROMOTION_CREATE',
         ts: new Date().toISOString(),
         ip,

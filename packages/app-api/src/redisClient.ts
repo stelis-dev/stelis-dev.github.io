@@ -13,6 +13,15 @@ interface RedisRuntimeClient extends RawRedisClient {
   isOpen?: boolean;
   connect(): Promise<void>;
   quit(): Promise<void>;
+  ttl(key: string): Promise<number>;
+  lRange(key: string, start: number, stop: number): Promise<string[]>;
+  lPush(key: string, ...values: string[]): Promise<number>;
+  lTrim(key: string, start: number, stop: number): Promise<void>;
+  hIncrBy(key: string, field: string, increment: number): Promise<number>;
+  hSet(key: string, field: string, value: string): Promise<number>;
+  sAdd(key: string, ...members: string[]): Promise<number>;
+  sMembers(key: string): Promise<string[]>;
+  sRem(key: string, ...members: string[]): Promise<number>;
   /** Raw command execution — used for topology probe before wrapping. */
   sendCommand?(args: string[]): Promise<unknown>;
 }
@@ -35,6 +44,15 @@ async function loadRedisModule(): Promise<{
 }
 
 export interface RedisClient extends RedisClientLike {
+  ttl(key: string): Promise<number>;
+  lrange(key: string, start: number, stop: number): Promise<string[]>;
+  lpush(key: string, value: string): Promise<number>;
+  ltrim(key: string, start: number, stop: number): Promise<void>;
+  hincrby(key: string, field: string, increment: number): Promise<number>;
+  hset(key: string, field: string, value: string): Promise<number>;
+  sadd(key: string, ...members: string[]): Promise<number>;
+  smembers(key: string): Promise<string[]>;
+  srem(key: string, ...members: string[]): Promise<number>;
   dispose(): Promise<void>;
 }
 
@@ -66,6 +84,33 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
 
   return {
     ...wrapped,
+    ttl(key) {
+      return client.ttl(key);
+    },
+    lrange(key, start, stop) {
+      return client.lRange(key, start, stop);
+    },
+    lpush(key, value) {
+      return client.lPush(key, value);
+    },
+    ltrim(key, start, stop) {
+      return client.lTrim(key, start, stop);
+    },
+    hincrby(key, field, increment) {
+      return client.hIncrBy(key, field, increment);
+    },
+    hset(key, field, value) {
+      return client.hSet(key, field, value);
+    },
+    sadd(key, ...members) {
+      return client.sAdd(key, ...members);
+    },
+    smembers(key) {
+      return client.sMembers(key);
+    },
+    srem(key, ...members) {
+      return client.sRem(key, ...members);
+    },
     async dispose() {
       if (client.isOpen) {
         await client.quit();

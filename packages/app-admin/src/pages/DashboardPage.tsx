@@ -507,7 +507,9 @@ export function DashboardPage() {
                 style={{ fontFamily: 'monospace', fontSize: 13 }}
                 title={data.settlementPayoutRecipientAddress}
               >
-                {data.settlementPayoutRecipientAddress ? truncateAddress(data.settlementPayoutRecipientAddress) : '—'}{' '}
+                {data.settlementPayoutRecipientAddress
+                  ? truncateAddress(data.settlementPayoutRecipientAddress)
+                  : '—'}{' '}
                 {data.settlementPayoutRecipientAddress && (
                   <CopyButton value={data.settlementPayoutRecipientAddress} />
                 )}

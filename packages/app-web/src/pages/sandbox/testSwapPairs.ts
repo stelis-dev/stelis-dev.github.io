@@ -63,5 +63,7 @@ export function findTestSwapPair(
   network: SupportedNetwork,
   settlementTokenType: string,
 ): TestSwapPair | null {
-  return TEST_SWAP_PAIRS[network].find((p) => p.settlementTokenType === settlementTokenType) ?? null;
+  return (
+    TEST_SWAP_PAIRS[network].find((p) => p.settlementTokenType === settlementTokenType) ?? null
+  );
 }

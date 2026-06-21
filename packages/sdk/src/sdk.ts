@@ -241,7 +241,9 @@ export class StelisSDK {
    * Find the settlement swap path for a given settlement token type.
    * @throws if no settlement swap path is found for the given token type.
    */
-  getSettlementSwapPathForSettlementToken(settlementTokenType: string): SingleHopSettlementSwapPath {
+  getSettlementSwapPathForSettlementToken(
+    settlementTokenType: string,
+  ): SingleHopSettlementSwapPath {
     const settlementSwapPath = this._relayConfig.supportedSettlementSwapPaths.find(
       (p) => p.settlementTokenType === settlementTokenType,
     );
@@ -303,7 +305,8 @@ export class StelisSDK {
     // We chain using a reference input of 1e18 (high precision bigint).
     const composedMidPriceRaw = composePaymentToSuiMidPrice(settlementSwapPath, hopPrices);
     const rate = bigintToSafeNumberOrNull(composedMidPriceRaw);
-    const numerator = composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
+    const numerator =
+      composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
     const denominator = FLOAT_SCALING * 10n ** BigInt(SUI_DECIMALS);
     const suiPerTokenHuman = formatRatioDecimal(numerator, denominator, 4);
     const rateDisplay = `1 ${settlementSwapPath.settlementTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
@@ -374,7 +377,9 @@ export class StelisSDK {
       throw new Error('[StelisSDK] settlementToken is required.');
     }
 
-    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
+    const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(
+      opts.settlementToken.type,
+    );
 
     // 3. Vault/credit check for profile determination
     const credit = await queryUserCredit(client, this._vaultRegistryId, opts.addr);
@@ -579,11 +584,11 @@ export class StelisSDK {
       ? await sha256Bytes(new TextEncoder().encode(opts.orderId))
       : new Uint8Array(0);
     const settleFieldValidation = validateSettleTransactionFields(settleFields, {
-      executionCostClaimMist: parseDecimalBigInt(prepareRes.cost.executionCostClaim, 'executionCostClaim'),
-      quotedHostFeeMist: parseDecimalBigInt(
-        prepareRes.cost.quotedHostFee,
-        'quotedHostFee',
+      executionCostClaimMist: parseDecimalBigInt(
+        prepareRes.cost.executionCostClaim,
+        'executionCostClaim',
       ),
+      quotedHostFeeMist: parseDecimalBigInt(prepareRes.cost.quotedHostFee, 'quotedHostFee'),
       expectedProtocolFeeMist: parseDecimalBigInt(prepareRes.cost.protocolFee, 'protocolFee'),
       policyHash: hexToBytes(prepareRes.policyHash, 'policyHash'),
       orderIdHash,

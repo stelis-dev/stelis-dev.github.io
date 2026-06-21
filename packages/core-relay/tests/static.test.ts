@@ -404,13 +404,21 @@ describe('Layer 2: validateSettleArgs', () => {
   });
 
   it('fail — execution_cost_claim_mist > max_claim_mist', () => {
-    const result = validateSettleArgs({ ...validArgs, executionCostClaim: 50_000_001n }, CONFIG, ENV);
+    const result = validateSettleArgs(
+      { ...validArgs, executionCostClaim: 50_000_001n },
+      CONFIG,
+      ENV,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('L2_EXCESSIVE_CLAIM');
   });
 
   it('boundary — execution_cost_claim_mist == max_claim_mist passes', () => {
-    const result = validateSettleArgs({ ...validArgs, executionCostClaim: 50_000_000n }, CONFIG, ENV);
+    const result = validateSettleArgs(
+      { ...validArgs, executionCostClaim: 50_000_000n },
+      CONFIG,
+      ENV,
+    );
     expect(result).toEqual({ ok: true });
   });
 
@@ -480,21 +488,13 @@ describe('Layer 2: validateSettleArgs', () => {
 
   it('fail — L2_HOST_FEE_CAP: quoted_host_fee_mist exceeds on-chain cap', () => {
     // CONFIG.maxHostFeeMist = 500_000n; 500_001n exceeds cap by 1.
-    const result = validateSettleArgs(
-      { ...validArgs, quotedHostFeeMist: 500_001n },
-      CONFIG,
-      ENV,
-    );
+    const result = validateSettleArgs({ ...validArgs, quotedHostFeeMist: 500_001n }, CONFIG, ENV);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('L2_HOST_FEE_CAP');
   });
 
   it('boundary — quoted_host_fee_mist == max_host_fee_mist passes', () => {
-    const result = validateSettleArgs(
-      { ...validArgs, quotedHostFeeMist: 500_000n },
-      CONFIG,
-      ENV,
-    );
+    const result = validateSettleArgs({ ...validArgs, quotedHostFeeMist: 500_000n }, CONFIG, ENV);
     expect(result).toEqual({ ok: true });
   });
 

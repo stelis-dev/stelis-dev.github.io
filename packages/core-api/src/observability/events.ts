@@ -5,9 +5,8 @@
  * Scope: events emitted via `logStructuredEvent` / `logSponsorPoolEvent`
  * (server-interior sinks at `../structuredEventLog.ts` /
  * `../sponsorPoolEventLog.ts`). Redis-backed admin audit logs written
- * via `writeAuditLog` in `packages/app-api/src/routes/auth.ts` and
- * `pushAdminOperationLog` in `packages/app-api/src/routes/admin.ts` are a separate
- * observability path and are out of scope for this file.
+ * by `packages/app-api/src/adminAuditLog.ts` are a separate observability
+ * path and are out of scope for this file.
  *
  * The public operations summary is in `docs/operations.md#observability`.
  * This file remains the runtime event-name list. Do not mention a separate

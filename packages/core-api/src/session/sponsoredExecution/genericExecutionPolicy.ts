@@ -27,7 +27,11 @@ import {
   validateGenericUserTransactionKind,
   validateSettleArgs,
 } from '@stelis/core-relay';
-import type { AllowedSettlementSwapPath, OnchainConfig, HostValidationEnv } from '@stelis/core-relay';
+import type {
+  AllowedSettlementSwapPath,
+  OnchainConfig,
+  HostValidationEnv,
+} from '@stelis/core-relay';
 import { validatePaymentInputIntegrity } from '@stelis/core-relay/server';
 import type {
   StaticSettlementSwapPathDescriptor,
@@ -555,10 +559,7 @@ async function runGenericRequestValidation(
   state.slippageBps = slippageResult.value;
   state.gasMarginBps = gasMarginResult.value;
 
-  const userTx = await d.deserializeUserTxKind(
-    prepare.params.txKindBytes,
-    options.hostContext.sui,
-  );
+  const userTx = await d.deserializeUserTxKind(prepare.params.txKindBytes, options.hostContext.sui);
   const env = buildPrepareEnv(options.hostContext);
   const validationResult = validateGenericUserTransactionKind(
     userTx,
@@ -813,17 +814,15 @@ async function runGenericDecodeSponsorSubmission(
     );
   }
 
-  const peeked = await options.hostContext.prepareStore
-    .peek(ctx.receiptId)
-    .catch(async (err) => {
-      throw await handleCorruptPreparedEntry(
-        options.hostContext,
-        sponsor.errors,
-        ctx.receiptId,
-        err,
-        'peek',
-      );
-    });
+  const peeked = await options.hostContext.prepareStore.peek(ctx.receiptId).catch(async (err) => {
+    throw await handleCorruptPreparedEntry(
+      options.hostContext,
+      sponsor.errors,
+      ctx.receiptId,
+      err,
+      'peek',
+    );
+  });
   if (!peeked) {
     throw sponsor.errors.sponsorValidation(
       'PREPARED_TX_NOT_FOUND',
@@ -948,7 +947,8 @@ async function runGenericSharedPostconsumeChecks(
       sender: txSender,
       clientIp: ctx.clientIp,
     });
-    const message = 'Prepared nonce does not match the stored-hash-verified PTB nonce — retry /prepare';
+    const message =
+      'Prepared nonce does not match the stored-hash-verified PTB nonce — retry /prepare';
     setValidationFailure(state, message);
     throw sponsor.errors.sponsorValidation('REPREPARE_REQUIRED', message);
   }

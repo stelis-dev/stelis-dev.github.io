@@ -9,8 +9,9 @@
  */
 import type { Context } from 'hono';
 import { ADMIN_COOKIE, verifyAdminJwt } from './adminAuth.js';
-import { getRedisForAdmin } from '@stelis/core-api/admin';
-import { requireEnv } from './env.js';
+import type { AdminRedisClient } from '@stelis/core-api/admin';
+import type { AppApiContext } from './context.js';
+import { createAdminRedisAdapter } from './adminRedis.js';
 
 /** Unified not_before key for app-api. */
 export const NOT_BEFORE_KEY = 'stelis:app-api:admin:not_before';
@@ -25,11 +26,25 @@ export interface AdminSession {
   iatMs: number;
 }
 
+export async function requireAdminSessionFromContext(
+  c: Context,
+  getCtx: () => Promise<AppApiContext>,
+): Promise<AdminSession | null> {
+  try {
+    return await requireAdminSession(c, createAdminRedisAdapter((await getCtx()).redis));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Verify JWT signature + iatMs/exp finite + Redis not_before timestamp (ms).
  * Returns null on any failure (fail-closed).
  */
-export async function requireAdminSession(c: Context): Promise<AdminSession | null> {
+export async function requireAdminSession(
+  c: Context,
+  redis: AdminRedisClient,
+): Promise<AdminSession | null> {
   try {
     // Extract token from cookie
     const cookieHeader = c.req.header('cookie') ?? '';
@@ -41,7 +56,6 @@ export async function requireAdminSession(c: Context): Promise<AdminSession | nu
     if (!session) return null;
     // iat, exp, and iatMs are already validated as finite numbers by verifyAdminJwt
 
-    const redis = await getRedisForAdmin(requireEnv('REDIS_URL'));
     const raw = await redis.get(NOT_BEFORE_KEY);
 
     // fail-closed: key missing → reject (boot sets this key at startup)

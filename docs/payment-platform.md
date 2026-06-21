@@ -12,8 +12,14 @@ This document defines the product terms used by SDK, web app, and API package do
 | Admin app | The operator tool used to manage Host settings, sponsor state, settlement swap paths, and operating policy |
 | Studio | Promotion and policy-controlled flows layered on the same Host |
 | settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `settlementTokenType` for the token's Sui coin type. |
-| User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned and is not Host-owned balance. |
+| User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned, is not Host-owned balance, and cannot be treated as Host liquidity. |
 | Host execution role | The internal Host role for execution, sponsorship, and settlement fields such as `settlementPayoutRecipient`, `executionCostClaim`, and `hostFee` |
+
+## Sponsored Execution Operating Model
+
+A Host pays SUI gas for sponsored execution, but generic settlement is not modeled as a pure subsidy. When a generic sponsored transaction succeeds, settlement can recover the execution cost and configured host fee from the user's settlement source.
+
+This makes settlement swap path liquidity part of Host operations. A Host should only advertise settlement tokens and paths it is prepared to price, admit, and operate.
 
 ## Generic Settlement Flow
 

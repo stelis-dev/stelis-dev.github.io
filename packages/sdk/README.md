@@ -2,6 +2,8 @@
 
 SDK for Sui apps that use sponsored transactions through a Host.
 
+Use it when your app already builds a Sui transaction and wants a Host to sponsor execution, then settle the execution cost from a supported token or user-owned vault credit.
+
 - Built for: app developers, service developers, and integration agents using an existing Host.
 - Use for: `StelisSDK`, package-level TypeScript APIs, and links to integration, API, and demo docs.
 - Not for: full HTTP field definitions, Host deployment procedures, Host operations policy, or wallet custody.
@@ -418,9 +420,9 @@ Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans o
 
 ## External PTB Composition
 
-Stelis is designed as a general gas abstraction layer for Sui PTBs.
+Stelis is designed as a settlement layer for token-funded Sui PTB execution.
 The `Transaction` you pass into `executeSponsored()` can already
-contain external Move calls. Stelis then appends the final settlement step, prices
+contain external Move calls. Stelis then appends the settlement step, prices
 the sponsorship, and runs the Host-sponsored flow.
 
 This means Stelis is not tied to a single payment protocol or app contract.

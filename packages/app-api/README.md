@@ -1,6 +1,6 @@
 # @stelis/app-api
 
-Stelis Host runtime - Hono server for Relay API, auth, admin, and promotion endpoints.
+Deployable Host API for sponsoring Sui transactions and enforcing settlement policy. It runs as a Hono server with Relay API, auth, admin, and promotion endpoints.
 
 - Built for: Host operators deploying the provided Host runtime, plus maintainers changing it.
 - Use for: running the Relay API, admin API, auth routes, and promotion routes.

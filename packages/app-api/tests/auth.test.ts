@@ -22,7 +22,6 @@ const { mockRedis } = vi.hoisted(() => ({
 
 vi.mock('@stelis/core-api/admin', () => ({
   verifyAdminSignature: vi.fn().mockResolvedValue(true),
-  getRedisForAdmin: vi.fn().mockResolvedValue(mockRedis),
   checkAndIncrement: vi.fn().mockResolvedValue({ allowed: true, current: 1, retryAfterMs: 0 }),
   resetAttempts: vi.fn().mockResolvedValue(undefined),
 }));
@@ -36,9 +35,9 @@ vi.mock('../src/adminAuth.js', () => ({
   ADMIN_COOKIE: 'stelis_admin',
 }));
 
-// ── Mock requireAdminSession ────────────────────────────────────────────
+// ── Mock requireAdminSessionFromContext ─────────────────────────────────
 vi.mock('../src/requireAdminSession.js', () => ({
-  requireAdminSession: vi.fn().mockResolvedValue(null),
+  requireAdminSessionFromContext: vi.fn().mockResolvedValue(null),
 }));
 
 // ── Mock clientIp ───────────────────────────────────────────────────────
@@ -61,16 +60,17 @@ vi.mock('../src/env.js', () => ({
 
 import { createAuthRoutes } from '../src/routes/auth.js';
 import type { AppApiContext } from '../src/context.js';
-import { requireAdminSession } from '../src/requireAdminSession.js';
-import { getRedisForAdmin } from '@stelis/core-api/admin';
+import { requireAdminSessionFromContext } from '../src/requireAdminSession.js';
+import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 
 describe('auth routes', () => {
   let app: Hono;
+  let mockGetCtx: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    const getCtx = async () => ({}) as AppApiContext;
-    const routes = createAuthRoutes(getCtx);
+    mockGetCtx = vi.fn().mockResolvedValue({ redis: mockRedis } as unknown as AppApiContext);
+    const routes = createAuthRoutes(mockGetCtx as () => Promise<AppApiContext>);
     app = new Hono();
     app.route('/auth', routes);
   });
@@ -97,6 +97,25 @@ describe('auth routes', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'Too many requests. Try again in 15 minutes.',
       });
+    });
+
+    it('logs unexpected nonce errors without exposing internals to clients', async () => {
+      const { checkAndIncrement } = await import('@stelis/core-api/admin');
+      const failure = new Error('redis unavailable at redis://:secret@redis.example:6379');
+      (checkAndIncrement as ReturnType<typeof vi.fn>).mockRejectedValueOnce(failure);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        const res = await app.request('/auth/nonce');
+        expect(res.status).toBe(500);
+        await expect(res.json()).resolves.toEqual({ error: 'Internal server error' });
+        expect(errorSpy).toHaveBeenCalledWith(
+          '[app-api] /auth/nonce failed',
+          'Error: redis unavailable at redis://[REDACTED]@redis.example:6379',
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 
@@ -139,6 +158,8 @@ describe('auth routes', () => {
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(res.headers.get('Set-Cookie')).toContain('stelis_admin');
+      expect(mockRedis.lpush).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, expect.any(String));
+      expect(mockRedis.ltrim).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
     });
 
     it('returns 429 when rate limited', async () => {
@@ -210,13 +231,13 @@ describe('auth routes', () => {
   });
 
   describe('GET /auth/session', () => {
-    it('returns 401 when no session (requireAdminSession returns null)', async () => {
+    it('returns 401 when no session is available', async () => {
       const res = await app.request('/auth/session');
       expect(res.status).toBe(401);
     });
 
     it('returns 200 with session data when authenticated', async () => {
-      vi.mocked(requireAdminSession).mockResolvedValueOnce({
+      vi.mocked(requireAdminSessionFromContext).mockResolvedValueOnce({
         address: '0xADMIN',
         iat: 1000,
         exp: 2000,
@@ -270,9 +291,9 @@ describe('auth routes', () => {
     });
   });
 
-  describe('Redis acquire failure', () => {
-    it('POST /auth/verify returns 500 when getAdminRedis rejects', async () => {
-      vi.mocked(getRedisForAdmin).mockRejectedValueOnce(new Error('Redis unavailable'));
+  describe('context Redis acquire failure', () => {
+    it('POST /auth/verify returns 500 when Host context rejects', async () => {
+      mockGetCtx.mockRejectedValueOnce(new Error('Context unavailable'));
       const res = await app.request('/auth/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -281,8 +302,8 @@ describe('auth routes', () => {
       expect(res.status).toBe(500);
     });
 
-    it('POST /auth/renew returns 500 when getAdminRedis rejects', async () => {
-      vi.mocked(getRedisForAdmin).mockRejectedValueOnce(new Error('Redis unavailable'));
+    it('POST /auth/renew returns 500 when Host context rejects', async () => {
+      mockGetCtx.mockRejectedValueOnce(new Error('Context unavailable'));
       const res = await app.request('/auth/renew', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -337,7 +337,10 @@ function assertSingleHopOnly(settlementSwapPath: SingleHopSettlementSwapPath): v
 
 function materializePrefixUsage(tx: Transaction, settlementTokenType: string): PrefixUsage {
   const classification = classifyUserTxCoins(tx);
-  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(tx, settlementTokenType);
+  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(
+    tx,
+    settlementTokenType,
+  );
   if (unaccountable) {
     throw new PrepareValidationError(
       'UNACCOUNTABLE_WITHDRAWAL',
@@ -434,7 +437,11 @@ async function solveSwapForClaim(
   quoteCache?: QuoteCache,
 ): Promise<SolveSwapResult> {
   const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
-  const targetOutputMist = calculateRequiredSwapOutput(plannerConfig, plannerInput, executionCostClaim);
+  const targetOutputMist = calculateRequiredSwapOutput(
+    plannerConfig,
+    plannerInput,
+    executionCostClaim,
+  );
   const basePort = createDeepbookQuotePort(ctx.sui, ctx.deepbookPackageId);
   const { port, stats } = quoteCache
     ? wrapQuotePortWithCacheAndStats(basePort, quoteCache)
@@ -1221,7 +1228,11 @@ async function runPreparePass(
   };
 
   // ── Step 1: Credit-only eligibility (planner) ─────────────────────────
-  const creditCheck = checkCreditOnlyEligibility(plannerConfig, plannerInput, audit.executionCostClaim);
+  const creditCheck = checkCreditOnlyEligibility(
+    plannerConfig,
+    plannerInput,
+    audit.executionCostClaim,
+  );
   if (creditCheck && forcedSettlePath !== 'swap') {
     const plan = assembleCreditSettlementPlan(
       plannerInput,

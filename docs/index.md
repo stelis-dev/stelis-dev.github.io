@@ -4,6 +4,8 @@ This page shows where to start in the current repository documentation.
 
 The docs are kept small on purpose. A document is added only when its content has been checked against the current code.
 
+Stelis lets apps run programmable Sui transactions without asking users to manage SUI gas first. A Host, the deployed API service, pays SUI gas for execution, and generic settlement can recover the execution cost from supported user-held value.
+
 ## Start Here
 
 | Reader | Start with | Then |

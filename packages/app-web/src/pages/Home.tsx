@@ -52,8 +52,9 @@ export function HomePage() {
                   User-owned vault protection
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                  Vault credit lives in a user-owned Sui object. Settlement-token funding can use coin
-                  objects or address balance, and users can withdraw vault credit directly anytime.
+                  Vault credit lives in a user-owned Sui object. Settlement-token funding can use
+                  coin objects or address balance, and users can withdraw vault credit directly
+                  anytime.
                 </div>
               </div>
             </div>

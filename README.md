@@ -1,34 +1,36 @@
 # Stelis
 
-Stelis is a settlement layer for token-funded transaction execution on Sui.
+## Value Into Execution
 
-SUI remains the execution fuel. A user's held value becomes the settlement source for execution cost.
+Stelis lets users run programmable Sui transactions with value they already hold.
 
-## Beyond Transfers
+A user may hold stablecoins, protocol tokens, game tokens, or reusable user-owned credit, but still be blocked when transaction execution requires SUI gas.
 
-Sui has already shown a better blockchain UX with qualified stablecoin transfers that do not require users to pay SUI gas directly. This is an important step.
+Stelis closes that gap by separating execution from settlement. Technically, it is a settlement layer for token-funded transaction execution on Sui.
 
-Transfers are only the beginning. Real app usage does not stop at sending tokens. Purchases, subscriptions, protocol actions, game actions, and agent actions often require contract calls and Programmable Transaction Blocks.
+## A Concrete Flow
 
-Stelis extends this UX beyond transfers. It reduces native gas management for app, service, and agent actions that need programmable execution.
+A user holds USDC but no SUI.
+
+The user approves an in-app purchase. The app builds its normal Sui transaction. On Sui, that transaction can be a Programmable Transaction Block (PTB).
+
+Stelis sponsors execution with SUI gas, then settles the execution cost and configured fee from the user's USDC through a configured path into SUI.
+
+The user does not need to acquire SUI first. The app does not need to replace its payment, fulfillment, or refund model.
 
 ## Execution and Settlement
 
-The long-running blockchain UX problem is not that users lack value. Users may already hold stablecoins, protocol tokens, or other held value.
+SUI remains the execution fuel. The user's held value becomes the settlement source for execution cost.
 
-The problem is that execution is still tied to a native gas asset. Even when a wallet holds value, transaction execution stops if the required gas asset is missing.
+Stelis does not make Sui execution free, and it does not remove SUI from Sui execution. It moves native gas inventory out of the user-facing payment flow.
 
-Stelis separates execution from settlement.
-
-Transaction execution uses SUI gas. Execution cost can be settled from the user's held value.
-
-In other words, SUI remains the execution fuel, and held value becomes the settlement source.
+This also changes the operating model for sponsored transactions. Sponsorship does not have to remain a pure subsidy: the gas payer can provide SUI for execution, then recover the execution cost and configured fee through settlement. That is why usable settlement liquidity matters.
 
 ## Liquidity Makes Value Usable
 
 For a held token to become a settlement source for execution cost, it needs a path to settle into SUI.
 
-Stelis uses DeepBook for this path. DeepBook is Sui's on-chain liquidity infrastructure. Stelis does not automatically accept arbitrary tokens. Settlement tokens and DeepBook SUI settlement swap paths are explicitly configured and must satisfy pricing, fee, and request admission rules.
+Stelis uses DeepBook for this path. DeepBook is Sui's on-chain liquidity infrastructure. Stelis does not automatically accept arbitrary tokens. Settlement tokens and DeepBook SUI settlement swap paths are explicitly configured. Each configured path must pass configured pricing, fee, liquidity, and request admission checks.
 
 In this model, liquidity becomes usability infrastructure.
 
@@ -42,7 +44,7 @@ Stelis does not define checkout, payment, fulfillment, or refund formats.
 
 Apps can keep their own PTB structure, object model, and business logic. Existing payment SDKs, merchant backends, and external payment protocols can compose with Stelis instead of being replaced by it.
 
-Stelis handles execution-cost settlement underneath. Payment products can focus on their own user experience, while users do not need to manage native gas directly.
+Stelis handles execution-cost settlement underneath those systems. Payment products can focus on their own user experience, while users do not need to manage native gas directly.
 
 ## Operating a Host
 
@@ -91,9 +93,11 @@ Stelis implements this model while preserving Sui's execution model.
 
 Programmable Transaction Blocks let user actions and settlement paths be composed in one execution flow. Sponsored gas separates the sender from the gas payer.
 
+Stelis does not require apps to move their business state into a shared Stelis object. App objects remain app-owned, and Stelis composes the settlement path around the app's PTB flow.
+
 A User Vault is a reusable settlement source owned by the user. It preserves the user's asset boundary while giving wallets, apps, services, and agents a way to turn held value into execution capacity.
 
-Object ownership keeps User Vault credit user-owned instead of turning it into Host-owned balance.
+A User Vault is not a Host balance. The Host cannot treat it as its own liquidity. The vault remains user-owned, and withdrawal authority stays with the user through the vault module.
 
 ## Product Entry Points
 

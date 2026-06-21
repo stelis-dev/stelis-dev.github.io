@@ -159,7 +159,9 @@ function makeMockSuiClient(overrides?: { listCoins?: ReturnType<typeof vi.fn> })
 async function createSDK(): Promise<StelisSDK> {
   // Mock the internal /relay/config fetch that StelisSDK.connect() uses.
   // The StelisClient constructor is mocked — getStatus() resolves immediately.
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }));
+  mockFetch.mockResolvedValueOnce(
+    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
+  );
   return StelisSDK.connect('http://mock.local/api');
 }
 

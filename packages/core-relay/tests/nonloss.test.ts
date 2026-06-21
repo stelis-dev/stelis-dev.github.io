@@ -32,7 +32,10 @@ describe('Layer 3: validateNonlossSponsor', () => {
 
   // 1. Nonloss guarantee
   it('fail — executionCostClaim < simGas + gasVarianceFixedMist + slippageBufferMist', () => {
-    const result = validateNonlossSponsor(makeSponsorCtx({ executionCostClaim: 7_349_999n }), CONFIG);
+    const result = validateNonlossSponsor(
+      makeSponsorCtx({ executionCostClaim: 7_349_999n }),
+      CONFIG,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('L3_NONLOSS_VIOLATION');
   });

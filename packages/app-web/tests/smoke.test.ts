@@ -21,7 +21,10 @@ describe('relayApiEndpoint', () => {
   it('root frontend builds do not override deployment URLs', async () => {
     const fs = await import('fs');
     const path = await import('path');
-    const rootPackageJson = fs.readFileSync(path.resolve(__dirname, '../../../package.json'), 'utf-8');
+    const rootPackageJson = fs.readFileSync(
+      path.resolve(__dirname, '../../../package.json'),
+      'utf-8',
+    );
     expect(rootPackageJson).toContain('"build:app-web": "npm run build -w @stelis/app-web"');
     expect(rootPackageJson).toContain('"build:app-admin": "npm run build -w @stelis/app-admin"');
     expect(rootPackageJson).not.toContain(
@@ -58,7 +61,11 @@ describe('Sandbox SDK wiring', () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { settlementTokenType: '0xTOKEN', settlementTokenSymbol: 'TOKEN', settlementTokenDecimals: 6 },
+        {
+          settlementTokenType: '0xTOKEN',
+          settlementTokenSymbol: 'TOKEN',
+          settlementTokenDecimals: 6,
+        },
       ],
     };
     const settlementSwapPath = getSelectedSettlementSwapPath(mockSdk as never);
@@ -78,8 +85,16 @@ describe('Sandbox SDK wiring', () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { settlementTokenType: '0xDEEP', settlementTokenSymbol: 'DEEP', settlementTokenDecimals: 6 },
-        { settlementTokenType: '0xUSDC', settlementTokenSymbol: 'USDC', settlementTokenDecimals: 6 },
+        {
+          settlementTokenType: '0xDEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
+        },
+        {
+          settlementTokenType: '0xUSDC',
+          settlementTokenSymbol: 'USDC',
+          settlementTokenDecimals: 6,
+        },
       ],
     };
     expect(getSelectedSettlementSwapPath(mockSdk as never, 0).settlementTokenSymbol).toBe('DEEP');
@@ -90,7 +105,11 @@ describe('Sandbox SDK wiring', () => {
     const { getSelectedSettlementSwapPath } = await import('../src/pages/sandbox/constants');
     const mockSdk = {
       supportedSettlementSwapPaths: [
-        { settlementTokenType: '0xDEEP', settlementTokenSymbol: 'DEEP', settlementTokenDecimals: 6 },
+        {
+          settlementTokenType: '0xDEEP',
+          settlementTokenSymbol: 'DEEP',
+          settlementTokenDecimals: 6,
+        },
       ],
     };
     expect(() => getSelectedSettlementSwapPath(mockSdk as never, 5)).toThrow('out of range');

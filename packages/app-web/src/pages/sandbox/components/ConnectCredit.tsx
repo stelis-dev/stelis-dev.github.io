@@ -136,9 +136,7 @@ export function ConnectCredit({
 
       {/* Settlement Swap Path Status */}
       <div style={{ fontSize: 13, color: 'var(--text-secondary, #aaa)', marginBottom: 8 }}>
-        {sdkError && (
-          <div style={{ color: '#f44336', marginBottom: 6 }}>SDK: {sdkError}</div>
-        )}
+        {sdkError && <div style={{ color: '#f44336', marginBottom: 6 }}>SDK: {sdkError}</div>}
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
           <span>{settlementTokenSymbol}/SUI Rate:</span>
           <strong style={{ color: settlementSwapPathStatus.hasLiquidity ? '#4caf50' : '#f44336' }}>

@@ -24,6 +24,8 @@ The settlement payout sent to the configured settlement payout recipient is:
 settlementPayout = executionCostClaim + quotedHostFeeMist
 ```
 
+These equations are why generic sponsored execution is not modeled as a pure subsidy. The sponsor pays SUI gas up front, while successful settlement recovers the execution cost claim and quoted host fee through the settlement payout.
+
 ## Sponsor Approval Gate
 
 The sponsor must reject a transaction when the execution cost claim is lower than the required claim:

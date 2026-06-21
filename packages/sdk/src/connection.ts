@@ -8,7 +8,11 @@ import {
   SETTLEMENT_SWAP_DIRECTION_VECTORS,
   VALID_SETTLEMENT_SWAP_DIRECTIONS,
 } from '@stelis/contracts';
-import type { RelayConfigResponse, SingleHopSettlementSwapPath, StelisRequestTimeouts } from './types.js';
+import type {
+  RelayConfigResponse,
+  SingleHopSettlementSwapPath,
+  StelisRequestTimeouts,
+} from './types.js';
 
 const DEFAULT_RELAY_CONFIG_TIMEOUT_MS = 5_000;
 const MIST_STRING_RE = /^(?:0|[1-9]\d*)$/;
@@ -60,7 +64,9 @@ export function parseRelayConfigResponse(data: unknown): RelayConfigResponse {
 
   const settlementPayoutRecipient = raw.settlementPayoutRecipient;
   if (typeof settlementPayoutRecipient !== 'string' || settlementPayoutRecipient.length === 0) {
-    throw new Error('Invalid /relay/config response: settlementPayoutRecipient must be a non-empty string');
+    throw new Error(
+      'Invalid /relay/config response: settlementPayoutRecipient must be a non-empty string',
+    );
   }
 
   const supportedSettlementSwapPaths = raw.supportedSettlementSwapPaths;

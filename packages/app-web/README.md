@@ -1,6 +1,6 @@
 # @stelis/app-web
 
-Demo Vite + React SPA for evaluating a deployed Stelis Host.
+Public demo web app for checking a deployed Stelis Host, trying direct Relay API calls, and running sandbox transaction flows.
 
 - Built for: app developers, service developers, and agent clients checking a live Host before integration.
 - Use for: `/docs`, `/playground`, `/sandbox`, `/status`, and the static demo frontend bundle.

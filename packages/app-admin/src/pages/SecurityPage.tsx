@@ -1,5 +1,5 @@
 /**
- * SecurityPage — abuse blocklist management and auth audit review.
+ * SecurityPage — abuse blocklist management and admin audit review.
  */
 import { useEffect, useState, useCallback } from 'react';
 import { getAuditLogs, getBlocklist, removeBlocklistEntry, type BlockEntry } from '../api/client';
@@ -143,14 +143,14 @@ export function SecurityPage() {
           }}
         >
           <div className="admin-card-title" style={{ margin: 0 }}>
-            Auth Audit
+            Admin Audit
           </div>
           <button className="admin-btn admin-btn-primary" onClick={() => void loadAuditLogs()}>
             Refresh
           </button>
         </div>
         {auditLogs.length === 0 ? (
-          <p style={{ color: '#64748b', margin: 0 }}>No auth events recorded.</p>
+          <p style={{ color: '#64748b', margin: 0 }}>No audit events recorded.</p>
         ) : (
           (() => {
             const parsed = auditLogs

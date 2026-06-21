@@ -1,6 +1,44 @@
 # AGENTS.md
 
-This file defines the package-policy rules agents must preserve while working in this repository.
+This file defines the package-policy and naming rules agents must preserve while working in this repository.
+
+## Project Context
+
+Stelis lets apps run programmable Sui transactions without asking users to manage SUI gas first. A deployed Host pays SUI gas for sponsored execution, and generic settlement can recover the execution cost from supported user-held value.
+
+Use these terms consistently:
+
+- `Host`: the deployed `@stelis/app-api` service. It exposes HTTP APIs, sponsors transactions, and enforces settlement policy.
+- `Relay API`: the public `/relay/*` HTTP API exposed by a Host.
+- `SDK`: `@stelis/sdk`, the app and service developer package for building integrations against a Host.
+- `MCP server`: `@stelis/mcp-server`, the agent-facing tool package. It calls a Host over HTTP. It does not build arbitrary transactions, hold keys, sign for users, or run Host server logic.
+- `Move package`: `packages/contracts/move`, the on-chain settlement and vault artifact.
+
+If a rule below mentions an unfamiliar package, first decide whether the package is a deployed/published product surface or an internal source-of-truth package. That distinction controls dependency, export, and naming decisions.
+
+## General Agent Discipline
+
+- Do not work from imagination, memory, previous answers, or progress notes alone. Read the relevant files from disk before making claims or edits.
+- Inspect the current repository state before editing and before the final response. At minimum, check `git status --short` when your answer depends on pending files or completion state.
+- Do not say a command, test, build, lint, deployment, or verification passed unless you actually ran it and observed success in this turn or explicitly state the earlier run you are relying on.
+- If a check is not run, say exactly what was skipped and what risk remains.
+- Treat a commit, note, or plan as evidence, not proof of completion. Completion requires the requested behavior, affected docs/code/interfaces, and relevant verification to line up.
+- For non-trivial work, keep the accepted task name stable. Do not rename, split, or reframe work to make incomplete work look complete.
+- Every changed line should trace to the user request, an accepted plan, or an affected shared invariant. Avoid drive-by cleanup.
+
+## Stelis-Specific Safety Rules
+
+- Treat MIST, SUI, gas, token amounts, balances, quotes, fees, nonces, object IDs, transaction bytes, and settlement values as safety-critical data.
+- Keep raw amounts as integer strings or `BigInt` values when precision matters. Do not use floating point arithmetic for settlement, fee, gas, quote, or signable quantities.
+- Keep display values presentation-only. Do not feed formatted UI strings back into transaction building, settlement, signing, validation, or persistence without an explicit raw conversion step.
+- Do not infer token decimals, token identity, network identity, settlement eligibility, path support, or liquidity readiness from symbols, labels, memory, or convenience defaults.
+- Preserve current boundary terms: `Host`, `Relay API`, `settlement token`, `settlement swap path`, `SponsorOperations`, `SponsorAvailability`, and `User Vault`.
+- Keep `@stelis/sdk`, `@stelis/mcp-server`, and `@stelis/app-api` responsibilities separate. The MCP server does not hold keys, sign for users, build arbitrary transaction content, or run Host server logic.
+- Public docs, examples, schemas, package exports, tests, and user-facing strings describe current behavior only. Put future work, unsupported behavior, and discovered gaps in planning or debt notes, not public current-state docs.
+
+## Do Not Import Rules From Other Projects
+
+Rules from other repositories may be useful as inspiration, but do not copy project-specific boundaries into Stelis. In particular, do not add rules about firmware state models, hardware approval flows, device flashing, tax/P&L/fiat cash-out, peg guarantees, unrelated protocol-adapter roadmaps, or another repository's command list unless Stelis explicitly adopts that product surface.
 
 ## Package Policy
 

@@ -180,7 +180,8 @@ async function buildValidTx(
   const packageId = opts?.packageId ?? MOCK_CONFIG.packageId;
   const configId = opts?.configId ?? MOCK_CONFIG.configId;
   const vaultRegistryId = opts?.vaultRegistryId ?? MOCK_CONFIG.vaultRegistryId;
-  const settlementPayoutRecipient = opts?.settlementPayoutRecipient ?? MOCK_CONFIG.settlementPayoutRecipientAddress;
+  const settlementPayoutRecipient =
+    opts?.settlementPayoutRecipient ?? MOCK_CONFIG.settlementPayoutRecipientAddress;
 
   tx.moveCall({
     target: `${packageId}::settle::${SETTLE_WITH_CREDIT_FUNCTION}`,

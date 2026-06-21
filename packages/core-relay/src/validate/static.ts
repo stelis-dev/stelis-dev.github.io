@@ -80,7 +80,10 @@ export function containsGasCoinReference(args: unknown[]): boolean {
  *   - Publish/Upgrade: always rejected
  *   - Command count: <= MAX_COMMANDS
  */
-export function validatePtbStructure(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
+export function validatePtbStructure(
+  commands: PtbCommand[],
+  env: HostValidationEnv,
+): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'L1_TOO_MANY_COMMANDS',
@@ -153,7 +156,10 @@ export function validatePtbStructure(commands: PtbCommand[], env: HostValidation
  *   - Stelis package guard (only vault::withdraw allowed)
  *   - Publish/Upgrade implicitly blocked by non-MoveCall allowlist
  */
-export function validateUserCommands(commands: PtbCommand[], env: HostValidationEnv): ValidationResult {
+export function validateUserCommands(
+  commands: PtbCommand[],
+  env: HostValidationEnv,
+): ValidationResult {
   if (commands.length > MAX_COMMANDS) {
     return fail(
       'P1_TOO_MANY_COMMANDS',

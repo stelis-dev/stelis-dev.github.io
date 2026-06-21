@@ -181,9 +181,7 @@ export function StatusPage() {
       {/* Header */}
       <div className="status-header">
         <h1 className="status-title">Stelis Host Status</h1>
-        <p className="status-subtitle">
-          Live status of this Stelis Host (single endpoint probe).
-        </p>
+        <p className="status-subtitle">Live status of this Stelis Host (single endpoint probe).</p>
         <StatusBadge status={status} />
         {fmtChecked && <p className="last-checked">Last checked: {fmtChecked}</p>}
       </div>

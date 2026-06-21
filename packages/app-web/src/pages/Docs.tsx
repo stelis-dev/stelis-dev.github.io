@@ -364,8 +364,8 @@ export function DocsPage() {
           {'{ "error": "<message>", "code": "<ERROR_CODE>" }'}
         </code>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          All Relay API endpoints use this shape. See <code>docs/api.md</code> for the full error code
-          reference.
+          All Relay API endpoints use this shape. See <code>docs/api.md</code> for the full error
+          code reference.
         </span>
       </div>
 
