@@ -17,6 +17,7 @@ import {
 } from '../deepbookDirectSwap';
 import { useAppConfig } from '../../../AppConfigContext';
 import { SANDBOX_CARD_STYLE } from './cardStyles';
+import { signAndExecuteLocalTransaction } from '../localSuiExecution';
 import {
   formatSmallestUnitDecimal,
   parseDecimalIntegerToBigInt,
@@ -274,20 +275,18 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
       );
       const tx = buildSwapTx(suiMist, freshQuote);
       setStatus('executing');
-      addLog('Signing & executing with SUI gas...');
-      const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
-      const transactionDigest =
-        (result as { Transaction?: { digest?: string }; digest?: string }).Transaction?.digest ??
-        (result as { digest?: string }).digest;
-      if (!transactionDigest) {
-        throw new Error('SUI execution returned an empty digest');
-      }
+      addLog('Signing with wallet and submitting with SUI gas...');
+      const { digest: transactionDigest } = await signAndExecuteLocalTransaction({
+        transaction: tx,
+        client,
+        signer: dAppKit,
+        senderAddress: account.address,
+      });
 
       setStatus('success');
       setDigest(transactionDigest);
       addLog(`✅ Swap complete! Digest: ${transactionDigest}`);
       onTxSuccess?.();
-      client.waitForTransaction({ digest: transactionDigest }).then(() => onTxSuccess?.());
     } catch (e: unknown) {
       setStatus('error');
       const msg = e instanceof Error ? e.message : 'Unknown error';

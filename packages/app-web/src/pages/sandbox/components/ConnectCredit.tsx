@@ -9,6 +9,7 @@ import { getSelectedSettlementSwapPath, SUI_DECIMALS } from '../constants';
 import { WalletButton } from './WalletButton';
 import { SANDBOX_CARD_STYLE } from './cardStyles';
 import { formatSmallestUnitDecimal, parseDecimalIntegerToBigInt } from '../amount';
+import { signAndExecuteLocalTransaction } from '../localSuiExecution';
 
 interface ConnectCreditProps {
   refreshKey?: number;
@@ -98,19 +99,12 @@ export function ConnectCredit({
         vaultId: creditRes.vaultObjectId,
         recipientAddress: account.address,
       });
-      tx.setSender(account.address);
-      const txBytes = await tx.build({ client });
-      const b64 = btoa(String.fromCharCode(...txBytes));
-      const { signature } = await dAppKit.signTransaction({ transaction: b64 });
-      const result = await client.executeTransaction({
-        transaction: txBytes,
-        signatures: [signature],
+      await signAndExecuteLocalTransaction({
+        transaction: tx,
+        client,
+        signer: dAppKit,
+        senderAddress: account.address,
       });
-      const digest = result.Transaction?.digest;
-      if (!digest) {
-        throw new Error('Withdraw execution returned an empty digest');
-      }
-      await client.waitForTransaction({ digest });
       await fetchCredit();
       onTxSuccess?.();
     } catch (err) {

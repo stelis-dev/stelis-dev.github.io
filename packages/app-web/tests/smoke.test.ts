@@ -132,6 +132,44 @@ describe('Sandbox SDK wiring', () => {
     expect(combined).not.toContain("?? 'DEEP'");
   });
 
+  it('registers the Agent-Q Sui Wallet Standard initializer', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const walletProvider = fs.readFileSync(
+      path.resolve(__dirname, '../src/pages/sandbox/components/WalletProvider.tsx'),
+      'utf-8',
+    );
+    expect(walletProvider).toContain('@stelis/agent-q-provider-sui/browser');
+    expect(walletProvider).toContain('@stelis/agent-q-provider-sui/wallet-standard');
+    expect(walletProvider).toContain('createAgentQSuiWalletInitializer');
+    expect(walletProvider).toContain('walletInitializers');
+  });
+
+  it('uses local Sui submission for wallet-direct transactions only', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const sandboxDir = path.resolve(__dirname, '../src/pages/sandbox');
+    const directComponents = ['components/SwapForm.tsx', 'components/ConnectCredit.tsx']
+      .map((file) => fs.readFileSync(path.join(sandboxDir, file), 'utf-8'))
+      .join('\n');
+    const hostTransfer = fs.readFileSync(
+      path.join(sandboxDir, 'components/TransferForm.tsx'),
+      'utf-8',
+    );
+    const localSuiExecution = fs.readFileSync(
+      path.join(sandboxDir, 'localSuiExecution.ts'),
+      'utf-8',
+    );
+    expect(directComponents).toContain('signAndExecuteLocalTransaction');
+    expect(directComponents).not.toContain('signAndExecuteTransaction');
+    expect(hostTransfer).toContain('executeSponsored');
+    expect(hostTransfer).toContain('signTransaction');
+    expect(hostTransfer).not.toContain('signAndExecuteLocalTransaction');
+    expect(localSuiExecution).toContain('signTransaction');
+    expect(localSuiExecution).toContain('executeTransaction');
+    expect(localSuiExecution).toContain('waitForTransaction');
+  });
+
   it('isSwapDemoSupported returns true for 1-hop whitelisted, false for hop count > 1', async () => {
     const { isSwapDemoSupported } = await import('../src/pages/sandbox/constants');
     const oneHop = {
