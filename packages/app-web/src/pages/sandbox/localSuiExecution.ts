@@ -43,7 +43,8 @@ export async function signAndExecuteLocalTransaction({
 }> {
   transaction.setSenderIfNotSet(senderAddress);
   const txBytes = await transaction.build({ client });
-  const { signature } = await signer.signTransaction({ transaction: toBase64(txBytes) });
+  const txBytesBase64 = toBase64(txBytes);
+  const { signature } = await signer.signTransaction({ transaction: txBytesBase64 });
   const result = await client.executeTransaction({
     transaction: txBytes,
     signatures: [signature],
