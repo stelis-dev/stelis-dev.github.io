@@ -14,7 +14,7 @@
   "dependencies": {
     "@mysten/dapp-kit-react": "^1.0.2",
     "@mysten/sui": "^2.4.0",
-    "@stelis/agent-q-provider-sui": "^0.2.0",
+    "@stelis/agent-q-provider-sui": "^0.2.2",
     "@stelis/sdk": "*",
     "dompurify": "^3.3.3",
     "mermaid": "^11.4.1",
