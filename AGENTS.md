@@ -26,6 +26,16 @@ If a rule below mentions an unfamiliar package, first decide whether the package
 - For non-trivial work, keep the accepted task name stable. Do not rename, split, or reframe work to make incomplete work look complete.
 - Every changed line should trace to the user request, an accepted plan, or an affected shared invariant. Avoid drive-by cleanup.
 
+## Completion Reporting Rule
+
+- When reporting the result of an accepted user request, the outcome is binary: success or failure. Do not report an intermediate completion state for the task itself.
+- Judge success against the accepted user request, including reasonably expected verification, not against effort, partial progress, or honest disclosure.
+- If any required part is blocked, partial, missing, or unverified, report failure to complete unless the user explicitly narrowed the request to that smaller result.
+- State the outcome first, then the cause. For example: `Failed to complete: blocked by X` or `Failed to complete: implemented but not verified`.
+- Use `blocked` only as a cause of failure, not as a neutral final state.
+- Do not soften failure with phrases such as `mostly done`, `should be fine`, `completed except tests`, or `partial complete`.
+- Caveats are supporting details, not substitutes for a clear success/failure statement.
+
 ## Stelis-Specific Safety Rules
 
 - Treat MIST, SUI, gas, token amounts, balances, quotes, fees, nonces, object IDs, transaction bytes, and settlement values as safety-critical data.
