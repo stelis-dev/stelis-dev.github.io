@@ -4,11 +4,9 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
-# deepbook testnet branch: has Published.toml with real on-chain addresses.
-# testnet:  0x22be4cade64bf2d02412c7e8d0e8beea2f78828b948118d46735315409371a3c (v17)
-# mainnet:  0x337f4f4f6567fcd778d5454f27c16c70e2f274cc6377ea6249ddf491482ef497 (v6)
-deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "testnet" }
-token = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "testnet", override = true }
+# Exact source whose testnet publication metadata targets DeepBook v17.
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "d3206b717c6f63593fae14d1ff9e1ec055f051bd" }
+token = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "462713b575077603c7fcb38d5cdeef904669495a", override = true }
 
 [addresses]
 stelis = "0x0"

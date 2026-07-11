@@ -25,7 +25,8 @@
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'packages/*/tests/**/*.ts'",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'packages/*/tests/**/*.ts'",
     "check:prepare-stage-schema": "node scripts/check-prepare-stage-schema.mjs",
-    "release:check": "npm run typecheck && npm run lint && npm test && npm --workspace @stelis/core-api run test:redis && npm run build",
+    "verify:move": "sui move test --path packages/contracts/move && sui move build --path packages/contracts/move",
+    "release:check": "npm run verify:move && npm run typecheck && npm run lint && npm test && npm --workspace @stelis/core-api run test:redis && npm run build",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

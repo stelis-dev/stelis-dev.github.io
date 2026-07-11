@@ -23,7 +23,6 @@ coverage/
 
 # Move build and audit outputs.
 packages/contracts/move/build/
-packages/contracts/move/Move.lock
 packages/contracts/move/build_log.txt
 packages/contracts/move/Upgrade.toml
 packages/contracts/move/bytecode.dump.json
