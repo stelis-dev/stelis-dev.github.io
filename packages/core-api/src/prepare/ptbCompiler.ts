@@ -92,6 +92,16 @@ function assertFundingMatchesSwap(funding: SwapFundingResolution, swapAmount: bi
   }
 }
 
+function assertSwapOutputFloor(plan: SettlementPlan): void {
+  const { requiredSwapOutputMist, minSuiOut } = plan.swap;
+  if (requiredSwapOutputMist < 0n || minSuiOut < requiredSwapOutputMist) {
+    throw new PrepareValidationError(
+      'INVALID_AMOUNT',
+      'Settlement min output must cover the required swap output.',
+    );
+  }
+}
+
 function mergeResolvedCoinObjects(
   tx: Transaction,
   funding: Extract<SwapFundingResolution, { source: 'coin_object' | 'mixed_topup' }>,
@@ -115,6 +125,13 @@ export function compileCreditSettlement(
 ): PaymentInputIntegrityExpectation {
   if (plan.funding.source !== 'none_credit_only') {
     throw new Error('[SETTLEMENT_PLAN] Credit compiler requires none_credit_only funding');
+  }
+  if (
+    plan.swap.swapAmountSmallest !== 0n ||
+    plan.swap.requiredSwapOutputMist !== 0n ||
+    plan.swap.minSuiOut !== 0n
+  ) {
+    throw new Error('[SETTLEMENT_PLAN] Credit-only settlement requires zero swap output fields');
   }
   const quoteTimestampMs = compiledQuoteTimestampMs(plan.audit.quoteTimestampMs);
   if (plan.audit.slippageBufferMist !== 0n) {
@@ -161,6 +178,7 @@ export function compileSwapSettlement(
   if (plan.funding.source === 'none_credit_only') {
     throw new Error('[SETTLEMENT_PLAN] Swap compiler requires swap funding');
   }
+  assertSwapOutputFloor(plan);
   const funding = plan.funding;
   const swapAmount = plan.swap.swapAmountSmallest;
   assertFundingMatchesSwap(funding, swapAmount);

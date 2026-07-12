@@ -40,7 +40,11 @@ function makePlan(): SettlementPlan {
       remainingBalance: SWAP_AMOUNT,
     },
     useCreditAmount: 0n,
-    swap: { swapAmountSmallest: SWAP_AMOUNT, minSuiOut: 400_000n },
+    swap: {
+      swapAmountSmallest: SWAP_AMOUNT,
+      requiredSwapOutputMist: 350_000n,
+      minSuiOut: 400_000n,
+    },
     audit: BASE_AUDIT,
   };
 }

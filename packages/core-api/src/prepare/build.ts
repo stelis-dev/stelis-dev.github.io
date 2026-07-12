@@ -55,7 +55,7 @@ import {
 import {
   checkCreditOnlyEligibility,
   calculateRequiredSwapOutput,
-  calculateMinOutputGuardsFromQuotedOutputs,
+  calculateSwapOutputGuards,
   assembleSwapSettlementPlan,
   assembleCreditSettlementPlan,
 } from './settlementPlanner.js';
@@ -1418,15 +1418,17 @@ async function runPreparePass(
 
     // ── Step 6: Assemble swap settlement plan ───────────────────────────
     const quotedHopOutputs = [...executionQuote.quotedHopOutputs];
-    const swap = calculateMinOutputGuardsFromQuotedOutputs(
+    const swap = calculateSwapOutputGuards(
       swapAmountSmallest,
-      quotedHopOutputs,
+      executionQuote.targetOutputMist,
+      executionQuote.actualOutputMist,
       input.slippageBps,
     );
     const plan = assembleSwapSettlementPlan(plannerInput, auditFields, funding, swap);
     logPrepareBuildStage('run_prepare_pass_minout_quoted', {
       pass: passLabel,
       quoted_hop_outputs: quotedHopOutputs.map((p) => p.toString()),
+      required_swap_output_mist: swap.requiredSwapOutputMist.toString(),
       min_sui_out: swap.minSuiOut.toString(),
       slippage_bps: input.slippageBps,
     });

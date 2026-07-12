@@ -426,6 +426,136 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     resetBuildMocks();
   });
 
+  it.each([
+    {
+      label: 'new-user base-for-quote',
+      profile: 'new_user' as const,
+      vaultObjectId: undefined,
+      credit: '0',
+      slippageBps: 10_000,
+      verifiedOutput: 'near' as const,
+      swapDirection: 'baseForQuote' as const,
+      expectedVariant: 'new_user' as const,
+    },
+    {
+      label: 'with-vault quote-for-base',
+      profile: 'with_vault' as const,
+      vaultObjectId: '0xVAULT',
+      credit: '500000',
+      slippageBps: 100,
+      verifiedOutput: 'double' as const,
+      swapDirection: 'quoteForBase' as const,
+      expectedVariant: 'with_vault' as const,
+    },
+  ])(
+    'combines required and verified output in the compiled $label swap',
+    async ({
+      profile,
+      vaultObjectId,
+      credit,
+      slippageBps,
+      verifiedOutput,
+      swapDirection,
+      expectedVariant,
+    }) => {
+      const ctx = makeCtx();
+      const hop = {
+        poolId: '0xPOOL',
+        baseType: swapDirection === 'baseForQuote' ? '0xBASE' : '0x2::sui::SUI',
+        quoteType: swapDirection === 'baseForQuote' ? '0x2::sui::SUI' : '0xQUOTE',
+        swapDirection,
+        feeBps: 0,
+      };
+      const input = makeInput({
+        profile,
+        vaultObjectId,
+        credit,
+        slippageBps,
+        settlementSwapPath: {
+          hops: [hop],
+          settlementTokenType: swapDirection === 'baseForQuote' ? '0xBASE' : '0xQUOTE',
+          settlementTokenSymbol: swapDirection === 'baseForQuote' ? 'BASE' : 'QUOTE',
+          settlementTokenDecimals: 6,
+          lotSize: 1n,
+          minSize: 1n,
+          effectiveFeeRateBps: 0,
+          settlementSwapDirection: swapDirection,
+        } as GenericPrepareBuildRequest['settlementSwapPath'],
+        descriptor: {
+          settlementTokenType: swapDirection === 'baseForQuote' ? '0xBASE' : '0xQUOTE',
+          settlementTokenSymbol: swapDirection === 'baseForQuote' ? 'BASE' : 'QUOTE',
+          settlementTokenDecimals: 6,
+          effectiveFeeRateBps: 0,
+          settlementSwapDirection: swapDirection,
+          hops: [hop],
+          lotSize: 1n,
+          minSize: 1n,
+        } as GenericPrepareBuildRequest['descriptor'],
+      });
+
+      mockComputeExecutionCostClaim.mockImplementation(
+        (_gasUsed: unknown, opts?: { slippageBufferMist?: bigint }) => {
+          const slippageBufferMist = opts?.slippageBufferMist ?? 0n;
+          return {
+            simGas: 2_000_000n,
+            grossGas: 2_500_000n,
+            gasVarianceFixedMist: 100_000n,
+            slippageBufferMist,
+            executionCostClaim: 3_000_000n + slippageBufferMist,
+          };
+        },
+      );
+      mockSolveExecutableSwap.mockImplementation(
+        async (request: { targetOutputMist: bigint; rawMidPrices: readonly bigint[] }) => {
+          const verifiedOutputMist =
+            verifiedOutput === 'double'
+              ? request.targetOutputMist * 2n
+              : request.targetOutputMist + 1n;
+          const executionGapMist = verifiedOutput === 'double' ? 1_000n : 0n;
+          return makeExecutableQuote({
+            targetOutputMist: request.targetOutputMist,
+            effectiveTargetOutputMist: request.targetOutputMist,
+            quotedHopOutputs: [verifiedOutputMist],
+            rawMidPrices: [...request.rawMidPrices],
+            idealOutputMist: verifiedOutputMist + executionGapMist,
+            actualOutputMist: verifiedOutputMist,
+            executionGapMist,
+            executionGapBps: 0n,
+          });
+        },
+      );
+
+      await runGenericPrepareBuildPipeline(ctx, input);
+
+      const compiled = mockBuildSwapAndSettlePtb.mock.calls.map(
+        (call) =>
+          call[1] as {
+            variant: 'new_user' | 'with_vault';
+            settlementSwapDirection: 'baseForQuote' | 'quoteForBase';
+            executionCostClaim: bigint;
+            minSuiOut: bigint;
+          },
+      );
+      expect(compiled.length).toBeGreaterThan(0);
+      for (const params of compiled) {
+        const totalRequired =
+          params.executionCostClaim > ctx.minSettleMist
+            ? params.executionCostClaim
+            : ctx.minSettleMist;
+        const creditMist = profile === 'with_vault' ? BigInt(credit) : 0n;
+        const requiredSwapOutputMist = totalRequired > creditMist ? totalRequired - creditMist : 0n;
+        const verifiedOutputMist =
+          verifiedOutput === 'double' ? requiredSwapOutputMist * 2n : requiredSwapOutputMist + 1n;
+        const slippageFloor = (verifiedOutputMist * BigInt(10_000 - slippageBps)) / 10_000n;
+        const expectedMinSuiOut =
+          requiredSwapOutputMist > slippageFloor ? requiredSwapOutputMist : slippageFloor;
+        expect(params.variant).toBe(expectedVariant);
+        expect(params.settlementSwapDirection).toBe(swapDirection);
+        expect(params.minSuiOut).toBe(expectedMinSuiOut);
+      }
+    },
+  );
+
   // ── Pass 1 max-claim probe behavior ─────────────────────────────────────
 
   it('measures and selects credit before payment-source resolution when credit covers the measured credit-only cost', async () => {
@@ -490,12 +620,18 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       )
       .mockResolvedValueOnce(
         makeExecutableQuote({
+          targetOutputMist: 26_000_000n,
+          effectiveTargetOutputMist: 26_000_000n,
+          quotedHopOutputs: [26_800_000n],
           executionGapMist: 200_000n,
           actualOutputMist: 26_800_000n,
         }),
       )
       .mockResolvedValueOnce(
         makeExecutableQuote({
+          targetOutputMist: 26_000_000n,
+          effectiveTargetOutputMist: 26_000_000n,
+          quotedHopOutputs: [26_800_000n],
           executionGapMist: 200_000n,
           actualOutputMist: 26_800_000n,
         }),
@@ -645,12 +781,18 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       )
       .mockResolvedValueOnce(
         makeExecutableQuote({
+          targetOutputMist: 26_000_000n,
+          effectiveTargetOutputMist: 26_000_000n,
+          quotedHopOutputs: [26_300_000n],
           executionGapMist: 700_000n,
           actualOutputMist: 26_300_000n,
         }),
       )
       .mockResolvedValueOnce(
         makeExecutableQuote({
+          targetOutputMist: 26_000_000n,
+          effectiveTargetOutputMist: 26_000_000n,
+          quotedHopOutputs: [26_300_000n],
           executionGapMist: 700_000n,
           actualOutputMist: 26_300_000n,
         }),
@@ -2644,8 +2786,8 @@ describe('runGenericPrepareBuildPipeline — slippage error paths', () => {
       })
       .mockResolvedValueOnce({
         swapAmountSmallest: 2_000_000n,
-        targetOutputMist: 54_000_000n,
-        effectiveTargetOutputMist: 54_000_000n,
+        targetOutputMist: 53_000_000n,
+        effectiveTargetOutputMist: 53_000_000n,
         quotedHopOutputs: [53_999_000n],
         rawMidPrices: [27_000_000_000n],
         idealOutputMist: 54_000_000n,
@@ -2707,8 +2849,8 @@ describe('runGenericPrepareBuildPipeline — slippage error paths', () => {
       })
       .mockResolvedValueOnce({
         swapAmountSmallest: 1_000_000n,
-        targetOutputMist: 27_000_000n,
-        effectiveTargetOutputMist: 27_000_000n,
+        targetOutputMist: 26_000_000n,
+        effectiveTargetOutputMist: 26_000_000n,
         quotedHopOutputs: [26_999_000n],
         rawMidPrices: [27_000_000_000n],
         idealOutputMist: 27_000_000n,

@@ -6,7 +6,11 @@
 import { describe, expect, it } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
-import { settlementParameterIndex, type MoveCallCommand } from '@stelis/contracts';
+import {
+  SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
+  settlementParameterIndex,
+  type MoveCallCommand,
+} from '@stelis/contracts';
 import { convertSdkCommands, extractObjectIdFromInput } from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
@@ -28,6 +32,19 @@ import {
 } from './fixtures/prepareTestFixtures.js';
 
 const SWAP_AMOUNT = 9_000_000n;
+const REQUIRED_SWAP_OUTPUT = 350_000n;
+const MIN_SUI_OUT = 400_000n;
+
+const SETTLEMENT_SWAP_PATH_QFB: SettlementPlan['settlementSwapPath'] = {
+  ...SETTLEMENT_SWAP_PATH_BFQ,
+  hops: [
+    {
+      ...SETTLEMENT_SWAP_PATH_BFQ.hops[0],
+      swapDirection: 'quoteForBase',
+    },
+  ],
+  settlementSwapDirection: 'quoteForBase',
+};
 
 const COMPILE_CONTEXT = {
   packageId: ADDR_PKG,
@@ -50,7 +67,11 @@ function makeSwapPlan(overrides: Partial<SettlementPlan> = {}): SettlementPlan {
       remainingBalance: 12_000_000n,
     },
     useCreditAmount: 0n,
-    swap: { swapAmountSmallest: SWAP_AMOUNT, minSuiOut: 400_000n },
+    swap: {
+      swapAmountSmallest: SWAP_AMOUNT,
+      requiredSwapOutputMist: REQUIRED_SWAP_OUTPUT,
+      minSuiOut: MIN_SUI_OUT,
+    },
     audit: BASE_AUDIT,
     ...overrides,
   };
@@ -63,7 +84,7 @@ function makeCreditPlan(useCreditAmount: bigint): SettlementPlan {
     settlementSwapDirection: 'baseForQuote',
     funding: { source: 'none_credit_only' },
     useCreditAmount,
-    swap: { swapAmountSmallest: 0n, minSuiOut: 0n },
+    swap: { swapAmountSmallest: 0n, requiredSwapOutputMist: 0n, minSuiOut: 0n },
     audit: { ...BASE_AUDIT, slippageBufferMist: 0n },
   };
 }
@@ -160,6 +181,13 @@ function extractUseCreditAmount(commands: readonly NormalizedCommand[], inputs: 
   return decodePureU64(settle.arguments[parameterIndex], inputs);
 }
 
+function extractMinSuiOut(commands: readonly NormalizedCommand[], inputs: unknown[]): bigint {
+  const settle = findSettleCommand(commands);
+  const parameterIndex = settlementParameterIndex(settle.function, 'min_sui_out');
+  if (parameterIndex === undefined) throw new Error('Settle function has no min_sui_out');
+  return decodePureU64(settle.arguments[parameterIndex], inputs);
+}
+
 function expectFinalIntegrity(
   commands: ReturnType<typeof convertSdkCommands>,
   inputs: unknown[],
@@ -194,6 +222,7 @@ describe('compileSwapSettlement exact materialization', () => {
     expect(objectIdForArgument(split.coin, inputs)).toBe(ADDR_USABLE_COIN);
     expect(split.amounts).toHaveLength(1);
     expect(decodePureU64(split.amounts[0], inputs)).toBe(SWAP_AMOUNT);
+    expect(extractMinSuiOut(commands, inputs)).toBe(MIN_SUI_OUT);
     expect(expectation).toEqual({
       source: 'coin_object',
       swapAmountSmallest: SWAP_AMOUNT,
@@ -290,9 +319,40 @@ describe('compileSwapSettlement exact materialization', () => {
     expect(extractUseCreditAmount(commands, inputs)).toBe(useCreditAmount);
     expect('useCreditAmount' in plan.funding).toBe(false);
   });
+
+  it('materializes the same output floor for the quote-for-base with-vault variant', () => {
+    const tx = new Transaction();
+    const plan = makeSwapPlan({
+      settlementSwapPath: SETTLEMENT_SWAP_PATH_QFB,
+      settlementSwapDirection: 'quoteForBase',
+    });
+
+    compileSwapSettlement(tx, plan, COMPILE_CONTEXT, ADDR_VAULT);
+    const { commands, inputs } = normalizedTransaction(tx);
+    const settle = findSettleCommand(commands);
+
+    expect(settle.function).toBe(SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.quoteForBase.withVault);
+    expect(extractMinSuiOut(commands, inputs)).toBe(MIN_SUI_OUT);
+  });
 });
 
 describe('compileSwapSettlement fail-closed funding contract', () => {
+  it('rejects a min output below settlement sufficiency before PTB mutation', () => {
+    const tx = new Transaction();
+    const plan = makeSwapPlan({
+      swap: {
+        swapAmountSmallest: SWAP_AMOUNT,
+        requiredSwapOutputMist: REQUIRED_SWAP_OUTPUT,
+        minSuiOut: REQUIRED_SWAP_OUTPUT - 1n,
+      },
+    });
+
+    expect(() => compileSwapSettlement(tx, plan, COMPILE_CONTEXT, ADDR_VAULT)).toThrow(
+      /must cover the required swap output/,
+    );
+    expect(tx.getData().commands).toHaveLength(0);
+  });
+
   it('rejects a merge list that repeats the selected base coin', () => {
     const tx = new Transaction();
     const plan = makeSwapPlan({
@@ -385,6 +445,20 @@ describe('compileCreditSettlement', () => {
 
     expect(() => compileCreditSettlement(tx, invalidPlan, COMPILE_CONTEXT, ADDR_VAULT)).toThrow(
       /Credit-only PTB requires slippageBufferMist=0/,
+    );
+    expect(tx.getData().commands).toHaveLength(0);
+  });
+
+  it('rejects non-zero credit-path swap output fields before mutation', () => {
+    const tx = new Transaction();
+    const plan = makeCreditPlan(5_120_000n);
+    const invalidPlan: SettlementPlan = {
+      ...plan,
+      swap: { ...plan.swap, requiredSwapOutputMist: 1n, minSuiOut: 1n },
+    };
+
+    expect(() => compileCreditSettlement(tx, invalidPlan, COMPILE_CONTEXT, ADDR_VAULT)).toThrow(
+      /requires zero swap output fields/,
     );
     expect(tx.getData().commands).toHaveLength(0);
   });

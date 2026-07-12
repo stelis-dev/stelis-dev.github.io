@@ -6,7 +6,7 @@
  * Exported functions:
  *   - checkCreditOnlyEligibility:               credit-only path decision
  *   - calculateRequiredSwapOutput:              target SUI output needed from swap
- *   - calculateMinOutputGuardsFromQuotedOutputs: canonical runtime min-out guards (quoted path)
+ *   - calculateSwapOutputGuards:                canonical runtime min-out guards (quoted path)
  *   - assembleSwapSettlementPlan:               assemble SettlementPlan for swap path
  *   - assembleCreditSettlementPlan:             assemble SettlementPlan for credit path
  *
@@ -94,26 +94,35 @@ export function calculateRequiredSwapOutput(
 }
 
 /**
- * Calculate min output guards from per-hop quoted outputs.
+ * Calculate the final on-chain minimum output from one verified quote.
  *
- * Used when runtime quoting is available and should drive
- * for min-out guards. The hop outputs come from the server-side executable
- * market-policy solve, where each candidate input is verified against the
- * input-fee quantity-out path before being used for guard derivation.
+ * `requiredSwapOutputMist` is the economic target already carried by the
+ * executable quote. `verifiedOutputMist` is that quote's verified SUI output.
+ * Rejecting required > verified keeps the final guard at or below the quote
+ * instead of manufacturing an unreachable minimum.
  */
-export function calculateMinOutputGuardsFromQuotedOutputs(
+export function calculateSwapOutputGuards(
   swapAmountSmallest: bigint,
-  hopOutputs: readonly bigint[],
+  requiredSwapOutputMist: bigint,
+  verifiedOutputMist: bigint,
   slippageBps: number,
 ): SwapPlan {
   if (!Number.isSafeInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000) {
     throw new Error('slippageBps must be a safe integer in [0, 10000]');
   }
-  const applySlippage = (amount: bigint): bigint =>
-    amount > 0n ? (amount * BigInt(10_000 - slippageBps)) / 10_000n : 0n;
+  if (requiredSwapOutputMist < 0n) {
+    throw new Error('requiredSwapOutputMist must be non-negative');
+  }
+  if (verifiedOutputMist < requiredSwapOutputMist) {
+    throw new Error('verifiedOutputMist must cover requiredSwapOutputMist');
+  }
+
+  const slippageFloor =
+    verifiedOutputMist > 0n ? (verifiedOutputMist * BigInt(10_000 - slippageBps)) / 10_000n : 0n;
   return {
     swapAmountSmallest,
-    minSuiOut: hopOutputs.length > 0 ? applySlippage(hopOutputs[0]) : 0n,
+    requiredSwapOutputMist,
+    minSuiOut: requiredSwapOutputMist > slippageFloor ? requiredSwapOutputMist : slippageFloor,
   };
 }
 
@@ -130,7 +139,7 @@ export function calculateMinOutputGuardsFromQuotedOutputs(
  * Call sequence in build.ts:
  *   1. solveExecutableSwap(...)       → swapAmountSmallest + quotedHopOutputs
  *   2. resolvePaymentSource(...)      → funding
- *   3. calculateMinOutputGuardsFromQuotedOutputs(...) → swap
+ *   3. calculateSwapOutputGuards(...) → swap
  *   4. assembleSwapSettlementPlan(input, audit, funding, swap)
  */
 export function assembleSwapSettlementPlan(
@@ -185,7 +194,7 @@ export function assembleCreditSettlementPlan(
     settlementSwapDirection: input.settlementSwapPath.settlementSwapDirection,
     funding: { source: 'none_credit_only' },
     useCreditAmount,
-    swap: { swapAmountSmallest: 0n, minSuiOut: 0n },
+    swap: { swapAmountSmallest: 0n, requiredSwapOutputMist: 0n, minSuiOut: 0n },
     audit,
   };
 }

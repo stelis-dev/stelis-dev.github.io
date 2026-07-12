@@ -68,7 +68,9 @@ export type FundingResolution = { readonly source: 'none_credit_only' } | SwapFu
 export interface SwapPlan {
   /** Exact settlement token amount to swap (after direction-aware DeepBook min/lot constraints). */
   readonly swapAmountSmallest: bigint;
-  /** Minimum SUI output (slippage guard). */
+  /** Minimum SUI output required for settlement sufficiency. */
+  readonly requiredSwapOutputMist: bigint;
+  /** Final on-chain minimum SUI output (settlement sufficiency and slippage guard). */
   readonly minSuiOut: bigint;
 }
 
