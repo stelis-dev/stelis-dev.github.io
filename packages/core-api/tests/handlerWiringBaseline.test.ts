@@ -140,6 +140,14 @@ const COIN_OBJECT_PAYMENT_EVIDENCE = {
   producerCommandKind: 'SplitCoins' as const,
   settleSwapAmount: 500_000n,
   splitAmount: 500_000n,
+  splitCommandIndex: 0,
+  baseInputIndex: 0,
+  baseCoinObjectId: `0x${'11'.repeat(32)}`,
+  directMergeSources: [],
+  unsupportedMergeSources: [],
+  fundingInputUses: [{ commandIndex: 0, inputIndex: 0, occurrences: 1 }],
+  senderWithdrawals: [],
+  senderRedeems: [],
 };
 
 const ADDRESS_BALANCE_PAYMENT_EVIDENCE = {
@@ -149,6 +157,10 @@ const ADDRESS_BALANCE_PAYMENT_EVIDENCE = {
   producerCommandKind: 'MoveCall' as const,
   settleSwapAmount: 500_000n,
   withdrawalAmount: 500_000n,
+  redeemCommandIndex: 0,
+  withdrawalInputIndex: 0,
+  senderWithdrawals: [{ inputIndex: 0, amount: 500_000n }],
+  senderRedeems: [{ commandIndex: 0, inputIndex: 0, amount: 500_000n }],
 };
 
 const CREDIT_ONLY_PAYMENT_EVIDENCE = {

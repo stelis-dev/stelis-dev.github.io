@@ -467,7 +467,7 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     httpStatus: 422,
     abuseImpact: SKIP_BOTH,
     bodyFields: ['meta'],
-    notes: 'R-9 prefix-coin withdrawal mismatch.',
+    notes: 'User-prefix address-balance withdrawal cannot be accounted exactly.',
   },
   SLIPPAGE_QUERY_FAILED: {
     code: 'SLIPPAGE_QUERY_FAILED',

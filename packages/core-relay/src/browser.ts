@@ -102,7 +102,7 @@ export type { IntegrityVerdict } from './integrityCompare.js';
 // ── GasCoin reference detection (S-15/S-16) ─────────────────────────────────
 export { containsGasCoinReference } from './validate/static.js';
 
-// ── PTB input object ID extraction (shared helper for S-16 + R-9) ───────────
+// ── PTB input object ID extraction (integrity + prefix value tracing) ────────
 export { extractObjectIdFromInput } from './ptbInputUtils.js';
 
 // ── tx gas preset guard ─────────────────────────────────────────────────────

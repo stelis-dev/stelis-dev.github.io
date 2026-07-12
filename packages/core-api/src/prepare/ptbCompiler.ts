@@ -1,31 +1,13 @@
 /**
- * ptbCompiler — PTB assembly from a fully determined SettlementPlan.
- *
- * Receives a SettlementPlan (produced by SettlementPlanner) and materializes
- * the settlement suffix onto the user's Transaction.
- *
- * This module must NOT:
- *   - Infer settlement swap path shape
- *   - Recalculate swap amounts
- *   - Make funding-source decisions
- *
- * Coin discovery (selectPaymentCoin) requires chain queries (sui.listCoins) and
- * is co-located here because coin selection is tightly coupled with PTB mutation
- * (merge/split/withdrawal). The orchestrator calls compileSwapSettlement which
- * encapsulates both discovery and mutation as a single atomic step. The
- * SettlementPlan.funding field provides the pre-decided funding source so the
- * compiler does not re-decide the funding path.
- *
- * DEEP fee coin is not materialized in the PTB. The Move swap entrypoint
- * creates `coin::zero<DEEP>(ctx)` internally, so DeepBook always takes the
- * input-fee path.
+ * Materialize a fully determined SettlementPlan onto the user's Transaction.
+ * Funding discovery, object selection, and amount calculation are forbidden in
+ * this module; they are complete in `SettlementPlan.funding`.
  */
-
 import type { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from '@stelis/core-relay';
-import type { PrefixUsage, SettlementPlan } from './settlePlanTypes.js';
-import { pickPreferredPaymentBaseCoin, selectPaymentCoin } from './coinSelection.js';
+import type { PaymentInputIntegrityExpectation } from '@stelis/core-relay/server';
+import type { SettlementPlan, SwapFundingResolution } from './settlePlanTypes.js';
 import { PrepareValidationError } from './replay.js';
 
 function compiledQuoteTimestampMs(value: number): bigint {
@@ -37,19 +19,103 @@ function compiledQuoteTimestampMs(value: number): bigint {
   return BigInt(value);
 }
 
-// ─────────────────────────────────────────────
-// Compiler: credit-only path
-// ─────────────────────────────────────────────
+function assertUniqueFundingCoinIds(
+  funding: Extract<SwapFundingResolution, { source: 'coin_object' | 'mixed_topup' }>,
+): void {
+  let normalizedBaseCoinId: string;
+  try {
+    normalizedBaseCoinId = normalizeSuiAddress(funding.baseCoinId);
+  } catch {
+    throw new PrepareValidationError(
+      'PAYMENT_COIN_CONFLICT',
+      `Funding base ${funding.baseCoinId} is not a valid Sui object ID.`,
+    );
+  }
+  const seen = new Set([normalizedBaseCoinId]);
+  for (const objectId of funding.mergeCoinIds) {
+    let normalizedObjectId: string;
+    try {
+      normalizedObjectId = normalizeSuiAddress(objectId);
+    } catch {
+      throw new PrepareValidationError(
+        'PAYMENT_COIN_CONFLICT',
+        `Funding merge source ${objectId} is not a valid Sui object ID.`,
+      );
+    }
+    if (seen.has(normalizedObjectId)) {
+      throw new PrepareValidationError(
+        'PAYMENT_COIN_CONFLICT',
+        `Funding object ${objectId} appears more than once in the resolved coin set.`,
+      );
+    }
+    seen.add(normalizedObjectId);
+  }
+}
 
-/**
- * Compile a credit-only settlement onto the Transaction.
- */
+function assertFundingMatchesSwap(funding: SwapFundingResolution, swapAmount: bigint): void {
+  if (swapAmount <= 0n) {
+    throw new PrepareValidationError(
+      'INVALID_AMOUNT',
+      `Swap funding requires a positive bigint amount, got ${swapAmount}.`,
+    );
+  }
+  if (funding.source === 'address_balance') {
+    if (funding.redeemAmount !== swapAmount) {
+      throw new PrepareValidationError(
+        'PAYMENT_COIN_CONFLICT',
+        'Address-balance funding must redeem the exact swap amount.',
+      );
+    }
+    return;
+  }
+
+  assertUniqueFundingCoinIds(funding);
+  if (funding.source === 'coin_object') {
+    if (funding.remainingBalance < swapAmount) {
+      throw new PrepareValidationError(
+        'PAYMENT_COIN_CONFLICT',
+        'Coin-object funding does not contain the resolved swap amount.',
+      );
+    }
+    return;
+  }
+
+  if (
+    funding.remainingBalance <= 0n ||
+    funding.remainingBalance >= swapAmount ||
+    funding.redeemAmount !== swapAmount - funding.remainingBalance
+  ) {
+    throw new PrepareValidationError(
+      'PAYMENT_COIN_CONFLICT',
+      'Mixed funding must combine the exact remaining coin balance with the exact redeem amount.',
+    );
+  }
+}
+
+function mergeResolvedCoinObjects(
+  tx: Transaction,
+  funding: Extract<SwapFundingResolution, { source: 'coin_object' | 'mixed_topup' }>,
+): TransactionObjectArgument {
+  const baseCoin = tx.object(funding.baseCoinId);
+  if (funding.mergeCoinIds.length > 0) {
+    tx.mergeCoins(
+      baseCoin,
+      funding.mergeCoinIds.map((objectId) => tx.object(objectId)),
+    );
+  }
+  return baseCoin;
+}
+
+/** Compile a credit-only settlement and return its one integrity expectation. */
 export function compileCreditSettlement(
   tx: Transaction,
   plan: SettlementPlan,
   config: { packageId: string; configId: string; vaultRegistryId: string },
   vaultId: string,
-): void {
+): PaymentInputIntegrityExpectation {
+  if (plan.funding.source !== 'none_credit_only') {
+    throw new Error('[SETTLEMENT_PLAN] Credit compiler requires none_credit_only funding');
+  }
   const quoteTimestampMs = compiledQuoteTimestampMs(plan.audit.quoteTimestampMs);
   if (plan.audit.slippageBufferMist !== 0n) {
     throw new Error(
@@ -61,7 +127,7 @@ export function compileCreditSettlement(
     configId: config.configId,
     vaultRegistryId: config.vaultRegistryId,
     vaultId,
-    useCreditAmount: plan.funding.useCreditAmount,
+    useCreditAmount: plan.useCreditAmount,
     executionCostClaim: plan.audit.executionCostClaim,
     settlementPayoutRecipient: plan.audit.settlementPayoutRecipient,
     receiptId: plan.audit.receiptId,
@@ -76,61 +142,46 @@ export function compileCreditSettlement(
     policyHash: plan.audit.policyHash,
     orderIdHash: plan.audit.orderIdHash,
   });
+  return { source: 'none_credit_only', swapAmountSmallest: 0n };
 }
 
-// ─────────────────────────────────────────────
-// Compiler: swap path
-// ─────────────────────────────────────────────
-
-/** Context needed for swap compilation (coin selection requires chain queries). */
 export interface SwapCompileContext {
-  readonly sui: SuiGrpcClient;
   readonly packageId: string;
   readonly configId: string;
   readonly vaultRegistryId: string;
 }
 
-/**
- * Compile a swap settlement onto the Transaction.
- *
- * Steps:
- *   1. Select/create payment coin (coin_object | address_balance | mixed_topup)
- *   2. Call buildSwapAndSettlePtb with the plan's settlement swap path + audit fields
- *
- * Payment-coin selection is the only remaining async/chain-dependent step in the compiler.
- * This is acceptable because coin object selection requires real-time balance data
- * that cannot be pre-fetched at planning time without TOCTOU risk.
- *
- * DEEP fee coin is not materialized in the PTB: the Move entry creates
- * `coin::zero<DEEP>(ctx)` internally so DeepBook always runs the input-fee path.
- */
-export async function compileSwapSettlement(
+/** Compile the exact resolved funding and settlement suffix without I/O. */
+export function compileSwapSettlement(
   tx: Transaction,
   plan: SettlementPlan,
   ctx: SwapCompileContext,
-  senderAddress: string,
   vaultObjectId: string | null,
-  prefixUsage: PrefixUsage,
-): Promise<void> {
+): PaymentInputIntegrityExpectation {
+  if (plan.funding.source === 'none_credit_only') {
+    throw new Error('[SETTLEMENT_PLAN] Swap compiler requires swap funding');
+  }
+  const funding = plan.funding;
+  const swapAmount = plan.swap.swapAmountSmallest;
+  assertFundingMatchesSwap(funding, swapAmount);
+  const variant = plan.variant;
+  if (!variant) {
+    throw new Error('[SETTLEMENT_PLAN] Swap plan has no compiled variant');
+  }
+  if (variant === 'with_vault' && !vaultObjectId) {
+    throw new Error('[SETTLEMENT_PLAN] with_vault settlement requires a vault object ID');
+  }
+
+  const userData = tx.getData();
+  const userCommandCount = userData.commands.length;
+  const userInputCount = userData.inputs.length;
   const quoteTimestampMs = compiledQuoteTimestampMs(plan.audit.quoteTimestampMs);
   const settlementSwapPath = plan.settlementSwapPath;
-
-  // ── Payment coin selection ──────────────────────────────────────────────
   let paymentCoin: TransactionObjectArgument;
 
-  if (plan.funding.source === 'coin_object') {
-    ({ paymentCoin } = await selectPaymentCoin(
-      ctx.sui,
-      tx,
-      senderAddress,
-      settlementSwapPath.settlementTokenType,
-      plan.swap.swapAmountSmallest,
-      settlementSwapPath.settlementTokenSymbol,
-      prefixUsage,
-    ));
-  } else if (plan.funding.source === 'address_balance') {
+  if (funding.source === 'address_balance') {
     const withdrawalInput = tx.withdrawal({
-      amount: plan.swap.swapAmountSmallest,
+      amount: funding.redeemAmount,
       type: settlementSwapPath.settlementTokenType,
     });
     [paymentCoin] = tx.moveCall({
@@ -139,51 +190,33 @@ export async function compileSwapSettlement(
       arguments: [withdrawalInput],
     });
   } else {
-    // mixed_topup
-    const usable = plan.funding.usableCoins;
-    if (usable.length === 0) {
-      throw new PrepareValidationError(
-        'PAYMENT_COIN_CONFLICT',
-        `Mixed topup selected but no usable ${settlementSwapPath.settlementTokenSymbol} coin objects remain after R-9 filtering.`,
-      );
+    const baseCoin = mergeResolvedCoinObjects(tx, funding);
+    if (funding.source === 'mixed_topup') {
+      const withdrawalInput = tx.withdrawal({
+        amount: funding.redeemAmount,
+        type: settlementSwapPath.settlementTokenType,
+      });
+      const [redeemedCoin] = tx.moveCall({
+        target: '0x2::coin::redeem_funds',
+        typeArguments: [settlementSwapPath.settlementTokenType],
+        arguments: [withdrawalInput],
+      });
+      tx.mergeCoins(baseCoin, [redeemedCoin]);
     }
-    const baseCoin = pickPreferredPaymentBaseCoin(usable, prefixUsage);
-    const baseCoinId = baseCoin.objectId;
-    const toMerge = usable.filter((c) => c.objectId !== baseCoinId);
-    if (toMerge.length > 0) {
-      tx.mergeCoins(
-        tx.object(baseCoinId),
-        toMerge.map((c) => tx.object(c.objectId)),
-      );
-    }
-    const withdrawalInput = tx.withdrawal({
-      amount: plan.funding.redeemDelta,
-      type: settlementSwapPath.settlementTokenType,
-    });
-    const [redeemedCoin] = tx.moveCall({
-      target: '0x2::coin::redeem_funds',
-      typeArguments: [settlementSwapPath.settlementTokenType],
-      arguments: [withdrawalInput],
-    });
-    tx.mergeCoins(tx.object(baseCoinId), [redeemedCoin]);
-    [paymentCoin] = tx.splitCoins(tx.object(baseCoinId), [plan.swap.swapAmountSmallest]);
+    [paymentCoin] = tx.splitCoins(baseCoin, [swapAmount]);
   }
-
-  // ── Settlement swap path args + PTB builder ────────────────────────────
-  const variant = plan.variant!;
 
   const settlementSwapPathArgs = {
     settlementSwapDirection: settlementSwapPath.settlementSwapDirection,
     settlementTokenType: settlementSwapPath.settlementTokenType,
     poolId: settlementSwapPath.hops[0].poolId,
   };
-
   const sharedParams = {
     packageId: ctx.packageId,
     configId: ctx.configId,
     vaultRegistryId: ctx.vaultRegistryId,
     paymentCoinId: paymentCoin,
-    swapAmount: plan.swap.swapAmountSmallest,
+    swapAmount,
     minSuiOut: plan.swap.minSuiOut,
     executionCostClaim: plan.audit.executionCostClaim,
     settlementPayoutRecipient: plan.audit.settlementPayoutRecipient,
@@ -208,7 +241,23 @@ export async function compileSwapSettlement(
       ...settlementSwapPathArgs,
       ...sharedParams,
       vaultId: vaultObjectId!,
-      useCreditAmount: plan.funding.useCreditAmount,
+      useCreditAmount: plan.useCreditAmount,
     });
   }
+
+  return {
+    source: funding.source,
+    swapAmountSmallest: swapAmount,
+    userCommandCount,
+    userInputCount,
+    ...(funding.source === 'address_balance'
+      ? { addressBalanceRedeemAmount: funding.redeemAmount }
+      : {
+          baseCoinObjectId: funding.baseCoinId,
+          mergeCoinObjectIds: [...funding.mergeCoinIds],
+          ...(funding.source === 'mixed_topup'
+            ? { addressBalanceRedeemAmount: funding.redeemAmount }
+            : {}),
+        }),
+  };
 }

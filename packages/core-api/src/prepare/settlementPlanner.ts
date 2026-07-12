@@ -15,8 +15,12 @@
  */
 
 import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
-import type { PaymentInputSource } from '@stelis/core-relay/server';
-import type { SwapPlan, SettlementPlan, SettlePlanAuditFields } from './settlePlanTypes.js';
+import type {
+  SwapFundingResolution,
+  SwapPlan,
+  SettlementPlan,
+  SettlePlanAuditFields,
+} from './settlePlanTypes.js';
 
 // ─────────────────────────────────────────────
 // Planner config input
@@ -35,15 +39,6 @@ export interface PlannerInput {
   readonly profile: SettleProfile;
   readonly vaultObjectId: string | null;
   readonly creditMist: bigint;
-}
-
-/** Result of funding-source resolution (from resolvePaymentSource). */
-export interface FundingResolution {
-  readonly source: PaymentInputSource;
-  readonly usableCoins: ReadonlyArray<{ objectId: string; balance: string }>;
-  readonly usableCoinTotal: bigint;
-  readonly addressBalance: bigint;
-  readonly redeemDelta: bigint;
 }
 
 // ─────────────────────────────────────────────
@@ -141,7 +136,7 @@ export function calculateMinOutputGuardsFromQuotedOutputs(
 export function assembleSwapSettlementPlan(
   input: PlannerInput,
   audit: SettlePlanAuditFields,
-  funding: FundingResolution,
+  funding: SwapFundingResolution,
   swap: SwapPlan,
 ): SettlementPlan {
   const variant: 'new_user' | 'with_vault' =
@@ -161,14 +156,8 @@ export function assembleSwapSettlementPlan(
     variant,
     settlementSwapPath: input.settlementSwapPath,
     settlementSwapDirection: input.settlementSwapPath.settlementSwapDirection,
-    funding: {
-      source: funding.source,
-      usableCoins: [...funding.usableCoins],
-      usableCoinTotal: funding.usableCoinTotal,
-      addressBalance: funding.addressBalance,
-      redeemDelta: funding.redeemDelta,
-      useCreditAmount,
-    },
+    funding,
+    useCreditAmount,
     swap,
     audit,
   };
@@ -194,14 +183,8 @@ export function assembleCreditSettlementPlan(
     profile: 'credit_general',
     settlementSwapPath: input.settlementSwapPath,
     settlementSwapDirection: input.settlementSwapPath.settlementSwapDirection,
-    funding: {
-      source: 'none_credit_only',
-      usableCoins: [],
-      usableCoinTotal: 0n,
-      addressBalance: 0n,
-      redeemDelta: 0n,
-      useCreditAmount,
-    },
+    funding: { source: 'none_credit_only' },
+    useCreditAmount,
     swap: { swapAmountSmallest: 0n, minSuiOut: 0n },
     audit,
   };

@@ -5,8 +5,8 @@
  * Supports UnresolvedObject, Object.SharedObject, Object.ImmOrOwnedObject.
  *
  * Used by:
- *   - sdk/integrity.ts (S-16 input verification)
- *   - core-api/prepare/build.ts (R-9 coin classification)
+ *   - sdk/integrity.ts (input verification)
+ *   - core-relay/prefixValueTrace.ts (command-ordered coin value tracing)
  */
 
 /**

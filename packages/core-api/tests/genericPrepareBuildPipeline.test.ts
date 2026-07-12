@@ -54,7 +54,7 @@ vi.mock('@mysten/sui/transactions', () => {
     mergeCoins = vi.fn();
     splitCoins = vi.fn().mockReturnValue([{ $kind: 'Result', Result: 1 }]);
 
-    // R-9: classifyUserTxCoins reads TX data to detect coin overlap
+    // Unit 9 prefix tracing and compiler command-boundary accounting read TX data.
     getData() {
       return { inputs: [], commands: this.commands };
     }
@@ -72,16 +72,12 @@ const mockBuildSwapAndSettlePtb = vi.fn();
 const mockBuildSettleWithCreditPtb = vi.fn();
 const mockComputeExecutionCostClaim = vi.fn();
 const mockBatchGetHopMidPrices = vi.fn().mockResolvedValue([27_000_000_000n]);
+const MOCK_FUNDING_COIN = `0x${'c0'.repeat(32)}`;
 const mockResolvePaymentSource = vi.fn().mockResolvedValue({
   source: 'coin_object',
-  usableCoinTotal: 100_000_000n,
-  addressBalance: 0n,
-  usableCoins: [{ objectId: '0xCOIN', balance: '100000000' }],
-  redeemDelta: 0n,
-});
-const mockSelectPaymentCoin = vi.fn().mockResolvedValue({
-  paymentCoin: '0xCOIN',
-  leftoverCoin: null,
+  baseCoinId: MOCK_FUNDING_COIN,
+  mergeCoinIds: [],
+  remainingBalance: 100_000_000n,
 });
 const mockSolveExecutableSwap = vi.fn().mockResolvedValue({
   swapAmountSmallest: 1_000_000n,
@@ -94,7 +90,13 @@ const mockSolveExecutableSwap = vi.fn().mockResolvedValue({
   executionGapMist: 0n,
   executionGapBps: 0n,
 });
-const mockExtractPrefixWithdrawals = vi.fn().mockReturnValue({ total: 0n, unaccountable: false });
+const mockTraceUserPrefixValue = vi.fn().mockReturnValue({
+  directCoins: new Map(),
+  valueConstraints: [],
+  senderWithdrawalDebit: 0n,
+  unaccountableSenderWithdrawal: false,
+});
+const mockValidatePaymentInputIntegrity = vi.fn().mockReturnValue({ ok: true });
 
 vi.mock('@stelis/core-relay', () => {
   // Must be defined inside factory to avoid hoisting issues
@@ -135,15 +137,8 @@ vi.mock('@stelis/core-relay', () => {
     SlippageQueryError,
     CONVERGENCE_TOLERANCE_BPS: 500,
     DEFAULT_GAS_MARGIN_BPS: 1000,
-    classifyUserTxCoins: () => ({
-      survivors: new Set(),
-      consumed: new Set(),
-      opaqueInUse: new Set(),
-      mutated: new Set(),
-      reusableSplitSources: new Set(),
-      mergeDestToSources: new Map(),
-    }),
-    extractPrefixWithdrawals: (...args: unknown[]) => mockExtractPrefixWithdrawals(...args),
+    PrefixValueTraceError: class PrefixValueTraceError extends Error {},
+    traceUserPrefixValue: (...args: unknown[]) => mockTraceUserPrefixValue(...args),
     extractObjectIdFromInput: () => null,
     convertSdkCommands: (commands: unknown[]) => commands,
   };
@@ -187,6 +182,9 @@ vi.mock('@stelis/core-relay/server', () => {
   }
 
   return {
+    extractSettlePaymentInputContract: () => ({ paymentInputTrace: {} }),
+    validatePaymentInputIntegrity: (...args: unknown[]) =>
+      mockValidatePaymentInputIntegrity(...args),
     findUniqueSettleCommandIndex: (commands: Array<Record<string, unknown>>, packageId: string) => {
       const indices = commands.flatMap((command, index) =>
         command['kind'] === 'MoveCall' &&
@@ -256,7 +254,6 @@ const mockQueuedRpcStats: QuotedRpcStatsEntry[] = [];
 // ── Mock internal modules ───────────────────────────────────────────────────
 
 vi.mock('../src/prepare/coinSelection.js', () => ({
-  selectPaymentCoin: (...args: unknown[]) => mockSelectPaymentCoin(...args),
   resolvePaymentSource: (...args: unknown[]) => mockResolvePaymentSource(...args),
 }));
 
@@ -394,17 +391,21 @@ function resetBuildMocks(): void {
   mockResolvePaymentSource.mockReset();
   mockResolvePaymentSource.mockResolvedValue({
     source: 'coin_object',
-    usableCoinTotal: 100_000_000n,
-    addressBalance: 0n,
-    usableCoins: [{ objectId: '0xCOIN', balance: '100000000' }],
-    redeemDelta: 0n,
+    baseCoinId: MOCK_FUNDING_COIN,
+    mergeCoinIds: [],
+    remainingBalance: 100_000_000n,
   });
-  mockSelectPaymentCoin.mockReset();
-  mockSelectPaymentCoin.mockResolvedValue({ paymentCoin: '0xCOIN', leftoverCoin: null });
   mockSolveExecutableSwap.mockReset();
   mockSolveExecutableSwap.mockResolvedValue(makeExecutableQuote());
-  mockExtractPrefixWithdrawals.mockReset();
-  mockExtractPrefixWithdrawals.mockReturnValue({ total: 0n, unaccountable: false });
+  mockTraceUserPrefixValue.mockReset();
+  mockTraceUserPrefixValue.mockReturnValue({
+    directCoins: new Map(),
+    valueConstraints: [],
+    senderWithdrawalDebit: 0n,
+    unaccountableSenderWithdrawal: false,
+  });
+  mockValidatePaymentInputIntegrity.mockReset();
+  mockValidatePaymentInputIntegrity.mockReturnValue({ ok: true });
   mockComputeExecutionCostClaim.mockReturnValue({
     simGas: 2_000_000n,
     grossGas: 2_500_000n,
@@ -462,7 +463,12 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' });
 
-    mockExtractPrefixWithdrawals.mockReturnValueOnce({ total: 0n, unaccountable: true });
+    mockTraceUserPrefixValue.mockReturnValueOnce({
+      directCoins: new Map(),
+      valueConstraints: [],
+      senderWithdrawalDebit: 0n,
+      unaccountableSenderWithdrawal: true,
+    });
 
     await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
       code: 'UNACCOUNTABLE_WITHDRAWAL',
@@ -791,6 +797,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(pass1SwapCall[1].executionCostClaim).toBe(50_000_000n);
     expect(pass2SwapCall[1].executionCostClaim).toBe(3_000_000n);
     expect(result.executionCostClaim).toBe(3_000_000n);
+    expect(mockTraceUserPrefixValue).toHaveBeenCalledTimes(1);
   });
 
   // ── Credit-insufficient → swap fallback ─────────────────────────────────
@@ -918,7 +925,8 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
   it('measureSwapExecutionGap stays slot-free: quote solve only, no gas-owner, dry-run, or final build', async () => {
     const ctx = makeCtx();
     const input = makeInput();
-    const runContext = __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext();
+    const runContext =
+      __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext(input);
     const measuredCosts = {
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
@@ -949,7 +957,8 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
   it('runMaxClaimGasProbe is gas-bound: applies lowered sponsor identity, gas budget, and dry-run', async () => {
     const ctx = makeCtx();
     const input = makeInput({ sponsorAddress: '0xBOUND_SPONSOR' });
-    const runContext = __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext();
+    const runContext =
+      __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext(input);
 
     const result = await __testingGenericPrepareBuildStages.runMaxClaimGasProbe(
       ctx,
@@ -969,7 +978,8 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
   it('buildFinalGenericPrepareResult is gas-bound: final assembly sets sponsor gas owner and safe-builds txBytes', async () => {
     const ctx = makeCtx();
     const input = makeInput({ sponsorAddress: '0xFINAL_SPONSOR' });
-    const runContext = __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext();
+    const runContext =
+      __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext(input);
     const finalCosts = {
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
@@ -985,8 +995,7 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
       'swap',
       [27_000_000_000n],
       makeExecutableQuote({ executionGapMist: 0n }),
-      runContext.rpcAcc,
-      runContext.quoteCache,
+      runContext,
     );
 
     expect(mockSetSender).toHaveBeenCalledWith(input.senderAddress);
@@ -1009,15 +1018,43 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     resetBuildMocks();
   });
 
-  // ── UNACCOUNTABLE_WITHDRAWAL: extractPrefixWithdrawals returns unaccountable ──
-  it('throws UNACCOUNTABLE_WITHDRAWAL when extractPrefixWithdrawals returns unaccountable: true', async () => {
-    mockExtractPrefixWithdrawals.mockReturnValueOnce({ total: 0n, unaccountable: true });
+  // ── UNACCOUNTABLE_WITHDRAWAL: prefix value trace reports an unknown debit ──
+  it('throws UNACCOUNTABLE_WITHDRAWAL when the prefix debit is unaccountable', async () => {
+    mockTraceUserPrefixValue.mockReturnValueOnce({
+      directCoins: new Map(),
+      valueConstraints: [],
+      senderWithdrawalDebit: 0n,
+      unaccountableSenderWithdrawal: true,
+    });
     const ctx = makeCtx();
     const input = makeInput({ credit: '0' });
 
     await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
       code: 'UNACCOUNTABLE_WITHDRAWAL',
     });
+  });
+
+  it('rejects when the final PTB does not match the compiler funding expectation', async () => {
+    mockValidatePaymentInputIntegrity.mockReturnValueOnce({
+      ok: false,
+      subcode: 'payment_input_merge_coin_ids_mismatch',
+      message: 'final merge IDs differ from the resolved funding',
+    });
+    const ctx = makeCtx();
+    const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
+
+    await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
+      code: 'L2_EXTRACT_FAILED',
+      meta: { subcode: 'payment_input_merge_coin_ids_mismatch' },
+    });
+    expect(mockValidatePaymentInputIntegrity).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        source: 'coin_object',
+        baseCoinObjectId: MOCK_FUNDING_COIN,
+        mergeCoinObjectIds: [],
+      }),
+    );
   });
 
   // ── safeBuild: InsufficientCoinBalance → INSUFFICIENT_BALANCE ─────────
@@ -3270,15 +3307,14 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     });
 
     mockBatchGetHopMidPrices.mockResolvedValue([27_000_000_000n]);
-    // resolvePaymentSource succeeds with mixed_topup but no usableCoins,
-    // which makes the real compileSwapSettlement throw PAYMENT_COIN_CONFLICT
-    // (ptbCompiler.ts mixed_topup branch invariant).
+    // Resolver output is structurally inconsistent: the base is also listed as
+    // a merge source. The compiler rejects rather than materializing it.
     mockResolvePaymentSource.mockResolvedValueOnce({
       source: 'mixed_topup',
-      usableCoins: [],
-      usableCoinTotal: 0n,
-      addressBalance: 5_000_000n,
-      redeemDelta: 1_000_000n,
+      baseCoinId: MOCK_FUNDING_COIN,
+      mergeCoinIds: [MOCK_FUNDING_COIN],
+      remainingBalance: 500_000n,
+      redeemAmount: 500_000n,
     });
 
     const events = captureStageEvents();

@@ -116,6 +116,14 @@ const MOCK_PAYMENT_INPUT_TRACE = {
   producerCommandKind: 'SplitCoins' as const,
   settleSwapAmount: 500_000n,
   splitAmount: 500_000n,
+  splitCommandIndex: 0,
+  baseInputIndex: 0,
+  baseCoinObjectId: `0x${'11'.repeat(32)}`,
+  directMergeSources: [],
+  unsupportedMergeSources: [],
+  fundingInputUses: [{ commandIndex: 0, inputIndex: 0, occurrences: 1 }],
+  senderWithdrawals: [],
+  senderRedeems: [],
 };
 
 const MOCK_CREDIT_RESULT = {
@@ -533,6 +541,12 @@ describe('handlePrepare — success path', () => {
         producerCommandKind: 'MoveCall',
         settleSwapAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
         withdrawalAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
+        redeemCommandIndex: 0,
+        withdrawalInputIndex: 0,
+        senderWithdrawals: [{ inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest }],
+        senderRedeems: [
+          { commandIndex: 0, inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest },
+        ],
       },
     });
 

@@ -23,12 +23,13 @@ export { validateGenericSettlementTransaction } from './validate/transactionKind
 // no verified browser/SDK consumer.
 export { extractVaultTableId, extractMoveObjectFields } from './creditQuery.js';
 
-// R-9 prefix coin classification: used in core-api prepare path, not in browser.
+// Prefix value trace: used in the core-api prepare path, not in the browser.
 export {
-  classifyUserTxCoins,
-  extractPrefixWithdrawals,
+  PrefixValueTraceError,
+  traceUserPrefixValue,
   containsSponsorWithdrawal,
-} from './classifyPrefixCoins.js';
+} from './prefixValueTrace.js';
+export type { PrefixValueTrace } from './prefixValueTrace.js';
 
 // Transport error-code unions: type-only re-export so the server-side failure
 // policy (`packages/core-api/src/failures.ts`) can narrow `FailureCode` against

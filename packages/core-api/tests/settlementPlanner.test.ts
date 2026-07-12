@@ -13,10 +13,11 @@ import {
   assembleSwapSettlementPlan,
   assembleCreditSettlementPlan,
 } from '../src/prepare/settlementPlanner.js';
-import type { FundingResolution } from '../src/prepare/settlementPlanner.js';
+import type { SwapFundingResolution } from '../src/prepare/settlePlanTypes.js';
 import {
   BASE_CONFIG,
   BASE_AUDIT,
+  ADDR_DEEP_COIN,
   ADDR_USABLE_COIN,
   makeInput,
 } from './fixtures/prepareTestFixtures.js';
@@ -125,8 +126,9 @@ describe('assembleCreditSettlementPlan', () => {
     const plan = assembleCreditSettlementPlan(input, creditAudit, 5_120_000n);
     expect(plan.profile).toBe('credit_general');
     expect(plan.swap.swapAmountSmallest).toBe(0n);
-    expect(plan.funding.source).toBe('none_credit_only');
-    expect(plan.funding.useCreditAmount).toBe(5_120_000n);
+    expect(plan.funding).toEqual({ source: 'none_credit_only' });
+    expect(plan.useCreditAmount).toBe(5_120_000n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
     expect(plan.audit.slippageBufferMist).toBe(0n);
   });
 
@@ -139,12 +141,11 @@ describe('assembleCreditSettlementPlan', () => {
 });
 
 describe('assembleSwapSettlementPlan', () => {
-  const funding: FundingResolution = {
+  const funding: SwapFundingResolution = {
     source: 'coin_object',
-    usableCoins: [{ objectId: ADDR_USABLE_COIN, balance: '10000000' }],
-    usableCoinTotal: 10_000_000n,
-    addressBalance: 0n,
-    redeemDelta: 0n,
+    baseCoinId: ADDR_USABLE_COIN,
+    mergeCoinIds: [],
+    remainingBalance: 10_000_000n,
   };
   const swap = { swapAmountSmallest: 1_916_668n, minSuiOut: 26_730_000n };
 
@@ -152,7 +153,13 @@ describe('assembleSwapSettlementPlan', () => {
     const input = makeInput({ profile: 'with_vault', creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.swap.swapAmountSmallest).toBe(1_916_668n);
-    expect(plan.funding.source).toBe('coin_object');
+    expect(plan.funding).toBe(funding);
+    expect(plan.funding).toEqual({
+      source: 'coin_object',
+      baseCoinId: ADDR_USABLE_COIN,
+      mergeCoinIds: [],
+      remainingBalance: 10_000_000n,
+    });
     expect(plan.audit.executionCostClaim).toBe(BASE_AUDIT.executionCostClaim);
     expect(plan.variant).toBe('with_vault');
   });
@@ -161,7 +168,8 @@ describe('assembleSwapSettlementPlan', () => {
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.profile).toBe('new_user');
-    expect(plan.funding.useCreditAmount).toBe(0n);
+    expect(plan.useCreditAmount).toBe(0n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
   });
 
   it('normalizes credit_general swap path to with_vault', () => {
@@ -172,24 +180,45 @@ describe('assembleSwapSettlementPlan', () => {
     });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.profile).toBe('with_vault');
-    expect(plan.funding.useCreditAmount).toBe(2_000_000n);
+    expect(plan.useCreditAmount).toBe(2_000_000n);
+    expect(plan.funding).toBe(funding);
   });
 
   it('with_vault variant carries creditMist as useCreditAmount', () => {
     const input = makeInput({ profile: 'with_vault', creditMist: 2_000_000n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
-    expect(plan.funding.useCreditAmount).toBe(2_000_000n);
+    expect(plan.useCreditAmount).toBe(2_000_000n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
   });
 
-  it('preserves funding.redeemDelta for mixed_topup', () => {
-    const mixedFunding: FundingResolution = {
-      ...funding,
+  it('preserves the exact mixed funding object identity and amounts', () => {
+    const mixedFunding: SwapFundingResolution = {
       source: 'mixed_topup',
-      redeemDelta: 500_000n,
+      baseCoinId: ADDR_USABLE_COIN,
+      mergeCoinIds: [ADDR_DEEP_COIN],
+      remainingBalance: 1_416_668n,
+      redeemAmount: 500_000n,
     };
     const input = makeInput({ profile: 'with_vault', creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, mixedFunding, swap);
-    expect(plan.funding.source).toBe('mixed_topup');
-    expect(plan.funding.redeemDelta).toBe(500_000n);
+    expect(plan.funding).toBe(mixedFunding);
+    expect(plan.funding).toEqual(mixedFunding);
+    expect(plan.useCreditAmount).toBe(0n);
+  });
+
+  it('preserves address-balance funding without adding coin-selection fields', () => {
+    const addressFunding: SwapFundingResolution = {
+      source: 'address_balance',
+      redeemAmount: swap.swapAmountSmallest,
+    };
+    const input = makeInput({ profile: 'with_vault', creditMist: 750_000n });
+    const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, addressFunding, swap);
+
+    expect(plan.funding).toBe(addressFunding);
+    expect(plan.funding).toEqual({
+      source: 'address_balance',
+      redeemAmount: swap.swapAmountSmallest,
+    });
+    expect(plan.useCreditAmount).toBe(750_000n);
   });
 });

@@ -1,5 +1,5 @@
 import type { Transaction } from '@mysten/sui/transactions';
-import { containsSponsorWithdrawal, extractPrefixWithdrawals } from '../classifyPrefixCoins.js';
+import { containsSponsorWithdrawal, extractPrefixWithdrawals } from '../prefixValueTrace.js';
 import { convertSdkCommands } from '../convert.js';
 import type { HostValidationEnv, ValidationResult } from '../types.js';
 import { fail, ok } from '../types.js';

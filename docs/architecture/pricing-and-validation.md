@@ -42,12 +42,12 @@ Client guidance:
 
 ## Validation Layers
 
-| Layer | Checks |
-| --- | --- |
-| User-command validation | command count, forbidden command kinds, `GasCoin` references, direct Stelis calls |
-| Settlement validation | config object, vault registry object, settlement payout recipient address, settlement swap path authorization, fee caps |
-| Non-loss validation | execution cost claim, gas budget, simulated gas cap |
-| Move validation | vault ownership, settlement minimums, pause state, admin-only config |
+| Layer                   | Checks                                                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| User-command validation | command count, forbidden command kinds, `GasCoin` references, direct Stelis calls                                       |
+| Settlement validation   | config object, vault registry object, settlement payout recipient address, settlement swap path authorization, fee caps |
+| Non-loss validation     | execution cost claim, gas budget, simulated gas cap                                                                     |
+| Move validation         | vault ownership, settlement minimums, pause state, admin-only config                                                    |
 
 ## PTB Validation Layer Contract
 
@@ -55,19 +55,19 @@ Programmable Transaction Block (PTB) validation is split by ownership boundary. 
 same primitive checks can appear in more than one layer, but each layer answers a
 different question.
 
-| Layer | Owner | Current role | Shared primitives |
-| --- | --- | --- | --- |
-| Generic user `TransactionKind` gate | SDK prepare pre-check and generic `/relay/prepare` | Rejects a user-supplied `TransactionKind` before the Host appends settlement. It requires zero settlement calls, applies the command cap, rejects `GasCoin`, rejects `FundsWithdrawal(Sponsor)`, and rejects unaccountable same-token `FundsWithdrawal(Sender)`. | `validateUserCommands`, `containsGasCoinReference`, `containsSponsorWithdrawal`, `extractPrefixWithdrawals` |
-| Generic final settlement transaction validation | Generic prepare self-check and `/relay/sponsor` revalidation | Validates the Host-built final transaction after settlement is appended. It requires exactly one allowed settlement call and does not repeat user-prefix address-balance accounting, because the final transaction may contain Host-created `FundsWithdrawal(Sender)` inputs for funding. | `validatePtbStructure`, `containsGasCoinReference` |
-| Promotion-sponsored policy | Promotion prepare and sponsor paths | Keeps promotion-specific rules separate from the generic validator. Promotion transactions must be MoveCall-only, must not reference `GasCoin`, and use promotion-owned target and entitlement checks. Prepare also rejects `FundsWithdrawal(Sponsor)`. | `containsGasCoinReference`, `containsSponsorWithdrawal`, `isMoveCall` |
-| SDK returned-transaction integrity verification | `@stelis/sdk` after the Host returns transaction bytes | Verifies that returned transaction bytes preserve the user's prefix and append only the expected settlement suffix. This is a client-side integrity layer, not the user `TransactionKind` gate and not the server final-transaction validator. | `convertSdkCommands`, `containsGasCoinReference`, `isMoveCall`, `integrityCompare` |
-| Funding evidence extraction | Generic prepare build | Reads user coin-object provenance and `FundsWithdrawal(Sender)` address-balance use so payment-source resolution can account for already-consumed address balance. This is not an admissibility gate replacement. | `classifyUserTxCoins`, `extractPrefixWithdrawals` |
+| Layer                                           | Owner                                                        | Current role                                                                                                                                                                                                                                                                              | Shared primitives                                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Generic user `TransactionKind` gate             | SDK prepare pre-check and generic `/relay/prepare`           | Rejects a user-supplied `TransactionKind` before the Host appends settlement. It requires zero settlement calls, applies the command cap, rejects `GasCoin`, rejects `FundsWithdrawal(Sponsor)`, and rejects unaccountable same-token `FundsWithdrawal(Sender)`.                          | `validateUserCommands`, `containsGasCoinReference`, `containsSponsorWithdrawal`, `extractPrefixWithdrawals` |
+| Generic final settlement transaction validation | Generic prepare self-check and `/relay/sponsor` revalidation | Validates the Host-built final transaction after settlement is appended. It requires exactly one allowed settlement call and does not repeat user-prefix address-balance accounting, because the final transaction may contain Host-created `FundsWithdrawal(Sender)` inputs for funding. | `validatePtbStructure`, `containsGasCoinReference`                                                          |
+| Promotion-sponsored policy                      | Promotion prepare and sponsor paths                          | Keeps promotion-specific rules separate from the generic validator. Promotion transactions must be MoveCall-only, must not reference `GasCoin`, and use promotion-owned target and entitlement checks. Prepare also rejects `FundsWithdrawal(Sponsor)`.                                   | `containsGasCoinReference`, `containsSponsorWithdrawal`, `isMoveCall`                                       |
+| SDK returned-transaction integrity verification | `@stelis/sdk` after the Host returns transaction bytes       | Verifies that returned transaction bytes preserve the user's prefix and append only the expected settlement suffix. This is a client-side integrity layer, not the user `TransactionKind` gate and not the server final-transaction validator.                                            | `convertSdkCommands`, `containsGasCoinReference`, `isMoveCall`, `integrityCompare`                          |
+| Prefix value and funding resolution             | Generic prepare build                                        | Traces direct coin identity and command-ordered split/merge value, then accounts for same-token `FundsWithdrawal(Sender)` use before selecting the exact funding objects and redeem amount. This is not an admissibility gate replacement.                                                | `traceUserPrefixValue`, `resolvePaymentSource`                                                              |
 
 The phrase "source of truth" must name the layer. For example,
 `validateGenericUserTransactionKind` is the shared SDK/server source for the
 generic user `TransactionKind` gate. It is not the source for SDK
-returned-transaction integrity verification, promotion policy, or funding
-evidence extraction.
+returned-transaction integrity verification, promotion policy, or prefix value
+and funding resolution.
 
 The SDK returned-transaction integrity layer deliberately reuses core-relay
 primitives while keeping its own rule assembly. Its job is to check the bytes
