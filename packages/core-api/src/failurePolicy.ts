@@ -216,14 +216,14 @@ const NO_BODY_EXTRAS: readonly ('digest' | 'subcode' | 'meta')[] = [];
  * mapper preserves the override; the table records the default.
  */
 export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
-  // ── Body / parse failures (host-route boundary) ───────────────────
+  // ── Request-shape failures ────────────────────────────────────────
   BAD_REQUEST: {
     code: 'BAD_REQUEST',
     classification: 'normal',
     httpStatus: 400,
     abuseImpact: SKIP_BOTH,
     bodyFields: NO_BODY_EXTRAS,
-    notes: 'Body validation rejection from host route or RequestBodyParseError.',
+    notes: 'Request body, parse, or normal command-admission rejection.',
   },
   REQUEST_BODY_TOO_LARGE: {
     code: 'REQUEST_BODY_TOO_LARGE',

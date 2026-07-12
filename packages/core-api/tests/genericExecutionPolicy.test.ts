@@ -385,6 +385,59 @@ describe('createGenericExecutionPolicy', () => {
     }
   });
 
+  test('generic prepare rejects 12 user commands before resource acquisition', async () => {
+    const userTx = new Transaction();
+    for (let index = 0; index < 12; index++) {
+      userTx.moveCall({ target: `0x${'99'.repeat(32)}::example::act` });
+    }
+    const deserializeUserTxKind = vi.fn().mockResolvedValue(userTx);
+    const { policy } = createGenericExecutionPolicy(
+      makePrepareOptions({
+        deps: {
+          deserializeUserTxKind:
+            deserializeUserTxKind as GenericExecutionPolicyDependencies['deserializeUserTxKind'],
+        },
+      }),
+    );
+    const host = {
+      inflightLimiter: {
+        tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
+      },
+      sponsorPool: {
+        checkout: vi.fn(),
+        commit: vi.fn(),
+        checkin: vi.fn(),
+      },
+      prepareStore: {
+        reserveNonce: vi.fn(),
+        releaseReservation: vi.fn(),
+        store: vi.fn(),
+      },
+    };
+
+    const err = await runPrepareStateMachine(
+      host,
+      {
+        senderAddress: makePrepareHookCtx().senderAddress,
+        clientIp: makePrepareHookCtx().clientIp,
+        preparedDraftFields: vi.fn(),
+        projectResponse: vi.fn(),
+      },
+      policy,
+    ).catch((caught: unknown) => caught);
+
+    expect(err).toBeInstanceOf(PrepareValidationError);
+    expect(err).toMatchObject({
+      code: 'P1_TOO_MANY_COMMANDS',
+      message: 'P1 validation failed: User TransactionKind command count 12 exceeds max 11',
+    });
+    expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
+    expect(host.inflightLimiter.tryAcquire).not.toHaveBeenCalled();
+    expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
+    expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
+    expect(host.prepareStore.store).not.toHaveBeenCalled();
+  });
+
   test('does not widen the package main barrel', async () => {
     const mainBarrel = await import('@stelis/core-api');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'createGenericExecutionPolicy')).toBe(

@@ -8,13 +8,13 @@ This document summarizes the current security boundaries that are visible in the
 | --- | --- |
 | User assets | User vault assets are owned on-chain by the user. |
 | Sponsor gas | User commands must not reference `GasCoin` or use `FundsWithdrawal(Sponsor)`. |
-| User TransactionKind | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most `MAX_COMMANDS = 16` commands. |
-| Final Host-built transaction | The Host-built transaction must contain exactly one allowed settlement call. |
+| User TransactionKind | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most 11 commands. |
+| Final Host-built transaction | The Host-built generic transaction must contain exactly one allowed settlement call and at most 16 commands. |
 | Settlement-token funding | The Host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
 | Prepare authorization | Generic prepare requires a sender personal-message signature over the transaction-kind hash and request fields. |
 | Settlement swap path | Relay validation accepts only configured settlement swap paths. Each supported `settlementTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
 | Prepare records | Prepare records are single-use and time-limited. |
-| Promotion calls | Promotion-sponsored Move calls must match `STUDIO_ALLOWED_TARGETS`. |
+| Promotion calls | Promotion-sponsored transactions contain 1 to 16 `MoveCall` commands, all matching `STUDIO_ALLOWED_TARGETS`; the Host adds no commands. |
 | Admin routes | `/api/*` routes require an admin session. |
 
 ## Web3 Security Policy
@@ -65,6 +65,7 @@ Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUD
 
 Promotion prepare and sponsor routes also check:
 
+- 1 to 16 `MoveCall` commands
 - promotion status and user entitlement
 - sender address from the verified identity
 - allowed Move call targets

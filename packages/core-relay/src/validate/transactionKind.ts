@@ -18,8 +18,6 @@ export function validateGenericUserTransactionKind(
   settlementTokenType: string,
 ): ValidationResult {
   const data = tx.getData();
-  const commandResult = validateUserCommands(convertSdkCommands(data.commands as unknown[]), env);
-  if (!commandResult.ok) return commandResult;
 
   if (containsSponsorWithdrawal(tx)) {
     return fail(
@@ -35,6 +33,11 @@ export function validateGenericUserTransactionKind(
       'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
     );
   }
+
+  // Run the normal command-count policy only after input-level manipulation
+  // checks, so command padding cannot hide sponsor or unaccountable withdrawals.
+  const commandResult = validateUserCommands(convertSdkCommands(data.commands as unknown[]), env);
+  if (!commandResult.ok) return commandResult;
 
   return ok();
 }

@@ -8,7 +8,8 @@ import { useAppConfig } from '../../../AppConfigContext';
 
 /**
  * Minimal MoveCall targets used by the test TX.
- * Promotion prepare rejects any non-MoveCall command (FORBIDDEN_COMMAND, 403).
+ * Promotion prepare requires 1 to 16 MoveCall commands and rejects every
+ * non-MoveCall command.
  *
  * We use a 2-step MoveCall pattern:
  *   1. coin::zero<SUI> — creates a zero-balance coin (returns Coin<SUI>)
@@ -44,8 +45,7 @@ interface StudioExecutionPanelProps {
  * The TX builds a 2-step MoveCall-only PTB:
  *   1. coin::zero<SUI> — creates zero-balance Coin<SUI>
  *   2. coin::destroy_zero<SUI> — consumes it (Coin has no `drop` ability)
- * Promotion prepare rejects non-MoveCall commands (SplitCoins, TransferObjects, etc.)
- * so only MoveCall commands are allowed in the transaction.
+ * Promotion prepare accepts 1 to 16 commands, all of them MoveCall.
  */
 export function StudioExecutionPanel({
   sdk,
@@ -72,7 +72,7 @@ export function StudioExecutionPanel({
   /**
    * Build a minimal MoveCall-only test TX.
    *
-   * Promotion prepare handler (Step 5) rejects ALL non-MoveCall commands:
+   * Promotion prepare accepts 1 to 16 commands and rejects ALL non-MoveCall commands:
    * SplitCoins, MergeCoins, TransferObjects, MakeMoveVec, Publish, Upgrade
    * are all FORBIDDEN_COMMAND (403).
    *
@@ -122,7 +122,7 @@ export function StudioExecutionPanel({
         label: 'TX Build',
         response: {
           moveCallTargets,
-          note: 'Promotion path: MoveCall-only TX. No settlement token or settlement swap path needed — budget covers gas.',
+          note: 'Promotion path: 2-command MoveCall-only TX (allowed range: 1 to 16). No settlement token or settlement swap path needed — budget covers gas.',
         },
         timestamp: Date.now(),
       });
@@ -226,8 +226,8 @@ export function StudioExecutionPanel({
       <p className="promo-panel-desc">
         Execute a promotion-sponsored transaction. Uses <code>sdk.preparePromotionSponsored()</code>{' '}
         and <code>sdk.sponsorPromotionSponsored()</code>. No settlement token or settlement swap
-        path needed — promotion budget covers gas. Builds a MoveCall-only TX (
-        <code>coin::zero&lt;SUI&gt;</code>).
+        path needed — promotion budget covers gas. Builds a 2-command MoveCall-only TX within the
+        allowed 1-to-16 range (<code>coin::zero&lt;SUI&gt;</code>).
       </p>
 
       {!account && <div className="promo-warning">⚠️ Connect your wallet first.</div>}

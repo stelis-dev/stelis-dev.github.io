@@ -7,11 +7,18 @@ import { describe, expect, it } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import {
+  SETTLE_FUNCTIONS,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   settlementParameterIndex,
   type MoveCallCommand,
 } from '@stelis/contracts';
-import { convertSdkCommands, extractObjectIdFromInput } from '@stelis/core-relay';
+import {
+  convertSdkCommands,
+  extractObjectIdFromInput,
+  validateGenericSettlementTransaction,
+  validateGenericUserTransactionKind,
+  type HostValidationEnv,
+} from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
   validatePaymentInputIntegrity,
@@ -51,6 +58,16 @@ const COMPILE_CONTEXT = {
   configId: ADDR_CONFIG,
   vaultRegistryId: ADDR_REGISTRY,
 };
+
+const VALIDATION_ENV: HostValidationEnv = {
+  network: 'testnet',
+  settlementPayoutRecipientAddress: BASE_AUDIT.settlementPayoutRecipient,
+  configId: ADDR_CONFIG,
+  vaultRegistryId: ADDR_REGISTRY,
+  packageId: ADDR_PKG,
+};
+
+const USER_PREFIX_TARGET = `0x${'9'.repeat(64)}::example::act`;
 
 type NormalizedCommand = ReturnType<typeof convertSdkCommands>[number];
 
@@ -198,6 +215,124 @@ function expectFinalIntegrity(
     ok: true,
   });
 }
+
+function appendUserPrefix(tx: Transaction, commandCount: number): void {
+  for (let index = 0; index < commandCount; index++) {
+    tx.moveCall({ target: USER_PREFIX_TARGET as `${string}::${string}::${string}` });
+  }
+}
+
+describe('current generic compiler command budget', () => {
+  it("measures every settlement entry against each funding source's maximum command shape", () => {
+    const fundingCases = [
+      {
+        funding: {
+          source: 'coin_object' as const,
+          baseCoinId: ADDR_USABLE_COIN,
+          mergeCoinIds: [ADDR_DEEP_COIN],
+          remainingBalance: 12_000_000n,
+        },
+        expectedAddedCommands: 3,
+      },
+      {
+        funding: { source: 'address_balance' as const, redeemAmount: SWAP_AMOUNT },
+        expectedAddedCommands: 2,
+      },
+      {
+        funding: {
+          source: 'mixed_topup' as const,
+          baseCoinId: ADDR_PAYMENT_COIN,
+          mergeCoinIds: [ADDR_USABLE_COIN],
+          remainingBalance: 8_000_000n,
+          redeemAmount: SWAP_AMOUNT - 8_000_000n,
+        },
+        expectedAddedCommands: 5,
+      },
+    ] satisfies ReadonlyArray<{
+      funding: SwapFundingResolution;
+      expectedAddedCommands: number;
+    }>;
+    const swapVariants = [
+      {
+        variant: 'new_user' as const,
+        profile: 'new_user' as const,
+        vaultId: null,
+      },
+      {
+        variant: 'with_vault' as const,
+        profile: 'with_vault' as const,
+        vaultId: ADDR_VAULT,
+      },
+    ];
+    const directions = [
+      {
+        direction: 'baseForQuote' as const,
+        settlementSwapPath: SETTLEMENT_SWAP_PATH_BFQ,
+      },
+      {
+        direction: 'quoteForBase' as const,
+        settlementSwapPath: SETTLEMENT_SWAP_PATH_QFB,
+      },
+    ];
+    const observedAddedCommands: number[] = [];
+    const observedSettlementFunctions = new Set<string>();
+
+    for (const variant of swapVariants) {
+      for (const direction of directions) {
+        for (const fundingCase of fundingCases) {
+          const tx = new Transaction();
+          appendUserPrefix(tx, 11);
+          expect(tx.getData().commands).toHaveLength(11);
+          expect(
+            validateGenericUserTransactionKind(
+              tx,
+              VALIDATION_ENV,
+              direction.settlementSwapPath.settlementTokenType,
+            ),
+          ).toEqual({ ok: true });
+
+          const plan = makeSwapPlan({
+            profile: variant.profile,
+            variant: variant.variant,
+            settlementSwapPath: direction.settlementSwapPath,
+            settlementSwapDirection: direction.direction,
+            funding: fundingCase.funding,
+            useCreditAmount: variant.variant === 'with_vault' ? 100_000n : 0n,
+          });
+          const before = tx.getData().commands.length;
+          compileSwapSettlement(tx, plan, COMPILE_CONTEXT, variant.vaultId);
+          const after = tx.getData().commands.length;
+          const added = after - before;
+          const settle = findSettleCommand(normalizedTransaction(tx).commands);
+
+          observedAddedCommands.push(added);
+          observedSettlementFunctions.add(settle.function);
+          expect(added).toBe(fundingCase.expectedAddedCommands);
+          expect(after).toBe(11 + fundingCase.expectedAddedCommands);
+          expect(after).toBeLessThanOrEqual(16);
+          expect(validateGenericSettlementTransaction(tx, VALIDATION_ENV)).toEqual({ ok: true });
+        }
+      }
+    }
+
+    const creditTx = new Transaction();
+    appendUserPrefix(creditTx, 11);
+    const creditBefore = creditTx.getData().commands.length;
+    compileCreditSettlement(creditTx, makeCreditPlan(5_120_000n), COMPILE_CONTEXT, ADDR_VAULT);
+    const creditAfter = creditTx.getData().commands.length;
+    const creditAdded = creditAfter - creditBefore;
+    observedAddedCommands.push(creditAdded);
+    observedSettlementFunctions.add(
+      findSettleCommand(normalizedTransaction(creditTx).commands).function,
+    );
+    expect(creditAdded).toBe(1);
+    expect(creditAfter).toBe(12);
+    expect(validateGenericSettlementTransaction(creditTx, VALIDATION_ENV)).toEqual({ ok: true });
+
+    expect(Math.max(...observedAddedCommands)).toBe(5);
+    expect([...observedSettlementFunctions].sort()).toEqual([...SETTLE_FUNCTIONS].sort());
+  });
+});
 
 describe('compileSwapSettlement exact materialization', () => {
   it('materializes the resolved coin base and merge IDs without discovery or reselection', () => {

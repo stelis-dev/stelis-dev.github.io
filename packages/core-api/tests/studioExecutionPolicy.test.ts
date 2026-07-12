@@ -36,6 +36,7 @@ import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js'
 import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import type { OnchainConfig } from '@stelis/core-relay';
+import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
 import {
   grpcSimulationFailure,
   grpcSimulationSuccess,
@@ -56,6 +57,7 @@ const GAS_USED = {
   storageCost: '500',
   storageRebate: '200',
 };
+const ALLOWED_TARGET = `0x${'88'.repeat(32)}::example::act`;
 
 class TestStudioError extends Error {
   constructor(
@@ -197,7 +199,7 @@ function makeContext(
       getByUser: vi.fn(),
       getByPromotion: vi.fn(),
     },
-    globalTargetHashes: new Set<string>(),
+    globalTargetHashes: new Set(hashTargets([ALLOWED_TARGET])),
     getConfig: vi.fn(),
     onSponsorResult: undefined,
     ...overrides,
@@ -313,11 +315,13 @@ async function buildTxBytes(sender: string, gasBudget = RESERVED_GAS): Promise<U
 
 async function buildTxKindBytes(): Promise<string> {
   const tx = new Transaction();
+  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
   return toBase64(await tx.build({ onlyTransactionKind: true }));
 }
 
 function makeBuildReadyTransaction(): Transaction {
   const tx = new Transaction();
+  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
   tx.setGasPrice(1);
   const digestBytes = new Uint8Array(32);
   digestBytes.fill(2);

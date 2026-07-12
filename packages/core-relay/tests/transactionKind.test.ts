@@ -83,13 +83,13 @@ describe('validateGenericUserTransactionKind', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  it('enforces MAX_COMMANDS through the shared user command validator', () => {
-    const maxCommands = Array.from({ length: 16 }, () => moveCall());
+  it('accepts 11 user commands and rejects 12 through the shared validator', () => {
+    const maxCommands = Array.from({ length: 11 }, () => moveCall());
     expect(validateGenericUserTransactionKind(txWithData(maxCommands), ENV, PAYMENT_TYPE)).toEqual({
       ok: true,
     });
 
-    const tooManyCommands = Array.from({ length: 17 }, () => moveCall());
+    const tooManyCommands = Array.from({ length: 12 }, () => moveCall());
     const result = validateGenericUserTransactionKind(
       txWithData(tooManyCommands),
       ENV,
@@ -161,9 +161,37 @@ describe('validateGenericUserTransactionKind', () => {
     if (!result.ok) expect(result.code).toBe('P1_SPONSOR_WITHDRAWAL_FORBIDDEN');
   });
 
+  it('does not let an over-cap prefix mask FundsWithdrawal(Sponsor)', () => {
+    const result = validateGenericUserTransactionKind(
+      txWithData(
+        Array.from({ length: 12 }, () => moveCall()),
+        [fundsWithdrawal({ Sponsor: true })],
+      ),
+      ENV,
+      PAYMENT_TYPE,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('P1_SPONSOR_WITHDRAWAL_FORBIDDEN');
+  });
+
   it('rejects malformed same-token FundsWithdrawal(Sender)', () => {
     const result = validateGenericUserTransactionKind(
       txWithData([], [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '0x10')]),
+      ENV,
+      PAYMENT_TYPE,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('UNACCOUNTABLE_WITHDRAWAL');
+  });
+
+  it('does not let an over-cap prefix mask an unaccountable Sender withdrawal', () => {
+    const result = validateGenericUserTransactionKind(
+      txWithData(
+        Array.from({ length: 12 }, () => moveCall()),
+        [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '0x10')],
+      ),
       ENV,
       PAYMENT_TYPE,
     );

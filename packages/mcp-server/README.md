@@ -19,6 +19,7 @@ Use this package when an agent runtime needs to:
 
 Stelis does not custody keys, sign for users, or build arbitrary Sui transactions in this MCP server. The caller must provide `txKindBytes` before prepare and a user signature before sponsor.
 The caller-provided `txKindBytes` must satisfy the [User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
+Generic `txKindBytes` may contain at most 11 commands. Promotion `txKindBytes` must contain 1 to 16 commands, all of them `MoveCall`; the MCP server forwards these opaque bytes and the Host enforces the policy.
 
 ## Install
 

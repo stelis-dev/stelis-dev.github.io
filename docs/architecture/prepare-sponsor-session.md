@@ -16,7 +16,8 @@ The prepare→sponsor pipeline passes data through four owned boundaries.
 ```text
 Request (handlePrepare — handlers/prepare.ts)
   ├─ verify:   verifyPrepareAuthorization()
-  ├─ validate: validateUserCommands(), containsSponsorWithdrawal()
+  ├─ validate: validateGenericUserTransactionKind()
+  │             (command policy + Sponsor/Sender withdrawal policy)
   └─ query:    queryUserCredit(), getConfig()
         │
         ▼

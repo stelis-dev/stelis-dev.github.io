@@ -11,6 +11,9 @@
  *   S2 — STUDIO_ALLOWED_TARGETS hash match
  *   S3 — promotion active + entitlement claimed + use-window active
  *
+ * The normal 1..MAX_FINAL_COMMANDS admission range is checked only after S1/S2
+ * by callers so padding cannot hide a manipulation-policy violation.
+ *
  * Prepare-only companion guard (distinct from S1): sponsor-withdrawal forbidden.
  * Sponsor preconsume relies on the stored-hash-verified contract for this check and
  * therefore does not call the sponsor-withdrawal guard directly.
@@ -29,6 +32,7 @@ import {
   containsGasCoinReference,
   containsSponsorWithdrawal,
   isMoveCall,
+  MAX_FINAL_COMMANDS,
 } from '@stelis/core-relay';
 import type { PtbCommand } from '@stelis/contracts';
 import { hashTarget } from './promotionTargetPolicy.js';
@@ -41,6 +45,11 @@ import type { Promotion, Entitlement } from './domain.js';
 export type PtbStructureFailure =
   | { code: 'FORBIDDEN_COMMAND'; kind: string }
   | { code: 'GASCOIN_FORBIDDEN' };
+
+export type PromotionCommandCountFailure = {
+  code: 'INVALID_COMMAND_COUNT';
+  commandCount: number;
+};
 
 /**
  * S1 — validate PTB command structure for promotion flows.
@@ -66,6 +75,18 @@ export function validatePromotionPtbStructure(
     }
   }
   return null;
+}
+
+/**
+ * Normal Promotion command-count admission. Callers run this after the
+ * manipulation-policy structure and target checks.
+ */
+export function validatePromotionCommandCount(
+  commands: readonly PtbCommand[],
+): PromotionCommandCountFailure | null {
+  return commands.length === 0 || commands.length > MAX_FINAL_COMMANDS
+    ? { code: 'INVALID_COMMAND_COUNT', commandCount: commands.length }
+    : null;
 }
 
 // ─────────────────────────────────────────────

@@ -158,7 +158,7 @@
       "properties": {
         "txKindBytes": {
           "type": "string",
-          "description": "Serialized TransactionKind bytes in base64."
+          "description": "Serialized TransactionKind bytes in base64. Generic user transactions may contain at most 11 commands; the Host reserves up to 5 commands inside the 16-command final limit."
         },
         "senderAddress": {
           "$ref": "#/$defs/hexString"
@@ -696,7 +696,7 @@
         },
         "txKindBytes": {
           "type": "string",
-          "description": "Serialized TransactionKind bytes in base64. Must contain only MoveCall commands."
+          "description": "Serialized TransactionKind bytes in base64. Must contain 1 to 16 commands, all of them MoveCall."
         }
       }
     },

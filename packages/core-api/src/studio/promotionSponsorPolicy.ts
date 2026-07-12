@@ -1,5 +1,5 @@
 import { Transaction } from '@mysten/sui/transactions';
-import { convertSdkCommands } from '@stelis/core-relay';
+import { convertSdkCommands, MAX_FINAL_COMMANDS } from '@stelis/core-relay';
 import type { PromotionPreparedTxEntry } from '../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
@@ -14,6 +14,7 @@ import {
   LEDGER_CONSUME_THREW_IN_HANDLER,
 } from '../observability/events.js';
 import {
+  validatePromotionCommandCount,
   validatePromotionPtbStructure,
   validatePromotionTargets,
   validatePromotionEligibility,
@@ -227,6 +228,15 @@ export async function validatePromotionPreconsumePolicy(
     throw sponsorPolicyErrorForTargetPolicy(targetFailure);
   }
 
+  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
+  if (commandCountFailure) {
+    throw new PromotionSponsorPolicyError(
+      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
+      'BAD_REQUEST',
+      400,
+    );
+  }
+
   // S3 — eligibility (promotion active + claimed + use-window).
   const promotion = await ctx.promotionStore.get(input.promotionId);
   const entitlement = promotion
@@ -305,22 +315,24 @@ async function recordSponsorAbuseForPtbStructure(
     promotionId: input.promotionId,
     userId: input.verifiedIdentity.userId,
   };
-  if (f.code === 'FORBIDDEN_COMMAND') {
-    await recordPromotionAbuseEvent(
-      ctx.abuseBlocker,
-      input.clientIp,
-      { kind: 'studio_user', userId: peeked.userId },
-      PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
-      { ...common, kind: f.kind },
-    );
-  } else if (f.code === 'GASCOIN_FORBIDDEN') {
-    await recordPromotionAbuseEvent(
-      ctx.abuseBlocker,
-      input.clientIp,
-      { kind: 'studio_user', userId: peeked.userId },
-      PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
-      common,
-    );
+  switch (f.code) {
+    case 'FORBIDDEN_COMMAND':
+      await recordPromotionAbuseEvent(
+        ctx.abuseBlocker,
+        input.clientIp,
+        { kind: 'studio_user', userId: peeked.userId },
+        PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
+        { ...common, kind: f.kind },
+      );
+      return;
+    case 'GASCOIN_FORBIDDEN':
+      await recordPromotionAbuseEvent(
+        ctx.abuseBlocker,
+        input.clientIp,
+        { kind: 'studio_user', userId: peeked.userId },
+        PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
+        common,
+      );
   }
 }
 

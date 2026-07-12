@@ -22,7 +22,7 @@
  */
 
 // ── Constants (browser-safe, core-relay-interior) ───────────────────────────
-export { MAX_COMMANDS, SUI_CLOCK_OBJECT_ID } from './constants.js';
+export { MAX_FINAL_COMMANDS, SUI_CLOCK_OBJECT_ID } from './constants.js';
 
 // ── Hash utilities (browser-safe, uses SubtleCrypto) ────────────────────────
 export { sha256Bytes } from './hash.js';
@@ -46,12 +46,7 @@ export type {
 export { ok, fail } from './types.js';
 
 // ── Validation ──────────────────────────────────────────────────────────────
-export {
-  validatePtbStructure,
-  validateUserCommands,
-  validateSettleArgs,
-  isMoveCall,
-} from './validate/static.js';
+export { validatePtbStructure, validateSettleArgs, isMoveCall } from './validate/static.js';
 export { validateGenericUserTransactionKind } from './validate/transactionKind.js';
 export { validateNonlossSponsor } from './validate/nonloss.js';
 export type { SponsorNonlossContext } from './validate/nonloss.js';

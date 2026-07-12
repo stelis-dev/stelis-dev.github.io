@@ -530,9 +530,12 @@ describe('handlePromotionSponsor', () => {
   test('rejects txBytes hash mismatch (tamper detection) and releases ledger reservation', async () => {
     const { ctx, receiptId, executionLedger } = await setup();
 
-    const emptyKind = new Transaction();
-    const emptyKindBytes = await emptyKind.build({ onlyTransactionKind: true });
-    const tx2 = Transaction.fromKind(emptyKindBytes);
+    // Keep the kind valid under current Promotion admission and change the
+    // full transaction's gas metadata so this test isolates stored-byte hash binding.
+    const validKind = new Transaction();
+    validKind.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+    const validKindBytes = await validKind.build({ onlyTransactionKind: true });
+    const tx2 = Transaction.fromKind(validKindBytes);
     tx2.setSender(USER_ADDR);
     tx2.setGasOwner(SPONSOR_KP.toSuiAddress());
     tx2.setGasBudget(2_000_000n);
@@ -1682,6 +1685,31 @@ describe('handlePromotionSponsor', () => {
     return { txBytes, txBytesBase64: toBase64(txBytes), userSignature: sig.signature };
   }
 
+  async function buildCommandCountTx(commandCount: number) {
+    const kindTx = new Transaction();
+    for (let index = 0; index < commandCount; index++) {
+      kindTx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+    }
+    const kindBytes = await kindTx.build({ onlyTransactionKind: true });
+    const tx = Transaction.fromKind(kindBytes);
+    tx.setSender(USER_ADDR);
+    tx.setGasOwner(SPONSOR_KP.toSuiAddress());
+    tx.setGasBudget(2_000_000n);
+    tx.setGasPrice(1000);
+    const digestBytes = new Uint8Array(32);
+    digestBytes.fill(7);
+    tx.setGasPayment([
+      {
+        objectId: '0x' + '0'.repeat(64),
+        version: '1',
+        digest: toBase58(digestBytes),
+      },
+    ]);
+    const txBytes = await tx.build();
+    const sig = await USER_KP.signTransaction(txBytes);
+    return { txBytesBase64: toBase64(txBytes), userSignature: sig.signature };
+  }
+
   // Helper: tamper tx.sender while signing with USER_KP. Canonical sender
   // mismatch path (same shape as the canonical mismatch test but with a
   // separate digest seed so fixtures don't collide if tests are reordered).
@@ -1833,6 +1861,56 @@ describe('handlePromotionSponsor', () => {
       expectedStatusHint: 403,
       expectedAbuseCode: 'PROMO_FORBIDDEN_COMMAND',
     });
+  });
+
+  test.each([0, 17])(
+    'pure command count %i returns BAD_REQUEST before consume without recording manipulation abuse',
+    async (commandCount) => {
+      const { ctx, receiptId } = await setup();
+      const submission = await buildCommandCountTx(commandCount);
+      const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
+
+      const err = await handlePromotionSponsor(ctx, {
+        promotionId: TEST_PROMO_ID,
+        receiptId,
+        txBytes: submission.txBytesBase64,
+        userSignature: submission.userSignature,
+        verifiedIdentity: buildIdentity(),
+        clientIp: '127.0.0.1',
+      }).catch((error: unknown) => error);
+
+      expect(err).toBeInstanceOf(PromotionSponsorError);
+      expect(err).toMatchObject({
+        code: 'BAD_REQUEST',
+        statusHint: 400,
+        message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
+      });
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(await ctx.prepareStore.peek(receiptId)).not.toBeNull();
+    },
+  );
+
+  test('does not let over-cap padding hide disallowed-target abuse', async () => {
+    const { ctx, receiptId } = await setup();
+    ctx.globalTargetHashes = new Set<string>();
+    const submission = await buildCommandCountTx(17);
+    const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
+
+    const err = await handlePromotionSponsor(ctx, {
+      promotionId: TEST_PROMO_ID,
+      receiptId,
+      txBytes: submission.txBytesBase64,
+      userSignature: submission.userSignature,
+      verifiedIdentity: buildIdentity(),
+      clientIp: '127.0.0.1',
+    }).catch((error: unknown) => error);
+
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect(err).toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+    expect(
+      recordSpy.mock.calls.filter((call) => call[2] === 'PROMO_DISALLOWED_TARGET'),
+    ).toHaveLength(1);
+    expect(await ctx.prepareStore.peek(receiptId)).not.toBeNull();
   });
 
   test('malformed txBytes (valid base64, invalid BCS) returns BAD_REQUEST/400 and preserves prepared entry', async () => {

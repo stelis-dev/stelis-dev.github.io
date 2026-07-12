@@ -24,6 +24,7 @@ vi.mock('@stelis/core-relay', async () => {
 import * as coreRelay from '@stelis/core-relay';
 import type { PtbCommand, MoveCallCommand, OtherCommand } from '@stelis/contracts';
 import {
+  validatePromotionCommandCount,
   validatePromotionPtbStructure,
   validatePromotionSponsorWithdrawal,
   validatePromotionTargets,
@@ -92,14 +93,6 @@ describe('convertSdkCommands normalization (S-15 reach)', () => {
 // ─────────────────────────────────────────────
 
 describe('validatePromotionPtbStructure (S1)', () => {
-  it('returns null for all-MoveCall commands', () => {
-    const result = validatePromotionPtbStructure([
-      moveCallCmd(ALLOWED_TARGET),
-      moveCallCmd(ALLOWED_TARGET),
-    ]);
-    expect(result).toBeNull();
-  });
-
   it('rejects non-MoveCall command kinds', () => {
     const result = validatePromotionPtbStructure([otherCmd('SplitCoins')]);
     expect(result).toEqual({ code: 'FORBIDDEN_COMMAND', kind: 'SplitCoins' });
@@ -135,6 +128,21 @@ describe('validatePromotionPtbStructure (S1)', () => {
       moveCallCmd(ALLOWED_TARGET, [{ $kind: 'GasCoin' }]),
     ]);
     expect(result).toEqual({ code: 'FORBIDDEN_COMMAND', kind: 'SplitCoins' });
+  });
+});
+
+describe('validatePromotionCommandCount', () => {
+  it.each([1, 16])('accepts %i command(s)', (commandCount) => {
+    const commands = Array.from({ length: commandCount }, () => moveCallCmd(ALLOWED_TARGET));
+    expect(validatePromotionCommandCount(commands)).toBeNull();
+  });
+
+  it.each([0, 17])('rejects a Promotion command count of %i', (commandCount) => {
+    const commands = Array.from({ length: commandCount }, () => moveCallCmd(ALLOWED_TARGET));
+    expect(validatePromotionCommandCount(commands)).toEqual({
+      code: 'INVALID_COMMAND_COUNT',
+      commandCount,
+    });
   });
 });
 

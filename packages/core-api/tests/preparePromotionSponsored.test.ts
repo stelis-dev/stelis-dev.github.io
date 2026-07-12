@@ -78,8 +78,14 @@ function buildIdentity(overrides?: Partial<VerifiedDeveloperIdentity>): Verified
 }
 
 async function buildTestTxKindBytes(): Promise<string> {
+  return buildCommandCountTxKindBytes(1);
+}
+
+async function buildCommandCountTxKindBytes(commandCount: number): Promise<string> {
   const tx = new Transaction();
-  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+  for (let index = 0; index < commandCount; index++) {
+    tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+  }
   const kindBytes = await tx.build({ onlyTransactionKind: true });
   return toBase64(kindBytes);
 }
@@ -419,6 +425,76 @@ describe('handlePromotionPrepare', () => {
     expect(storeSpy).not.toHaveBeenCalled();
   });
 
+  test.each([0, 17])(
+    'rejects a Promotion command count of %i before inflight, config, checkout, reserve, or store',
+    async (commandCount) => {
+      const { ctx, promoId } = await setup();
+      const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
+      const getConfigSpy = vi.spyOn(ctx, 'getConfig');
+      const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
+      const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
+      const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+      const txKindBytes = await buildCommandCountTxKindBytes(commandCount);
+
+      await expect(
+        handlePromotionPrepare(ctx, {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        }),
+      ).rejects.toMatchObject({
+        code: 'BAD_REQUEST',
+        statusHint: 400,
+        message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
+      });
+      expect(inflightSpy).not.toHaveBeenCalled();
+      expect(getConfigSpy).not.toHaveBeenCalled();
+      expect(checkoutSpy).not.toHaveBeenCalled();
+      expect(reserveSpy).not.toHaveBeenCalled();
+      expect(storeSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  test('does not let an over-cap Promotion hide a disallowed target', async () => {
+    const { ctx, promoId } = await setup();
+    ctx.globalTargetHashes = new Set<string>();
+    const txKindBytes = await buildCommandCountTxKindBytes(17);
+
+    await expect(
+      handlePromotionPrepare(ctx, {
+        promotionId: promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes,
+        verifiedIdentity: buildIdentity(),
+        clientIp: '127.0.0.1',
+      }),
+    ).rejects.toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+  });
+
+  test('allows 16 Promotion commands through request validation to inflight admission', async () => {
+    const { ctx, promoId } = await setup();
+    const exhaustedLimiter = new MemoryPrepareInflight(1);
+    await exhaustedLimiter.tryAcquire('occupy');
+    const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
+    const txKindBytes = await buildCommandCountTxKindBytes(16);
+
+    await expect(
+      handlePromotionPrepare(
+        { ...ctx, prepareInflightLimiter: exhaustedLimiter },
+        {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        },
+      ),
+    ).rejects.toBeInstanceOf(PrepareOverloadError);
+    expect(checkoutSpy).not.toHaveBeenCalled();
+  });
+
   test('rejects FundsWithdrawal(Sponsor) input before inflight, checkout, reserve, or store (S-15 companion)', async () => {
     const { ctx, promoId } = await setup();
     const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
@@ -429,6 +505,7 @@ describe('handlePromotionPrepare', () => {
 
     // Build a Sender withdrawal, patch to Sponsor via BCS
     const seed = new Transaction();
+    seed.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
     seed.withdrawal({ amount: 999_999_999n, type: '0x2::sui::SUI' });
     const kindBytes = await seed.build({ onlyTransactionKind: true });
     const decoded = bcs.TransactionKind.parse(kindBytes);

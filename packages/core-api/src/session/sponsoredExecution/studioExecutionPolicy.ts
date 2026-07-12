@@ -18,6 +18,7 @@ import {
   computeExecutionCostClaim,
   convertSdkCommands,
   GAS_VARIANCE_FIXED_MIST,
+  MAX_FINAL_COMMANDS,
 } from '@stelis/core-relay';
 import type { OnchainConfig } from '@stelis/core-relay';
 import { PrepareValidationError, deserializeUserTxKind } from '../../prepare/replay.js';
@@ -63,6 +64,7 @@ import {
 } from '../../studio/promotionSponsorPolicy.js';
 import { recordPromotionAbuseEvent } from '../../studio/promotionAbusePolicy.js';
 import {
+  validatePromotionCommandCount,
   validatePromotionEligibility,
   validatePromotionPtbStructure,
   validatePromotionSponsorWithdrawal,
@@ -540,6 +542,15 @@ async function runStudioRequestValidation(
       `Disallowed MoveCall targets: ${targetFailure.disallowedTargets.join(', ')}`,
       'DISALLOWED_TARGET',
       403,
+    );
+  }
+
+  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
+  if (commandCountFailure) {
+    throw prepare.errors.prepare(
+      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
+      'BAD_REQUEST',
+      400,
     );
   }
 

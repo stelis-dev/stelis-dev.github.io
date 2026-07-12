@@ -132,7 +132,7 @@ describe('Layer 1: validatePtbStructure', () => {
     expect(validatePtbStructure(commands, ENV)).toEqual({ ok: true });
   });
 
-  it('boundary — exactly MAX_COMMANDS (16) passes', () => {
+  it('boundary — exactly MAX_FINAL_COMMANDS (16) passes', () => {
     const commands: PtbCommand[] = Array.from({ length: 15 }, () => ({
       kind: 'TransferObjects' as const,
     }));
@@ -867,15 +867,35 @@ describe('P1: validateUserCommands', () => {
     if (!result.ok) expect(result.code).toBe('P1_GASCOIN_FORBIDDEN');
   });
 
-  // ── Fail: MAX_COMMANDS ────────────────────────────────────────────────────
+  // ── User command budget ───────────────────────────────────────────────────
 
-  it('fail — command count exceeds limit (P1_TOO_MANY_COMMANDS)', () => {
-    const commands: PtbCommand[] = Array.from({ length: 17 }, () => ({
+  it('pass — exactly MAX_GENERIC_USER_COMMANDS (11)', () => {
+    const commands: PtbCommand[] = Array.from({ length: 11 }, () => ({
+      kind: 'TransferObjects' as const,
+    }));
+    expect(validateUserCommands(commands, ENV)).toEqual({ ok: true });
+  });
+
+  it('fail — 12 user commands exceed the reserved prefix budget', () => {
+    const commands: PtbCommand[] = Array.from({ length: 12 }, () => ({
       kind: 'TransferObjects' as const,
     }));
     const result = validateUserCommands(commands, ENV);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('P1_TOO_MANY_COMMANDS');
+  });
+
+  it('does not let an over-cap prefix mask a GasCoin manipulation violation', () => {
+    const commands: PtbCommand[] = Array.from({ length: 12 }, () => ({
+      kind: 'TransferObjects' as const,
+    }));
+    commands[0] = {
+      kind: 'TransferObjects',
+      arguments: [{ $kind: 'GasCoin' }, { $kind: 'Input', Input: 0 }],
+    };
+    const result = validateUserCommands(commands, ENV);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('P1_GASCOIN_FORBIDDEN');
   });
 
   // ── Fail: unauthorized Stelis package call ─────────────────────────────────

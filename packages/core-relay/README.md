@@ -101,9 +101,7 @@ const estimate = computeExecutionCostClaim({
 ### Constants
 
 ```typescript
-import {
-  MAX_COMMANDS,
-} from '@stelis/core-relay';
+import { MAX_FINAL_COMMANDS } from '@stelis/core-relay';
 
 import {
   // credit-only
@@ -140,7 +138,7 @@ For user-supplied transaction-kind bytes, see [User TransactionKind rules](../..
 
 | Layer | Code                          | Description                                                       |
 | ----- | ----------------------------- | ----------------------------------------------------------------- |
-| P1    | `P1_TOO_MANY_COMMANDS`        | User TransactionKind command count exceeds the cap                |
+| P1    | `P1_TOO_MANY_COMMANDS`        | User TransactionKind command count exceeds 11                     |
 | P1    | `P1_GASCOIN_FORBIDDEN`        | User TransactionKind references GasCoin                           |
 | P1    | `P1_USER_SETTLE_FORBIDDEN`    | User TransactionKind calls a settlement entrypoint                |
 | P1    | `P1_UNAUTHORIZED_STELIS_CALL` | User TransactionKind calls a non-entrypoint Stelis function       |
@@ -151,7 +149,7 @@ For user-supplied transaction-kind bytes, see [User TransactionKind rules](../..
 | L1    | `L1_MULTIPLE_SETTLE`          | More than one swap_and_settle call                                |
 | L1    | `L1_FORBIDDEN_COMMAND`        | Contains Publish/Upgrade                                          |
 | L1    | `L1_UNAUTHORIZED_STELIS_CALL` | Stelis package call other than swap*and_settle*\*                 |
-| L1    | `L1_TOO_MANY_COMMANDS`        | Command count > MAX_COMMANDS                                      |
+| L1    | `L1_TOO_MANY_COMMANDS`        | Final command count exceeds 16                                    |
 | L1    | `L1_GASCOIN_FORBIDDEN`        | Command references GasCoin (S-15)                                 |
 | L2    | `L2_WRONG_CONFIG`             | Config object ID mismatch                                         |
 | L2    | `L2_WRONG_REGISTRY`           | VaultRegistry object ID mismatch                                  |

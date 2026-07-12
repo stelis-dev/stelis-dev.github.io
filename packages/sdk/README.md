@@ -210,6 +210,7 @@ Use this shortcut before you connect product-specific flows:
 ### `executeSponsored()` — One-liner (Recommended)
 
 SDK handles everything: coin query → `swap_and_settle` (single MoveCall) → prepare → sign → sponsor.
+The user transaction may contain at most 11 commands; the Host reserves up to five commands for settlement inside the 16-command final policy.
 
 ```typescript
 import { Transaction } from '@mysten/sui/transactions';
@@ -363,8 +364,9 @@ const result = await sdk.sponsorPromotionSponsored({
 
 > [!IMPORTANT]
 > `executePromotionSponsored()` requires `studioEndpoint: true` at connect time.
-> The promotion TX must contain only `MoveCall` commands. Non-MoveCall commands
-> (`SplitCoins`, `TransferObjects`, etc.) are rejected by the promotion handler.
+> The promotion TX must contain 1 to 16 commands, all of them `MoveCall`.
+> Non-MoveCall commands (`SplitCoins`, `TransferObjects`, etc.) are rejected by
+> the promotion handler. The Host adds gas metadata but no commands.
 
 ### Server-to-Server Promotion Discovery
 
