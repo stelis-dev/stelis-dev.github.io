@@ -246,8 +246,8 @@ interface GenericHarness {
 
 function makeGenericHarness(): GenericHarness {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);
@@ -591,8 +591,8 @@ async function makeStudioHarness(): Promise<StudioHarness> {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);

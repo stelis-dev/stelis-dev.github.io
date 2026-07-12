@@ -37,7 +37,6 @@ const fixedClock = () => new Date(FROZEN_TS);
 
 function makeMetadata(overrides: Partial<SponsorResultMetadata> = {}): SponsorResultMetadata {
   const base: SponsorResultMetadata = {
-    slotId: '0xslot',
     sponsorAddress: '0xsponsor',
     outcome: 'success',
     executionStage: 'on_chain',
@@ -102,6 +101,7 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
     for (const [outcome, executionStage] of [
       ['congestion', 'after_sponsor_signature'],
       ['preflight_failure', 'before_sponsor_signature'],
+      ['preflight_failure', 'on_chain'],
       ['validation_failure', 'before_sponsor_signature'],
     ] as const) {
       await cb(
@@ -211,7 +211,6 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     await cb(makeMetadata());
     const e = store.appended[0];
     expect(e).toMatchObject({
-      schemaVersion: 1,
       createdAt: FROZEN_TS,
       mode: 'generic',
       outcome: 'success',
@@ -219,7 +218,6 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       digest: '0xdigest',
       senderAddress: '0xsender',
       sponsorAddress: '0xsponsor',
-      slotId: '0xslot',
       executionPathKey: 'rk',
       orderIdHash: 'abcdef',
       promotionId: null,
@@ -257,6 +255,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     expect(e.grossGasMist).toBeNull();
     expect(e.storageRebateMist).toBeNull();
     expect(e.hostFeeMist).toBeNull();
+    expect(e.protocolFeeMist).toBeNull();
     expect(e.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
   });
 
@@ -369,7 +368,7 @@ describe('fanOutSponsorResult', () => {
         outcome: 'success',
         route: 'generic',
         digest: '0xfanout_digest',
-        slotId: '0xslot_x',
+        sponsorAddress: '0xsponsor_x',
       }),
     );
     const events = warnSpy.mock.calls
@@ -383,9 +382,9 @@ describe('fanOutSponsorResult', () => {
     expect(fanFailed?.error).toBe('child boom');
     // digest is the cross-reference key in `docs/operations.md`:
     // operators correlate fanOut failures with `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`
-    // / `SPONSORED_LOGS_RECORDER_FAILED` on the same digest/slot.
+    // / `SPONSORED_LOGS_RECORDER_FAILED` on the same digest/sponsor address.
     expect(fanFailed?.digest).toBe('0xfanout_digest');
-    expect(fanFailed?.slot_id).toBe('0xslot_x');
+    expect(fanFailed?.sponsor_address).toBe('0xsponsor_x');
     warnSpy.mockRestore();
   });
 

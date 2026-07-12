@@ -196,7 +196,6 @@ function makeMockContext() {
     sui: {},
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        slotId: 'slot-42',
         sponsorAddress: '0xSPONSOR42',
       }),
       commit: vi.fn().mockResolvedValue(undefined),

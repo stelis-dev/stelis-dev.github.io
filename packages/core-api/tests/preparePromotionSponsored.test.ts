@@ -145,8 +145,8 @@ async function setup() {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
 
   // Create and activate a promotion

@@ -1,7 +1,8 @@
 /**
  * PrepareStoreAdapter — interface for /prepare binding storage.
  *
- * Binds receiptId → PreparedTx and holds slotId until /sponsor or TTL expiry.
+ * Binds receiptId → PreparedTx and holds one sponsor-address lease until
+ * /sponsor or TTL expiry.
  *
  * Implementations:
  *   - `RedisPrepareStore` — required for production hosts; `app-api`
@@ -49,19 +50,17 @@ interface PreparedTxEntryBase {
   txBytesHash: string;
 
   // ── Slot reservation (from ExecuteTicketStore pattern) ────────
-  /** Pre-checked-out sponsor slot identifier */
-  slotId: string;
-  /** Sponsor address for the leased slot */
+  /** Sponsor address that identifies the leased pool entry. */
   sponsorAddress: string;
   // The raw lease fencing token is gone. The sponsor pool adapter commits
-  // `HMAC(secret, receiptId || slotId || commitDigest)` to its lease
+  // `HMAC(secret, receiptId || sponsorAddress || commitDigest)` to its lease
   // store, where `commitDigest` is a reserved sentinel after
   // `checkout()` and `txBytesHash` after the prepare runner calls
   // `sponsorPool.commit()` just before `prepareStore.store()`. `sign()`
-  // verifies that proof against `hash(txBytes)`, so `receiptId` is the
-  // lease identity and `txBytesHash` (elsewhere in this entry) is the
-  // prepare-commit authenticator. Both are already persisted under
-  // their own fields; no extra lease material lives here.
+  // verifies that proof against `hash(txBytes)`. `sponsorAddress` is the
+  // lease identity; `receiptId` binds it to one prepare operation and
+  // `txBytesHash` (elsewhere in this entry) is the prepare-commit
+  // authenticator. No extra lease material lives here.
 
   // ── IP tracking (for max concurrent enforcement) ─────────────
   /** Client IP that issued this prepare request */
@@ -165,6 +164,121 @@ export interface PromotionPreparedTxEntry extends PreparedTxEntryBase {
  */
 export type PreparedTxEntry = GenericPreparedTxEntry | PromotionPreparedTxEntry;
 
+const GENERIC_PREPARED_ENTRY_KEYS = [
+  'mode',
+  'issuedAt',
+  'receiptId',
+  'senderAddress',
+  'txBytesHash',
+  'sponsorAddress',
+  'clientIp',
+  'executionPathKey',
+  'orderId',
+  'nonce',
+] as const;
+
+const PROMOTION_PREPARED_ENTRY_KEYS = [
+  ...GENERIC_PREPARED_ENTRY_KEYS,
+  'promotionId',
+  'userId',
+  'reservedGasMist',
+] as const;
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('PreparedTxEntry must be an object');
+  }
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Assert the exact current field set and return its discriminator.
+ *
+ * Redis calls this before converting decimal strings to bigint; Memory calls
+ * it as part of the full runtime parser. Keeping the key authority here makes
+ * versioned, dual-identity, and cross-mode records fail in both adapters.
+ * This symbol is store-internal and is not re-exported from the package barrel.
+ */
+export function assertCurrentPreparedTxEntryKeys(value: unknown): 'generic' | 'promotion' {
+  const record = requireRecord(value);
+  const mode = record.mode;
+  if (mode !== 'generic' && mode !== 'promotion') {
+    throw new Error('PreparedTxEntry.mode must be "generic" or "promotion"');
+  }
+  const expected = mode === 'generic' ? GENERIC_PREPARED_ENTRY_KEYS : PROMOTION_PREPARED_ENTRY_KEYS;
+  const actual = Object.keys(record);
+  if (actual.length !== expected.length) {
+    throw new Error(`PreparedTxEntry.${mode} has an unexpected field set`);
+  }
+  const expectedSet = new Set<string>(expected);
+  for (const key of actual) {
+    if (!expectedSet.has(key)) {
+      throw new Error(`PreparedTxEntry.${mode} has an unexpected field: ${key}`);
+    }
+  }
+  return mode;
+}
+
+function requireString(record: Record<string, unknown>, field: string): string {
+  const value = record[field];
+  if (typeof value !== 'string') {
+    throw new Error(`PreparedTxEntry.${field} must be a string`);
+  }
+  return value;
+}
+
+function requireUnsignedBigInt(record: Record<string, unknown>, field: string): bigint {
+  const value = record[field];
+  if (typeof value !== 'bigint' || value < 0n) {
+    throw new Error(`PreparedTxEntry.${field} must be a non-negative bigint`);
+  }
+  return value;
+}
+
+/**
+ * Validate and clone the exact current in-memory prepared-entry shape.
+ *
+ * The returned object contains only declared fields. Both adapters use this
+ * at their write/read boundaries so callers cannot mutate Memory storage by
+ * retaining an input or `peek()` reference, and runtime-only extra fields can
+ * never leak into Redis JSON.
+ */
+export function parseCurrentPreparedTxEntry(value: unknown): PreparedTxEntry {
+  const mode = assertCurrentPreparedTxEntryKeys(value);
+  const record = value as Record<string, unknown>;
+  const issuedAt = record.issuedAt;
+  if (!Number.isSafeInteger(issuedAt) || (issuedAt as number) < 0) {
+    throw new Error('PreparedTxEntry.issuedAt must be a non-negative safe integer');
+  }
+  const orderId = record.orderId;
+  if (orderId !== null && typeof orderId !== 'string') {
+    throw new Error('PreparedTxEntry.orderId must be a string or null');
+  }
+  const common = {
+    mode,
+    issuedAt: issuedAt as number,
+    receiptId: requireString(record, 'receiptId'),
+    senderAddress: requireString(record, 'senderAddress'),
+    txBytesHash: requireString(record, 'txBytesHash'),
+    sponsorAddress: requireString(record, 'sponsorAddress'),
+    clientIp: requireString(record, 'clientIp'),
+    executionPathKey: requireString(record, 'executionPathKey'),
+    orderId,
+    nonce: requireUnsignedBigInt(record, 'nonce'),
+  } as const;
+
+  if (mode === 'generic') {
+    return { ...common, mode: 'generic' };
+  }
+  return {
+    ...common,
+    mode: 'promotion',
+    promotionId: requireString(record, 'promotionId'),
+    userId: requireString(record, 'userId'),
+    reservedGasMist: requireUnsignedBigInt(record, 'reservedGasMist'),
+  };
+}
+
 // ─────────────────────────────────────────────
 // Store adapter interface
 // ─────────────────────────────────────────────
@@ -174,7 +288,7 @@ export type PreparedTxEntry = GenericPreparedTxEntry | PromotionPreparedTxEntry;
  *
  * Implementations must guarantee:
  *   1. Atomic 1-time consume semantics (same as ExecuteTicketStore)
- *   2. Slot release on TTL expiry or error
+ *   2. Sponsor-address lease release on TTL expiry or error
  *   3. IP concurrency enforcement (max outstanding per IP)
  */
 export interface PrepareStoreAdapter {
@@ -210,7 +324,7 @@ export interface PrepareStoreAdapter {
    * Read without consuming. Returns null if not found or logically expired.
    *
    * Throws if the entry exists but cannot be deserialized (corrupt JSON,
-   * unsupported schema version, etc.). Callers must catch the throw and
+   * malformed or non-current stored shape, etc.). Callers must catch the throw and
    * use `evictPreparedEntry(receiptId)` to release the held slot before
    * rejecting the request — silently returning `null` would let an
    * unparseable entry hold its sponsor slot until lease TTL.
@@ -224,17 +338,21 @@ export interface PrepareStoreAdapter {
    *
    * Used for corrupt-entry eviction. `peek()` or `consume()` threw on
    * deserialize failure; raw JSON is read without invoking the typed
-   * deserializer, `slotId` and `receiptId` are extracted from it, and the
-   * entry is deleted. Sponsor-time policy rejections that parse cleanly are
+   * deserializer, recoverable `sponsorAddress` and `txBytesHash` are extracted
+   * from it, and the entry is deleted. The method argument remains the
+   * authoritative receipt identity selected by the store key. Sponsor-time
+   * policy rejections that parse cleanly are
    * owned by their route-local lifecycle code and may intentionally preserve
    * the prepared entry for retry.
    *
    * Implementation contract:
-   *   1. Extract `slotId` and `receiptId` from whatever form of the
-   *      entry is available (raw JSON fallback if typed read failed).
+   *   1. Extract `sponsorAddress` and `txBytesHash` from whatever form of the
+   *      entry is available (raw JSON fallback if typed read failed), while
+   *      retaining the method's `receiptId` as authority.
    *   2. Delete the entry from the store atomically.
-   *   3. Call the configured `onRelease(slotId, receiptId)` to return
-   *      the sponsor slot via the HMAC lease fencing path.
+   *   3. Call the configured
+   *      `onRelease(sponsorAddress, receiptId, txBytesHash)` to return the
+   *      sponsor slot via the HMAC lease fencing path.
    *
    * Idempotent: a no-op if the entry is already gone. Must NEVER throw —
    * callers are already on a failure path.

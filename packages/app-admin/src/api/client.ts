@@ -322,18 +322,17 @@ export interface SponsoredExecutionAggregate {
 
 export type SponsoredLogsRowMode = 'generic' | 'promotion';
 export type SponsoredLogsEconomicsStatus = 'known' | 'unknown';
+export type SponsoredLogsOutcome = 'success' | 'onchain_revert' | 'internal_error';
 
 export interface SponsoredExecutionLogEntry {
-  schemaVersion: 1;
   createdAt: string;
   mode: SponsoredLogsRowMode;
-  outcome: string;
+  outcome: SponsoredLogsOutcome;
   receiptId: string;
   digest: string | null;
-  senderAddress: string | null;
-  sponsorAddress: string | null;
-  slotId: string | null;
-  executionPathKey: string | null;
+  senderAddress: string;
+  sponsorAddress: string;
+  executionPathKey: string;
   orderIdHash: string | null;
   promotionId: string | null;
   userId: string | null;

@@ -125,14 +125,12 @@ describe('SponsoredExecution — state vocabulary', () => {
 describe('SponsoredExecution — reservation handle construction guard', () => {
   test('reconstructReservationHandles (the public mint API) issues live tokens', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     expect(slot.reservationKind).toBe('SponsorSlot');
     expect(slot.isLive()).toBe(true);
-    expect(slot.slotId).toBe('slot-1');
+    expect(slot.sponsorAddress).toBe('0xSPONSOR');
   });
 
   test('direct constructor call with a forged factory key is rejected at runtime', () => {
@@ -142,7 +140,7 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
     const fakeKey = Symbol('fake') as unknown as Parameters<
       typeof SponsorSlotReservationHandleImpl
     >[0];
-    expect(() => new SponsorSlotReservationHandleImpl(fakeKey, 'slot', '0xS', '0xR')).toThrow(
+    expect(() => new SponsorSlotReservationHandleImpl(fakeKey, '0xS', '0xR')).toThrow(
       ReservationHandleConstructionError,
     );
     expect(() => new NonceReservationHandleImpl(fakeKey, 1n, '0xS', '0xR')).toThrow(
@@ -192,14 +190,12 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
 describe('SponsoredExecution — post-release / post-consume guard', () => {
   test('after release(), every payload getter throws ReservationHandleClosedError(reason="released")', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     slot.release();
     expect(slot.isLive()).toBe(false);
-    expect(() => slot.slotId).toThrow(ReservationHandleClosedError);
+    expect(() => slot.sponsorAddress).toThrow(ReservationHandleClosedError);
     try {
       void slot.sponsorAddress;
       expect.fail('expected throw');
@@ -290,10 +286,8 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
     // would violate the lifecycle boundary: the ledger reservation is acquired
     // AFTER GasBoundBuild.
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const ev: GasBoundBuildReservationHandles = { sponsorSlot: slot };
     // Use Object.keys for shape parity. `nonce` is the only legal optional key.
@@ -308,10 +302,8 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
 
   test('PreparedCommitReservationHandles carries both nonce and ledgerReservation as optional fields', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const nonce = reconstructReservationHandles.nonce({
       nonce: 1n,
@@ -339,10 +331,8 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
     // Type-level lock: nonce has no sponsor result verb. The in-PTB nonce match
     // already happened at SharedPostconsumeChecks.
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const ev: SponsorResultReservationHandles = { sponsorSlot: slot };
     expect((ev as Record<string, unknown>).nonce).toBeUndefined();
@@ -356,10 +346,8 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
 describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', () => {
   test('builder accepts SponsorSlotReservationHandle-only input (Studio-style ledger reservation arrives after build)', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const input = createGasBoundBuildInput({ sponsorSlot: slot });
     expect(input.reservationHandles.sponsorSlot).toBe(slot);
@@ -368,10 +356,8 @@ describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', ()
 
   test('builder accepts SponsorSlot + Nonce (generic-style)', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const nonce = reconstructReservationHandles.nonce({
       nonce: 1n,
@@ -385,10 +371,8 @@ describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', ()
 
   test('builder rejects a released sponsorSlot — fails closed before any build work', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     slot.release();
     expect(() => createGasBoundBuildInput({ sponsorSlot: slot })).toThrow(
@@ -398,10 +382,8 @@ describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', ()
 
   test('builder rejects when a supplied nonce is released (generic safety)', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const nonce = reconstructReservationHandles.nonce({
       nonce: 1n,
@@ -421,16 +403,14 @@ describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', ()
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — sponsor-phase reconstruction', () => {
-  test('reconstructReservationHandles.sponsorSlot lifts verified durable inputs back into a live token', () => {
+  test('reconstructReservationHandles.sponsorSlot lifts consumed lease identity into a live token', () => {
     const ev = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-A',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xRECEIPT',
-      hmacCommitVerified: true,
     });
     expect(ev.reservationKind).toBe('SponsorSlot');
     expect(ev.isLive()).toBe(true);
-    expect(ev.slotId).toBe('slot-A');
+    expect(ev.sponsorAddress).toBe('0xSPONSOR');
   });
 
   test('reconstructReservationHandles.nonce produces a live token whose payload mirrors the durable inputs', () => {
@@ -458,21 +438,17 @@ describe('SponsoredExecution — sponsor-phase reconstruction', () => {
 
   test('reconstructed reservation handle is independent of any prior instance — release of one does not affect the other', () => {
     const original = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-A',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     const reconstructed = reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-A',
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
-      hmacCommitVerified: true,
     });
     original.release();
     expect(original.isLive()).toBe(false);
     expect(reconstructed.isLive()).toBe(true);
-    expect(reconstructed.slotId).toBe('slot-A');
+    expect(reconstructed.sponsorAddress).toBe('0xSPONSOR');
   });
 });
 

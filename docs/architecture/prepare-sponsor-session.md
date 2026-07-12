@@ -38,7 +38,7 @@ GenericPrepareBuildOutput              prepare/build.ts
 PreparedTxEntry                        store/prepareTypes.ts
   stored in PrepareStoreAdapter — coordination-only shape
   ├─ txBytesHash           SHA-256 of txBytes; verified in consume() before /sponsor proceeds
-  ├─ slotId, sponsorAddress  sponsor slot identity + gasOwner coordination
+  ├─ sponsorAddress       sponsor lease identity + gasOwner coordination
   ├─ receiptId, senderAddress, nonce  lease + nonce-reservation keys (generic outstanding-prepare quota is keyed by verified sender; promotion quota is keyed by verified `userId`)
   └─ orderId, executionPathKey, clientIp, issuedAt  echo + observability
   (no settle-value copies; sponsor reads every settle field from txBytes)
@@ -46,7 +46,7 @@ PreparedTxEntry                        store/prepareTypes.ts
 /sponsor receives: txBytes + userSignature + receiptId
   │
   ├─ Transaction.from(txBytes) → extractTxSender      [pre-consume, unbound]
-  ├─ peek(receiptId)  → slot + echo metadata           [read-only, coordination]
+  ├─ peek(receiptId)  → sponsor address + echo metadata [read-only, coordination]
   ├─ verifySenderSignature(txBytes, sig, txSender)     [explicit sender binding]
   ├─ checkBlockedRequest(ip)                           [pre-consume IP-only]
   ├─ consume(receiptId, txBytesHash)                   [atomic single-use delete]
@@ -90,7 +90,7 @@ are authoritative.
 | Field                                      | Role                                                                                                                                                                       |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `txBytesHash`                              | single-use hash binding — `consume()` verifies it                                                                                                                          |
-| `slotId`, `sponsorAddress`                 | sponsor slot identity + gasOwner coordination                                                                                                                              |
+| `sponsorAddress`                           | sponsor lease identity + gasOwner coordination                                                                                                                             |
 | `receiptId`                                | HMAC-protected receipt identity (paired with committed `txBytesHash` in the pool)                                                                                          |
 | `senderAddress`                            | Verified prepare sender, nonce reservation key, generic outstanding-prepare quota key, and observability echo. Promotion outstanding-prepare quota uses verified `userId`. |
 | `nonce`                                    | sender-local live/pending reservation compaction key                                                                                                                       |
@@ -300,7 +300,7 @@ Stored fields still read at `/sponsor` (coordination-only, never execution autho
 | -------------------------- | --------------------------------------------------------------------------------- |
 | `txBytesHash`              | Single-use stored hash verified in `consume()`                                    |
 | `orderId`                  | Echo target for `expectedOrderIdHash` reconstruction during settlement validation |
-| `slotId`, `sponsorAddress` | Sponsor pool slot identity + gasOwner coordination                                |
+| `sponsorAddress`           | Sponsor lease identity + gasOwner coordination                                   |
 | `receiptId`                | HMAC-protected receipt identity (paired with committed `txBytesHash` in the pool) |
 | `executionPathKey`         | `ONCHAIN_REVERT` log key                                                          |
 

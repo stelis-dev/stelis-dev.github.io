@@ -126,13 +126,13 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     const receiptId = `receipt-${randomUUID()}`;
     const lease = await pool.checkout(receiptId);
     expect(lease).not.toBeNull();
-    expect(lease!.slotId).toBe(keypair.toSuiAddress());
+    expect(lease!.sponsorAddress).toBe(keypair.toSuiAddress());
 
-    await pool.commit(lease!.slotId, receiptId, sha256Hex(SAMPLE_TX_BYTES));
-    const signature = await pool.sign(lease!.slotId, receiptId, SAMPLE_TX_BYTES);
+    await pool.commit(lease!.sponsorAddress, receiptId, sha256Hex(SAMPLE_TX_BYTES));
+    const signature = await pool.sign(lease!.sponsorAddress, receiptId, SAMPLE_TX_BYTES);
     expect(signature.signature.length).toBeGreaterThan(0);
 
-    await pool.checkin(lease!.slotId, receiptId, sha256Hex(SAMPLE_TX_BYTES));
+    await pool.checkin(lease!.sponsorAddress, receiptId, sha256Hex(SAMPLE_TX_BYTES));
     await expect(pool.leaseStatus()).resolves.toMatchObject({
       leasedSlots: 0,
       freeSlots: 1,
@@ -143,8 +143,8 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     const released: string[] = [];
     const store = new RedisPrepareStore(
       redis!.client,
-      (slotId) => {
-        released.push(slotId);
+      (sponsorAddress) => {
+        released.push(sponsorAddress);
       },
       { keyPrefix: `test:ps:${randomUUID()}:`, ttlMs: 60_000 },
     );
@@ -156,7 +156,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       nonce: 1n,
       executionPathKey: 'direct',
       txBytesHash: 'hash-integ',
-      slotId: 'slot-integ',
       sponsorAddress: '0xSP',
       clientIp: '10.0.0.99',
       orderId: null,
@@ -181,8 +180,8 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     const released: string[] = [];
     const store = new RedisPrepareStore(
       redis!.client,
-      (slotId) => {
-        released.push(slotId);
+      (sponsorAddress) => {
+        released.push(sponsorAddress);
       },
       { keyPrefix: `test:ps:${randomUUID()}:`, ttlMs: 60_000 },
     );
@@ -194,7 +193,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       nonce: 1n,
       executionPathKey: 'direct',
       txBytesHash: 'correct-hash',
-      slotId: 'slot-mismatch',
       sponsorAddress: '0xSP',
       clientIp: '10.0.0.88',
       orderId: null,
@@ -204,11 +202,69 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     await store.store('integ-pay-002', entry);
     const result = await store.consume('integ-pay-002', 'wrong-hash');
     expect(result).toBe('hash_mismatch');
-    expect(released).toContain('slot-mismatch');
+    expect(released).toContain('0xSP');
 
     // Entry should be deleted
     const second = await store.consume('integ-pay-002', 'correct-hash');
     expect(second).toBe('not_found');
+  });
+
+  it('RedisPrepareStore — malformed consume returns raw evidence and releases the key-bound lease once', async () => {
+    const keyPrefix = `test:ps:${randomUUID()}:`;
+    const receiptId = 'integ-malformed-consume';
+    const clientIp = '10.0.0.71';
+    const released: Array<{
+      sponsorAddress: string;
+      receiptId: string;
+      txBytesHash: string | null;
+    }> = [];
+    const store = new RedisPrepareStore(
+      redis!.client,
+      (sponsorAddress, releasedReceiptId, txBytesHash) => {
+        released.push({ sponsorAddress, receiptId: releasedReceiptId, txBytesHash });
+      },
+      { keyPrefix, ttlMs: 60_000 },
+    );
+
+    await store.store(receiptId, {
+      issuedAt: Date.now(),
+      receiptId,
+      senderAddress: '0xMALFORMED_CONSUME',
+      nonce: 1n,
+      executionPathKey: 'direct',
+      txBytesHash: 'hash-malformed-consume',
+      sponsorAddress: '0xMALFORMED_SPONSOR',
+      clientIp,
+      orderId: null,
+      mode: 'generic',
+    });
+
+    const entryKey = `${keyPrefix}${receiptId}`;
+    const raw = JSON.parse((await redis!.client.get(entryKey))!);
+    raw.receiptId = 'forged-receipt';
+    raw.senderAddress = { malformed: true };
+    await redis!.client.set(entryKey, JSON.stringify(raw), { px: 65_000 });
+    await redis!.client.set(
+      `${keyPrefix}ip:${clientIp}`,
+      JSON.stringify([true, { pid: { malformed: true }, t: 'bad' }]),
+      { px: 120_000 },
+    );
+
+    await expect(store.consume(receiptId, 'hash-malformed-consume')).rejects.toThrow(
+      /stored receiptId does not match its Redis key/,
+    );
+    await sleep(0);
+
+    expect(released).toEqual([
+      {
+        sponsorAddress: '0xMALFORMED_SPONSOR',
+        receiptId,
+        txBytesHash: 'hash-malformed-consume',
+      },
+    ]);
+    await expect(redis!.client.get(entryKey)).resolves.toBeNull();
+    await expect(store.consume(receiptId, 'hash-malformed-consume')).resolves.toBe('not_found');
+    expect(released).toHaveLength(1);
   });
 
   it('RedisPrepareStore — reserveNonce derives from live sender metadata', async () => {
@@ -223,7 +279,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       nonce: 7n,
       executionPathKey: 'direct',
       txBytesHash: 'hash-integ-3',
-      slotId: 'slot-integ-3',
       sponsorAddress: '0xSP',
       clientIp: '10.0.0.77',
       orderId: null,
@@ -232,6 +287,98 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     });
 
     await expect(store.reserveNonce('0xRECOVER', 0n, 'res-1')).resolves.toBe(8n);
+  });
+
+  it('RedisPrepareStore — rewrites retained index rows to their exact current projections', async () => {
+    const keyPrefix = `test:ps:${randomUUID()}:`;
+    const senderAddress = '0xINDEX_PROJECTION';
+    const clientIp = '10.0.0.75';
+    const userId = 'index-projection-user';
+    const store = new RedisPrepareStore(redis!.client, () => {}, {
+      keyPrefix,
+      ttlMs: 60_000,
+    });
+
+    const makePromotionEntry = (receiptId: string, nonce: bigint) => ({
+      issuedAt: Date.now(),
+      receiptId,
+      senderAddress,
+      nonce,
+      reservedGasMist: 2_000_000n,
+      executionPathKey: 'promotion-sponsored',
+      txBytesHash: `hash-${receiptId}`,
+      sponsorAddress: `0xSP_${receiptId}`,
+      clientIp,
+      orderId: null,
+      mode: 'promotion' as const,
+      promotionId: 'promotion-index-projection',
+      userId,
+    });
+
+    await store.store('projection-1', makePromotionEntry('projection-1', 1n));
+
+    const ipKey = `${keyPrefix}ip:${clientIp}`;
+    const senderKey = `${keyPrefix}sender:${senderAddress}`;
+    const userKey = `${keyPrefix}user:${userId}`;
+    for (const key of [ipKey, senderKey, userKey]) {
+      const rows = JSON.parse((await redis!.client.get(key))!) as Array<Record<string, unknown>>;
+      await redis!.client.set(
+        key,
+        JSON.stringify(rows.map((row) => ({ ...row, unexpected: 'discard-me' }))),
+        { px: 120_000 },
+      );
+    }
+
+    await store.store('projection-2', makePromotionEntry('projection-2', 2n));
+
+    const ipRows = JSON.parse((await redis!.client.get(ipKey))!) as Array<Record<string, unknown>>;
+    const senderRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
+      Record<string, unknown>
+    >;
+    const userRows = JSON.parse((await redis!.client.get(userKey))!) as Array<
+      Record<string, unknown>
+    >;
+    expect(ipRows.map((row) => Object.keys(row).sort())).toEqual([
+      ['pid', 't'],
+      ['pid', 't'],
+    ]);
+    expect(senderRows.map((row) => Object.keys(row).sort())).toEqual([
+      ['nonce', 'pid', 't'],
+      ['nonce', 'pid', 't'],
+    ]);
+    expect(userRows.map((row) => Object.keys(row).sort())).toEqual([
+      ['pid', 't'],
+      ['pid', 't'],
+    ]);
+
+    await redis!.client.set(
+      senderKey,
+      JSON.stringify(senderRows.map((row) => ({ ...row, unexpected: 'discard-again' }))),
+      { px: 120_000 },
+    );
+    await expect(store.reserveNonce(senderAddress, 0n, 'projection-pending')).resolves.toBe(3n);
+    const reservedRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
+      Record<string, unknown>
+    >;
+    expect(reservedRows.map((row) => Object.keys(row).sort())).toEqual([
+      ['nonce', 'pid', 't'],
+      ['nonce', 'pid', 't'],
+      ['nonce', 'pending', 'pid', 't'],
+    ]);
+
+    await redis!.client.set(
+      senderKey,
+      JSON.stringify(reservedRows.map((row) => ({ ...row, unexpected: 'discard-on-release' }))),
+      { px: 120_000 },
+    );
+    await store.releaseReservation('projection-pending', senderAddress);
+    const releasedRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
+      Record<string, unknown>
+    >;
+    expect(releasedRows.map((row) => Object.keys(row).sort())).toEqual([
+      ['nonce', 'pid', 't'],
+      ['nonce', 'pid', 't'],
+    ]);
   });
 
   it('RedisPrepareStore — releaseReservation preserves a live entry promoted under same receiptId', async () => {
@@ -258,7 +405,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       nonce: live,
       executionPathKey: 'direct',
       txBytesHash: 'hash-integ-4',
-      slotId: 'slot-integ-4',
       sponsorAddress: '0xSP',
       clientIp: '10.0.0.66',
       orderId: null,
@@ -300,11 +446,15 @@ describe('Redis-backed adapters — real Redis conformance', () => {
 
   it('RedisPrepareStore — evictPreparedEntry deletes entry and cleans related indexes atomically', async () => {
     const keyPrefix = `test:ps:${randomUUID()}:`;
-    const released: Array<{ slotId: string; receiptId: string; txBytesHash: string | null }> = [];
+    const released: Array<{
+      sponsorAddress: string;
+      receiptId: string;
+      txBytesHash: string | null;
+    }> = [];
     const store = new RedisPrepareStore(
       redis!.client,
-      (slotId, receiptId, txBytesHash) => {
-        released.push({ slotId, receiptId, txBytesHash });
+      (sponsorAddress, receiptId, txBytesHash) => {
+        released.push({ sponsorAddress, receiptId, txBytesHash });
       },
       {
         keyPrefix,
@@ -324,7 +474,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       reservedGasMist: 2_000_000n,
       executionPathKey: 'promotion-sponsored',
       txBytesHash: 'hash-evict',
-      slotId: 'slot-evict',
       sponsorAddress: '0xSP',
       clientIp: '10.0.0.42',
       orderId: null,
@@ -339,7 +488,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     await store.evictPreparedEntry('evict-pay-001');
 
     expect(released).toEqual([
-      { slotId: 'slot-evict', receiptId: 'evict-pay-001', txBytesHash: 'hash-evict' },
+      { sponsorAddress: '0xSP', receiptId: 'evict-pay-001', txBytesHash: 'hash-evict' },
     ]);
     await expect(redis!.client.get(`${keyPrefix}evict-pay-001`)).resolves.toBeNull();
     await expect(redis!.client.get(`${keyPrefix}ip:10.0.0.42`)).resolves.toBeNull();
@@ -351,5 +500,59 @@ describe('Redis-backed adapters — real Redis conformance', () => {
 
     await store.evictPreparedEntry('evict-pay-001');
     expect(released).toHaveLength(1);
+  });
+
+  it('RedisPrepareStore — malformed eviction returns raw evidence and ignores the row receipt authority', async () => {
+    const keyPrefix = `test:ps:${randomUUID()}:`;
+    const receiptId = 'integ-malformed-evict';
+    const senderAddress = '0xMALFORMED_EVICT';
+    const released: Array<{
+      sponsorAddress: string;
+      receiptId: string;
+      txBytesHash: string | null;
+    }> = [];
+    const store = new RedisPrepareStore(
+      redis!.client,
+      (sponsorAddress, releasedReceiptId, txBytesHash) => {
+        released.push({ sponsorAddress, receiptId: releasedReceiptId, txBytesHash });
+      },
+      { keyPrefix, ttlMs: 60_000 },
+    );
+
+    await store.store(receiptId, {
+      issuedAt: Date.now(),
+      receiptId,
+      senderAddress,
+      nonce: 1n,
+      executionPathKey: 'direct',
+      txBytesHash: 'hash-malformed-evict',
+      sponsorAddress: '0xMALFORMED_EVICT_SPONSOR',
+      clientIp: '10.0.0.72',
+      orderId: null,
+      mode: 'generic',
+    });
+
+    const entryKey = `${keyPrefix}${receiptId}`;
+    const raw = JSON.parse((await redis!.client.get(entryKey))!);
+    raw.receiptId = 'forged-evict-receipt';
+    raw.clientIp = { malformed: true };
+    await redis!.client.set(entryKey, JSON.stringify(raw), { px: 65_000 });
+    await redis!.client.set(
+      `${keyPrefix}sender:${senderAddress}`,
+      JSON.stringify([null, { pid: [], t: 'bad' }]),
+      { px: 120_000 },
+    );
+
+    await store.evictPreparedEntry(receiptId);
+    await store.evictPreparedEntry(receiptId);
+
+    expect(released).toEqual([
+      {
+        sponsorAddress: '0xMALFORMED_EVICT_SPONSOR',
+        receiptId,
+        txBytesHash: 'hash-malformed-evict',
+      },
+    ]);
+    await expect(redis!.client.get(entryKey)).resolves.toBeNull();
   });
 });

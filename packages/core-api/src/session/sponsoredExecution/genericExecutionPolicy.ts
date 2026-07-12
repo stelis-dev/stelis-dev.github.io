@@ -305,7 +305,6 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
       ReceiptIdGenerated: () => {},
       SponsorSlotReservationAcquired: (_ctx, sponsorSlot) => {
         logPrepareStage('sponsor_slot_checked_out', {
-          slot_id: sponsorSlot.slotId,
           sponsor_address: sponsorSlot.sponsorAddress,
         });
       },
@@ -393,7 +392,7 @@ export function createGenericSponsorConsumeAdapter(input: {
       if (entry.mode === 'promotion') {
         await safeSlotCheckin(
           input.hostContext.sponsorPool,
-          entry.slotId,
+          entry.sponsorAddress,
           entry.receiptId,
           entry.txBytesHash,
         );
@@ -422,7 +421,6 @@ export function buildGenericPreparedCommitInputs(
     senderAddress: prepare.params.senderAddress,
     clientIp: prepare.params.clientIp,
     txBytesHash: input.txBytesHash,
-    slotId: input.sponsorSlot.slotId,
     sponsorAddress: input.sponsorSlot.sponsorAddress,
     executionPathKey,
     orderId: prepare.params.orderId ?? null,
@@ -493,12 +491,12 @@ export function createGenericSignAndSubmitPort(
   state: GenericExecutionPolicyState,
 ): SignAndSubmitPort {
   const d = getDeps(options);
-  return async (slotId, receiptId, txBytes, userSignature) => {
+  return async (sponsorAddress, receiptId, txBytes, userSignature) => {
     try {
       return await d.signAndSubmit(
         options.hostContext.sponsorPool,
         options.hostContext.sui,
-        slotId,
+        sponsorAddress,
         receiptId,
         txBytes,
         userSignature,
@@ -1148,7 +1146,6 @@ async function classifyGenericSponsorResult(
         receipt_id: prepared.receiptId,
         sender: txSender,
         client_ip: ctx.clientIp,
-        slot_id: prepared.slotId,
         sponsor_address: prepared.sponsorAddress,
         execution_path_key: prepared.executionPathKey,
       },
@@ -1223,7 +1220,6 @@ async function runGenericRelease(
 
   try {
     await callback({
-      slotId: prepared.slotId,
       sponsorAddress: prepared.sponsorAddress,
       outcome: state.sponsorResultOutcome,
       executionStage: ctx.executionStage,
@@ -1243,7 +1239,7 @@ async function runGenericRelease(
       {
         source: 'sponsor_handler',
         route: 'generic',
-        slot_id: prepared.slotId,
+        sponsor_address: prepared.sponsorAddress,
         digest: state.sponsorResultDigest ?? null,
         outcome: state.sponsorResultOutcome,
         error: err instanceof Error ? err.message : String(err),

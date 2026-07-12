@@ -30,8 +30,8 @@ const memoryFactory: PrepareStoreFactory = ({
 }) => {
   const releasedSlots: ReleasedSlot[] = [];
   const store = new MemoryPrepareStore(
-    (slotId, receiptId, txBytesHash) => {
-      releasedSlots.push({ slotId, receiptId, txBytesHash });
+    (sponsorAddress, receiptId, txBytesHash) => {
+      releasedSlots.push({ sponsorAddress, receiptId, txBytesHash });
     },
     ttlMs,
     maxPerIp,
@@ -86,8 +86,7 @@ describe('MemoryPrepareStore — impl-only', () => {
       senderAddress: '0xSENDER',
       nonce: 1n,
       txBytesHash: 'hash-abc',
-      slotId: SLOT_A,
-      sponsorAddress: '0xSPONSOR_A',
+      sponsorAddress: SLOT_A,
       clientIp: IP_1,
       executionPathKey: 'mock-execution-path',
       orderId: null,
@@ -98,7 +97,7 @@ describe('MemoryPrepareStore — impl-only', () => {
 
   let store: MemoryPrepareStore | null = null;
   const releasedSlots: Array<{
-    slotId: string;
+    sponsorAddress: string;
     receiptId: string;
     txBytesHash: string | null;
   }> = [];
@@ -106,8 +105,8 @@ describe('MemoryPrepareStore — impl-only', () => {
   function create(ttlMs: number): MemoryPrepareStore {
     releasedSlots.length = 0;
     store = new MemoryPrepareStore(
-      (slotId, receiptId, txBytesHash) => {
-        releasedSlots.push({ slotId, receiptId, txBytesHash });
+      (sponsorAddress, receiptId, txBytesHash) => {
+        releasedSlots.push({ sponsorAddress, receiptId, txBytesHash });
       },
       ttlMs,
       2,
@@ -127,7 +126,7 @@ describe('MemoryPrepareStore — impl-only', () => {
       'pid-1',
       makeEntry({
         receiptId: 'pid-1',
-        slotId: SLOT_A,
+        sponsorAddress: SLOT_A,
         txBytesHash: 'hash-1',
         issuedAt: Date.now() - 200,
       }),
@@ -138,7 +137,9 @@ describe('MemoryPrepareStore — impl-only', () => {
     (s as unknown as { _evictExpired: () => void })._evictExpired();
     await new Promise((r) => queueMicrotask(() => r(undefined)));
 
-    expect(releasedSlots).toEqual([{ slotId: SLOT_A, receiptId: 'pid-1', txBytesHash: 'hash-1' }]);
+    expect(releasedSlots).toEqual([
+      { sponsorAddress: SLOT_A, receiptId: 'pid-1', txBytesHash: 'hash-1' },
+    ]);
 
     expect(await s.consume('pid-1', 'hash-1')).toBe('not_found');
 
@@ -205,8 +206,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
       senderAddress: SENDER,
       nonce: 1n,
       txBytesHash: 'hash-abc',
-      slotId: SLOT_A,
-      sponsorAddress: '0xSPONSOR',
+      sponsorAddress: SLOT_A,
       clientIp: IP_1,
       executionPathKey: 'mock-execution-path',
       orderId: null,
@@ -251,7 +251,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
     const s = create(100);
     await s.store(
       'pid-1',
-      makeEntry({ receiptId: 'pid-1', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-1', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -262,7 +262,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
       const match = warns.find((w) => w['reason'] === 'prepare_expired');
       expect(match).toBeDefined();
       expect(match!['adapter']).toBe('memory-prepare');
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('release-callback-failed');
     } finally {
       warnSpy.mockRestore();
@@ -273,7 +273,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
     const s = create(60_000);
     await s.store(
       'pid-2',
-      makeEntry({ receiptId: 'pid-2', slotId: SLOT_B, txBytesHash: 'correct' }),
+      makeEntry({ receiptId: 'pid-2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -281,7 +281,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
       await new Promise((r) => setTimeout(r, 0));
       const match = collectReleaseFailed(warnSpy).find((w) => w['reason'] === 'hash_mismatch');
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_B);
+      expect(match!['sponsor_address']).toBe(SLOT_B);
       expect(match!['error']).toBe('release-callback-failed');
     } finally {
       warnSpy.mockRestore();
@@ -290,13 +290,13 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
 
   it('evictPreparedEntry() — release rejection emits warn', async () => {
     const s = create(60_000);
-    await s.store('pid-3', makeEntry({ receiptId: 'pid-3', slotId: SLOT_C }));
+    await s.store('pid-3', makeEntry({ receiptId: 'pid-3', sponsorAddress: SLOT_C }));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.evictPreparedEntry('pid-3');
       const match = collectReleaseFailed(warnSpy).find((w) => w['reason'] === 'evict_corrupt');
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_C);
+      expect(match!['sponsor_address']).toBe(SLOT_C);
       expect(match!['error']).toBe('release-callback-failed');
     } finally {
       warnSpy.mockRestore();
@@ -307,7 +307,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
     const s = create(100);
     await s.store(
       'pid-4',
-      makeEntry({ receiptId: 'pid-4', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-4', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -317,7 +317,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
         (w) => w['reason'] === 'background_ttl_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('release-callback-failed');
     } finally {
       warnSpy.mockRestore();
@@ -328,20 +328,30 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
     const s = create(60_000, 1);
     await s.store(
       'pid-a',
-      makeEntry({ receiptId: 'pid-a', slotId: SLOT_A, clientIp: IP_2, senderAddress: '0xA' }),
+      makeEntry({
+        receiptId: 'pid-a',
+        sponsorAddress: SLOT_A,
+        clientIp: IP_2,
+        senderAddress: '0xA',
+      }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
         'pid-b',
-        makeEntry({ receiptId: 'pid-b', slotId: SLOT_B, clientIp: IP_2, senderAddress: '0xB' }),
+        makeEntry({
+          receiptId: 'pid-b',
+          sponsorAddress: SLOT_B,
+          clientIp: IP_2,
+          senderAddress: '0xB',
+        }),
       );
       await new Promise((r) => setTimeout(r, 0));
       const match = collectReleaseFailed(warnSpy).find(
         (w) => w['reason'] === 'ip_concurrent_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['client_ip']).toBe(IP_2);
       expect(match!['error']).toBe('release-callback-failed');
     } finally {
@@ -372,8 +382,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
       senderAddress: '0xSENDER',
       nonce: 1n,
       txBytesHash: 'hash-abc',
-      slotId: SLOT_A,
-      sponsorAddress: '0xSPONSOR',
+      sponsorAddress: SLOT_A,
       clientIp: IP_1,
       executionPathKey: 'mock-execution-path',
       orderId: null,
@@ -420,7 +429,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
     const s = createSyncThrowing(100);
     await s.store(
       'pid-s1',
-      makeEntry({ receiptId: 'pid-s1', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-s1', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -428,7 +437,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
       await new Promise((r) => setTimeout(r, 0));
       const match = collectReleaseFailed(warnSpy).find((w) => w['reason'] === 'prepare_expired');
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('release-sync-throw');
     } finally {
       warnSpy.mockRestore();
@@ -439,7 +448,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
     const s = createSyncThrowing(60_000);
     await s.store(
       'pid-s2',
-      makeEntry({ receiptId: 'pid-s2', slotId: SLOT_B, txBytesHash: 'correct' }),
+      makeEntry({ receiptId: 'pid-s2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -447,7 +456,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
       await new Promise((r) => setTimeout(r, 0));
       const match = collectReleaseFailed(warnSpy).find((w) => w['reason'] === 'hash_mismatch');
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_B);
+      expect(match!['sponsor_address']).toBe(SLOT_B);
       expect(match!['error']).toBe('release-sync-throw');
     } finally {
       warnSpy.mockRestore();
@@ -458,7 +467,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
     const s = createSyncThrowing(100);
     await s.store(
       'pid-s4',
-      makeEntry({ receiptId: 'pid-s4', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-s4', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -468,7 +477,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
         (w) => w['reason'] === 'background_ttl_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('release-sync-throw');
     } finally {
       warnSpy.mockRestore();
@@ -479,20 +488,30 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
     const s = createSyncThrowing(60_000, 1);
     await s.store(
       'pid-sa',
-      makeEntry({ receiptId: 'pid-sa', slotId: SLOT_A, clientIp: IP_2, senderAddress: '0xA' }),
+      makeEntry({
+        receiptId: 'pid-sa',
+        sponsorAddress: SLOT_A,
+        clientIp: IP_2,
+        senderAddress: '0xA',
+      }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
         'pid-sb',
-        makeEntry({ receiptId: 'pid-sb', slotId: SLOT_B, clientIp: IP_2, senderAddress: '0xB' }),
+        makeEntry({
+          receiptId: 'pid-sb',
+          sponsorAddress: SLOT_B,
+          clientIp: IP_2,
+          senderAddress: '0xB',
+        }),
       );
       await new Promise((r) => setTimeout(r, 0));
       const match = collectReleaseFailed(warnSpy).find(
         (w) => w['reason'] === 'ip_concurrent_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['client_ip']).toBe(IP_2);
       expect(match!['error']).toBe('release-sync-throw');
     } finally {
@@ -523,8 +542,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
       senderAddress: '0xSENDER',
       nonce: 1n,
       txBytesHash: 'hash-abc',
-      slotId: SLOT_A,
-      sponsorAddress: '0xSPONSOR',
+      sponsorAddress: SLOT_A,
       clientIp: IP_1,
       executionPathKey: 'mock-execution-path',
       orderId: null,
@@ -587,13 +605,23 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     );
     await s.store(
       'pid-a',
-      makeEntry({ receiptId: 'pid-a', slotId: SLOT_A, clientIp: IP_2, senderAddress: '0xA' }),
+      makeEntry({
+        receiptId: 'pid-a',
+        sponsorAddress: SLOT_A,
+        clientIp: IP_2,
+        senderAddress: '0xA',
+      }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
         'pid-b',
-        makeEntry({ receiptId: 'pid-b', slotId: SLOT_B, clientIp: IP_2, senderAddress: '0xB' }),
+        makeEntry({
+          receiptId: 'pid-b',
+          sponsorAddress: SLOT_B,
+          clientIp: IP_2,
+          senderAddress: '0xB',
+        }),
       );
       await new Promise((r) => setTimeout(r, 0));
       const match = collectEvictCallbackFailed(warnSpy).find(
@@ -601,7 +629,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
       );
       expect(match).toBeDefined();
       expect(match!['adapter']).toBe('memory-prepare');
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['receipt_id']).toBe('pid-a');
       expect(match!['error']).toBe('evict-sync-throw');
     } finally {
@@ -613,20 +641,30 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(60_000, () => Promise.reject(new Error('evict-reject')), 1);
     await s.store(
       'pid-a',
-      makeEntry({ receiptId: 'pid-a', slotId: SLOT_A, clientIp: IP_2, senderAddress: '0xA' }),
+      makeEntry({
+        receiptId: 'pid-a',
+        sponsorAddress: SLOT_A,
+        clientIp: IP_2,
+        senderAddress: '0xA',
+      }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
         'pid-b',
-        makeEntry({ receiptId: 'pid-b', slotId: SLOT_B, clientIp: IP_2, senderAddress: '0xB' }),
+        makeEntry({
+          receiptId: 'pid-b',
+          sponsorAddress: SLOT_B,
+          clientIp: IP_2,
+          senderAddress: '0xB',
+        }),
       );
       await new Promise((r) => setTimeout(r, 0));
       const match = collectEvictCallbackFailed(warnSpy).find(
         (w) => w['reason'] === 'ip_concurrent_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['receipt_id']).toBe('pid-a');
       expect(match!['error']).toBe('evict-reject');
     } finally {
@@ -642,7 +680,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     });
     await s.store(
       'pid-exp',
-      makeEntry({ receiptId: 'pid-exp', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-exp', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -652,7 +690,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'prepare_expired',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['receipt_id']).toBe('pid-exp');
       expect(match!['error']).toBe('evict-sync-throw');
     } finally {
@@ -664,7 +702,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(100, () => Promise.reject(new Error('evict-reject')));
     await s.store(
       'pid-exp',
-      makeEntry({ receiptId: 'pid-exp', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-exp', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -674,7 +712,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'prepare_expired',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('evict-reject');
     } finally {
       warnSpy.mockRestore();
@@ -689,7 +727,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     });
     await s.store(
       'pid-hm',
-      makeEntry({ receiptId: 'pid-hm', slotId: SLOT_B, txBytesHash: 'correct' }),
+      makeEntry({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -699,7 +737,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'hash_mismatch',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_B);
+      expect(match!['sponsor_address']).toBe(SLOT_B);
       expect(match!['receipt_id']).toBe('pid-hm');
       expect(match!['error']).toBe('evict-sync-throw');
     } finally {
@@ -711,7 +749,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(60_000, () => Promise.reject(new Error('evict-reject')));
     await s.store(
       'pid-hm',
-      makeEntry({ receiptId: 'pid-hm', slotId: SLOT_B, txBytesHash: 'correct' }),
+      makeEntry({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -721,7 +759,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'hash_mismatch',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_B);
+      expect(match!['sponsor_address']).toBe(SLOT_B);
       expect(match!['error']).toBe('evict-reject');
     } finally {
       warnSpy.mockRestore();
@@ -736,7 +774,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     });
     await s.store(
       'pid-bg',
-      makeEntry({ receiptId: 'pid-bg', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-bg', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -746,7 +784,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'background_ttl_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['receipt_id']).toBe('pid-bg');
       expect(match!['error']).toBe('evict-sync-throw');
     } finally {
@@ -758,7 +796,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(100, () => Promise.reject(new Error('evict-reject')));
     await s.store(
       'pid-bg',
-      makeEntry({ receiptId: 'pid-bg', slotId: SLOT_A, issuedAt: Date.now() - 200 }),
+      makeEntry({ receiptId: 'pid-bg', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -768,7 +806,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
         (w) => w['reason'] === 'background_ttl_eviction',
       );
       expect(match).toBeDefined();
-      expect(match!['slot_id']).toBe(SLOT_A);
+      expect(match!['sponsor_address']).toBe(SLOT_A);
       expect(match!['error']).toBe('evict-reject');
     } finally {
       warnSpy.mockRestore();

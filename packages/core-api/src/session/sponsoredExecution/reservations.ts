@@ -238,7 +238,7 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
   /**
    * Check out a sponsor slot reserved against `receiptId`. On success the
    * reservation issues `SponsorSlotReservationHandle` keyed to the chosen
-   * `slotId` + `sponsorAddress`. Returns null when the pool is exhausted —
+   * `sponsorAddress`. Returns null when the pool is exhausted —
    * the caller decides the route-specific domain error
    * (`NO_SPONSOR_SLOT` etc.).
    */
@@ -432,10 +432,10 @@ export class InflightReservationImpl extends InflightReservation {
  *
  * `acquire(receiptId)` calls `pool.checkout(receiptId)`. On success the
  * reservation issues `SponsorSlotReservationHandle` keyed to the chosen
- * `slotId` + `sponsorAddress`; on null (pool exhausted) the reservation
+ * `sponsorAddress`; on null (pool exhausted) the reservation
  * stays in the `pending` state so reverse cleanup is a no-op.
  *
- * `commitToTxBytesHash(hash)` calls `pool.commit(slotId, receiptId, hash)`
+ * `commitToTxBytesHash(hash)` calls `pool.commit(sponsorAddress, receiptId, hash)`
  * to promote the lease from reserved → committed. Lease-commit
  * failures propagate to the public handler adapter for route-specific mapping
  * (`SponsorLeaseCommitError` →
@@ -456,7 +456,6 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     const slot = await this.pool.checkout(receiptId);
     if (!slot) return null;
     this.issuedHandle = internalReservationHandleFactory.newSponsorSlot(
-      slot.slotId,
       slot.sponsorAddress,
       receiptId,
     );
@@ -469,7 +468,7 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     if (!this.issuedHandle || !this.receiptId) {
       throw new Error('SponsorSlotReservationImpl.commitToTxBytesHash called before acquire');
     }
-    await this.pool.commit(this.issuedHandle.slotId, this.receiptId, txBytesHash);
+    await this.pool.commit(this.issuedHandle.sponsorAddress, this.receiptId, txBytesHash);
     this.committedTxBytesHash = txBytesHash;
   }
 
@@ -480,7 +479,7 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     // hand-off safety).
     await safeSlotCheckin(
       this.pool,
-      this.issuedHandle.slotId,
+      this.issuedHandle.sponsorAddress,
       this.receiptId,
       this.committedTxBytesHash,
     );

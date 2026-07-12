@@ -7,7 +7,7 @@
  *
  * This file intentionally contains no implementation-specific
  * assertions. Memory-only (background eviction timer) and Redis-only
- * (BigInt JSON round-trip, `_v` schema versioning, corrupt JSON
+ * (BigInt JSON round-trip, exact current stored shape, corrupt JSON
  * tolerance, constructor input validation) cases live in their
  * respective backend entry files.
  *
@@ -32,7 +32,7 @@ import {
 
 /** Release callback payload captured per backend. */
 export interface ReleasedSlot {
-  slotId: string;
+  sponsorAddress: string;
   receiptId: string;
   txBytesHash: string | null;
 }
@@ -81,8 +81,7 @@ function makeGeneric(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPr
     senderAddress: SENDER_A,
     nonce: 1n,
     txBytesHash: 'hash-default',
-    slotId: SLOT_A,
-    sponsorAddress: '0xSPONSOR',
+    sponsorAddress: SLOT_A,
     clientIp: IP_1,
     executionPathKey: 'mock-execution-path',
     orderId: null,
@@ -101,8 +100,7 @@ function makePromotion(
     reservedGasMist: 1_650_000n,
     nonce: 0n,
     txBytesHash: 'hash-promo-default',
-    slotId: SLOT_A,
-    sponsorAddress: '0xSPONSOR',
+    sponsorAddress: SLOT_A,
     clientIp: IP_1,
     executionPathKey: 'promotion:test',
     orderId: null,
@@ -175,6 +173,54 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const result = await h.store.consume('pid-unknown', 'anything');
       expect(result).toBe('not_found');
     });
+
+    it('stores and returns isolated current-shape records', async () => {
+      const h = await setup();
+      const input = makeGeneric({ receiptId: 'pid-isolated', txBytesHash: 'hash-original' });
+      await h.store.store('pid-isolated', input);
+
+      (input as { txBytesHash: string }).txBytesHash = 'hash-mutated-input';
+      const firstPeek = await h.store.peek('pid-isolated');
+      expect(firstPeek?.txBytesHash).toBe('hash-original');
+
+      (firstPeek as { txBytesHash: string }).txBytesHash = 'hash-mutated-peek';
+      const secondPeek = await h.store.peek('pid-isolated');
+      expect(secondPeek?.txBytesHash).toBe('hash-original');
+
+      const consumed = await h.store.consume('pid-isolated', 'hash-original');
+      expect(typeof consumed).toBe('object');
+      expect((consumed as PreparedTxEntry).txBytesHash).toBe('hash-original');
+    });
+
+    it('rejects a key/entry receipt mismatch before creating a record', async () => {
+      const h = await setup();
+      await expect(
+        h.store.store('key-receipt', makeGeneric({ receiptId: 'row-receipt' })),
+      ).rejects.toThrow('receiptId argument must match entry.receiptId');
+      await expect(h.store.peek('key-receipt')).resolves.toBeNull();
+      await expect(h.store.peek('row-receipt')).resolves.toBeNull();
+      expect(h.releasedSlots).toEqual([]);
+    });
+
+    it('rejects non-current runtime records before storing them', async () => {
+      const h = await setup();
+      const generic = makeGeneric({ receiptId: 'pid-invalid' });
+      const promotion = makePromotion({ receiptId: 'pid-invalid' });
+      const invalid: unknown[] = [
+        { ...generic, unexpected: true },
+        { ...generic, mode: 'future' },
+        { ...generic, issuedAt: '1' },
+        { ...generic, nonce: -1n },
+        { ...generic, orderId: 7 },
+        { ...generic, promotionId: 'cross-mode' },
+        Object.fromEntries(Object.entries(promotion).filter(([key]) => key !== 'userId')),
+      ];
+
+      for (const candidate of invalid) {
+        await expect(h.store.store('pid-invalid', candidate as PreparedTxEntry)).rejects.toThrow();
+      }
+      await expect(h.store.peek('pid-invalid')).resolves.toBeNull();
+    });
   });
 
   // ── Expiry ───────────────────────────────────────
@@ -186,7 +232,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'hash-1',
           issuedAt: Date.now() - 200,
         }),
@@ -195,7 +241,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const result = await h.store.consume('pid-1', 'hash-1');
       expect(result).toBe('expired');
       expect(h.releasedSlots).toEqual([
-        { slotId: SLOT_A, receiptId: 'pid-1', txBytesHash: 'hash-1' },
+        { sponsorAddress: SLOT_A, receiptId: 'pid-1', txBytesHash: 'hash-1' },
       ]);
     });
 
@@ -216,13 +262,13 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const h = await setup();
       await h.store.store(
         'pid-1',
-        makeGeneric({ receiptId: 'pid-1', slotId: SLOT_B, txBytesHash: 'correct-hash' }),
+        makeGeneric({ receiptId: 'pid-1', sponsorAddress: SLOT_B, txBytesHash: 'correct-hash' }),
       );
 
       const result = await h.store.consume('pid-1', 'wrong-hash');
       expect(result).toBe('hash_mismatch');
       expect(h.releasedSlots).toEqual([
-        { slotId: SLOT_B, receiptId: 'pid-1', txBytesHash: 'correct-hash' },
+        { sponsorAddress: SLOT_B, receiptId: 'pid-1', txBytesHash: 'correct-hash' },
       ]);
     });
   });
@@ -237,7 +283,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'h1',
           clientIp: IP_1,
           issuedAt: 1_000,
@@ -248,7 +294,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'h2',
           clientIp: IP_1,
           issuedAt: 2_000,
@@ -259,7 +305,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
-          slotId: SLOT_C,
+          sponsorAddress: SLOT_C,
           txBytesHash: 'h3',
           clientIp: IP_1,
           issuedAt: 3_000,
@@ -269,7 +315,9 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         }),
       );
 
-      expect(h.releasedSlots).toEqual([{ slotId: SLOT_A, receiptId: 'pid-1', txBytesHash: 'h1' }]);
+      expect(h.releasedSlots).toEqual([
+        { sponsorAddress: SLOT_A, receiptId: 'pid-1', txBytesHash: 'h1' },
+      ]);
       expect(await h.store.consume('pid-1', 'h1')).toBe('not_found');
       expect(await h.store.consume('pid-2', 'h2')).not.toBe('not_found');
       expect(await h.store.consume('pid-3', 'h3')).not.toBe('not_found');
@@ -282,7 +330,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           clientIp: IP_1,
           txBytesHash: 'h1',
           senderAddress: SENDER_A,
@@ -292,7 +340,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           clientIp: IP_1,
           txBytesHash: 'h2',
           senderAddress: SENDER_B,
@@ -302,7 +350,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
-          slotId: SLOT_C,
+          sponsorAddress: SLOT_C,
           clientIp: IP_2,
           txBytesHash: 'h3',
           senderAddress: '0xSENDER_C',
@@ -320,7 +368,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           clientIp: IP_1,
           txBytesHash: 'h1',
           senderAddress: SENDER_A,
@@ -331,7 +379,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           clientIp: IP_1,
           txBytesHash: 'h2',
           senderAddress: SENDER_B,
@@ -345,7 +393,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
-          slotId: SLOT_C,
+          sponsorAddress: SLOT_C,
           clientIp: IP_1,
           txBytesHash: 'h3',
           senderAddress: '0xSENDER_C',
@@ -424,7 +472,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
           senderAddress: SENDER_A,
           nonce: live,
           txBytesHash: 'hash-live',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
         }),
       );
 
@@ -481,7 +529,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'g-1',
         makeGeneric({
           receiptId: 'g-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'h1',
           senderAddress: SENDER_A,
         }),
@@ -490,7 +538,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'g-2',
         makeGeneric({
           receiptId: 'g-2',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'h2',
           senderAddress: SENDER_A,
         }),
@@ -507,7 +555,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'p-1',
         makePromotion({
           receiptId: 'p-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'ph1',
           senderAddress: SENDER_A,
         }),
@@ -516,7 +564,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'p-2',
         makePromotion({
           receiptId: 'p-2',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'ph2',
           senderAddress: SENDER_A,
         }),
@@ -526,7 +574,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
           'p-3',
           makePromotion({
             receiptId: 'p-3',
-            slotId: SLOT_C,
+            sponsorAddress: SLOT_C,
             txBytesHash: 'ph3',
             senderAddress: SENDER_A,
           }),
@@ -541,7 +589,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'g-1',
         makeGeneric({
           receiptId: 'g-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'h1',
           senderAddress: SENDER_A,
         }),
@@ -552,7 +600,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'p-1',
         makePromotion({
           receiptId: 'p-1',
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'ph1',
           senderAddress: SENDER_A,
         }),
@@ -569,7 +617,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'p-1',
         makePromotion({
           receiptId: 'p-1',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'ph1',
           senderAddress: SENDER_A,
         }),
@@ -616,7 +664,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         'p-old',
         makePromotion({
           receiptId: 'p-old',
-          slotId: SLOT_A,
+          sponsorAddress: SLOT_A,
           txBytesHash: 'ph-old',
           issuedAt: pastIssuedAt,
         }),

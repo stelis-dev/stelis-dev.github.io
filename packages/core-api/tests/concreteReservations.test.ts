@@ -170,7 +170,7 @@ describe('InflightReservationImpl', () => {
 // ─────────────────────────────────────────────
 
 describe('SponsorSlotReservationImpl', () => {
-  function makePool(slot: { slotId: string; sponsorAddress: string } | null): SponsorPoolAdapter {
+  function makePool(slot: { sponsorAddress: string } | null): SponsorPoolAdapter {
     return {
       size: 1,
       primaryAddress: '0xPRIMARY',
@@ -182,14 +182,13 @@ describe('SponsorSlotReservationImpl', () => {
     };
   }
 
-  test('acquire issues SponsorSlotReservationHandle with the pool-returned slotId + sponsorAddress', async () => {
-    const pool = makePool({ slotId: 'slot-X', sponsorAddress: '0xSPONSOR_X' });
+  test('acquire issues SponsorSlotReservationHandle with the pool-returned sponsorAddress', async () => {
+    const pool = makePool({ sponsorAddress: '0xSPONSOR_X' });
     const r = new SponsorSlotReservationImpl(pool);
 
     const ev = await r.acquire('0xRECEIPT');
 
     expect(ev).not.toBeNull();
-    expect(ev!.slotId).toBe('slot-X');
     expect(ev!.sponsorAddress).toBe('0xSPONSOR_X');
     expect(ev!.receiptId).toBe('0xRECEIPT');
     expect(ev!.reservationKind).toBe('SponsorSlot');
@@ -205,46 +204,46 @@ describe('SponsorSlotReservationImpl', () => {
     expect(r.isAcquired()).toBe(false);
   });
 
-  test('commitToTxBytesHash forwards to pool.commit(slotId, receiptId, hash)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+  test('commitToTxBytesHash forwards to pool.commit(sponsorAddress, receiptId, hash)', async () => {
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     await r.commitToTxBytesHash('a'.repeat(64));
 
-    expect(pool.commit).toHaveBeenCalledWith('slot-A', '0xRECEIPT', 'a'.repeat(64));
+    expect(pool.commit).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'a'.repeat(64));
   });
 
   test('commitToTxBytesHash throws if called before acquire', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await expect(r.commitToTxBytesHash('h')).rejects.toThrow(/before acquire/);
   });
 
   test('release() delegates to safeSlotCheckin (pool.checkin called with slot/receipt/committed-hash)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
     await r.commitToTxBytesHash('h'.repeat(64));
 
     await r.release();
 
-    expect(pool.checkin).toHaveBeenCalledWith('slot-A', '0xRECEIPT', 'h'.repeat(64));
+    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'h'.repeat(64));
     expect(r.isAcquired()).toBe(false);
   });
 
   test('release() before commitToTxBytesHash passes null to pool.checkin (reserved-stage hand-off)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     await r.release();
 
-    expect(pool.checkin).toHaveBeenCalledWith('slot-A', '0xRECEIPT', null);
+    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', null);
   });
 
   test('release() never throws even when pool.checkin throws (safeSlotCheckin internal swallow)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     (pool.checkin as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('redis down'));
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
@@ -255,7 +254,7 @@ describe('SponsorSlotReservationImpl', () => {
   });
 
   test('transferOwnership() then release() does not call pool.checkin', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
@@ -266,12 +265,12 @@ describe('SponsorSlotReservationImpl', () => {
   });
 
   test('reservationHandle returns the live token after acquire', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     const handle = r.reservationHandle();
-    expect(handle.slotId).toBe('slot-A');
+    expect(handle.sponsorAddress).toBe('0xSP');
     expect(handle.isLive()).toBe(true);
   });
 });

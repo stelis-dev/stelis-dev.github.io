@@ -35,7 +35,6 @@ describe('composePreparedCommit — coordination-field parity', () => {
     senderAddress: '0xSENDER',
     clientIp: '127.0.0.1',
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: '0xSPONSOR',
     executionPathKey: 'credit',
     orderId: 'order-1',
@@ -51,7 +50,6 @@ describe('composePreparedCommit — coordination-field parity', () => {
     expect(commit.senderAddress).toBe(COMMON.senderAddress);
     expect(commit.clientIp).toBe(COMMON.clientIp);
     expect(commit.txBytesHash).toBe(COMMON.txBytesHash);
-    expect(commit.slotId).toBe(COMMON.slotId);
     expect(commit.sponsorAddress).toBe(COMMON.sponsorAddress);
     expect(commit.executionPathKey).toBe(COMMON.executionPathKey);
     expect(commit.orderId).toBe(COMMON.orderId);
@@ -112,7 +110,6 @@ describe('composePreparedCommit — durable store entry shape contract', () => {
       senderAddress: '0xS',
       clientIp: '127.0.0.1',
       txBytesHash: 'h',
-      slotId: 's',
       sponsorAddress: '0xSP',
       executionPathKey: 'credit',
       orderId: null,
@@ -124,7 +121,6 @@ describe('composePreparedCommit — durable store entry shape contract', () => {
       senderAddress: '0xS',
       clientIp: '127.0.0.1',
       txBytesHash: 'h',
-      slotId: 's',
       sponsorAddress: '0xSP',
       executionPathKey: 'promotion:p1',
       orderId: null,
@@ -151,7 +147,6 @@ describe('composePreparedCommit — type guards', () => {
     senderAddress: '0xS',
     clientIp: '127.0.0.1',
     txBytesHash: 'h',
-    slotId: 's',
     sponsorAddress: '0xSP',
     executionPathKey: 'credit',
     orderId: null,
@@ -163,7 +158,6 @@ describe('composePreparedCommit — type guards', () => {
     senderAddress: '0xS',
     clientIp: '127.0.0.1',
     txBytesHash: 'h',
-    slotId: 's',
     sponsorAddress: '0xSP',
     executionPathKey: 'promotion:p1',
     orderId: null,

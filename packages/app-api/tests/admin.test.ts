@@ -376,7 +376,6 @@ describe('admin routes', () => {
       };
       const entries = [
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:00Z',
           mode: 'generic',
           outcome: 'success',
@@ -439,7 +438,6 @@ describe('admin routes', () => {
       });
       (mockCtx.sponsoredLogsStore.getRecent as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:00Z',
           mode: 'generic',
           outcome: 'success',
@@ -456,7 +454,6 @@ describe('admin routes', () => {
           failureReason: 'SPONSOR_EXEC_GAS_USED_MISSING',
         },
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:01Z',
           mode: 'promotion',
           outcome: 'success',

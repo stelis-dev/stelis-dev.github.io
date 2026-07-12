@@ -12,9 +12,9 @@ import type {
   SponsoredExecutionLogEntry,
   SponsoredExecutionMode,
 } from './types.js';
+import { parseSignedMistString, parseSponsoredExecutionLogEntry } from './types.js';
 import {
   SPONSORED_LOGS_RECENT_DEFAULT_CAP,
-  parseSignedMistString,
   sponsoredLogIdempotencyKey,
   type SponsoredLogsStoreAdapter,
 } from './store.js';
@@ -82,7 +82,8 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
   }
 
   async append(entry: SponsoredExecutionLogEntry): Promise<void> {
-    const key = sponsoredLogIdempotencyKey(entry);
+    const currentEntry = parseSponsoredExecutionLogEntry(entry);
+    const key = sponsoredLogIdempotencyKey(currentEntry);
     if (this.seenKeys.has(key)) {
       return;
     }
@@ -92,11 +93,8 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
     // (mode, receiptId, outcome) would no-op silently. Mirrors the
     // Redis adapter, which validates before invoking the Lua script.
     let hostNet: bigint | null = null;
-    if (entry.economicsStatus === 'known') {
-      if (entry.hostNetMist === null) {
-        throw new Error('sponsoredLogs.memoryStore: known economics entry missing hostNetMist');
-      }
-      hostNet = parseSignedMistString(entry.hostNetMist, 'hostNetMist');
+    if (currentEntry.economicsStatus === 'known') {
+      hostNet = parseSignedMistString(currentEntry.hostNetMist!, 'hostNetMist');
     }
 
     // Validation passed — claim the idempotency key now (adapter
@@ -104,7 +102,7 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
     this.seenKeys.add(key);
 
     // Aggregate update — `all` plus per-mode scope.
-    const scopes: readonly SponsoredExecutionAggregateMode[] = ['all', entry.mode];
+    const scopes: readonly SponsoredExecutionAggregateMode[] = ['all', currentEntry.mode];
     for (const scope of scopes) {
       const agg = this.aggregates.get(scope)!;
       agg.sponsoredExecutions += 1n;
@@ -118,7 +116,7 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
     }
 
     // Recent — newest-first by createdAt, bounded.
-    this.recent.unshift(entry);
+    this.recent.unshift(currentEntry);
     this.recent.sort(compareCreatedAtDesc);
     if (this.recent.length > this.recentCap) {
       this.recent.length = this.recentCap;
@@ -140,12 +138,12 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
   ): Promise<readonly SponsoredExecutionLogEntry[]> {
     if (limit <= 0) return [];
     if (mode === 'all') {
-      return this.recent.slice(0, limit);
+      return this.recent.slice(0, limit).map((entry) => parseSponsoredExecutionLogEntry(entry));
     }
     const filtered: SponsoredExecutionLogEntry[] = [];
     for (const e of this.recent) {
       if (e.mode === (mode as SponsoredExecutionMode)) {
-        filtered.push(e);
+        filtered.push(parseSponsoredExecutionLogEntry(e));
         if (filtered.length >= limit) break;
       }
     }

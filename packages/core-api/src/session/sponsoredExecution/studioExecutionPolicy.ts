@@ -283,7 +283,6 @@ export function createStudioExecutionPolicy(options: StudioExecutionPolicyOption
       ReceiptIdGenerated: () => {},
       SponsorSlotReservationAcquired: (_ctx, sponsorSlot) => {
         logPrepareStage('sponsor_slot_checked_out', {
-          slot_id: sponsorSlot.slotId,
           sponsor_address: sponsorSlot.sponsorAddress,
         });
       },
@@ -397,7 +396,7 @@ export function createStudioSponsorConsumeAdapter(input: {
       if (entry.mode !== 'promotion') {
         await safeSlotCheckin(
           input.context.sponsorPool,
-          entry.slotId,
+          entry.sponsorAddress,
           entry.receiptId,
           entry.txBytesHash,
         );
@@ -425,7 +424,6 @@ export function buildStudioPreparedCommitInputs(
     senderAddress: prepare.params.senderAddress,
     clientIp: prepare.params.clientIp,
     txBytesHash: input.txBytesHash,
-    slotId: input.sponsorSlot.slotId,
     sponsorAddress: input.sponsorSlot.sponsorAddress,
     executionPathKey: `promotion:${prepare.params.promotionId}`,
     orderId: null,
@@ -479,12 +477,12 @@ export function createStudioSignAndSubmitPort(
   state: StudioExecutionPolicyState,
 ): SignAndSubmitPort {
   const d = getDeps(options);
-  return async (slotId, receiptId, txBytes, userSignature) => {
+  return async (sponsorAddress, receiptId, txBytes, userSignature) => {
     try {
       return await d.signAndSubmit(
         options.context.sponsorPool,
         options.context.sui,
-        slotId,
+        sponsorAddress,
         receiptId,
         txBytes,
         userSignature,
@@ -1209,7 +1207,6 @@ async function runStudioRelease(
 
   try {
     await callback({
-      slotId: prepared.slotId,
       sponsorAddress: prepared.sponsorAddress,
       outcome: state.sponsorResultOutcome,
       executionStage: ctx.executionStage,
@@ -1229,7 +1226,7 @@ async function runStudioRelease(
       {
         source: 'sponsor_handler',
         route: 'promotion',
-        slot_id: prepared.slotId,
+        sponsor_address: prepared.sponsorAddress,
         digest: state.sponsorResultDigest ?? null,
         outcome: state.sponsorResultOutcome,
         error: err instanceof Error ? err.message : String(err),
@@ -1299,7 +1296,6 @@ async function handleStudioSignAndSubmitThrow(
       receiptId: sponsor.params.receiptId,
       userId: identity.userId,
       senderAddress: peekedPromotion.senderAddress,
-      slotId: prepared.slotId,
       sponsorAddress: prepared.sponsorAddress,
       reservedMist: prepared.reservedGasMist.toString(),
       submittedAt: new Date().toISOString(),

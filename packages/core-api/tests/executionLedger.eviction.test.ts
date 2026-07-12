@@ -28,7 +28,6 @@ function makePromotionEntry(
     receiptId: 'receipt-evict-1',
     senderAddress: '0x' + '1'.repeat(64),
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: '0x' + '2'.repeat(64),
     clientIp: '127.0.0.1',
     executionPathKey: `promotion:${PROMO_ID}`,

@@ -212,7 +212,6 @@ export function createSponsorResultStateUpdater(
         SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
         {
           source: 'sponsor_result_state_update_unhandled',
-          slot_id: metadata.slotId,
           sponsor_address: metadata.sponsorAddress,
           outcome: metadata.outcome,
           error: outerErr instanceof Error ? outerErr.message : String(outerErr),

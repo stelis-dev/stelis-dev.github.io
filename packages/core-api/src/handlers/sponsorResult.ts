@@ -10,7 +10,7 @@
  * Contract:
  *   - Invoked on every sponsor result path (success and throw), exactly once per
  *     sponsor request that reached the post-consume stage (where
- *     `prepared.slotId` / `prepared.sponsorAddress` are known).
+ *     `prepared.sponsorAddress` is known).
  *   - Runs after `safeSlotCheckin()` so slot-release invariants are
  *     independent of callback outcome.
  *   - Must be best-effort: it must catch its own errors internally and
@@ -98,9 +98,7 @@ export type SponsorResultEconomics =
  * to coordinate two parallel hooks per sponsor result.
  */
 export interface SponsorResultMetadata {
-  /** Slot identifier consumed by this sponsor run. */
-  readonly slotId: string;
-  /** Sponsor address associated with `slotId` (pool-adapter-resolved). */
+  /** Sponsor address consumed by this sponsor run (pool-adapter-resolved). */
   readonly sponsorAddress: string;
   /** Classified sponsor result outcome. */
   readonly outcome: SponsorResultOutcome;

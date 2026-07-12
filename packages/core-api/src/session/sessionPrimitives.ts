@@ -437,11 +437,12 @@ export async function runPreflight(
  * `SponsorPostSignatureUncertaintyError`. Only a validated terminal result can
  * establish congestion or on-chain execution.
  *
- * The pool `sign(slotId, receiptId, txBytes)` signature pins lease
- * verification to `HMAC(secret, receiptId || slotId || hash(txBytes))`,
+ * The pool `sign(sponsorAddress, receiptId, txBytes)` signature pins lease
+ * verification to `HMAC(secret, receiptId || sponsorAddress || hash(txBytes))`,
  * compared against the committed proof the prepare runner installed at
- * `sponsorPool.commit(slot, receiptId, buildResult.txBytesHash)`.
- * `receiptId` is the lease identity carried through the HTTP contract; a
+ * `sponsorPool.commit(sponsorAddress, receiptId, buildResult.txBytesHash)`.
+ * `sponsorAddress` is the lease identity; `receiptId` and the committed hash
+ * bind that lease to one prepared transaction. A
  * Redis-only attacker cannot produce a matching proof for any other
  * `txBytes` because the HMAC secret stays in process env.
  */
@@ -473,20 +474,20 @@ export class SponsorPostSignatureUncertaintyError extends Error {
 export async function signAndSubmit(
   pool: SponsorPoolAdapter,
   sui: SuiGrpcClient,
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
 ): Promise<ExecResult> {
   // Pool throws SponsorLeaseExpiredError directly if the committed HMAC
-  // lease proof for (receiptId, slotId, hash(txBytes)) does not match
+  // lease proof for (receiptId, sponsorAddress, hash(txBytes)) does not match
   // the Redis value — including the case where `entry.txBytesHash` was
   // overwritten under a live committed lease, because the committed
   // Redis proof still references the original commit digest. Pre-sign
   // failures rethrow unchanged: the sponsor signature was NOT issued
   // for them, so post-signature uncertainty policies (entitlement consume
   // and sponsored-execution recording) must not apply.
-  const sponsorSig = await pool.sign(slotId, receiptId, txBytes);
+  const sponsorSig = await pool.sign(sponsorAddress, receiptId, txBytes);
 
   try {
     const execResult = await sui.executeTransaction({
@@ -544,7 +545,7 @@ export async function signAndSubmit(
  * Best-effort slot checkin with structured error logging.
  * Safe to call in finally blocks — never throws.
  *
- * The pool `checkin` signature is `(slotId, receiptId, txBytesHash | null)`.
+ * The pool `checkin` signature is `(sponsorAddress, receiptId, txBytesHash | null)`.
  * Callers pass the prepare commit hash (`txBytesHash`) when releasing a
  * committed lease, and `null` when releasing a lease that only reached the
  * reservation window (for example build/commit failure before
@@ -556,17 +557,17 @@ export async function signAndSubmit(
  */
 export async function safeSlotCheckin(
   pool: SponsorPoolAdapter,
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytesHash: string | null,
 ): Promise<void> {
   try {
-    await pool.checkin(slotId, receiptId, txBytesHash);
+    await pool.checkin(sponsorAddress, receiptId, txBytesHash);
   } catch (checkinErr) {
     logStructuredEvent(
       SPONSOR_POOL_CHECKIN_FAILED,
       {
-        slotId,
+        sponsor_address: sponsorAddress,
         error: checkinErr instanceof Error ? checkinErr.message : String(checkinErr),
       },
       'error',

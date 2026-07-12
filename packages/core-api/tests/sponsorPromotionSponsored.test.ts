@@ -227,8 +227,8 @@ async function setup(opts?: {
 }) {
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -243,7 +243,7 @@ async function setup(opts?: {
   const signed = await buildSignedTx();
 
   // receiptId must exist before pool.checkout() so the lease proof can
-  // bind receiptId and slotId deterministically.
+  // bind receiptId and sponsorAddress deterministically.
   const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
 
   // Checkout a slot
@@ -252,7 +252,7 @@ async function setup(opts?: {
 
   // Commit the slot lease to the final txBytesHash so
   // handlePromotionSponsor → pool.sign() can pass.
-  await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+  await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
 
   // Reserve via executionLedger
   const reserveResult = await executionLedger.reserve({
@@ -270,7 +270,6 @@ async function setup(opts?: {
     reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
     txBytesHash: signed.txHash,
     senderAddress: USER_ADDR,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: `promotion:${TEST_PROMO_ID}`,
@@ -361,18 +360,8 @@ describe('handlePromotionSponsor', () => {
     await ctx.prepareStore.store(genericReceiptId, {
       issuedAt: Date.now(),
       receiptId: genericReceiptId,
-      executionCostClaim: 2_000_000n,
-      simGas: 1_300_000n,
-      gasVarianceFixedMist: 100_000n,
-      slippageBufferMist: 0n,
-      grossGas: 1_500_000n,
-      profile: 'credit_general',
-      quoteTimestampMs: Date.now(),
-      policyHash: '',
-      quotedHostFeeMist: 0n,
       txBytesHash: signed.txHash,
       senderAddress: USER_ADDR,
-      slotId: 'fake-slot',
       sponsorAddress: SPONSOR_KP.toSuiAddress(),
       clientIp: '127.0.0.1',
       executionPathKey: 'generic-execution-path',
@@ -1284,8 +1273,8 @@ describe('handlePromotionSponsor', () => {
   test('rejects with PROMOTION_NOT_STARTED when startAt is in the future', async () => {
     const executionLedger = new MemoryPromotionExecutionLedger();
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-    const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-      sponsorPool.checkin(slotId, receiptId, txBytesHash),
+    const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+      sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
     );
     const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -1300,7 +1289,7 @@ describe('handlePromotionSponsor', () => {
     const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
     const slot = await sponsorPool.checkout(receiptId);
     if (!slot) throw new Error('No sponsor slot');
-    await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+    await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
     const reserveResult = await executionLedger.reserve({
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
@@ -1316,7 +1305,6 @@ describe('handlePromotionSponsor', () => {
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n,
       txBytesHash,
-      slotId: slot.slotId,
       sponsorAddress: slot.sponsorAddress,
       clientIp: '127.0.0.1',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,
@@ -1386,8 +1374,8 @@ describe('handlePromotionSponsor', () => {
   test('rejects when use window has expired (USE_WINDOW_EXPIRED)', async () => {
     const executionLedger = new MemoryPromotionExecutionLedger();
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-    const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-      sponsorPool.checkin(slotId, receiptId, txBytesHash),
+    const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+      sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
     );
     const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -1402,7 +1390,7 @@ describe('handlePromotionSponsor', () => {
     const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
     const slot = await sponsorPool.checkout(receiptId);
     if (!slot) throw new Error('No sponsor slot');
-    await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+    await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
     const reserveResult = await executionLedger.reserve({
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
@@ -1418,7 +1406,6 @@ describe('handlePromotionSponsor', () => {
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
       txBytesHash,
-      slotId: slot.slotId,
       sponsorAddress: slot.sponsorAddress,
       clientIp: '127.0.0.1',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,

@@ -80,7 +80,6 @@ function makePrepared(overrides: Partial<GenericPreparedTxEntry> = {}): GenericP
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'credit',
     orderId: 'order-1',
@@ -97,7 +96,6 @@ function makePromotionEntry(): PromotionPreparedTxEntry {
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'promotion:p1',
     orderId: null,
@@ -203,10 +201,8 @@ function makePostCtx(): PostConsumeSponsorContext {
     clientIp: '127.0.0.1',
     executionStage: 'on_chain',
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
-      hmacCommitVerified: true,
     }),
   };
 }
@@ -443,7 +439,7 @@ describe('createGenericSponsorConsumeAdapter', () => {
     await expect(adapter.validateConsumedEntry?.(makePromotionEntry())).rejects.toMatchObject({
       code: 'MODE_MISMATCH',
     });
-    expect(checkin).toHaveBeenCalledWith('slot-1', RECEIPT_ID, 'a'.repeat(64));
+    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, 'a'.repeat(64));
   });
 
   test('hash mismatch records IP-only tampering before returning the classified error', async () => {

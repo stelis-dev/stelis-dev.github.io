@@ -53,7 +53,7 @@ import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
 /**
  * Sign-and-submit port the runner consumes for the
  * `SponsorSign` + `Submit` boundary. The production wiring binds this
- * to `signAndSubmit(pool, sui, slotId, receiptId, txBytes,
+ * to `signAndSubmit(pool, sui, sponsorAddress, receiptId, txBytes,
  * userSignature)` from `sessionPrimitives.ts`; tests pass a
  * deterministic mock.
  *
@@ -70,7 +70,7 @@ import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
  *     congestion vs on-chain revert.
  */
 export type SignAndSubmitPort = (
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
@@ -249,7 +249,7 @@ async function callObservabilityHookSwallow<Args extends unknown[]>(
  *     route-specific cleanup for `not_found` / `expired` /
  *     `hash_mismatch` / `corrupt` (via the consume adapter).
  *   - Post-consume failure paths run `safeSlotCheckin` in `finally`
- *     against the consumed entry's `(slotId, receiptId, txBytesHash)`
+ *     against the consumed entry's `(sponsorAddress, receiptId, txBytesHash)`
  *     — preserving the public sponsor-route cleanup semantics.
  *   - The post-checkin `Release` hook is swallowed if it throws so a
  *     buggy hook cannot replace the primary success path or the
@@ -288,15 +288,12 @@ export async function runSponsorStateMachine<TResult>(
       consumeAdapter,
     );
 
-    // Reconstruct the sponsor slot reservation handle. The pool's HMAC commit
-    // verification at consume time is the authority for `(slotId,
-    // sponsorAddress, receiptId)`; reconstruction is gated on the
-    // verified-flag input shape declared in `reservationHandles.ts`.
+    // Reconstruct the consumed entry's sponsor-address lifecycle handle.
+    // This is not an HMAC attestation: `pool.sign()` remains the sole
+    // committed-lease verification boundary for the submitted txBytes.
     const sponsorSlot = reconstructReservationHandles.sponsorSlot({
-      slotId: preparedEntry.slotId,
       sponsorAddress: preparedEntry.sponsorAddress,
       receiptId: preparedEntry.receiptId,
-      hmacCommitVerified: true,
     });
 
     let nonceHandle: NonceReservationHandle | undefined;
@@ -375,7 +372,7 @@ export async function runSponsorStateMachine<TResult>(
     let execResult: ExecResult;
     try {
       execResult = await host.signAndSubmit(
-        preparedEntry.slotId,
+        preparedEntry.sponsorAddress,
         preparedEntry.receiptId,
         request.txBytes,
         request.userSignature,
@@ -443,7 +440,7 @@ export async function runSponsorStateMachine<TResult>(
     if (preparedEntry) {
       await safeSlotCheckin(
         host.sponsorPool,
-        preparedEntry.slotId,
+        preparedEntry.sponsorAddress,
         preparedEntry.receiptId,
         preparedEntry.txBytesHash,
       );

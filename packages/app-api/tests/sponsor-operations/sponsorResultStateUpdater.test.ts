@@ -14,7 +14,6 @@ const ACCOUNT = `0x${'55'.repeat(32)}`;
 
 function metadata(outcome: SponsorResultMetadata['outcome']): SponsorResultMetadata {
   return {
-    slotId: SLOT,
     sponsorAddress: SLOT,
     outcome,
     executionStage: 'on_chain',

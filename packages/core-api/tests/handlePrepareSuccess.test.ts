@@ -140,7 +140,6 @@ function makeMockContext() {
     sui: {},
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        slotId: 'slot-42',
         sponsorAddress: '0xSPONSOR42',
       }),
       commit: vi.fn().mockResolvedValue(undefined),
@@ -316,7 +315,6 @@ describe('handlePrepare — success path', () => {
     expect(storedEntry.receiptId).toBe(result.receiptId);
     expect(storedEntry.senderAddress).toBe(TEST_PREPARE_AUTH_SENDER);
     expect(storedEntry.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
-    expect(storedEntry.slotId).toBe('slot-42');
     expect(storedEntry.sponsorAddress).toBe('0xSPONSOR42');
     expect(storedEntry.clientIp).toBe('192.168.1.1');
     expect(storedEntry.mode).toBe('generic');
@@ -596,7 +594,7 @@ describe('handlePrepare — success path', () => {
       TEST_PREPARE_AUTH_SENDER,
     );
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledWith(
-      'slot-42',
+      '0xSPONSOR42',
       expect.stringMatching(/^0x[0-9a-f]{64}$/),
       null, // commit failed → lease still in reserved stage
     );

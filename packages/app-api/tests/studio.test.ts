@@ -109,8 +109,8 @@ const {
   }
   class _SponsorLeaseExpiredError extends Error {
     readonly code = 'LEASE_EXPIRED' as const;
-    constructor(slotId: string) {
-      super(`Sponsor lease expired for slot ${slotId} — retry /prepare`);
+    constructor(sponsorAddress: string) {
+      super(`Sponsor lease expired for address ${sponsorAddress} — retry /prepare`);
       this.name = 'SponsorLeaseExpiredError';
     }
   }

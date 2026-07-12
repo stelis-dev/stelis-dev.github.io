@@ -12,8 +12,8 @@ function makeKnownEntry(
     mode: SponsoredExecutionMode;
   },
 ): SponsoredExecutionLogEntry {
+  const promotion = overrides.mode === 'promotion';
   return {
-    schemaVersion: 1,
     createdAt: overrides.createdAt ?? '2026-04-26T16:00:00.000Z',
     mode: overrides.mode,
     outcome: overrides.outcome ?? 'success',
@@ -21,11 +21,10 @@ function makeKnownEntry(
     digest: overrides.digest ?? '0xdigest',
     senderAddress: overrides.senderAddress ?? '0xsender',
     sponsorAddress: overrides.sponsorAddress ?? '0xsponsor',
-    slotId: overrides.slotId ?? '0xslot',
     executionPathKey: overrides.executionPathKey ?? 'generic-execution-path',
-    orderIdHash: overrides.orderIdHash ?? null,
-    promotionId: overrides.promotionId ?? null,
-    userId: overrides.userId ?? null,
+    orderIdHash: promotion ? null : (overrides.orderIdHash ?? null),
+    promotionId: promotion ? (overrides.promotionId ?? 'promo-1') : null,
+    userId: promotion ? (overrides.userId ?? 'user-1') : null,
     recoveredGasMist: overrides.recoveredGasMist ?? '12000',
     hostPaidGasMist: overrides.hostPaidGasMist ?? '8000',
     hostNetMist: overrides.hostNetMist ?? '5000',
@@ -44,20 +43,19 @@ function makeUnknownEntry(
     mode: SponsoredExecutionMode;
   },
 ): SponsoredExecutionLogEntry {
+  const promotion = overrides.mode === 'promotion';
   return {
-    schemaVersion: 1,
     createdAt: overrides.createdAt ?? '2026-04-26T16:00:00.000Z',
     mode: overrides.mode,
     outcome: overrides.outcome ?? 'success',
     receiptId: overrides.receiptId,
     digest: overrides.digest ?? null,
-    senderAddress: overrides.senderAddress ?? null,
-    sponsorAddress: overrides.sponsorAddress ?? null,
-    slotId: overrides.slotId ?? null,
-    executionPathKey: overrides.executionPathKey ?? null,
-    orderIdHash: overrides.orderIdHash ?? null,
-    promotionId: overrides.promotionId ?? null,
-    userId: overrides.userId ?? null,
+    senderAddress: overrides.senderAddress ?? '0xsender',
+    sponsorAddress: overrides.sponsorAddress ?? '0xsponsor',
+    executionPathKey: overrides.executionPathKey ?? 'generic-execution-path',
+    orderIdHash: promotion ? null : (overrides.orderIdHash ?? null),
+    promotionId: promotion ? (overrides.promotionId ?? 'promo-1') : null,
+    userId: promotion ? (overrides.userId ?? 'user-1') : null,
     recoveredGasMist: null,
     hostPaidGasMist: null,
     hostNetMist: null,
@@ -294,7 +292,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
       ...makeKnownEntry({ receiptId: 'r-bad', mode: 'generic' }),
       hostNetMist: null,
     };
-    await expect(store.append(bad)).rejects.toThrow(/known economics entry missing/);
+    await expect(store.append(bad)).rejects.toThrow(/hostNetMist/);
   });
 
   it('throws on malformed signed-mist string (no silent coercion)', async () => {
@@ -349,6 +347,66 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     await store.append(wellFormed);
     const final = await store.getSummary('all');
     expect(final.sponsoredExecutions).toBe('1');
+  });
+
+  it('rejects extra, cross-mode, wrong-outcome, and non-canonical current shapes before persistence', async () => {
+    const mutations: unknown[] = [
+      { ...makeKnownEntry({ receiptId: 'extra-field', mode: 'generic' }), unexpected: 1 },
+      {
+        ...makeKnownEntry({ receiptId: 'cross-mode', mode: 'generic' }),
+        promotionId: 'promo-1',
+        userId: 'user-1',
+      },
+      {
+        ...makeKnownEntry({ receiptId: 'promotion-id-missing', mode: 'promotion' }),
+        promotionId: null,
+      },
+      {
+        ...makeKnownEntry({ receiptId: 'promotion-user-missing', mode: 'promotion' }),
+        userId: null,
+      },
+      {
+        ...makeKnownEntry({ receiptId: 'promotion-order-id', mode: 'promotion' }),
+        orderIdHash: 'order-hash',
+      },
+      { ...makeKnownEntry({ receiptId: 'wrong-outcome', mode: 'generic' }), outcome: 'congestion' },
+      { ...makeKnownEntry({ receiptId: 'leading-zero', mode: 'generic' }), hostFeeMist: '01' },
+      { ...makeKnownEntry({ receiptId: 'number-money', mode: 'generic' }), hostPaidGasMist: 1 },
+      {
+        ...makeKnownEntry({ receiptId: 'negative-recovered', mode: 'generic' }),
+        recoveredGasMist: '-1',
+      },
+      { ...makeKnownEntry({ receiptId: 'negative-paid', mode: 'generic' }), hostPaidGasMist: '-1' },
+      ...[
+        'recoveredGasMist',
+        'hostPaidGasMist',
+        'hostNetMist',
+        'hostFeeMist',
+        'protocolFeeMist',
+        'grossGasMist',
+        'storageRebateMist',
+      ].map((field) => ({
+        ...makeUnknownEntry({ receiptId: `unknown-${field}`, mode: 'generic' }),
+        [field]: '0',
+      })),
+    ];
+    const store = new MemorySponsoredLogsStore();
+    for (const mutation of mutations) {
+      await expect(store.append(mutation as SponsoredExecutionLogEntry)).rejects.toThrow();
+    }
+    expect((await store.getSummary('all')).sponsoredExecutions).toBe('0');
+  });
+
+  it('stores and returns current-shape clones instead of caller-owned objects', async () => {
+    const store = new MemorySponsoredLogsStore();
+    const entry = makeKnownEntry({ receiptId: 'clone', mode: 'generic', hostNetMist: '5' });
+    await store.append(entry);
+    (entry as { hostNetMist: string | null }).hostNetMist = '999';
+
+    const first = await store.getRecent('all', 1);
+    expect(first[0].hostNetMist).toBe('5');
+    (first[0] as { hostNetMist: string | null }).hostNetMist = '888';
+    expect((await store.getRecent('all', 1))[0].hostNetMist).toBe('5');
   });
 });
 

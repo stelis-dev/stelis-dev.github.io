@@ -37,18 +37,8 @@ function makeEntry(overrides: Partial<PreparedTxEntry> = {}): PreparedTxEntry {
     issuedAt: Date.now(),
     receiptId: 'pid-test',
     senderAddress: '0xSENDER',
-    executionCostClaim: 1_800_000n,
-    simGas: 1_300_000n,
-    gasVarianceFixedMist: 350_000n,
-    slippageBufferMist: 150_000n,
-    grossGas: 1_500_000n,
-    quotedHostFeeMist: 100_000n,
     nonce: 1n,
-    profile: 'new_user',
-    quoteTimestampMs: Date.now(),
-    policyHash: 'policy-hash',
     txBytesHash: 'hash-test',
-    slotId: 'slot-test',
     sponsorAddress: '0xSPONSOR',
     clientIp: '10.0.0.1',
     executionPathKey: 'mock-execution-path',
@@ -81,7 +71,7 @@ describe('invokeReleaseCallback', () => {
     try {
       await invokeReleaseCallback({
         onRelease,
-        slotId: 'slot-A',
+        sponsorAddress: 'slot-A',
         receiptId: 'pid-A',
         txBytesHash: 'hash-A',
         adapter: 'memory-prepare',
@@ -94,7 +84,7 @@ describe('invokeReleaseCallback', () => {
       expect(release).toBeDefined();
       expect(release!['adapter']).toBe('memory-prepare');
       expect(release!['reason']).toBe('prepare_expired');
-      expect(release!['slot_id']).toBe('slot-A');
+      expect(release!['sponsor_address']).toBe('slot-A');
     } finally {
       infoSpy.mockRestore();
     }
@@ -109,7 +99,7 @@ describe('invokeReleaseCallback', () => {
       await expect(
         invokeReleaseCallback({
           onRelease,
-          slotId: 'slot-B',
+          sponsorAddress: 'slot-B',
           receiptId: 'pid-B',
           txBytesHash: 'hash-B',
           adapter: 'redis-prepare',
@@ -123,7 +113,7 @@ describe('invokeReleaseCallback', () => {
       expect(failed).toBeDefined();
       expect(failed!['adapter']).toBe('redis-prepare');
       expect(failed!['reason']).toBe('ip_concurrent_eviction');
-      expect(failed!['slot_id']).toBe('slot-B');
+      expect(failed!['sponsor_address']).toBe('slot-B');
       expect(failed!['client_ip']).toBe('10.9.9.9');
       expect(failed!['error']).toBe('release-sync-throw');
     } finally {
@@ -140,7 +130,7 @@ describe('invokeReleaseCallback', () => {
       await expect(
         invokeReleaseCallback({
           onRelease,
-          slotId: 'slot-C',
+          sponsorAddress: 'slot-C',
           receiptId: 'pid-C',
           txBytesHash: null,
           adapter: 'memory-prepare',
@@ -152,7 +142,7 @@ describe('invokeReleaseCallback', () => {
       );
       expect(failed).toBeDefined();
       expect(failed!['reason']).toBe('hash_mismatch');
-      expect(failed!['slot_id']).toBe('slot-C');
+      expect(failed!['sponsor_address']).toBe('slot-C');
       expect(failed!['error']).toBe('release-async-reject');
     } finally {
       warnSpy.mockRestore();
@@ -166,7 +156,7 @@ describe('invokeReleaseCallback', () => {
     try {
       await invokeReleaseCallback({
         onRelease: onReleaseOk,
-        slotId: 'slot-EC',
+        sponsorAddress: 'slot-EC',
         receiptId: 'pid-EC',
         txBytesHash: 'hash-EC',
         adapter: 'memory-prepare',
@@ -190,7 +180,7 @@ describe('invokeReleaseCallback', () => {
     try {
       await invokeReleaseCallback({
         onRelease: onReleaseFail,
-        slotId: 'slot-EC',
+        sponsorAddress: 'slot-EC',
         receiptId: 'pid-EC',
         txBytesHash: 'hash-EC',
         adapter: 'memory-prepare',
@@ -215,7 +205,7 @@ describe('invokeReleaseCallback', () => {
 
 describe('invokeEvictCallback', () => {
   it('synchronous throw emits PREPARE_STORE_EVICT_CALLBACK_FAILED (warn)', async () => {
-    const entry = makeEntry({ slotId: 'slot-E1', receiptId: 'pid-E1' });
+    const entry = makeEntry({ sponsorAddress: 'slot-E1', receiptId: 'pid-E1' });
     const onEntryEvict = vi.fn().mockImplementation(() => {
       throw new Error('evict-sync-throw');
     });
@@ -235,7 +225,7 @@ describe('invokeEvictCallback', () => {
       expect(failed).toBeDefined();
       expect(failed!['adapter']).toBe('memory-prepare');
       expect(failed!['reason']).toBe('prepare_expired');
-      expect(failed!['slot_id']).toBe('slot-E1');
+      expect(failed!['sponsor_address']).toBe('slot-E1');
       expect(failed!['receipt_id']).toBe('pid-E1');
       expect(failed!['error']).toBe('evict-sync-throw');
     } finally {
@@ -244,7 +234,7 @@ describe('invokeEvictCallback', () => {
   });
 
   it('rejected promise emits PREPARE_STORE_EVICT_CALLBACK_FAILED (warn)', async () => {
-    const entry = makeEntry({ slotId: 'slot-E2', receiptId: 'pid-E2' });
+    const entry = makeEntry({ sponsorAddress: 'slot-E2', receiptId: 'pid-E2' });
     const onEntryEvict = vi
       .fn()
       .mockImplementation(() => Promise.reject(new Error('evict-async-reject')));
@@ -263,7 +253,7 @@ describe('invokeEvictCallback', () => {
       expect(failed).toBeDefined();
       expect(failed!['adapter']).toBe('redis-prepare');
       expect(failed!['reason']).toBe('hash_mismatch');
-      expect(failed!['slot_id']).toBe('slot-E2');
+      expect(failed!['sponsor_address']).toBe('slot-E2');
       expect(failed!['receipt_id']).toBe('pid-E2');
       expect(failed!['error']).toBe('evict-async-reject');
     } finally {

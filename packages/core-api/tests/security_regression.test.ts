@@ -27,7 +27,6 @@ import type {
 
 const SENDER_A = '0x' + 'AA'.repeat(32);
 const SENDER_B = '0x' + 'BB'.repeat(32);
-const SLOT_A = 'slot-a';
 const SLOT_B = 'slot-b';
 const SLOT_D = 'slot-d';
 const CLIENT_IP = '10.0.0.1';
@@ -38,18 +37,8 @@ function makeGenericEntry(overrides?: Partial<GenericPreparedTxEntry>): GenericP
     receiptId: 'pid-default',
     orderId: null,
     senderAddress: SENDER_A,
-    executionCostClaim: 7_350_000n,
-    simGas: 7_000_000n,
-    gasVarianceFixedMist: 100_000n,
-    slippageBufferMist: 250_000n,
-    grossGas: 7_100_000n,
-    quotedHostFeeMist: 0n,
     nonce: 1n,
-    profile: 'new_user',
-    quoteTimestampMs: Date.now(),
-    policyHash: '0xPOLICY',
     txBytesHash: 'mock-hash',
-    slotId: SLOT_A,
     sponsorAddress: '0xSPONSOR',
 
     clientIp: CLIENT_IP,
@@ -67,14 +56,9 @@ function makePromotionEntry(
     receiptId: 'pid-promo-default',
     orderId: null,
     senderAddress: SENDER_A,
-    executionCostClaim: 7_350_000n,
-    simGas: 7_000_000n,
-    gasVarianceFixedMist: 100_000n,
-    slippageBufferMist: 250_000n,
-    grossGas: 7_100_000n,
+    reservedGasMist: 7_350_000n,
     nonce: 0n,
     txBytesHash: 'mock-hash',
-    slotId: SLOT_A,
     sponsorAddress: '0xSPONSOR',
 
     clientIp: CLIENT_IP,
@@ -93,7 +77,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   beforeEach(() => {
     released.length = 0;
     store = new MemoryPrepareStore(
-      (slotId) => void released.push(slotId),
+      (sponsorAddress) => void released.push(sponsorAddress),
       PREPARE_TTL_MS, // ttlMs
       10, // maxPerIp — high enough that IP limit doesn't interfere with user-quota tests
       MAX_OUTSTANDING_PER_STUDIO_USER, // maxPerStudioUser (4th arg)
@@ -111,7 +95,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-generic-${i}`,
         makeGenericEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-generic-${i}`,
         }),
@@ -125,7 +109,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -139,7 +123,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -149,7 +133,11 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     await expect(
       store.store(
         'pid-promo-overflow',
-        makePromotionEntry({ slotId: SLOT_D, txBytesHash: 'hash-overflow' }),
+        makePromotionEntry({
+          receiptId: 'pid-promo-overflow',
+          sponsorAddress: SLOT_D,
+          txBytesHash: 'hash-overflow',
+        }),
       ),
     ).rejects.toThrow(PrepareStudioUserQuotaError);
   });
@@ -159,7 +147,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-a${i}`,
         makePromotionEntry({
-          slotId: `slot-a${i}`,
+          sponsorAddress: `slot-a${i}`,
           txBytesHash: `hash-a${i}`,
           receiptId: `pid-a${i}`,
           senderAddress: SENDER_A,
@@ -174,7 +162,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       store.store(
         'pid-b0',
         makePromotionEntry({
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'hash-b0',
           receiptId: 'pid-b0',
           senderAddress: SENDER_B,
@@ -189,7 +177,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -199,7 +187,11 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     await expect(
       store.store(
         'pid-promo-new',
-        makePromotionEntry({ slotId: SLOT_D, txBytesHash: 'hash-new', receiptId: 'pid-promo-new' }),
+        makePromotionEntry({
+          sponsorAddress: SLOT_D,
+          txBytesHash: 'hash-new',
+          receiptId: 'pid-promo-new',
+        }),
       ),
     ).resolves.toBeUndefined();
   });
@@ -210,7 +202,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-generic-${i}`,
         makeGenericEntry({
-          slotId: `slot-g${i}`,
+          sponsorAddress: `slot-g${i}`,
           txBytesHash: `hash-g${i}`,
           receiptId: `pid-generic-${i}`,
         }),
@@ -220,7 +212,11 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     await expect(
       store.store(
         'pid-promo-0',
-        makePromotionEntry({ slotId: 'slot-p0', txBytesHash: 'hash-p0', receiptId: 'pid-promo-0' }),
+        makePromotionEntry({
+          sponsorAddress: 'slot-p0',
+          txBytesHash: 'hash-p0',
+          receiptId: 'pid-promo-0',
+        }),
       ),
     ).resolves.toBeUndefined();
   });
@@ -237,7 +233,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       await store.store(
         `pid-rot-${i}`,
         makePromotionEntry({
-          slotId: `slot-rot-${i}`,
+          sponsorAddress: `slot-rot-${i}`,
           txBytesHash: `hash-rot-${i}`,
           receiptId: `pid-rot-${i}`,
           senderAddress: SENDER_A,
@@ -250,7 +246,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
       store.store(
         'pid-rot-bypass',
         makePromotionEntry({
-          slotId: SLOT_D,
+          sponsorAddress: SLOT_D,
           txBytesHash: 'hash-rot-bypass',
           receiptId: 'pid-rot-bypass',
           senderAddress: SENDER_B,
@@ -262,7 +258,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
 
   it('expired entries are pruned before quota check', async () => {
     const shortStore = new MemoryPrepareStore(
-      (slotId) => void released.push(slotId),
+      (sponsorAddress) => void released.push(sponsorAddress),
       100, // 100ms TTL
       10, // maxPerIp — high enough not to interfere
       MAX_OUTSTANDING_PER_STUDIO_USER, // maxPerStudioUser (4th arg)
@@ -273,7 +269,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
         await shortStore.store(
           `pid-promo-${i}`,
           makePromotionEntry({
-            slotId: `slot-${i}`,
+            sponsorAddress: `slot-${i}`,
             txBytesHash: `hash-${i}`,
             receiptId: `pid-promo-${i}`,
             issuedAt: Date.now() - 500, // already expired
@@ -284,7 +280,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
         shortStore.store(
           'pid-promo-new',
           makePromotionEntry({
-            slotId: SLOT_D,
+            sponsorAddress: SLOT_D,
             txBytesHash: 'hash-new',
             receiptId: 'pid-promo-new',
           }),

@@ -82,27 +82,27 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     const second = await pool.checkout(receipt2);
     const third = await pool.checkout(receipt3);
 
-    expect(first?.slotId).not.toBe(second?.slotId);
+    expect(first?.sponsorAddress).not.toBe(second?.sponsorAddress);
     expect(third).toBeNull();
 
     // Reservation checkin (never committed) — use txBytesHash=null.
-    await pool.checkin(first!.slotId, receipt1, null);
+    await pool.checkin(first!.sponsorAddress, receipt1, null);
     const receipt4 = '0x' + '04'.repeat(32);
     const reused = await pool.checkout(receipt4);
-    expect(reused?.slotId).toBe(first?.slotId);
+    expect(reused?.sponsorAddress).toBe(first?.sponsorAddress);
 
     // Commit second slot to a specific PTB hash, then sign the exact bytes.
     const txBytes = new Uint8Array([1, 2, 3]);
     const txBytesHash = sha256Hex(txBytes);
-    await pool.commit(second!.slotId, receipt2, txBytesHash);
-    const signature = await pool.sign(second!.slotId, receipt2, txBytes);
-    expect(signature.signature).toBe(`sig:${second!.slotId}`);
+    await pool.commit(second!.sponsorAddress, receipt2, txBytesHash);
+    const signature = await pool.sign(second!.sponsorAddress, receipt2, txBytes);
+    expect(signature.signature).toBe(`sig:${second!.sponsorAddress}`);
 
     vi.advanceTimersByTime(1_001);
     const receipt5 = '0x' + '05'.repeat(32);
     const afterExpiry = await pool.checkout(receipt5);
     expect(afterExpiry).not.toBeNull();
-    expect([first!.slotId, second!.slotId]).toContain(afterExpiry!.slotId);
+    expect([first!.sponsorAddress, second!.sponsorAddress]).toContain(afterExpiry!.sponsorAddress);
   });
 
   it('RedisSponsorPool checkout scans busy slots with one Redis eval', async () => {
@@ -132,10 +132,10 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     expect(evalSpy).toHaveBeenCalledWith(
       expect.stringContaining('RedisSponsorPool LEASE_CHECKOUT_SCRIPT'),
       expect.arrayContaining([
-        expect.stringContaining(first!.slotId),
-        expect.stringContaining(second!.slotId),
+        expect.stringContaining(first!.sponsorAddress),
+        expect.stringContaining(second!.sponsorAddress),
       ]),
-      expect.arrayContaining([String(60_000), first!.slotId, second!.slotId]),
+      expect.arrayContaining([String(60_000), first!.sponsorAddress, second!.sponsorAddress]),
     );
   });
 
@@ -191,7 +191,7 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     const leased = await pool.checkout(TEST_RECEIPT_ID);
     expect(leased).not.toBeNull();
     await expect(
-      pool.sign(leased!.slotId, TEST_RECEIPT_ID, new Uint8Array([9, 9, 9])),
+      pool.sign(leased!.sponsorAddress, TEST_RECEIPT_ID, new Uint8Array([9, 9, 9])),
     ).rejects.toBeInstanceOf(SponsorLeaseExpiredError);
   });
 
@@ -207,10 +207,10 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     );
     const leased = await pool.checkout(TEST_RECEIPT_ID);
     const committedBytes = new Uint8Array([0xc0, 0xde]);
-    await pool.commit(leased!.slotId, TEST_RECEIPT_ID, sha256Hex(committedBytes));
+    await pool.commit(leased!.sponsorAddress, TEST_RECEIPT_ID, sha256Hex(committedBytes));
     // Correct txBytes matches the commit digest.
-    const ok = await pool.sign(leased!.slotId, TEST_RECEIPT_ID, committedBytes);
-    expect(ok.signature).toBe(`sig:${leased!.slotId}`);
+    const ok = await pool.sign(leased!.sponsorAddress, TEST_RECEIPT_ID, committedBytes);
+    expect(ok.signature).toBe(`sig:${leased!.sponsorAddress}`);
   });
 
   it('RedisSponsorPool rejects sign() for a forged txBytes under a live committed lease (T5 pool-unit)', async () => {
@@ -227,13 +227,13 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     );
     const leased = await pool.checkout(TEST_RECEIPT_ID);
     const committedBytes = new Uint8Array([0xc0, 0xde, 0x01]);
-    await pool.commit(leased!.slotId, TEST_RECEIPT_ID, sha256Hex(committedBytes));
+    await pool.commit(leased!.sponsorAddress, TEST_RECEIPT_ID, sha256Hex(committedBytes));
 
     // Attacker submits a completely different PTB.
     const attackerBytes = new Uint8Array([0xba, 0xad, 0xf0, 0x0d]);
-    await expect(pool.sign(leased!.slotId, TEST_RECEIPT_ID, attackerBytes)).rejects.toBeInstanceOf(
-      SponsorLeaseExpiredError,
-    );
+    await expect(
+      pool.sign(leased!.sponsorAddress, TEST_RECEIPT_ID, attackerBytes),
+    ).rejects.toBeInstanceOf(SponsorLeaseExpiredError);
   });
 
   it('RedisSponsorPool rejects sign() when Redis lease value is stomped by an attacker', async () => {
@@ -250,19 +250,19 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     );
     const leased = await pool.checkout(TEST_RECEIPT_ID);
     expect(leased).not.toBeNull();
-    const slotId = leased!.slotId;
+    const sponsorAddress = leased!.sponsorAddress;
 
     // Overwrite the lease value with an attacker-chosen string.
-    await redis.set(`stelis:sponsor_lease:${slotId}`, 'attacker-forged-value', {
+    await redis.set(`stelis:sponsor_lease:${sponsorAddress}`, 'attacker-forged-value', {
       px: 60_000,
     });
-    await expect(pool.sign(slotId, TEST_RECEIPT_ID, new Uint8Array([9]))).rejects.toBeInstanceOf(
-      SponsorLeaseExpiredError,
-    );
+    await expect(
+      pool.sign(sponsorAddress, TEST_RECEIPT_ID, new Uint8Array([9])),
+    ).rejects.toBeInstanceOf(SponsorLeaseExpiredError);
   });
 
   it('RedisSponsorPool sign() rejects when receiptId is substituted across slots', async () => {
-    // Slot-pinning guard: the HMAC payload includes `slotId`, so a
+    // Slot-pinning guard: the HMAC payload includes `sponsorAddress`, so a
     // valid lease for slot A cannot authorise slot B.
     const redis = new FakeRedisClient();
     const kpA = makeKeypair('0x' + 'aa'.repeat(32));
@@ -285,14 +285,14 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     // Commit both to their own bytes.
     const bytesA = new Uint8Array([0x01, 0x02]);
     const bytesB = new Uint8Array([0x03, 0x04]);
-    await pool.commit(leaseA!.slotId, receiptA, sha256Hex(bytesA));
-    await pool.commit(leaseB!.slotId, receiptB, sha256Hex(bytesB));
+    await pool.commit(leaseA!.sponsorAddress, receiptA, sha256Hex(bytesA));
+    await pool.commit(leaseB!.sponsorAddress, receiptB, sha256Hex(bytesB));
 
     // Cross-slot replay fails even with the legitimate txBytes.
-    await expect(pool.sign(leaseB!.slotId, receiptA, bytesA)).rejects.toBeInstanceOf(
+    await expect(pool.sign(leaseB!.sponsorAddress, receiptA, bytesA)).rejects.toBeInstanceOf(
       SponsorLeaseExpiredError,
     );
-    await expect(pool.sign(leaseA!.slotId, receiptB, bytesB)).rejects.toBeInstanceOf(
+    await expect(pool.sign(leaseA!.sponsorAddress, receiptB, bytesB)).rejects.toBeInstanceOf(
       SponsorLeaseExpiredError,
     );
   });
@@ -329,9 +329,9 @@ describe('Redis-backed adapters with FakeRedisClient', () => {
     const leased = await pool.checkout(TEST_RECEIPT_ID);
     const bytes1 = new Uint8Array([0x10]);
     const bytes2 = new Uint8Array([0x20]);
-    await pool.commit(leased!.slotId, TEST_RECEIPT_ID, sha256Hex(bytes1));
+    await pool.commit(leased!.sponsorAddress, TEST_RECEIPT_ID, sha256Hex(bytes1));
     await expect(
-      pool.commit(leased!.slotId, TEST_RECEIPT_ID, sha256Hex(bytes2)),
+      pool.commit(leased!.sponsorAddress, TEST_RECEIPT_ID, sha256Hex(bytes2)),
     ).rejects.toBeInstanceOf(SponsorLeaseCommitError);
   });
 

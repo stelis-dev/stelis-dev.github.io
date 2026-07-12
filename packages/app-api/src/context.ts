@@ -206,7 +206,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // ── 3. Sponsor keys ─────────────────────────────────────────────
     const sponsorKeys = [...input.sponsorKeys];
     // `RedisSponsorPool` fences slot signing with
-    // `HMAC(secret, receiptId || slotId || commitDigest)`
+    // `HMAC(secret, receiptId || sponsorAddress || commitDigest)`
     // where `commitDigest` is `":reserved"` at `checkout()` and the
     // `hash(txBytes)` committed at `SponsorPool.commit()` (called
     // right before `prepareStore.store()`). `sign()` then verifies
@@ -231,8 +231,8 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     let _executionLedgerRef: PromotionExecutionLedger | null = null;
     const prepareStore = new RedisPrepareStore(
       redis,
-      (slotId: string, receiptId: string, txBytesHash: string | null) =>
-        sponsorPool.checkin(slotId, receiptId, txBytesHash),
+      (sponsorAddress: string, receiptId: string, txBytesHash: string | null) =>
+        sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
       {},
       (entry: PreparedTxEntry) => {
         // Best-effort promotion execution ledger release for promotion entries evicted by TTL/IP overflow.

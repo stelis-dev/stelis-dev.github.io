@@ -32,9 +32,23 @@ import {
 } from '@stelis/core-api/observability';
 import type { SponsorResultCallback, SponsorResultMetadata } from '@stelis/core-api';
 import type { SponsoredLogsStoreAdapter } from './store.js';
-import type { SponsoredExecutionLogEntry, SponsoredExecutionMode } from './types.js';
+import type {
+  SponsoredExecutionLogEntry,
+  SponsoredExecutionLogOutcome,
+  SponsoredExecutionMode,
+} from './types.js';
+import { isSponsoredExecutionLogOutcome } from './types.js';
 
-function shouldRecord(metadata: SponsorResultMetadata): boolean {
+type RecordableSponsorResultMetadata = SponsorResultMetadata & {
+  readonly outcome: SponsoredExecutionLogOutcome;
+};
+
+function shouldRecord(
+  metadata: SponsorResultMetadata,
+): metadata is RecordableSponsorResultMetadata {
+  if (!isSponsoredExecutionLogOutcome(metadata.outcome)) {
+    return false;
+  }
   if (metadata.executionStage === 'on_chain') {
     return true;
   }
@@ -104,7 +118,7 @@ export function createSponsoredLogsRecorder(
 }
 
 function buildLogEntry(
-  metadata: SponsorResultMetadata,
+  metadata: RecordableSponsorResultMetadata,
   clock: ClockFn,
 ): SponsoredExecutionLogEntry {
   const mode: SponsoredExecutionMode = metadata.route;
@@ -114,7 +128,6 @@ function buildLogEntry(
   // than manufacturing certainty at the host boundary.
   if (econ.economicsStatus === 'known' && metadata.executionStage !== 'after_sponsor_signature') {
     return {
-      schemaVersion: 1,
       createdAt: clock().toISOString(),
       mode,
       outcome: metadata.outcome,
@@ -122,7 +135,6 @@ function buildLogEntry(
       digest: metadata.digest ?? null,
       senderAddress: metadata.senderAddress,
       sponsorAddress: metadata.sponsorAddress,
-      slotId: metadata.slotId,
       executionPathKey: metadata.executionPathKey,
       orderIdHash: metadata.orderIdHash,
       promotionId: metadata.promotionId,
@@ -139,7 +151,6 @@ function buildLogEntry(
     };
   }
   return {
-    schemaVersion: 1,
     createdAt: clock().toISOString(),
     mode,
     outcome: metadata.outcome,
@@ -147,7 +158,6 @@ function buildLogEntry(
     digest: metadata.digest ?? null,
     senderAddress: metadata.senderAddress,
     sponsorAddress: metadata.sponsorAddress,
-    slotId: metadata.slotId,
     executionPathKey: metadata.executionPathKey,
     orderIdHash: metadata.orderIdHash,
     promotionId: metadata.promotionId,
@@ -195,10 +205,10 @@ export function fanOutSponsorResult(
             source: 'sponsored_logs_fanout',
             callback_index: i,
             route: metadata.route,
-            slot_id: metadata.slotId,
+            sponsor_address: metadata.sponsorAddress,
             // digest is the cross-reference key documented in
             // `docs/operations.md` (`SPONSOR_RESULT_CALLBACK_FAILED`
-            // → recorder/state failure correlation by digest/slot).
+            // → recorder/state failure correlation by digest/sponsor address).
             // null when the sponsor result path never reached submit.
             digest: metadata.digest ?? null,
             outcome: metadata.outcome,

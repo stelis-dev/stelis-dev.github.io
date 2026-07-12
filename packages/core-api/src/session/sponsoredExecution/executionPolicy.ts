@@ -149,7 +149,7 @@ export type PrepareChainSnapshot<D extends PolicyDiscriminator = PolicyDiscrimin
  * `UserSignatureValidation`, `Consume`). At this point the prepared
  * entry has not been stored-hash-verified to the submitted `txBytes` yet, so no
  * phase-local reservation handles can be reconstructed — `txSender` is still
- * attacker-choosable and the slot identity is not yet authoritative.
+ * attacker-choosable and the sponsor-address lease identity is not yet authoritative.
  *
  * `Consume` runs immediately after `UserSignatureValidation`;
  * reconstruction begins only after that boundary clears.
@@ -162,9 +162,10 @@ export interface PreConsumeSponsorContext {
 /**
  * Read-only state supplied to sponsor-side hooks that fire AFTER the
  * atomic consume succeeds. The runner reconstructs `sponsorSlot`
- * immediately after `runSponsorConsumePhase` returns success — the
- * pool's HMAC commit verification at consume time is the authority for
- * `(slotId, sponsorAddress, receiptId)`.
+ * immediately after `runSponsorConsumePhase` returns success. The handle
+ * carries the consumed entry's sponsor-address lease identity; the pool's
+ * `sign()` boundary later performs the committed HMAC verification against
+ * the submitted transaction bytes.
  *
  * `nonce` and `ledgerReservation` are minted progressively by the
  * runner from typed reconstruction inputs returned by the
@@ -291,8 +292,8 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
   // sub-runner returns success.
   readonly Consume: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
   // Post-consume hooks: fire AFTER the runner has reconstructed
-  // `sponsorSlot` from the consumed entry's slot identity plus the
-  // sponsor pool's committed HMAC verification.
+  // `sponsorSlot` from the consumed entry's sponsor-address lease identity.
+  // The later `sign()` boundary remains the committed HMAC authority.
   //
   // `SharedPostconsumeChecks` performs route-shared verification (gas
   // owner cross-check, S-14 in-PTB nonce match for generic, etc.). It

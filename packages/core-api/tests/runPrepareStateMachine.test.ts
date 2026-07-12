@@ -180,8 +180,8 @@ interface HostBuild {
 
 function makeHost(): HostBuild {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const ledger = new MemoryPromotionExecutionLedger();
   const inflight = new MemoryPrepareInflight(8);
@@ -225,7 +225,6 @@ function makeGenericRequest(): PrepareStateMachineRequest {
       senderAddress: sponsorSlot.receiptId === receiptId ? TEST_SENDER : TEST_SENDER,
       clientIp: HOOK_CTX.clientIp,
       txBytesHash,
-      slotId: sponsorSlot.slotId,
       sponsorAddress: sponsorSlot.sponsorAddress,
       executionPathKey: 'credit',
       orderId: null,
@@ -255,7 +254,6 @@ async function makePromotionRequest(host: HostBuild): Promise<PrepareStateMachin
       senderAddress: TEST_SENDER,
       clientIp: HOOK_CTX.clientIp,
       txBytesHash,
-      slotId: sponsorSlot.slotId,
       sponsorAddress: sponsorSlot.sponsorAddress,
       executionPathKey: `promotion:${TEST_PROMO}`,
       orderId: null,

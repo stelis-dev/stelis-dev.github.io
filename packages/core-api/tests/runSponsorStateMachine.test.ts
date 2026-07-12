@@ -306,8 +306,8 @@ interface HostBuild {
 
 function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): HostBuild {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const ledger = new MemoryPromotionExecutionLedger();
 
@@ -335,19 +335,18 @@ function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): Hos
 /**
  * Pre-store a generic prepared entry + commit the matching HMAC lease
  * on the sponsor pool so `runSponsorConsumePhase` finds a valid entry
- * keyed to `TEST_TX_BYTES_HASH`. Returns the slotId chosen by the pool.
+ * keyed to `TEST_TX_BYTES_HASH`. Returns the sponsorAddress chosen by the pool.
  */
 async function pinGenericEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   const entry: GenericPreparedTxEntry = {
     mode: 'generic',
     issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: 'credit',
@@ -355,20 +354,19 @@ async function pinGenericEntry(host: HostBuild): Promise<string> {
     nonce: 1n,
   };
   await host.prepareStore.store(TEST_RECEIPT_ID, entry);
-  return slot.slotId;
+  return slot.sponsorAddress;
 }
 
 async function pinPromotionEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   const entry: PromotionPreparedTxEntry = {
     mode: 'promotion',
     issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: `promotion:${TEST_PROMO}`,
@@ -379,7 +377,7 @@ async function pinPromotionEntry(host: HostBuild): Promise<string> {
     reservedGasMist: 1_400_000n,
   };
   await host.prepareStore.store(TEST_RECEIPT_ID, entry);
-  return slot.slotId;
+  return slot.sponsorAddress;
 }
 
 /**
@@ -511,9 +509,9 @@ describe('runSponsorStateMachine — generic happy path', () => {
     }
   });
 
-  test('host.signAndSubmit is called with (slotId, receiptId, txBytes, userSignature) from the consumed entry', async () => {
+  test('host.signAndSubmit is called with (sponsorAddress, receiptId, txBytes, userSignature) from the consumed entry', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -521,7 +519,7 @@ describe('runSponsorStateMachine — generic happy path', () => {
 
     expect(host.signAndSubmitMock).toHaveBeenCalledTimes(1);
     expect(host.signAndSubmitMock).toHaveBeenCalledWith(
-      slotId,
+      sponsorAddress,
       TEST_RECEIPT_ID,
       TEST_TX_BYTES,
       TEST_USER_SIGNATURE,
@@ -613,7 +611,7 @@ describe('runSponsorStateMachine — consume failures', () => {
 describe('runSponsorStateMachine — finally slot checkin parity', () => {
   test('SharedPostconsumeChecks throws → finally runs safeSlotCheckin', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ failAtState: 'SharedPostconsumeChecks' });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -623,12 +621,12 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow('policy fault at SharedPostconsumeChecks');
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('Preflight throws → finally runs safeSlotCheckin', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ failAtState: 'Preflight', emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -638,13 +636,13 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow('policy fault at Preflight');
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('signAndSubmit throws → finally runs safeSlotCheckin (pre-sign and post-sign branches both reach finally)', async () => {
     const preSignErr = new Error('SponsorLeaseExpired-equivalent');
     const host = makeHost({ signThrows: preSignErr });
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy, log } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -654,7 +652,7 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toBe(preSignErr);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
     const release = log.find((entry) => entry.state === 'Release');
     expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
       'before_sponsor_signature',
@@ -682,7 +680,7 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
 
   test('execResult.success === false → ClassifySponsorResult throws (route classification); finally still runs safeSlotCheckin', async () => {
     const host = makeHost({ execResult: FAILED_EXEC_ONCHAIN });
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -692,12 +690,12 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow(/route-classified sponsor result failure/);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('congestion path: ClassifySponsorResult classifies failed execResult.isCongestion → throws; finally still runs safeSlotCheckin', async () => {
     const host = makeHost({ execResult: FAILED_EXEC_CONGESTION });
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -707,7 +705,7 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow(/route-classified sponsor result failure/);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 });
 

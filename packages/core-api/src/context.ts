@@ -52,22 +52,17 @@ export { parseSponsorKey, parseSponsorKeys } from './sponsorKeyParser.js';
 // ─────────────────────────────────────────────
 
 /**
- * Serializable sponsor slot lease.
- *
- * `slotId` is stable across processes and can be persisted in Redis-backed
- * prepare records. The default in-memory pool uses the sponsor address as the
- * slot identifier.
+ * Serializable sponsor slot lease. The sponsor address is the lease identity
+ * across processes and is persisted in Redis-backed prepare records.
  *
  * The adapter commits a
  * two-stage HMAC lease proof to its lease store — reserved at
  * `checkout`, committed after the caller-driven `commit` — and verifies
- * it on `sign` / `checkin`. The caller passes `receiptId` (already
- * round-tripped in the HTTP contract) as the identity, and the prepare
- * commit digest (`txBytesHash`) as the authenticator bound at
- * `commit()`.
+ * it on `sign` / `checkin`. `sponsorAddress` is the lease identity;
+ * `receiptId` binds that lease to one prepare operation, and the prepare
+ * commit digest (`txBytesHash`) is the authenticator bound at `commit()`.
  */
 export interface SponsorLease {
-  readonly slotId: string;
   readonly sponsorAddress: string;
 }
 
@@ -83,25 +78,25 @@ export interface SponsorLease {
  * Lease contract (two-stage proof):
  *
  *   checkout(receiptId)
- *     → lease proof = HMAC(secret, receiptId || slotId || ":reserved")
+ *     → lease proof = HMAC(secret, receiptId || sponsorAddress || ":reserved")
  *     → reserved stage; `sign()` cannot satisfy this HMAC for any tx
  *       because `hash(txBytes)` never equals the literal `":reserved"`
  *
- *   commit(slotId, receiptId, txBytesHash)
+ *   commit(sponsorAddress, receiptId, txBytesHash)
  *     → CAS: require current Redis value == reserved proof, then
- *       write committed proof = HMAC(secret, receiptId || slotId || txBytesHash)
+ *       write committed proof = HMAC(secret, receiptId || sponsorAddress || txBytesHash)
  *     → fails closed (SponsorLeaseCommitError) if the reservation is
  *       missing, already committed, or stamped by a different
- *       `(receiptId, slotId)` pair. Silent no-op is not allowed
+ *       `(receiptId, sponsorAddress)` pair. Silent no-op is not allowed
  *
- *   sign(slotId, receiptId, txBytes)
- *     → computes HMAC(secret, receiptId || slotId || hash(txBytes))
+ *   sign(sponsorAddress, receiptId, txBytes)
+ *     → computes HMAC(secret, receiptId || sponsorAddress || hash(txBytes))
  *     → only matches when the submitted txBytes hashes to the committed
  *       prepare digest; a Redis-only attacker who overwrites an entry's
  *       `txBytesHash` after `commit()` cannot satisfy this gate because
  *       the committed Redis value still references the original hash
  *
- *   checkin(slotId, receiptId, txBytesHash | null)
+ *   checkin(sponsorAddress, receiptId, txBytesHash | null)
  *     → txBytesHash = string: verifies committed proof, deletes
  *     → txBytesHash = null:   verifies reserved proof, deletes
  *     → HMAC mismatch is a silent no-op (TTL safety net covers it);
@@ -115,7 +110,7 @@ export interface SponsorPoolAdapter {
   /**
    * Attempt to lease a slot for the given `receiptId`. Returns null when all
    * slots are busy. The pool stores the reserved HMAC proof
-   * `HMAC(secret, receiptId || slotId || ":reserved")`.
+   * `HMAC(secret, receiptId || sponsorAddress || ":reserved")`.
    */
   checkout(receiptId: string): Promise<SponsorLease | null>;
   /**
@@ -124,14 +119,14 @@ export interface SponsorPoolAdapter {
    * Must be called after the prepare runner has built the final
    * PTB and computed `buildResult.txBytesHash`, and just before
    * `prepareStore.store()`. CAS semantics: the current lease proof must
-   * equal the reserved proof for `(receiptId, slotId)`. Any other state
+   * equal the reserved proof for `(receiptId, sponsorAddress)`. Any other state
    * (missing key, different receiptId, already committed, TTL expired)
    * throws `SponsorLeaseCommitError` and the caller must fall through to
    * the error path (release pending nonce reservation + checkin the slot
    * with the appropriate state). Silent no-op is not allowed — a failed
    * commit indicates either a forged state or a concurrent actor.
    */
-  commit(slotId: string, receiptId: string, txBytesHash: string): Promise<void>;
+  commit(sponsorAddress: string, receiptId: string, txBytesHash: string): Promise<void>;
   /**
    * Release a leased slot.
    *
@@ -141,20 +136,24 @@ export interface SponsorPoolAdapter {
    * HMAC mismatch is a silent no-op; the Redis lease TTL covers residual
    * state.
    */
-  checkin(slotId: string, receiptId: string, txBytesHash: string | null): Promise<void>;
+  checkin(sponsorAddress: string, receiptId: string, txBytesHash: string | null): Promise<void>;
   /** Current sponsor slot lease occupancy for admin observability. */
   leaseStatus(): Promise<SponsorSlotLeaseSummary>;
   /** Return all configured sponsor addresses. */
   addresses(): string[];
   /**
    * Sign txBytes with the slot's keypair. Verifies the committed HMAC
-   * lease proof for `(receiptId, slotId, hash(txBytes))` before touching
+   * lease proof for `(receiptId, sponsorAddress, hash(txBytes))` before touching
    * the in-memory keypair. Reserved-stage leases fail this check because
    * the reservation sentinel cannot equal any hex SHA-256 digest.
    * Redis compromise alone cannot satisfy this check without the HMAC
    * secret held in process env.
    */
-  sign(slotId: string, receiptId: string, txBytes: Uint8Array): Promise<{ signature: string }>;
+  sign(
+    sponsorAddress: string,
+    receiptId: string,
+    txBytes: Uint8Array,
+  ): Promise<{ signature: string }>;
 }
 
 /**
@@ -197,9 +196,9 @@ export class SponsorPool implements SponsorPoolAdapter {
   private readonly _keypairs: Map<string, Ed25519Keypair>;
   private readonly _inUse = new Set<string>();
   /**
-   * slotId → HMAC lease proof. The HMAC input starts as
-   * `receiptId || slotId || ":reserved"` at `checkout` and is replaced
-   * atomically by `receiptId || slotId || txBytesHash` at `commit`. The
+   * sponsorAddress → HMAC lease proof. The HMAC input starts as
+   * `receiptId || sponsorAddress || ":reserved"` at `checkout` and is replaced
+   * atomically by `receiptId || sponsorAddress || txBytesHash` at `commit`. The
    * raw receiptId and the raw txBytesHash are not stored here.
    */
   private readonly _leaseProofs = new Map<string, string>();
@@ -238,65 +237,63 @@ export class SponsorPool implements SponsorPoolAdapter {
    * Node.js single-threaded: this is effectively a mutex-free atomic operation.
    */
   async checkout(receiptId: string): Promise<SponsorLease | null> {
-    const slotId = this._addresses.find((address) => !this._inUse.has(address));
-    if (!slotId) {
+    const sponsorAddress = this._addresses.find((address) => !this._inUse.has(address));
+    if (!sponsorAddress) {
       logSponsorPoolEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
         adapter: 'memory',
         pool_size: this.size,
       });
       return null;
     }
-    this._inUse.add(slotId);
+    this._inUse.add(sponsorAddress);
     this._leaseProofs.set(
-      slotId,
-      computeLeaseProof(this._hmacSecret, receiptId, slotId, COMMIT_DIGEST_RESERVED),
+      sponsorAddress,
+      computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, COMMIT_DIGEST_RESERVED),
     );
     logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
       adapter: 'memory',
-      slot_id: slotId,
-      sponsor_address: slotId,
+      sponsor_address: sponsorAddress,
       pool_size: this.size,
       in_use: this._inUse.size,
     });
     return {
-      slotId,
-      sponsorAddress: slotId,
+      sponsorAddress,
     };
   }
 
   /**
    * Transition a leased slot from the reserved stage to the committed
    * stage. CAS semantics: the current proof must equal the reserved
-   * proof for `(receiptId, slotId)`. Any mismatch throws
+   * proof for `(receiptId, sponsorAddress)`. Any mismatch throws
    * `SponsorLeaseCommitError` — silent no-op is not allowed.
    */
-  async commit(slotId: string, receiptId: string, txBytesHash: string): Promise<void> {
-    const current = this._leaseProofs.get(slotId);
+  async commit(sponsorAddress: string, receiptId: string, txBytesHash: string): Promise<void> {
+    const current = this._leaseProofs.get(sponsorAddress);
     if (typeof current !== 'string') {
       throw new SponsorLeaseCommitError(
         'LEASE_MISSING',
-        `SponsorPool.commit: no active lease for slot ${slotId}`,
+        `SponsorPool.commit: no active lease for sponsor ${sponsorAddress}`,
       );
     }
     const reservedProof = computeLeaseProof(
       this._hmacSecret,
       receiptId,
-      slotId,
+      sponsorAddress,
       COMMIT_DIGEST_RESERVED,
     );
     if (!leaseProofMatches(current, reservedProof)) {
       throw new SponsorLeaseCommitError(
         'LEASE_COMMIT_CAS_FAILED',
-        `SponsorPool.commit: lease for slot ${slotId} is not in reserved state for the given receiptId`,
+        `SponsorPool.commit: lease for sponsor ${sponsorAddress} is not in reserved state for the given receiptId`,
       );
     }
     this._leaseProofs.set(
-      slotId,
-      computeLeaseProof(this._hmacSecret, receiptId, slotId, txBytesHash),
+      sponsorAddress,
+      computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, txBytesHash),
     );
     logSponsorPoolEvent(SPONSOR_POOL_LEASE_COMMITTED, {
       adapter: 'memory',
-      slot_id: slotId,
+      sponsor_address: sponsorAddress,
     });
   }
 
@@ -310,16 +307,20 @@ export class SponsorPool implements SponsorPoolAdapter {
    * Mismatch is a silent no-op to keep background eviction paths
    * idempotent; the Redis lease TTL covers any residual state.
    */
-  async checkin(slotId: string, receiptId: string, txBytesHash: string | null): Promise<void> {
-    const current = this._leaseProofs.get(slotId);
+  async checkin(
+    sponsorAddress: string,
+    receiptId: string,
+    txBytesHash: string | null,
+  ): Promise<void> {
+    const current = this._leaseProofs.get(sponsorAddress);
     const commitDigest = txBytesHash ?? COMMIT_DIGEST_RESERVED;
-    const expected = computeLeaseProof(this._hmacSecret, receiptId, slotId, commitDigest);
+    const expected = computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, commitDigest);
     if (!leaseProofMatches(current, expected)) return;
-    this._inUse.delete(slotId);
-    this._leaseProofs.delete(slotId);
+    this._inUse.delete(sponsorAddress);
+    this._leaseProofs.delete(sponsorAddress);
     logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKIN, {
       adapter: 'memory',
-      slot_id: slotId,
+      sponsor_address: sponsorAddress,
       stage: txBytesHash === null ? 'reserved' : 'committed',
       pool_size: this.size,
       in_use: this._inUse.size,
@@ -347,7 +348,7 @@ export class SponsorPool implements SponsorPoolAdapter {
   }
 
   async sign(
-    slotId: string,
+    sponsorAddress: string,
     receiptId: string,
     txBytes: Uint8Array,
   ): Promise<{ signature: string }> {
@@ -355,17 +356,22 @@ export class SponsorPool implements SponsorPoolAdapter {
     // Redis-only attacker and the in-memory signing keypair.
     // Reserved-stage leases fail this check because the reservation
     // sentinel can never collide with a hex SHA-256 digest.
-    const expected = computeLeaseProof(this._hmacSecret, receiptId, slotId, sha256Hex(txBytes));
-    if (!leaseProofMatches(this._leaseProofs.get(slotId), expected)) {
-      throw new SponsorLeaseExpiredError(slotId);
+    const expected = computeLeaseProof(
+      this._hmacSecret,
+      receiptId,
+      sponsorAddress,
+      sha256Hex(txBytes),
+    );
+    if (!leaseProofMatches(this._leaseProofs.get(sponsorAddress), expected)) {
+      throw new SponsorLeaseExpiredError(sponsorAddress);
     }
-    const keypair = this._keypairs.get(slotId);
+    const keypair = this._keypairs.get(sponsorAddress);
     if (!keypair) {
-      throw new Error(`SponsorPool: unknown slotId ${slotId}`);
+      throw new Error(`SponsorPool: unknown sponsor address ${sponsorAddress}`);
     }
     logSponsorPoolEvent(SPONSOR_POOL_SIGN, {
       adapter: 'memory',
-      slot_id: slotId,
+      sponsor_address: sponsorAddress,
       tx_bytes_len: txBytes.length,
     });
     return keypair.signTransaction(txBytes);

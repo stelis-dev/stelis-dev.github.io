@@ -86,7 +86,6 @@ function makePromotionEntry(
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: TX_HASH,
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: `promotion:${PROMOTION_ID}`,
     orderId: null,
@@ -106,7 +105,6 @@ function makeGenericEntry(): PreparedTxEntry {
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: TX_HASH,
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'credit',
     orderId: null,
@@ -261,10 +259,8 @@ function makePostCtx(): PostConsumeSponsorContext {
     clientIp: '127.0.0.1',
     executionStage: 'on_chain',
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
-      hmacCommitVerified: true,
     }),
     ledgerReservation: reconstructReservationHandles.ledgerReservation({
       receiptId: RECEIPT_ID,
@@ -416,10 +412,8 @@ describe('studio prepare hooks', () => {
     const gasInput: GasBoundBuildInput = {
       reservationHandles: {
         sponsorSlot: reconstructReservationHandles.sponsorSlot({
-          slotId: 'slot-1',
           sponsorAddress: SPONSOR,
           receiptId: RECEIPT_ID,
-          hmacCommitVerified: true,
         }),
       },
     };
@@ -627,7 +621,7 @@ describe('createStudioSponsorConsumeAdapter', () => {
     await expect(adapter.validateConsumedEntry?.(makeGenericEntry())).rejects.toMatchObject({
       code: 'MODE_MISMATCH',
     });
-    expect(checkin).toHaveBeenCalledWith('slot-1', RECEIPT_ID, TX_HASH);
+    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, TX_HASH);
   });
 });
 
@@ -1044,7 +1038,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    const thrown = await port('slot-1', RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig').catch(
+    const thrown = await port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig').catch(
       (err: unknown) => err,
     );
     expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
@@ -1085,7 +1079,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    await expect(port('slot-1', RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
+    await expect(port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
       leaseErr,
     );
 

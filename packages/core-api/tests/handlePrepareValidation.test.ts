@@ -71,7 +71,6 @@ function makeCtx() {
     },
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        slotId: 'slot-1',
         sponsorAddress: '0xSPONSOR',
       }),
       commit: vi.fn().mockResolvedValue(undefined),
@@ -234,7 +233,6 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      slotId: 'slot-42',
       sponsorAddress: '0xSPONSOR42',
     });
 
@@ -267,7 +265,6 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      slotId: 'slot-42',
       sponsorAddress: '0xSPONSOR42',
     });
 
@@ -298,7 +295,6 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      slotId: 'slot-42',
       sponsorAddress: '0xSPONSOR42',
     });
 
@@ -308,11 +304,11 @@ describe('handlePrepare — built-transaction validation rejection', () => {
     await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg()).catch(() => {});
 
     // Slot must be released even on built-transaction validation failure. checkin is called with
-    // `(slotId, receiptId)` where receiptId is the generated lease
+    // `(sponsorAddress, receiptId)` where receiptId is the generated lease
     // authenticator; assert on its shape.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     const checkinArgs = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinArgs[0]).toBe('slot-1');
+    expect(checkinArgs[0]).toBe('0xSPONSOR');
     expect(checkinArgs[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 });

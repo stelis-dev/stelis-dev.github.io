@@ -41,7 +41,6 @@ export interface PreparedCommitCommonInputs {
   readonly senderAddress: string;
   readonly clientIp: string;
   readonly txBytesHash: string;
-  readonly slotId: string;
   readonly sponsorAddress: string;
   readonly executionPathKey: string;
   readonly orderId: string | null;
@@ -105,7 +104,6 @@ export function composePreparedCommit(
     senderAddress: input.senderAddress,
     clientIp: input.clientIp,
     txBytesHash: input.txBytesHash,
-    slotId: input.slotId,
     sponsorAddress: input.sponsorAddress,
     executionPathKey: input.executionPathKey,
     orderId: input.orderId,
