@@ -14,7 +14,6 @@
 import { createHash } from 'node:crypto';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { toBase64 } from '@mysten/sui/utils';
 import {
   computeExecutionCostClaim,
   convertSdkCommands,
@@ -76,6 +75,7 @@ import { mist, type Mist } from '../../internal/brand.js';
 import {
   extractTxSender,
   GasOwnerMismatchError,
+  parseSuiTransactionResult,
   runPreflight,
   SenderSignatureError,
   signAndSubmit,
@@ -97,8 +97,7 @@ import type {
   PreConsumeSponsorContext,
   SharedPostconsumeReconstruction,
 } from './index.js';
-import type { PromotionCommitInputs } from './preparedCommit.js';
-import type { PrepareStateMachineRequest, PrepareStateMachineResult } from './runner.js';
+import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from './runner.js';
 
 // -------------------------------------------------------------
 // Public factory input shapes
@@ -253,9 +252,9 @@ export function createStudioExecutionPolicy(options: StudioExecutionPolicyOption
   const policy: SponsoredExecutionPolicy<'promotion'> = {
     discriminator: 'promotion',
     handleRequirements: {
-      gasBoundBuild: { sponsorSlot: true },
-      preparedCommit: { sponsorSlot: true, ledgerReservation: true },
-      sponsorResult: { sponsorSlot: true, ledgerReservation: true },
+      gasBoundBuild: {},
+      preparedCommit: { ledgerReservation: true },
+      sponsorResult: { ledgerReservation: true },
     },
     hooks: {
       Intent: (ctx) => {
@@ -280,7 +279,6 @@ export function createStudioExecutionPolicy(options: StudioExecutionPolicyOption
       ChainSnapshot: async () => runStudioChainSnapshot(options, state),
       ExecutionPolicySelected: () => {},
       SlotFreePlan: () => {},
-      ReceiptIdGenerated: () => {},
       SponsorSlotReservationAcquired: (_ctx, sponsorSlot) => {
         logPrepareStage('sponsor_slot_checked_out', {
           sponsor_address: sponsorSlot.sponsorAddress,
@@ -308,12 +306,6 @@ export function createStudioExecutionPolicy(options: StudioExecutionPolicyOption
         requireValue(prepareState.buildResult, 'studio buildResult');
       },
       SponsorLeaseCommitted: () => {},
-      PrepareStored: () => {
-        logPrepareStage('prepare_stored');
-      },
-      AwaitUserSignature: () => {
-        logPrepareStage('response_ready');
-      },
       DecodeSponsorSubmission: async (ctx) => runStudioDecodeSponsorSubmission(options, state, ctx),
       UserSignatureValidation: async (ctx) => runStudioUserSignatureValidation(options, state, ctx),
       Consume: () => {},
@@ -411,46 +403,34 @@ export function createStudioSponsorConsumeAdapter(input: {
   };
 }
 
-export function buildStudioPreparedCommitInputs(
+export function buildStudioPreparedDraftFields(
   options: StudioExecutionPolicyOptions,
   _state: StudioExecutionPolicyState,
-  input: Parameters<PrepareStateMachineRequest['preparedCommitInputs']>[0],
-): PromotionCommitInputs {
+): PrepareDraftPolicyFields {
   const prepare = requirePrepare(options);
-  const ledgerReservation = requireValue(input.ledgerReservation, 'ledger reservation handle');
   return {
-    mode: 'promotion',
-    receiptId: input.receiptId,
-    senderAddress: prepare.params.senderAddress,
-    clientIp: prepare.params.clientIp,
-    txBytesHash: input.txBytesHash,
-    sponsorAddress: input.sponsorSlot.sponsorAddress,
     executionPathKey: `promotion:${prepare.params.promotionId}`,
     orderId: null,
-    nonce: 0n,
-    promotionId: ledgerReservation.promotionId,
-    userId: ledgerReservation.userId,
-    reservedGasMist: ledgerReservation.reservedGasMist,
   };
 }
 
 export function projectStudioPrepareResult(
   _options: StudioExecutionPolicyOptions,
   state: StudioExecutionPolicyState,
-  stateMachineResult: PrepareStateMachineResult,
+  input: PrepareResponseProjectionInput,
 ): StudioPreparePolicyResult {
   const prepareState = requirePrepareState(state);
   const buildResult = requireValue(prepareState.buildResult, 'studio buildResult');
-  if (stateMachineResult.commit.mode !== 'promotion') {
-    throw new StudioExecutionPolicyError(
-      'studio prepare projector received non-promotion prepared commit',
-    );
+  if (input.draft.mode !== 'promotion') {
+    throw new StudioExecutionPolicyError('studio prepare projector received non-promotion draft');
   }
-  return {
-    txBytes: toBase64(stateMachineResult.txBytes),
-    receiptId: stateMachineResult.receiptId,
+  const result = {
+    txBytes: input.txBytesBase64,
+    receiptId: input.draft.receiptId,
     estimatedGasMist: buildResult.measuredGasMist.toString(),
   };
+  logPrepareStage('response_ready');
+  return result;
 }
 
 export function projectStudioSponsorResult(
@@ -1442,43 +1422,20 @@ function promotionPrepareErrorForEligibility(
 }
 
 function readDryRunGasUsed(simResult: unknown): GasUsedFields {
-  interface GrpcFailedTx {
-    readonly $kind: 'FailedTransaction';
-    readonly FailedTransaction?: {
-      readonly status?: { readonly error?: { readonly message?: string; readonly $kind?: string } };
-    };
+  const terminal = parseSuiTransactionResult(simResult);
+  if (!terminal) {
+    throw new PrepareValidationError(
+      'DRY_RUN_FAILED',
+      'Dry-run returned a malformed terminal result',
+    );
   }
-  const failed = simResult as { readonly $kind?: string } & Partial<GrpcFailedTx>;
-  if (failed.$kind === 'FailedTransaction') {
-    const reason =
-      failed.FailedTransaction?.status?.error?.message ??
-      failed.FailedTransaction?.status?.error?.$kind ??
-      'unknown';
-    throw new PrepareValidationError('DRY_RUN_FAILED', `Dry-run failed: ${reason}`);
+  if (terminal.kind === 'failure') {
+    throw new PrepareValidationError('DRY_RUN_FAILED', `Dry-run failed: ${terminal.error.message}`);
   }
-
-  interface SimEffects {
-    readonly gasUsed?: GasUsedFields;
-  }
-  interface SimTx {
-    readonly status?: {
-      readonly success?: boolean;
-      readonly error?: { readonly message?: string; readonly $kind?: string };
-    };
-    readonly effects?: SimEffects | null;
-  }
-  const tx = (simResult as { readonly Transaction?: SimTx }).Transaction;
-  if (!tx) {
-    throw new PrepareValidationError('DRY_RUN_FAILED', 'Dry-run returned no transaction result');
-  }
-  if (!tx.status?.success) {
-    const reason = tx.status?.error?.message ?? tx.status?.error?.$kind ?? 'unknown';
-    throw new PrepareValidationError('DRY_RUN_FAILED', `Dry-run failed: ${reason}`);
-  }
-  if (!tx.effects?.gasUsed) {
+  if (!terminal.gasUsed) {
     throw new PrepareValidationError('DRY_RUN_NO_GAS', 'Dry-run returned no gas usage');
   }
-  return tx.effects.gasUsed;
+  return terminal.gasUsed;
 }
 
 function computeRevertAccounting(

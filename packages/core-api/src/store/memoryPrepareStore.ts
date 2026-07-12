@@ -12,7 +12,9 @@
  * TTL default is PREPARE_TTL_MS.
  */
 import {
+  parseCurrentPreparedTxDraft,
   parseCurrentPreparedTxEntry,
+  type PreparedTxDraft,
   type PreparedTxEntry,
   type PrepareStoreAdapter,
 } from './prepareTypes.js';
@@ -149,14 +151,13 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     clearInterval(this._timer);
   }
 
-  async store(receiptId: string, entry: PreparedTxEntry): Promise<void> {
-    const currentEntry = parseCurrentPreparedTxEntry(entry);
-    if (currentEntry.receiptId !== receiptId) {
-      throw new Error('PrepareStore: receiptId argument must match entry.receiptId');
-    }
+  async store(draft: PreparedTxDraft): Promise<PreparedTxEntry> {
+    const currentDraft = parseCurrentPreparedTxDraft(draft);
+    const now = this._clock.nowMs();
+    const currentEntry = parseCurrentPreparedTxEntry({ ...currentDraft, issuedAt: now });
+    const receiptId = currentEntry.receiptId;
     const ip = currentEntry.clientIp;
     const sender = currentEntry.senderAddress;
-    const now = this._clock.nowMs();
 
     // Prune expired sender entries before quota check to avoid false positives.
     // The background eviction runs on EVICT_INTERVAL_MS, so entries may linger up to that interval.
@@ -272,6 +273,8 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
       pendingMap.delete(receiptId);
       if (pendingMap.size === 0) this._pendingNonces.delete(sender);
     }
+
+    return parseCurrentPreparedTxEntry(currentEntry);
   }
 
   /**

@@ -213,25 +213,34 @@ export class FakeRedisClient implements RedisClientLike {
     }
 
     // ── RedisPrepareStore STORE_SCRIPT emulation ──
-    if (script.includes('cjson.encode(evicted)')) {
+    if (script.includes('RedisPrepareStore STORE_SCRIPT')) {
       const entryKey = keys[0];
       const ipKey = keys[1];
       const senderKey = keys[2];
       const userKey = keys[3] ?? '';
-      const entryJson = args[0];
+      const draftJson = args[0] ?? '';
       const entryPx = Number(args[1]);
-      const pid = args[2];
-      const issuedAt = Number(args[3]);
-      const maxPerIp = Number(args[4]);
-      const ipPx = Number(args[5]);
-      const prefix = args[6];
-      const maxPerStudioUser = Number(args[7]);
-      const senderPx = Number(args[8]);
-      const nonce = args[9] ?? '0';
-      const entryMode = args[10] ?? 'generic';
-      const ttlMs = Number(args[11] ?? '60000');
-      const userPx = Number(args[12] ?? '120000');
+      const maxPerIp = Number(args[2]);
+      const ipPx = Number(args[3]);
+      const prefix = args[4] ?? '';
+      const maxPerStudioUser = Number(args[5]);
+      const senderPx = Number(args[6]);
+      const ttlMs = Number(args[7] ?? '60000');
+      const userPx = Number(args[8] ?? '120000');
       const nowMs = Date.now();
+      const issuedAt = nowMs;
+
+      const draft = JSON.parse(draftJson) as Record<string, unknown>;
+      const pid = draft.receiptId;
+      const nonce = draft.nonce;
+      const entryMode = draft.mode;
+      if (
+        typeof pid !== 'string' ||
+        typeof nonce !== 'string' ||
+        (entryMode !== 'generic' && entryMode !== 'promotion')
+      ) {
+        throw new Error('invalid prepared draft');
+      }
 
       // ── Sender index — live-compact regardless of mode (S-14 nonce coordination) ──
       const senderRaw = senderKey ? await this.get(senderKey) : null;
@@ -288,10 +297,8 @@ export class FakeRedisClient implements RedisClientLike {
         }
       }
 
-      // SET entry with PX
-      await this.set(entryKey, entryJson, { px: entryPx });
-
-      // Read IP index
+      // Read and decode the IP index before any mutation. This ordering is
+      // the branch-parity evidence for the real Lua no-partial-commit guard.
       const ipRaw = await this.get(ipKey);
       let list: Array<{ pid: string; t: number }> = [];
       if (ipRaw) {
@@ -313,36 +320,66 @@ export class FakeRedisClient implements RedisClientLike {
       while (live.length >= maxPerIp) {
         const oldest = live.shift()!;
         const evictedEntryJson = (await this.get(prefix + oldest.pid)) ?? '';
-        await this.del(prefix + oldest.pid);
         evicted.push({ pid: oldest.pid, entryJson: evictedEntryJson });
       }
 
-      // Add new entry to IP index
+      // Construct every stored/result projection before the first mutation.
       live.push({ pid, t: issuedAt });
-      await this.set(ipKey, JSON.stringify(live), { px: ipPx });
 
-      // Update sender index: remove pending for this pid + evicted pids, add live entry
       const evictedPids = new Set(evicted.map((e) => e.pid));
       const updatedSender = liveSender.filter((item) => {
         const itemPid = (item as Record<string, unknown>).pid;
         return itemPid !== pid && !evictedPids.has(itemPid as string);
       });
       updatedSender.push({ pid, t: issuedAt, nonce });
-      if (senderKey) {
-        await this.set(senderKey, JSON.stringify(updatedSender), { px: senderPx });
-      }
 
-      // Update user index for promotion entries (Studio outstanding-prepare quota).
+      let updatedUser: Array<Record<string, unknown>> | null = null;
       if (entryMode === 'promotion' && userKey !== '') {
-        const updatedUser = liveUser.filter((item) => {
+        updatedUser = liveUser.filter((item) => {
           const itemPid = item['pid'];
           return itemPid !== pid && !evictedPids.has(itemPid as string);
         });
         updatedUser.push({ pid, t: issuedAt });
-        await this.set(userKey, JSON.stringify(updatedUser), { px: userPx });
       }
 
-      return JSON.stringify(evicted);
+      const committedJson = JSON.stringify({ ...draft, issuedAt });
+      const encodedIp = JSON.stringify(live);
+      const encodedSender = JSON.stringify(updatedSender);
+      const encodedUser = updatedUser ? JSON.stringify(updatedUser) : null;
+      const encodedEvicted = JSON.stringify(evicted);
+
+      // Mutation section mirrors the production Lua after all fallible
+      // data-derived work has completed.
+      for (const item of evicted) {
+        await this.del(prefix + item.pid);
+      }
+      await this.set(entryKey, committedJson, { px: entryPx });
+      await this.set(ipKey, encodedIp, { px: ipPx });
+      if (senderKey) {
+        await this.set(senderKey, encodedSender, { px: senderPx });
+      }
+      if (encodedUser !== null) {
+        await this.set(userKey, encodedUser, { px: userPx });
+      }
+
+      return [String(issuedAt), encodedEvicted];
+    }
+
+    // ── RedisPrepareStore PEEK_SCRIPT emulation ──
+    if (script.includes('RedisPrepareStore PEEK_SCRIPT')) {
+      const raw = await this.get(keys[0]);
+      if (!raw) return null;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(raw) as unknown;
+      } catch {
+        return raw;
+      }
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return raw;
+      const issuedAt = (entry as Record<string, unknown>).issuedAt;
+      if (typeof issuedAt !== 'number') return raw;
+      const ttlMs = Number(args[0] ?? '60000');
+      return issuedAt + ttlMs < Date.now() ? null : raw;
     }
 
     // ── RedisPrepareStore reserveNonce emulation (sender-local, no HWM key) ──

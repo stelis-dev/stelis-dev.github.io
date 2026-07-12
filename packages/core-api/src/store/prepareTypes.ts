@@ -18,12 +18,14 @@
  *   - Background eviction: expired entries auto-evict and release slots
  */
 // ─────────────────────────────────────────────
-// Base fields shared by all modes
+// Draft and committed fields shared by all modes
 // ─────────────────────────────────────────────
 
 /**
- * Common fields present in every PreparedTxEntry regardless of mode.
- * Not exported — use the discriminated union `PreparedTxEntry` instead.
+ * Common caller-projected fields present in every prepared draft.
+ * `issuedAt` is intentionally absent: the selected store is the sole clock
+ * authority and adds it exactly once when the draft becomes committed.
+ * Not exported — use the discriminated union `PreparedTxDraft` instead.
  *
  * Gas estimation fields are intentionally absent:
  *   - Generic: the sponsor path re-derives every settle value from
@@ -36,10 +38,8 @@
  *     SponsoredExecutionPolicy sponsor result accounting (consume → usage append →
  *     structured log).
  */
-interface PreparedTxEntryBase {
+interface PreparedTxDraftBase {
   // ── Binding (from QuoteStore pattern) ─────────────────────────
-  /** Unix timestamp (ms) of prepare issuance */
-  issuedAt: number;
   /** Unique receipt ID */
   receiptId: string;
   /** User wallet address */
@@ -83,9 +83,33 @@ interface PreparedTxEntryBase {
   nonce: bigint;
 }
 
+/** Store-committed fields shared by both modes. */
+interface PreparedTxEntryBase extends PreparedTxDraftBase {
+  /** Unix timestamp (ms) assigned by the store's clock authority. */
+  issuedAt: number;
+}
+
 // ─────────────────────────────────────────────
-// Mode-specific entry types
+// Mode-specific draft and committed entry types
 // ─────────────────────────────────────────────
+
+/** Generic prepare draft accepted by `PrepareStoreAdapter.store()`. */
+export interface GenericPreparedTxDraft extends PreparedTxDraftBase {
+  mode: 'generic';
+  promotionId?: never;
+  userId?: never;
+}
+
+/** Promotion prepare draft accepted by `PrepareStoreAdapter.store()`. */
+export interface PromotionPreparedTxDraft extends PreparedTxDraftBase {
+  mode: 'promotion';
+  promotionId: string;
+  userId: string;
+  reservedGasMist: bigint;
+}
+
+/** Exact current caller-to-store draft shape. */
+export type PreparedTxDraft = GenericPreparedTxDraft | PromotionPreparedTxDraft;
 
 /**
  * Generic relay prepare entry — `/relay/prepare` → `/relay/sponsor`.
@@ -164,9 +188,8 @@ export interface PromotionPreparedTxEntry extends PreparedTxEntryBase {
  */
 export type PreparedTxEntry = GenericPreparedTxEntry | PromotionPreparedTxEntry;
 
-const GENERIC_PREPARED_ENTRY_KEYS = [
+const GENERIC_PREPARED_DRAFT_KEYS = [
   'mode',
-  'issuedAt',
   'receiptId',
   'senderAddress',
   'txBytesHash',
@@ -177,18 +200,59 @@ const GENERIC_PREPARED_ENTRY_KEYS = [
   'nonce',
 ] as const;
 
-const PROMOTION_PREPARED_ENTRY_KEYS = [
-  ...GENERIC_PREPARED_ENTRY_KEYS,
+const PROMOTION_PREPARED_DRAFT_KEYS = [
+  ...GENERIC_PREPARED_DRAFT_KEYS,
   'promotionId',
   'userId',
   'reservedGasMist',
 ] as const;
 
-function requireRecord(value: unknown): Record<string, unknown> {
+const GENERIC_PREPARED_ENTRY_KEYS = [...GENERIC_PREPARED_DRAFT_KEYS, 'issuedAt'] as const;
+
+const PROMOTION_PREPARED_ENTRY_KEYS = [...PROMOTION_PREPARED_DRAFT_KEYS, 'issuedAt'] as const;
+
+type PreparedShapeName = 'PreparedTxDraft' | 'PreparedTxEntry';
+
+function requireRecord(value: unknown, shapeName: PreparedShapeName): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('PreparedTxEntry must be an object');
+    throw new Error(`${shapeName} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function assertExactPreparedKeys(
+  value: unknown,
+  shapeName: PreparedShapeName,
+  genericKeys: readonly string[],
+  promotionKeys: readonly string[],
+): 'generic' | 'promotion' {
+  const record = requireRecord(value, shapeName);
+  const mode = record.mode;
+  if (mode !== 'generic' && mode !== 'promotion') {
+    throw new Error(`${shapeName}.mode must be "generic" or "promotion"`);
+  }
+  const expected = mode === 'generic' ? genericKeys : promotionKeys;
+  const actual = Object.keys(record);
+  if (actual.length !== expected.length) {
+    throw new Error(`${shapeName}.${mode} has an unexpected field set`);
+  }
+  const expectedSet = new Set(expected);
+  for (const key of actual) {
+    if (!expectedSet.has(key)) {
+      throw new Error(`${shapeName}.${mode} has an unexpected field: ${key}`);
+    }
+  }
+  return mode;
+}
+
+/** Assert the exact current draft field set and return its discriminator. */
+function assertCurrentPreparedTxDraftKeys(value: unknown): 'generic' | 'promotion' {
+  return assertExactPreparedKeys(
+    value,
+    'PreparedTxDraft',
+    GENERIC_PREPARED_DRAFT_KEYS,
+    PROMOTION_PREPARED_DRAFT_KEYS,
+  );
 }
 
 /**
@@ -200,39 +264,74 @@ function requireRecord(value: unknown): Record<string, unknown> {
  * This symbol is store-internal and is not re-exported from the package barrel.
  */
 export function assertCurrentPreparedTxEntryKeys(value: unknown): 'generic' | 'promotion' {
-  const record = requireRecord(value);
-  const mode = record.mode;
-  if (mode !== 'generic' && mode !== 'promotion') {
-    throw new Error('PreparedTxEntry.mode must be "generic" or "promotion"');
-  }
-  const expected = mode === 'generic' ? GENERIC_PREPARED_ENTRY_KEYS : PROMOTION_PREPARED_ENTRY_KEYS;
-  const actual = Object.keys(record);
-  if (actual.length !== expected.length) {
-    throw new Error(`PreparedTxEntry.${mode} has an unexpected field set`);
-  }
-  const expectedSet = new Set<string>(expected);
-  for (const key of actual) {
-    if (!expectedSet.has(key)) {
-      throw new Error(`PreparedTxEntry.${mode} has an unexpected field: ${key}`);
-    }
-  }
-  return mode;
+  return assertExactPreparedKeys(
+    value,
+    'PreparedTxEntry',
+    GENERIC_PREPARED_ENTRY_KEYS,
+    PROMOTION_PREPARED_ENTRY_KEYS,
+  );
 }
 
-function requireString(record: Record<string, unknown>, field: string): string {
+function requireString(
+  record: Record<string, unknown>,
+  field: string,
+  shapeName: PreparedShapeName,
+): string {
   const value = record[field];
   if (typeof value !== 'string') {
-    throw new Error(`PreparedTxEntry.${field} must be a string`);
+    throw new Error(`${shapeName}.${field} must be a string`);
   }
   return value;
 }
 
-function requireUnsignedBigInt(record: Record<string, unknown>, field: string): bigint {
+function requireUnsignedBigInt(
+  record: Record<string, unknown>,
+  field: string,
+  shapeName: PreparedShapeName,
+): bigint {
   const value = record[field];
   if (typeof value !== 'bigint' || value < 0n) {
-    throw new Error(`PreparedTxEntry.${field} must be a non-negative bigint`);
+    throw new Error(`${shapeName}.${field} must be a non-negative bigint`);
   }
   return value;
+}
+
+function parsePreparedTxFields(
+  record: Record<string, unknown>,
+  mode: 'generic' | 'promotion',
+  shapeName: PreparedShapeName,
+): PreparedTxDraft {
+  const orderId = record.orderId;
+  if (orderId !== null && typeof orderId !== 'string') {
+    throw new Error(`${shapeName}.orderId must be a string or null`);
+  }
+  const common = {
+    receiptId: requireString(record, 'receiptId', shapeName),
+    senderAddress: requireString(record, 'senderAddress', shapeName),
+    txBytesHash: requireString(record, 'txBytesHash', shapeName),
+    sponsorAddress: requireString(record, 'sponsorAddress', shapeName),
+    clientIp: requireString(record, 'clientIp', shapeName),
+    executionPathKey: requireString(record, 'executionPathKey', shapeName),
+    orderId,
+    nonce: requireUnsignedBigInt(record, 'nonce', shapeName),
+  } as const;
+
+  if (mode === 'generic') {
+    return { ...common, mode: 'generic' };
+  }
+  return {
+    ...common,
+    mode: 'promotion',
+    promotionId: requireString(record, 'promotionId', shapeName),
+    userId: requireString(record, 'userId', shapeName),
+    reservedGasMist: requireUnsignedBigInt(record, 'reservedGasMist', shapeName),
+  };
+}
+
+/** Validate and clone the exact current caller-to-store draft shape. */
+export function parseCurrentPreparedTxDraft(value: unknown): PreparedTxDraft {
+  const mode = assertCurrentPreparedTxDraftKeys(value);
+  return parsePreparedTxFields(value as Record<string, unknown>, mode, 'PreparedTxDraft');
 }
 
 /**
@@ -250,33 +349,8 @@ export function parseCurrentPreparedTxEntry(value: unknown): PreparedTxEntry {
   if (!Number.isSafeInteger(issuedAt) || (issuedAt as number) < 0) {
     throw new Error('PreparedTxEntry.issuedAt must be a non-negative safe integer');
   }
-  const orderId = record.orderId;
-  if (orderId !== null && typeof orderId !== 'string') {
-    throw new Error('PreparedTxEntry.orderId must be a string or null');
-  }
-  const common = {
-    mode,
-    issuedAt: issuedAt as number,
-    receiptId: requireString(record, 'receiptId'),
-    senderAddress: requireString(record, 'senderAddress'),
-    txBytesHash: requireString(record, 'txBytesHash'),
-    sponsorAddress: requireString(record, 'sponsorAddress'),
-    clientIp: requireString(record, 'clientIp'),
-    executionPathKey: requireString(record, 'executionPathKey'),
-    orderId,
-    nonce: requireUnsignedBigInt(record, 'nonce'),
-  } as const;
-
-  if (mode === 'generic') {
-    return { ...common, mode: 'generic' };
-  }
-  return {
-    ...common,
-    mode: 'promotion',
-    promotionId: requireString(record, 'promotionId'),
-    userId: requireString(record, 'userId'),
-    reservedGasMist: requireUnsignedBigInt(record, 'reservedGasMist'),
-  };
+  const draft = parsePreparedTxFields(record, mode, 'PreparedTxEntry');
+  return { ...draft, issuedAt: issuedAt as number };
 }
 
 // ─────────────────────────────────────────────
@@ -293,15 +367,16 @@ export function parseCurrentPreparedTxEntry(value: unknown): PreparedTxEntry {
  */
 export interface PrepareStoreAdapter {
   /**
-   * Store a prepared TX entry.
+   * Commit a prepared TX draft and return the exact stored entry.
    *
    * Before storing, enforces IP concurrency limit:
    *   - If the IP already has MAX_CONCURRENT_PER_IP outstanding entries,
    *     evicts the oldest one (releasing its slot) before storing the new one.
    *
+   * The implementation uses `draft.receiptId` as the sole storage key.
    * The slot MUST already be checked out before calling this.
    */
-  store(receiptId: string, entry: PreparedTxEntry): Promise<void>;
+  store(draft: PreparedTxDraft): Promise<PreparedTxEntry>;
 
   /**
    * Atomically consume a prepare entry in /sponsor.

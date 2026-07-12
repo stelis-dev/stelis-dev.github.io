@@ -30,6 +30,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64 } from '@mysten/sui/utils';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
+import { grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -47,6 +48,11 @@ const ALLOWED_TARGET =
 const GLOBAL_TARGET_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
 
 const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
+const SIMULATION_GAS_USED = {
+  computationCost: '1000000',
+  storageCost: '500000',
+  storageRebate: '200000',
+};
 
 const BASE_PROMO: CreatePromotionInput = {
   type: 'gas_sponsorship',
@@ -80,19 +86,7 @@ async function buildTestTxKindBytes(): Promise<string> {
 
 function createMockSui() {
   return {
-    simulateTransaction: async () => ({
-      Transaction: {
-        digest: 'mock-digest',
-        status: { success: true },
-        effects: {
-          gasUsed: {
-            computationCost: '1000000',
-            storageCost: '500000',
-            storageRebate: '200000',
-          },
-        },
-      },
-    }),
+    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
   } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 }
 
@@ -103,24 +97,12 @@ function createMockSui() {
  * client.core.resolveTransactionPlugin() returns undefined. That fallback calls
  * client.core.{getCurrentSystemState, getBalance, listCoins, getChainIdentifier}.
  *
- * Required only for tests that exercise the full success path (all 13 handler steps).
+ * Required only for tests that exercise the full prepare success path.
  * Tests that fail before step 6 (first build) can continue to use createMockSui().
  */
 function createMockSuiWithCore() {
   return {
-    simulateTransaction: async () => ({
-      Transaction: {
-        digest: 'mock-digest',
-        status: { success: true },
-        effects: {
-          gasUsed: {
-            computationCost: '1000000',
-            storageCost: '500000',
-            storageRebate: '200000',
-          },
-        },
-      },
-    }),
+    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
     core: {
       // Returns undefined → Transaction.build() falls back to coreClientResolveTransactionPlugin,
       // which then calls the other core methods below for gas-price / gas-payment / expiration resolution.

@@ -22,8 +22,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import type {
+  GenericPreparedTxDraft,
   GenericPreparedTxEntry,
   PreparedTxEntry,
+  PromotionPreparedTxDraft,
   PromotionPreparedTxEntry,
 } from '../src/store/prepareTypes.js';
 import {
@@ -35,9 +37,8 @@ import {
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-function makeEntry(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+function makeEntry(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: 'pay-001',
     senderAddress: '0xSENDER',
     nonce: 1n,
@@ -62,6 +63,8 @@ const redisConformanceFactory: PrepareStoreFactory = ({
   maxOutstandingPerSender,
 }) => {
   const releasedSlots: ReleasedSlot[] = [];
+  let nowMs = 1_700_000_000_000;
+  const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
   const redis = new FakeRedisClient();
   const store = new RedisPrepareStore(
     redis,
@@ -73,11 +76,17 @@ const redisConformanceFactory: PrepareStoreFactory = ({
   const handle: PrepareStoreHandle = {
     store,
     releasedSlots,
+    setNowMs: (value) => {
+      nowMs = value;
+    },
+    advanceNowMs: (deltaMs) => {
+      nowMs += deltaMs;
+    },
     // FakeRedisClient has no long-lived handle to release; the Redis
     // adapter itself does not hold timers, so there is no teardown
     // required beyond dropping the references.
     dispose: () => {
-      /* no-op */
+      dateNow.mockRestore();
     },
   };
   return handle;
@@ -121,7 +130,9 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
   it('store → consume happy path preserves coordination BigInt (`nonce`) and carries no settle observability copies', async () => {
     const entry = makeEntry();
-    await store.store('pay-001', entry);
+    const committed = await store.store(entry);
+    expect(committed.receiptId).toBe(entry.receiptId);
+    expect(committed.issuedAt).toEqual(expect.any(Number));
 
     const result = await store.consume('pay-001', 'hash-aaa');
     const consumed = result as PreparedTxEntry;
@@ -164,12 +175,34 @@ describe('RedisPrepareStore — Redis-specific', () => {
     );
   });
 
+  it('rejects a malformed IP index before creating any prepared commit projection', async () => {
+    const receiptId = 'fake-no-partial';
+    const clientIp = '10.0.0.98';
+    const senderAddress = '0xFAKE_NO_PARTIAL';
+    const ipKey = `stelis:prepare:ip:${clientIp}`;
+    await redis.set(ipKey, '{not-valid-json', { px: 120_000 });
+
+    await expect(
+      store.store(
+        makeEntry({
+          receiptId,
+          clientIp,
+          senderAddress,
+          sponsorAddress: 'slot-fake-no-partial',
+        }),
+      ),
+    ).rejects.toThrow();
+
+    await expect(redis.get(`stelis:prepare:${receiptId}`)).resolves.toBeNull();
+    await expect(redis.get(`stelis:prepare:sender:${senderAddress}`)).resolves.toBeNull();
+    await expect(redis.get(ipKey)).resolves.toBe('{not-valid-json');
+  });
+
   // ── Redis sender-metadata bookkeeping ────────────────────────────
 
   it('reserveNonce derives max from live sender entries (sender-local metadata)', async () => {
     const sender = '0xNONCE_RECOVER';
     await store.store(
-      'recover-pid-1',
       makeEntry({
         receiptId: 'recover-pid-1',
         senderAddress: sender,
@@ -180,7 +213,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
       }),
     );
     await store.store(
-      'recover-pid-2',
       makeEntry({
         receiptId: 'recover-pid-2',
         senderAddress: sender,
@@ -200,7 +232,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const bigNonce = 9_007_199_254_740_999n;
 
     await store.store(
-      'big-pid-1',
       makeEntry({
         receiptId: 'big-pid-1',
         senderAddress: sender,
@@ -221,7 +252,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
     expect(nonceB).toBe(2n);
 
     await store.store(
-      'res-A',
       makeEntry({
         receiptId: 'res-A',
         senderAddress: sender,
@@ -243,7 +273,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const sender = '0xINDEX_SHAPE';
     const clientIp = '10.21.0.1';
     await store.store(
-      'index-shape',
       makeEntry({
         receiptId: 'index-shape',
         senderAddress: sender,
@@ -265,7 +294,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
     expect(nonce).toBe(6n);
 
     await store.store(
-      'res-consume',
       makeEntry({
         receiptId: 'res-consume',
         senderAddress: sender,
@@ -292,7 +320,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
     await store.reserveNonce(sender, 0n, 'evict-A');
     await store.store(
-      'evict-A',
       makeEntry({
         receiptId: 'evict-A',
         senderAddress: sender,
@@ -304,7 +331,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
     );
     await store.reserveNonce(sender, 0n, 'evict-B');
     await store.store(
-      'evict-B',
       makeEntry({
         receiptId: 'evict-B',
         senderAddress: sender,
@@ -317,7 +343,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
     await store.reserveNonce(sender, 0n, 'evict-C');
     await store.store(
-      'evict-C',
       makeEntry({
         receiptId: 'evict-C',
         senderAddress: sender,
@@ -348,7 +373,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
     await shortStore.reserveNonce(sender, 0n, 'grace-A');
     await shortStore.store(
-      'grace-A',
       makeEntry({
         receiptId: 'grace-A',
         senderAddress: sender,
@@ -385,8 +409,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       receiptId: string,
       sponsorAddress: string,
       txBytesHash: string,
-    ): PromotionPreparedTxEntry => ({
-      issuedAt: Date.now(),
+    ): PromotionPreparedTxDraft => ({
       receiptId,
       senderAddress: '0xSENDER_GRACE_QUOTA',
       reservedGasMist: 1_000_000n,
@@ -401,8 +424,8 @@ describe('RedisPrepareStore — Redis-specific', () => {
       userId,
     });
 
-    await shortStore.store('gq-A', makePromo('gq-A', 'slot-gqA', 'hash-gqA'));
-    await shortStore.store('gq-B', makePromo('gq-B', 'slot-gqB', 'hash-gqB'));
+    await shortStore.store(makePromo('gq-A', 'slot-gqA', 'hash-gqA'));
+    await shortStore.store(makePromo('gq-B', 'slot-gqB', 'hash-gqB'));
 
     // Quota is at the limit — precheck reports exceeded while entries
     // are still logically live.
@@ -429,8 +452,8 @@ describe('RedisPrepareStore — Redis-specific', () => {
     // STORE_SCRIPT must accept the next promotion entry, proving the
     // precheck and authoritative quota agree on live-entry semantics.
     await expect(
-      shortStore.store('gq-C', makePromo('gq-C', 'slot-gqC', 'hash-gqC')),
-    ).resolves.toBeUndefined();
+      shortStore.store(makePromo('gq-C', 'slot-gqC', 'hash-gqC')),
+    ).resolves.toMatchObject({ receiptId: 'gq-C' });
   });
 
   it('store() compaction ignores logically expired same-sender entries in grace window', async () => {
@@ -443,7 +466,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
     await shortStore.reserveNonce(sender, 0n, 'sg-A');
     await shortStore.store(
-      'sg-A',
       makeEntry({
         receiptId: 'sg-A',
         senderAddress: sender,
@@ -458,7 +480,6 @@ describe('RedisPrepareStore — Redis-specific', () => {
 
     await shortStore.reserveNonce(sender, 0n, 'sg-B');
     await shortStore.store(
-      'sg-B',
       makeEntry({
         receiptId: 'sg-B',
         senderAddress: sender,
@@ -477,8 +498,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
   // ── Promotion-mode JSON roundtrip (no generic fields in payload) ─
 
   it('store → consume roundtrip for promotion-mode entry (no generic settle fields)', async () => {
-    const promotionEntry: PromotionPreparedTxEntry = {
-      issuedAt: Date.now(),
+    const promotionEntry: PromotionPreparedTxDraft = {
       receiptId: 'promo-001',
       senderAddress: '0xSENDER',
       reservedGasMist: 1_850_000n,
@@ -493,7 +513,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       userId: 'user-1',
     };
 
-    await store.store('promo-001', promotionEntry);
+    await store.store(promotionEntry);
     const result = await store.consume('promo-001', 'hash-promo');
     expect(result).not.toBe('not_found');
     expect(result).not.toBe('expired');
@@ -520,7 +540,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
   // ── Exact current stored shape ────────────────────────────────────
 
   it('serializes only the current generic fields with canonical decimal strings', async () => {
-    await store.store('shape-generic', makeEntry({ receiptId: 'shape-generic', nonce: 4n }));
+    const committed = await store.store(makeEntry({ receiptId: 'shape-generic', nonce: 4n }));
 
     const rawJson = await redis.get('stelis:prepare:shape-generic');
     expect(JSON.parse(rawJson!)).toEqual({
@@ -535,12 +555,12 @@ describe('RedisPrepareStore — Redis-specific', () => {
       orderId: null,
       nonce: '4',
     });
+    expect(JSON.parse(rawJson!).issuedAt).toBe(committed.issuedAt);
   });
 
   it('projects the exact Promotion shape and rejects a malformed reserved amount', async () => {
-    const entry: PromotionPreparedTxEntry = {
+    const entry: PromotionPreparedTxDraft = {
       mode: 'promotion',
-      issuedAt: Date.now(),
       receiptId: 'shape-promotion',
       senderAddress: '0xPROMOTION_SENDER',
       txBytesHash: 'hash-shape-promotion',
@@ -553,14 +573,14 @@ describe('RedisPrepareStore — Redis-specific', () => {
       userId: 'user-shape-promotion',
       reservedGasMist: 1_500_000n,
     };
-    await store.store(entry.receiptId, entry);
+    const committed = await store.store(entry);
 
     const key = `stelis:prepare:${entry.receiptId}`;
     const rawJson = await redis.get(key);
     const raw = JSON.parse(rawJson!);
     expect(raw).toEqual({
       mode: 'promotion',
-      issuedAt: entry.issuedAt,
+      issuedAt: committed.issuedAt,
       receiptId: entry.receiptId,
       senderAddress: entry.senderAddress,
       txBytesHash: entry.txBytesHash,
@@ -588,7 +608,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
   });
 
   it('rejects extra, missing, wrong-type, and unknown-mode stored records', async () => {
-    await store.store('shape-invalid', makeEntry({ receiptId: 'shape-invalid' }));
+    await store.store(makeEntry({ receiptId: 'shape-invalid' }));
     const rawJson = await redis.get('stelis:prepare:shape-invalid');
     const current = JSON.parse(rawJson!) as Record<string, unknown>;
     const missing = { ...current };
@@ -619,7 +639,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const sponsorAddress = 'sponsor-malformed-consume';
     const txBytesHash = 'hash-malformed-consume';
     const clientIp = '10.0.0.61';
-    await store.store(receiptId, makeEntry({ receiptId, sponsorAddress, txBytesHash, clientIp }));
+    await store.store(makeEntry({ receiptId, sponsorAddress, txBytesHash, clientIp }));
 
     const entryKey = `stelis:prepare:${receiptId}`;
     const raw = JSON.parse((await redis.get(entryKey))!);
@@ -648,7 +668,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       const receiptId = `decimal-invalid-${i}`;
       const sponsorAddress = `sponsor-decimal-${i}`;
       const txBytesHash = `hash-decimal-${i}`;
-      await store.store(receiptId, makeEntry({ receiptId, sponsorAddress, txBytesHash }));
+      await store.store(makeEntry({ receiptId, sponsorAddress, txBytesHash }));
       const rawJson = await redis.get(`stelis:prepare:${receiptId}`);
       const parsed = JSON.parse(rawJson!);
       parsed.nonce = malformed[i];
@@ -666,7 +686,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       sponsorAddress: 'slot-corrupt-bi',
       txBytesHash: 'hash-corrupt-bi',
     });
-    await store.store('corrupt-bi', entry);
+    await store.store(entry);
 
     const rawJson = await redis.get('stelis:prepare:corrupt-bi');
     const parsed = JSON.parse(rawJson!);
@@ -685,7 +705,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       sponsorAddress: 'slot-peek-bad',
       txBytesHash: 'hash-peek-bad',
     });
-    await store.store('peek-bad', entry);
+    await store.store(entry);
 
     const rawJson = await redis.get('stelis:prepare:peek-bad');
     const parsed = JSON.parse(rawJson!);
@@ -703,7 +723,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       sponsorAddress: 'slot-evict',
       txBytesHash: 'hash-evict',
     });
-    await store.store('evict-test', entry);
+    await store.store(entry);
 
     const rawJson = await redis.get('stelis:prepare:evict-test');
     const parsed = JSON.parse(rawJson!);
@@ -721,10 +741,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const sponsorAddress = 'sponsor-evict-malformed';
     const txBytesHash = 'hash-evict-malformed';
     const senderAddress = '0xEVICT_MALFORMED';
-    await store.store(
-      receiptId,
-      makeEntry({ receiptId, sponsorAddress, txBytesHash, senderAddress }),
-    );
+    await store.store(makeEntry({ receiptId, sponsorAddress, txBytesHash, senderAddress }));
 
     const entryKey = `stelis:prepare:${receiptId}`;
     const raw = JSON.parse((await redis.get(entryKey))!);
@@ -788,7 +805,6 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
       { ttlMs: 60_000, maxPerIp: 1, maxPerStudioUser: 10 },
     );
     await smallStore.store(
-      'pid-a',
       makeEntry({
         receiptId: 'pid-a',
         sponsorAddress: 'slot-ip-a',
@@ -800,7 +816,6 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await smallStore.store(
-        'pid-b',
         makeEntry({
           receiptId: 'pid-b',
           sponsorAddress: 'slot-ip-b',
@@ -853,7 +868,6 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
 
   it('consume() hash_mismatch — release rejection emits warn', async () => {
     await store.store(
-      'hm-1',
       makeEntry({
         receiptId: 'hm-1',
         sponsorAddress: 'slot-hm',
@@ -879,7 +893,6 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
 
   it('consume() success with undeserializable entry — raw-entry release rejection emits warn', async () => {
     await store.store(
-      'raw-1',
       makeEntry({
         receiptId: 'raw-1',
         sponsorAddress: 'slot-raw',
@@ -952,7 +965,6 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
       { ttlMs: 60_000, maxPerIp: 1, maxPerStudioUser: 10 },
     );
     await smallStore.store(
-      'pid-sa',
       makeEntry({
         receiptId: 'pid-sa',
         sponsorAddress: 'slot-ip-sa',
@@ -964,7 +976,6 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await smallStore.store(
-        'pid-sb',
         makeEntry({
           receiptId: 'pid-sb',
           sponsorAddress: 'slot-ip-sb',
@@ -1016,7 +1027,6 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
 
   it('consume() hash_mismatch — sync throw emits warn', async () => {
     await store.store(
-      'hm-s1',
       makeEntry({
         receiptId: 'hm-s1',
         sponsorAddress: 'slot-hm-s',
@@ -1041,7 +1051,6 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
 
   it('consume() success with undeserializable entry — raw-entry fallback sync throw emits warn', async () => {
     await store.store(
-      'raw-s1',
       makeEntry({
         receiptId: 'raw-s1',
         sponsorAddress: 'slot-raw-s',
@@ -1203,7 +1212,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
       { maxPerIp: 1 },
     );
     await store.store(
-      'pid-a',
       makeEntry({
         receiptId: 'pid-a',
         sponsorAddress: 'slot-evict-a',
@@ -1215,7 +1223,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await store.store(
-        'pid-b',
         makeEntry({
           receiptId: 'pid-b',
           sponsorAddress: 'slot-evict-b',
@@ -1241,7 +1248,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
   it('store() IP eviction — rejected promise emits warn', async () => {
     const store = makeStore(() => Promise.reject(new Error('evict-reject')), { maxPerIp: 1 });
     await store.store(
-      'pid-a',
       makeEntry({
         receiptId: 'pid-a',
         sponsorAddress: 'slot-evict-a',
@@ -1253,7 +1259,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await store.store(
-        'pid-b',
         makeEntry({
           receiptId: 'pid-b',
           sponsorAddress: 'slot-evict-b',
@@ -1340,7 +1345,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
       throw new Error('evict-sync-throw');
     });
     await store.store(
-      'hm-1',
       makeEntry({
         receiptId: 'hm-1',
         sponsorAddress: 'slot-hm-1',
@@ -1369,7 +1373,6 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
   it('consume() hash_mismatch — rejected promise emits warn', async () => {
     const store = makeStore(() => Promise.reject(new Error('evict-reject')));
     await store.store(
-      'hm-2',
       makeEntry({
         receiptId: 'hm-2',
         sponsorAddress: 'slot-hm-2',

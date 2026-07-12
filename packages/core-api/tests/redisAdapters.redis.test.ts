@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { RedisAbuseBlocker } from '../src/store/redisAbuseBlocker.js';
 import { RedisPrepareInflight } from '../src/store/redisPrepareInflight.js';
@@ -14,6 +14,11 @@ const SAMPLE_TX_BYTES = new Uint8Array([0xc0, 0xde, 0x01]);
 
 function sha256Hex(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
+}
+
+async function readRedisTimeMs(redis: RealRedisHandle): Promise<number> {
+  const result = (await redis.rawClient.sendCommand(['TIME'])) as [string, string];
+  return Number(result[0]) * 1_000 + Math.floor(Number(result[1]) / 1_000);
 }
 
 describe('Redis-backed adapters — real Redis conformance', () => {
@@ -141,16 +146,16 @@ describe('Redis-backed adapters — real Redis conformance', () => {
 
   it('RedisPrepareStore — store → consume happy path with BigInt', async () => {
     const released: string[] = [];
+    const keyPrefix = `test:ps:${randomUUID()}:`;
     const store = new RedisPrepareStore(
       redis!.client,
       (sponsorAddress) => {
         released.push(sponsorAddress);
       },
-      { keyPrefix: `test:ps:${randomUUID()}:`, ttlMs: 60_000 },
+      { keyPrefix, ttlMs: 60_000 },
     );
 
     const entry = {
-      issuedAt: Date.now(),
       receiptId: 'integ-pay-001',
       senderAddress: '0xINTEG_SENDER',
       nonce: 1n,
@@ -162,7 +167,13 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       mode: 'generic' as const,
     };
 
-    await store.store('integ-pay-001', entry);
+    const beforeStore = await readRedisTimeMs(redis!);
+    const committed = await store.store(entry);
+    const afterStore = await readRedisTimeMs(redis!);
+    expect(committed.issuedAt).toBeGreaterThanOrEqual(beforeStore);
+    expect(committed.issuedAt).toBeLessThanOrEqual(afterStore);
+    const rawCommitted = JSON.parse((await redis!.client.get(`${keyPrefix}${entry.receiptId}`))!);
+    expect(rawCommitted.issuedAt).toBe(committed.issuedAt);
     const result = await store.consume('integ-pay-001', 'hash-integ');
     expect(result).not.toBe('not_found');
     expect(result).not.toBe('expired');
@@ -176,6 +187,76 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     expect(released).toHaveLength(0);
   });
 
+  it('RedisPrepareStore — STORE and peek use Redis time rather than the Host JS clock', async () => {
+    const keyPrefix = `test:ps:${randomUUID()}:`;
+    const store = new RedisPrepareStore(redis!.client, () => {}, {
+      keyPrefix,
+      ttlMs: 60_000,
+    });
+    const draft = {
+      receiptId: 'redis-time-001',
+      senderAddress: '0xREDIS_TIME',
+      nonce: 1n,
+      executionPathKey: 'direct',
+      txBytesHash: 'hash-redis-time',
+      sponsorAddress: '0xSP_REDIS_TIME',
+      clientIp: '10.0.0.97',
+      orderId: null,
+      mode: 'generic' as const,
+    };
+
+    const beforeStore = await readRedisTimeMs(redis!);
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(beforeStore - 10 * 60_000);
+    try {
+      const committed = await store.store(draft);
+      const afterStore = await readRedisTimeMs(redis!);
+      expect(committed.issuedAt).toBeGreaterThanOrEqual(beforeStore);
+      expect(committed.issuedAt).toBeLessThanOrEqual(afterStore);
+      const raw = JSON.parse((await redis!.client.get(`${keyPrefix}${draft.receiptId}`))!);
+      expect(raw.issuedAt).toBe(committed.issuedAt);
+
+      dateNowSpy.mockReturnValue(committed.issuedAt + 10 * 60_000);
+      await expect(store.peek(draft.receiptId)).resolves.toMatchObject({
+        receiptId: draft.receiptId,
+        issuedAt: committed.issuedAt,
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('RedisPrepareStore — malformed IP index rejects before any STORE mutation', async () => {
+    const keyPrefix = `test:ps:${randomUUID()}:`;
+    const clientIp = '10.0.0.96';
+    const senderAddress = '0xNO_PARTIAL_STORE';
+    const receiptId = 'no-partial-store-001';
+    const store = new RedisPrepareStore(redis!.client, () => {}, {
+      keyPrefix,
+      ttlMs: 60_000,
+    });
+    const ipKey = `${keyPrefix}ip:${clientIp}`;
+    const malformedIpIndex = '{not-valid-json';
+    await redis!.client.set(ipKey, malformedIpIndex, { px: 120_000 });
+
+    await expect(
+      store.store({
+        receiptId,
+        senderAddress,
+        nonce: 1n,
+        executionPathKey: 'direct',
+        txBytesHash: 'hash-no-partial-store',
+        sponsorAddress: '0xSP_NO_PARTIAL_STORE',
+        clientIp,
+        orderId: null,
+        mode: 'generic',
+      }),
+    ).rejects.toThrow();
+
+    await expect(redis!.client.get(`${keyPrefix}${receiptId}`)).resolves.toBeNull();
+    await expect(redis!.client.get(`${keyPrefix}sender:${senderAddress}`)).resolves.toBeNull();
+    await expect(redis!.client.get(ipKey)).resolves.toBe(malformedIpIndex);
+  });
+
   it('RedisPrepareStore — hash_mismatch releases slot', async () => {
     const released: string[] = [];
     const store = new RedisPrepareStore(
@@ -187,7 +268,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     );
 
     const entry = {
-      issuedAt: Date.now(),
       receiptId: 'integ-pay-002',
       senderAddress: '0xINTEG_SENDER_2',
       nonce: 1n,
@@ -199,7 +279,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       mode: 'generic' as const,
     };
 
-    await store.store('integ-pay-002', entry);
+    await store.store(entry);
     const result = await store.consume('integ-pay-002', 'wrong-hash');
     expect(result).toBe('hash_mismatch');
     expect(released).toContain('0xSP');
@@ -226,8 +306,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       { keyPrefix, ttlMs: 60_000 },
     );
 
-    await store.store(receiptId, {
-      issuedAt: Date.now(),
+    await store.store({
       receiptId,
       senderAddress: '0xMALFORMED_CONSUME',
       nonce: 1n,
@@ -273,8 +352,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       ttlMs: 60_000,
     });
 
-    await store.store('integ-pay-003', {
-      issuedAt: Date.now(),
+    await store.store({
       receiptId: 'integ-pay-003',
       nonce: 7n,
       executionPathKey: 'direct',
@@ -300,7 +378,6 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     });
 
     const makePromotionEntry = (receiptId: string, nonce: bigint) => ({
-      issuedAt: Date.now(),
       receiptId,
       senderAddress,
       nonce,
@@ -315,7 +392,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       userId,
     });
 
-    await store.store('projection-1', makePromotionEntry('projection-1', 1n));
+    await store.store(makePromotionEntry('projection-1', 1n));
 
     const ipKey = `${keyPrefix}ip:${clientIp}`;
     const senderKey = `${keyPrefix}sender:${senderAddress}`;
@@ -329,7 +406,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       );
     }
 
-    await store.store('projection-2', makePromotionEntry('projection-2', 2n));
+    await store.store(makePromotionEntry('projection-2', 2n));
 
     const ipRows = JSON.parse((await redis!.client.get(ipKey))!) as Array<Record<string, unknown>>;
     const senderRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
@@ -399,8 +476,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     const live = await store.reserveNonce(sender, 5n, 'integ-pay-004');
     expect(live).toBe(6n);
 
-    await store.store('integ-pay-004', {
-      issuedAt: Date.now(),
+    await store.store({
       receiptId: 'integ-pay-004',
       nonce: live,
       executionPathKey: 'direct',
@@ -467,8 +543,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
 
     const sender = '0xEVICT_SENDER';
     const userId = 'studio-user-evict';
-    await store.store('evict-pay-001', {
-      issuedAt: Date.now(),
+    await store.store({
       receiptId: 'evict-pay-001',
       nonce: 1n,
       reservedGasMist: 2_000_000n,
@@ -519,8 +594,7 @@ describe('Redis-backed adapters — real Redis conformance', () => {
       { keyPrefix, ttlMs: 60_000 },
     );
 
-    await store.store(receiptId, {
-      issuedAt: Date.now(),
+    await store.store({
       receiptId,
       senderAddress,
       nonce: 1n,

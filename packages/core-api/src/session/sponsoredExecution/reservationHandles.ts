@@ -465,18 +465,6 @@ export interface GasBoundBuildReservationHandles {
 }
 
 /**
- * Required reservation handles at the `PrepareStored` boundary (sponsor lease already
- * committed; entry about to be written). Both nonce (generic) and ledger
- * reservation (studio) may be present here; prepare commit transfers
- * ownership to the durable store.
- */
-export interface PreparedCommitReservationHandles {
-  readonly sponsorSlot: SponsorSlotReservationHandle;
-  readonly nonce?: NonceReservationHandle;
-  readonly ledgerReservation?: LedgerReservationHandle;
-}
-
-/**
  * Required reservation handles at the `ClassifySponsorResult` boundary (post-submit; runs
  * during sponsor processing after consume). Sponsor slot is required for
  * checkin; ledger reservation is required for Studio entitlement

@@ -87,6 +87,7 @@ import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepar
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
+import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -159,7 +160,10 @@ function makeMockContext() {
       claim: vi.fn().mockResolvedValue('ok'),
     },
     prepareStore: {
-      store: vi.fn().mockResolvedValue(undefined),
+      store: vi.fn(async (draft: PreparedTxDraft) => ({
+        ...draft,
+        issuedAt: 1_741_680_000_000,
+      })),
       consume: vi.fn(),
       peek: vi.fn(),
       evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
@@ -305,34 +309,32 @@ describe('handlePrepare — success path', () => {
     // prepareStore.store should have been called exactly once
     expect(ctx.prepareStore.store).toHaveBeenCalledTimes(1);
 
-    const [storedKey, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock
-      .calls[0];
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
 
-    // Key = receiptId (hex)
-    expect(storedKey).toBe(result.receiptId);
-
-    // Coordination fields persisted.
-    expect(storedEntry.receiptId).toBe(result.receiptId);
-    expect(storedEntry.senderAddress).toBe(TEST_PREPARE_AUTH_SENDER);
-    expect(storedEntry.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
-    expect(storedEntry.sponsorAddress).toBe('0xSPONSOR42');
-    expect(storedEntry.clientIp).toBe('192.168.1.1');
-    expect(storedEntry.mode).toBe('generic');
+    // The runner owns the receipt and passes one exact draft to the store;
+    // the store alone adds issuedAt to the committed entry it returns.
+    expect(storedDraft.receiptId).toBe(result.receiptId);
+    expect(storedDraft.senderAddress).toBe(TEST_PREPARE_AUTH_SENDER);
+    expect(storedDraft.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
+    expect(storedDraft.sponsorAddress).toBe('0xSPONSOR42');
+    expect(storedDraft.clientIp).toBe('192.168.1.1');
+    expect(storedDraft.mode).toBe('generic');
+    expect(storedDraft).not.toHaveProperty('issuedAt');
 
     // Settle / observability copies are not persisted. Sponsor reads
     // every settle value from `parseSettleArgs(txBytes)` — store copies
     // would invite drift bugs without adding authority. GenericPrepareBuildOutput-only
     // fields are also never persisted.
-    expect(storedEntry).not.toHaveProperty('executionCostClaim');
-    expect(storedEntry).not.toHaveProperty('simGas');
-    expect(storedEntry).not.toHaveProperty('gasVarianceFixedMist');
-    expect(storedEntry).not.toHaveProperty('slippageBufferMist');
-    expect(storedEntry).not.toHaveProperty('grossGas');
-    expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('quoteTimestampMs');
-    expect(storedEntry).not.toHaveProperty('policyHash');
-    expect(storedEntry).not.toHaveProperty('quotedHostFeeMist');
-    expect(storedEntry).not.toHaveProperty('paymentInputSource');
+    expect(storedDraft).not.toHaveProperty('executionCostClaim');
+    expect(storedDraft).not.toHaveProperty('simGas');
+    expect(storedDraft).not.toHaveProperty('gasVarianceFixedMist');
+    expect(storedDraft).not.toHaveProperty('slippageBufferMist');
+    expect(storedDraft).not.toHaveProperty('grossGas');
+    expect(storedDraft).not.toHaveProperty('profile');
+    expect(storedDraft).not.toHaveProperty('quoteTimestampMs');
+    expect(storedDraft).not.toHaveProperty('policyHash');
+    expect(storedDraft).not.toHaveProperty('quotedHostFeeMist');
+    expect(storedDraft).not.toHaveProperty('paymentInputSource');
   });
 
   it('txBytesHash in store matches response txBytes hash', async () => {
@@ -342,9 +344,9 @@ describe('handlePrepare — success path', () => {
 
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
-    // Store entry must have same txBytesHash as what runGenericPrepareBuildPipeline returned
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
+    // Store draft must have same txBytesHash as what runGenericPrepareBuildPipeline returned
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
 
     // Response txBytes must be base64 of the same bytes fed to hash
     expect(result.txBytes).toBe(toBase64(FAKE_TX_BYTES));
@@ -461,7 +463,7 @@ describe('handlePrepare — success path', () => {
     expect(result.orderId).toBeUndefined();
   });
 
-  it('stores orderId in PreparedTxEntry', async () => {
+  it('stores orderId in the PreparedTxDraft', async () => {
     // Re-setup extractSettleArgs mock with orderIdHash matching the orderId
     const policyHashHex = computePolicyHash({
       maxClaimMist: ONCHAIN_CONFIG.maxClaimMist,
@@ -498,8 +500,8 @@ describe('handlePrepare — success path', () => {
 
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry.orderId).toBe('store-test-order');
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft.orderId).toBe('store-test-order');
   });
 
   it('stores orderId as null when not provided', async () => {
@@ -509,8 +511,8 @@ describe('handlePrepare — success path', () => {
 
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry.orderId).toBeNull();
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft.orderId).toBeNull();
   });
 
   it('rejects before store when payment-input trace mismatches the selected source', async () => {

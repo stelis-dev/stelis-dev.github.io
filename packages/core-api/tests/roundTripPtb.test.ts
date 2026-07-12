@@ -1,26 +1,19 @@
 /**
- * roundTripPtb.test.ts — real builder → parser → prepared-commit coverage.
+ * roundTripPtb.test.ts — real builder → parser coverage.
  *
  * Nothing here is mocked. We:
  *
  *   1. Build a real PTB via `buildSwapAndSettlePtb` (core-relay builder).
  *   2. Serialize commands and inputs from the resulting Transaction.
  *   3. Re-extract settle args via the real `parseSettleArgs` (core-relay parser).
- *   4. Project the coordination fields through `composePreparedCommit`
- *      (core-api SponsoredExecution boundary) into a generic prepared entry.
- *   5. Assert that the parsed PTB args, the GenericPrepareBuildOutput-projected store
- *      entry, and the original audit input all agree on the canonical
- *      facts: executionCostClaim, nonce, quotedHostFeeMist, profile, and the
- *      route shape.
+ *   4. Assert that the parsed PTB args and original audit input agree on the
+ *      canonical settle facts and route shape.
  *
  * This proves:
  *   - The 13 SETTLE_FIELD_SCHEMA fields embedded in the real PTB round-trip
  *     correctly to TypeScript bigints/strings via parseSettleArgs.
- *   - composePreparedCommit's input → durable entry projection does
- *     not silently drift away from the values that actually live in the
- *     PTB the user signs.
- *   - SETTLE_FIELD_SCHEMA names, builder typeArguments, and store entry
- *     fields are locked to the real PTB shape rather than mocked assumptions.
+ *   - SETTLE_FIELD_SCHEMA names and builder typeArguments are locked to the
+ *     real PTB shape rather than mocked assumptions.
  */
 import { describe, it, expect } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
@@ -28,8 +21,6 @@ import { fromBase64 } from '@mysten/sui/utils';
 import { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from '@stelis/core-relay/browser';
 import { parseSettleArgs, convertSdkCommands } from '@stelis/core-relay';
 import { settlementParameterIndex } from '@stelis/contracts';
-import type { GenericPrepareBuildOutput } from '../src/prepare/build.js';
-import { composePreparedCommit } from '../src/session/sponsoredExecution/preparedCommit.js';
 
 // ─── Named addresses (file-level constants per AGENTS.md test policy) ────
 
@@ -164,25 +155,6 @@ function parseFromTx(tx: Transaction) {
   return parseSettleArgs(normalizedCommands, data.inputs, ADDR_PKG);
 }
 
-/** Make a GenericPrepareBuildOutput-shaped object that mirrors the AUDIT_FIELDS. */
-function makeGenericPrepareBuildOutput(
-  profile: 'new_user' | 'with_vault' | 'credit_general',
-): GenericPrepareBuildOutput {
-  const audit = profile === 'credit_general' ? CREDIT_AUDIT_FIELDS : AUDIT_FIELDS;
-  return {
-    txBytes: new Uint8Array([0x01]),
-    txBytesHash: 'fake-hash-' + profile,
-    executionCostClaim: audit.executionCostClaim,
-    simGas: audit.simGasReported,
-    gasVarianceFixedMist: audit.gasVarianceFixedMist,
-    slippageBufferMist: audit.slippageBufferMist,
-    grossGas: 1_500_000n,
-    profile,
-    paymentInputSource: profile === 'credit_general' ? 'none_credit_only' : 'coin_object',
-    swapAmountSmallest: profile === 'credit_general' ? 0n : 1_000_000n,
-  };
-}
-
 /**
  * Test-only: decode the tail `use_credit_amount` u64 from a with_vault PTB.
  *
@@ -219,7 +191,7 @@ function decodeTailCreditFromPtb(tx: Transaction): bigint {
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
-describe('roundTripPtb: real builder → parser → store entry adapter', () => {
+describe('roundTripPtb: real builder → parser', () => {
   // ── bfq new_user ──
 
   it('bfq new_user — PTB args round-trip to parseSettleArgs values', () => {
@@ -237,32 +209,6 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     expect(parsed.extractedSettlementSwapPath?.tokenType).toBe(PAYMENT_TYPE);
     expect(parsed.extractedSettlementSwapPath?.settlementSwapDirection).toBe('baseForQuote');
     expect(parsed.extractedSettlementSwapPath?.hops).toEqual([ADDR_POOL]);
-  });
-
-  it('bfq new_user — store adapter projects coordination-only fields (txBytesHash, nonce)', () => {
-    const buildResult = makeGenericPrepareBuildOutput('new_user');
-    const entry = composePreparedCommit({
-      mode: 'generic',
-      receiptId: '0xreceipt',
-      senderAddress: '0xsender',
-      clientIp: '10.0.0.1',
-      txBytesHash: buildResult.txBytesHash,
-      sponsorAddress: 'a',
-      executionPathKey: 'rk',
-      orderId: null,
-      nonce: AUDIT_FIELDS.nonce,
-    });
-
-    // The store entry is coordination-only. Settle facts
-    // (executionCostClaim, fee components, profile, policyHash, etc.) live in
-    // the PTB and are read by sponsor via parseSettleArgs(txBytes); the
-    // round-trip lock for those facts lives in `extractSettleArgs.test.ts`
-    // via ARG_INDEX_MAP. This test only verifies the build→store
-    // projection contract (txBytesHash + coordination fields).
-    expect(entry.txBytesHash).toBe(buildResult.txBytesHash);
-    expect(entry.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(entry).not.toHaveProperty('executionCostClaim');
-    expect(entry).not.toHaveProperty('profile');
   });
 
   // ── bfq with_vault ──
@@ -291,30 +237,6 @@ describe('roundTripPtb: real builder → parser → store entry adapter', () => 
     expect(parsed.slippageBufferMist).toBe(0n);
     // credit-only path has no extracted settlement swap path.
     expect(parsed.extractedSettlementSwapPath).toBeUndefined();
-  });
-
-  it('credit-only — store adapter projects coordination-only fields', () => {
-    const buildResult = makeGenericPrepareBuildOutput('credit_general');
-    const entry = composePreparedCommit({
-      mode: 'generic',
-      receiptId: '0xreceipt',
-      senderAddress: '0xsender',
-      clientIp: '10.0.0.1',
-      txBytesHash: buildResult.txBytesHash,
-      sponsorAddress: 'a',
-      executionPathKey: 'credit',
-      orderId: null,
-      nonce: AUDIT_FIELDS.nonce,
-    });
-
-    // Settle round-trip facts are PTB↔parser concerns and locked
-    // elsewhere (extractSettleArgs.test.ts via ARG_INDEX_MAP). The store
-    // entry carries only coordination fields.
-    expect(entry.txBytesHash).toBe(buildResult.txBytesHash);
-    expect(entry.nonce).toBe(AUDIT_FIELDS.nonce);
-    expect(entry).not.toHaveProperty('executionCostClaim');
-    expect(entry).not.toHaveProperty('profile');
-    expect(entry).not.toHaveProperty('slippageBufferMist');
   });
 
   // ── qfb ──

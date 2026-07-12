@@ -3,10 +3,9 @@
  *
  * The app-api route owns HTTP body validation and route-local gates. This
  * handler preserves the public `handlePrepare(ctx, params, extraCfg)` API
- * while delegating lifecycle order, reservation ownership, prepared-commit
- * construction, and cleanup to `runPrepareStateMachine`.
+ * while delegating lifecycle order, reservation ownership, prepared-draft
+ * construction, store commit, and cleanup to `runPrepareStateMachine`.
  */
-import { toHex } from '@mysten/sui/utils';
 import {
   GAS_MARGIN_CAP_BPS,
   SLIPPAGE_CAP_BPS,
@@ -24,7 +23,7 @@ import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
 import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
 import { PREPARE_SLOT_EXHAUSTED } from '../observability/events.js';
 import {
-  buildGenericPreparedCommitInputs,
+  buildGenericPreparedDraftFields,
   createGenericExecutionPolicy,
   projectGenericPrepareResult,
 } from '../session/sponsoredExecution/genericExecutionPolicy.js';
@@ -125,7 +124,6 @@ export async function handlePrepare(
   extraCfg: PrepareHandlerConfig,
 ): Promise<PrepareResult> {
   validatePrepareRequestShape(params);
-  const receiptId = generateReceiptIdHex();
 
   await verifyPrepareAuthorization(ctx, params);
   const blockedBySender = await checkBlockedRequest(ctx.abuseBlocker, params.clientIp, {
@@ -151,24 +149,20 @@ export async function handlePrepare(
   const { policy, state } = createGenericExecutionPolicy(options);
 
   try {
-    const stateMachineResult = await runPrepareStateMachine(
+    return await runPrepareStateMachine(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
         prepareStore: ctx.prepareStore,
       },
       {
-        hookContext: {
-          receiptId,
-          senderAddress: params.senderAddress,
-          clientIp: params.clientIp,
-        },
-        preparedCommitInputs: (input) => buildGenericPreparedCommitInputs(options, state, input),
+        senderAddress: params.senderAddress,
+        clientIp: params.clientIp,
+        preparedDraftFields: () => buildGenericPreparedDraftFields(options, state),
+        projectResponse: (input) => projectGenericPrepareResult(options, state, input),
       },
       policy,
     );
-
-    return projectGenericPrepareResult(options, state, stateMachineResult);
   } catch (err) {
     if (err instanceof RunnerSponsorSlotExhaustedError) {
       logSponsorPoolEvent(PREPARE_SLOT_EXHAUSTED, {
@@ -221,9 +215,4 @@ function validateOptionalBps(
   if (!Number.isSafeInteger(value) || value < 0 || value > cap) {
     throw new PrepareValidationError(code, `${field} must be an integer between 0 and ${cap}`);
   }
-}
-
-/** Generate a random canonical receipt ID (`0x` + 32-byte hex). */
-function generateReceiptIdHex(): string {
-  return `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
 }

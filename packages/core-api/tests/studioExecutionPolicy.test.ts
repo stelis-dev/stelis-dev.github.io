@@ -9,7 +9,7 @@ import { describe, test, expect, vi } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase58, toBase64 } from '@mysten/sui/utils';
 import {
-  buildStudioPreparedCommitInputs,
+  buildStudioPreparedDraftFields,
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
   createStudioSponsorConsumeAdapter,
@@ -36,6 +36,11 @@ import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js'
 import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import type { OnchainConfig } from '@stelis/core-relay';
+import {
+  grpcSimulationFailure,
+  grpcSimulationSuccess,
+  unknownExecutionError,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const PROMOTION_ID = 'promo-1';
@@ -331,13 +336,11 @@ describe('createStudioExecutionPolicy', () => {
     const { policy } = createStudioExecutionPolicy(makeSponsorOptions());
 
     expect(policy.discriminator).toBe('promotion');
-    expect(policy.handleRequirements.gasBoundBuild).toEqual({ sponsorSlot: true });
+    expect(policy.handleRequirements.gasBoundBuild).toEqual({});
     expect(policy.handleRequirements.preparedCommit).toEqual({
-      sponsorSlot: true,
       ledgerReservation: true,
     });
     expect(policy.handleRequirements.sponsorResult).toEqual({
-      sponsorSlot: true,
       ledgerReservation: true,
     });
   });
@@ -367,7 +370,7 @@ describe('studio prepare hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(makePrepareOptions({ ctx, txKindBytes }));
 
     await policy.hooks.RequestValidation({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
@@ -376,17 +379,12 @@ describe('studio prepare hooks', () => {
     expect(checkUserQuota).toHaveBeenCalledWith(USER_ID);
   });
 
-  test('GasBoundBuild returns measured gas and commit inputs preserve ledger reservation handle', async () => {
+  test('GasBoundBuild returns measured gas and policy exposes only route-owned draft fields', async () => {
     const txKindBytes = await buildTxKindBytes();
     const kindTx = makeBuildReadyTransaction();
     const ctx = makeContext({
       sui: {
-        simulateTransaction: vi.fn(async () => ({
-          Transaction: {
-            status: { success: true },
-            effects: { gasUsed: GAS_USED },
-          },
-        })),
+        simulateTransaction: vi.fn(async () => grpcSimulationSuccess('mock-digest', GAS_USED)),
       } as unknown as StudioPolicyContext['sui'],
       getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
     });
@@ -400,12 +398,12 @@ describe('studio prepare hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(options);
 
     await policy.hooks.RequestValidation({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
     await policy.hooks.ChainSnapshot({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
@@ -419,7 +417,7 @@ describe('studio prepare hooks', () => {
     };
     const buildResult = await policy.hooks.GasBoundBuild(
       {
-        receiptId: 'placeholder',
+        receiptId: RECEIPT_ID,
         senderAddress: SENDER,
         clientIp: '127.0.0.1',
       },
@@ -428,28 +426,100 @@ describe('studio prepare hooks', () => {
 
     expect(kindTx.getData().gasData.owner).toBe(SPONSOR);
     expect(buildResult.measuredGasMist).toBe(101_300n);
-    const commitInput = buildStudioPreparedCommitInputs(options, state, {
-      receiptId: RECEIPT_ID,
-      txBytesHash: buildResult.txBytesHash,
-      sponsorSlot: gasInput.reservationHandles.sponsorSlot,
-      ledgerReservation: reconstructReservationHandles.ledgerReservation({
-        receiptId: RECEIPT_ID,
-        promotionId: PROMOTION_ID,
-        userId: USER_ID,
-        reservedGasMist: buildResult.measuredGasMist,
-        ledgerLookupVerified: true,
-      }),
-      buildResult,
-    });
-    expect(commitInput).toMatchObject({
-      mode: 'promotion',
-      promotionId: PROMOTION_ID,
-      userId: USER_ID,
-      reservedGasMist: 101_300n,
+    const draftFields = buildStudioPreparedDraftFields(options, state);
+    expect(draftFields).toEqual({
       executionPathKey: `promotion:${PROMOTION_ID}`,
-      nonce: 0n,
+      orderId: null,
     });
   });
+
+  test.each([
+    {
+      name: 'legacy partial result',
+      simulationResult: {
+        Transaction: {
+          status: { success: true },
+          effects: { gasUsed: GAS_USED },
+        },
+      },
+      expected: {
+        code: 'DRY_RUN_FAILED',
+        message: 'Dry-run returned a malformed terminal result',
+      },
+    },
+    {
+      name: 'typed failed transaction',
+      simulationResult: grpcSimulationFailure(
+        'mock-failure',
+        unknownExecutionError('unit-8 typed dry-run failure'),
+        GAS_USED,
+      ),
+      expected: {
+        code: 'DRY_RUN_FAILED',
+        message: 'Dry-run failed: unit-8 typed dry-run failure',
+      },
+    },
+    {
+      name: 'current-union success without gas',
+      simulationResult: (() => {
+        const success = grpcSimulationSuccess('mock-no-gas', GAS_USED);
+        return {
+          ...success,
+          Transaction: {
+            ...success.Transaction,
+            effects: {
+              ...success.Transaction.effects,
+              gasUsed: undefined,
+            },
+          },
+        };
+      })(),
+      expected: {
+        code: 'DRY_RUN_NO_GAS',
+        message: 'Dry-run returned no gas usage',
+      },
+    },
+  ])(
+    'GasBoundBuild rejects $name with the specific boundary error',
+    async ({ simulationResult, expected }) => {
+      const txKindBytes = await buildTxKindBytes();
+      const kindTx = makeBuildReadyTransaction();
+      const ctx = makeContext({
+        sui: {
+          simulateTransaction: vi.fn(async () => simulationResult),
+        } as unknown as StudioPolicyContext['sui'],
+        getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
+      });
+      const { policy } = createStudioExecutionPolicy(
+        makePrepareOptions({
+          ctx,
+          txKindBytes,
+          deps: {
+            deserializeUserTxKind: vi.fn(async () => kindTx),
+          },
+        }),
+      );
+      const hookContext = {
+        receiptId: RECEIPT_ID,
+        senderAddress: SENDER,
+        clientIp: '127.0.0.1',
+      } as const;
+
+      await policy.hooks.RequestValidation(hookContext);
+      await policy.hooks.ChainSnapshot(hookContext);
+
+      await expect(
+        policy.hooks.GasBoundBuild(hookContext, {
+          reservationHandles: {
+            sponsorSlot: reconstructReservationHandles.sponsorSlot({
+              sponsorAddress: SPONSOR,
+              receiptId: RECEIPT_ID,
+            }),
+          },
+        }),
+      ).rejects.toMatchObject(expected);
+    },
+  );
 });
 
 describe('studio sponsor preconsume', () => {

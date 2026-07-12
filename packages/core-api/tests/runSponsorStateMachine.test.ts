@@ -35,8 +35,8 @@ import type {
   PolicyPostconsumeReconstruction,
 } from '../src/session/sponsoredExecution/index.js';
 import type {
-  GenericPreparedTxEntry,
-  PromotionPreparedTxEntry,
+  GenericPreparedTxDraft,
+  PromotionPreparedTxDraft,
 } from '../src/store/prepareTypes.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
@@ -153,7 +153,6 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
     ChainSnapshot: () => ({}),
     ExecutionPolicySelected: () => {},
     SlotFreePlan: () => {},
-    ReceiptIdGenerated: () => {},
     SponsorSlotReservationAcquired: () => {},
     RouteReservationBeforeBuild: () => {},
     GasBoundBuild: () => ({
@@ -164,8 +163,6 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
     RouteReservationAfterBuild: () => {},
     SelfCheck: () => {},
     SponsorLeaseCommitted: () => {},
-    PrepareStored: () => {},
-    AwaitUserSignature: () => {},
     DecodeSponsorSubmission: recordPre('DecodeSponsorSubmission'),
     UserSignatureValidation: recordPre('UserSignatureValidation'),
     Consume: recordPre('Consume'),
@@ -267,9 +264,9 @@ function makeGenericPolicy(opts: MakePolicyOptions = {}): {
     policy: {
       discriminator: 'generic',
       handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true, nonce: true },
-        preparedCommit: { sponsorSlot: true, nonce: true },
-        sponsorResult: { sponsorSlot: true },
+        gasBoundBuild: { nonce: true },
+        preparedCommit: {},
+        sponsorResult: {},
       },
       hooks,
     },
@@ -286,9 +283,9 @@ function makePromotionPolicy(opts: MakePolicyOptions = {}): {
     policy: {
       discriminator: 'promotion',
       handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true },
-        preparedCommit: { sponsorSlot: true, ledgerReservation: true },
-        sponsorResult: { sponsorSlot: true, ledgerReservation: true },
+        gasBoundBuild: {},
+        preparedCommit: { ledgerReservation: true },
+        sponsorResult: { ledgerReservation: true },
       },
       hooks,
     },
@@ -341,9 +338,8 @@ async function pinGenericEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
   await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: GenericPreparedTxEntry = {
+  const entry: GenericPreparedTxDraft = {
     mode: 'generic',
-    issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
@@ -353,7 +349,7 @@ async function pinGenericEntry(host: HostBuild): Promise<string> {
     orderId: null,
     nonce: 1n,
   };
-  await host.prepareStore.store(TEST_RECEIPT_ID, entry);
+  await host.prepareStore.store(entry);
   return slot.sponsorAddress;
 }
 
@@ -361,9 +357,8 @@ async function pinPromotionEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
   await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: PromotionPreparedTxEntry = {
+  const entry: PromotionPreparedTxDraft = {
     mode: 'promotion',
-    issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
@@ -376,7 +371,7 @@ async function pinPromotionEntry(host: HostBuild): Promise<string> {
     userId: TEST_USER,
     reservedGasMist: 1_400_000n,
   };
-  await host.prepareStore.store(TEST_RECEIPT_ID, entry);
+  await host.prepareStore.store(entry);
   return slot.sponsorAddress;
 }
 

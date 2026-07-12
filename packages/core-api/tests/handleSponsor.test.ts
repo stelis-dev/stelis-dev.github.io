@@ -845,7 +845,8 @@ describe('handleSponsor', () => {
     });
 
     try {
-      await prepareStore.store(PAYMENT_ID, prepared);
+      const { issuedAt: _issuedAt, ...draft } = prepared;
+      await prepareStore.store(draft);
 
       const err = await handleSponsor(
         ctx,

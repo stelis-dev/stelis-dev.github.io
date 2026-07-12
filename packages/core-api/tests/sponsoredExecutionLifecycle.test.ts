@@ -4,7 +4,7 @@
  * Pins the type-level + runtime-guard contracts introduced in
  * `packages/core-api/src/session/sponsoredExecution/`:
  *
- *   - state vocabulary + HTTP phase map,
+ *   - policy hook vocabulary,
  *   - branded reservation handle construction (factory-key gate, internal-only
  *     factory access),
  *   - post-release / post-consume runtime guard
@@ -22,17 +22,6 @@
  */
 import { describe, test, expect } from 'vitest';
 import {
-  PREPARE_STATE_ORDER,
-  SPONSOR_STATE_ORDER,
-  STATE_SPONSORED_EXECUTION_PHASE,
-  PREPARE_FORWARD_TRANSITIONS,
-  SPONSOR_FORWARD_TRANSITIONS,
-  OPTIONAL_PREPARE_STATES,
-  type SponsoredExecutionState,
-  type PrepareState,
-  type SponsorState,
-} from '../src/session/sponsoredExecution/states.js';
-import {
   ReservationHandleClosedError,
   ReservationHandleConstructionError,
   reconstructReservationHandles,
@@ -42,7 +31,6 @@ import {
   type NonceReservationHandle,
   type LedgerReservationHandle,
   type GasBoundBuildReservationHandles,
-  type PreparedCommitReservationHandles,
   type SponsorResultReservationHandles,
 } from '../src/session/sponsoredExecution/reservationHandles.js';
 import {
@@ -61,65 +49,7 @@ const {
 } = __testingReservationHandleInternals;
 
 // ─────────────────────────────────────────────
-// Section 1 — state vocabulary and HTTP phase map
-// ─────────────────────────────────────────────
-
-describe('SponsoredExecution — state vocabulary', () => {
-  test('PREPARE_STATE_ORDER and SPONSOR_STATE_ORDER are non-empty and disjoint', () => {
-    expect(PREPARE_STATE_ORDER.length).toBeGreaterThan(0);
-    expect(SPONSOR_STATE_ORDER.length).toBeGreaterThan(0);
-    const overlap = PREPARE_STATE_ORDER.filter((s) =>
-      (SPONSOR_STATE_ORDER as readonly string[]).includes(s),
-    );
-    expect(overlap).toEqual([]);
-  });
-
-  test('STATE_SPONSORED_EXECUTION_PHASE covers every state literal exactly once', () => {
-    const allStates: SponsoredExecutionState[] = [...PREPARE_STATE_ORDER, ...SPONSOR_STATE_ORDER];
-    for (const s of allStates) {
-      expect(STATE_SPONSORED_EXECUTION_PHASE[s]).toBeDefined();
-    }
-    const mappedKeys = Object.keys(STATE_SPONSORED_EXECUTION_PHASE) as SponsoredExecutionState[];
-    expect(mappedKeys.length).toBe(allStates.length);
-  });
-
-  test('every prepare-side state maps to phase=prepare; every sponsor-side state maps to phase=sponsor', () => {
-    for (const s of PREPARE_STATE_ORDER) expect(STATE_SPONSORED_EXECUTION_PHASE[s]).toBe('prepare');
-    for (const s of SPONSOR_STATE_ORDER) expect(STATE_SPONSORED_EXECUTION_PHASE[s]).toBe('sponsor');
-  });
-
-  test('forward transitions stay within their HTTP phase (no synthetic edge bridging /prepare to /sponsor)', () => {
-    for (const t of PREPARE_FORWARD_TRANSITIONS) {
-      expect(STATE_SPONSORED_EXECUTION_PHASE[t.from]).toBe('prepare');
-      expect(STATE_SPONSORED_EXECUTION_PHASE[t.to]).toBe('prepare');
-    }
-    for (const t of SPONSOR_FORWARD_TRANSITIONS) {
-      expect(STATE_SPONSORED_EXECUTION_PHASE[t.from]).toBe('sponsor');
-      expect(STATE_SPONSORED_EXECUTION_PHASE[t.to]).toBe('sponsor');
-    }
-  });
-
-  test('AwaitUserSignature ends the prepare run; DecodeSponsorSubmission begins the sponsor run', () => {
-    const lastPrepare: PrepareState = PREPARE_STATE_ORDER[PREPARE_STATE_ORDER.length - 1]!;
-    const firstSponsor: SponsorState = SPONSOR_STATE_ORDER[0]!;
-    expect(lastPrepare).toBe('AwaitUserSignature');
-    expect(firstSponsor).toBe('DecodeSponsorSubmission');
-    const fromPrepareToSponsor = PREPARE_FORWARD_TRANSITIONS.some(
-      (t) => (t.to as string) === 'DecodeSponsorSubmission',
-    );
-    expect(fromPrepareToSponsor).toBe(false);
-  });
-
-  test('OPTIONAL_PREPARE_STATES is exactly { RouteReservationBeforeBuild, RouteReservationAfterBuild }', () => {
-    expect([...OPTIONAL_PREPARE_STATES].sort()).toEqual([
-      'RouteReservationAfterBuild',
-      'RouteReservationBeforeBuild',
-    ]);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 2 — reservation handle construction guard + module API
+// Section 1 — reservation handle construction guard + module API
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — reservation handle construction guard', () => {
@@ -179,12 +109,11 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
     expect(
       Object.prototype.hasOwnProperty.call(mainBarrel, 'createSponsoredExecutionPolicyRegistry'),
     ).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'PREPARE_STATE_ORDER')).toBe(false);
   });
 });
 
 // ─────────────────────────────────────────────
-// Section 3 — post-release / post-consume guard
+// Section 2 — post-release / post-consume guard
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — post-release / post-consume guard', () => {
@@ -276,7 +205,7 @@ describe('SponsoredExecution — post-release / post-consume guard', () => {
 });
 
 // ─────────────────────────────────────────────
-// Section 4 — per-stage reservation handle shapes (F2 lock)
+// Section 3 — per-stage reservation handle shapes (F2 lock)
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — per-stage reservation handle shapes', () => {
@@ -300,33 +229,6 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
     expect((ev as Record<string, unknown>).ledgerReservation).toBeUndefined();
   });
 
-  test('PreparedCommitReservationHandles carries both nonce and ledgerReservation as optional fields', () => {
-    const slot = reconstructReservationHandles.sponsorSlot({
-      sponsorAddress: '0xSPONSOR',
-      receiptId: '0xR',
-    });
-    const nonce = reconstructReservationHandles.nonce({
-      nonce: 1n,
-      senderAddress: '0xS',
-      receiptId: '0xR',
-      inPtbNonceMatch: true,
-    });
-    const ledger = reconstructReservationHandles.ledgerReservation({
-      receiptId: '0xR',
-      promotionId: 'p',
-      userId: 'u',
-      reservedGasMist: 1_400_000n,
-      ledgerLookupVerified: true,
-    });
-    const ev: PreparedCommitReservationHandles = {
-      sponsorSlot: slot,
-      nonce,
-      ledgerReservation: ledger,
-    };
-    expect(ev.nonce?.reservationKind).toBe('Nonce');
-    expect(ev.ledgerReservation?.reservationKind).toBe('LedgerReservation');
-  });
-
   test('SponsorResultReservationHandles carries ledgerReservation but NOT nonce', () => {
     // Type-level lock: nonce has no sponsor result verb. The in-PTB nonce match
     // already happened at SharedPostconsumeChecks.
@@ -340,7 +242,7 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
 });
 
 // ─────────────────────────────────────────────
-// Section 5 — GasBoundBuildInput handle requirements
+// Section 4 — GasBoundBuildInput handle requirements
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', () => {
@@ -399,7 +301,7 @@ describe('SponsoredExecution — GasBoundBuildInput reservation handle gate', ()
 });
 
 // ─────────────────────────────────────────────
-// Section 6 — sponsor-phase reconstruction parity
+// Section 5 — sponsor-phase reconstruction parity
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — sponsor-phase reconstruction', () => {
@@ -453,7 +355,7 @@ describe('SponsoredExecution — sponsor-phase reconstruction', () => {
 });
 
 // ─────────────────────────────────────────────
-// Section 7 — SponsoredExecutionPolicy registry exact-key enforcement (F3 lock)
+// Section 6 — SponsoredExecutionPolicy registry exact-key enforcement (F3 lock)
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
@@ -475,13 +377,10 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
       ChainSnapshot: chainSnapshot,
       ExecutionPolicySelected: noop,
       SlotFreePlan: noop,
-      ReceiptIdGenerated: noop,
       SponsorSlotReservationAcquired: noop,
       GasBoundBuild: gasBoundBuild,
       SelfCheck: noop,
       SponsorLeaseCommitted: noop,
-      PrepareStored: noop,
-      AwaitUserSignature: noop,
       DecodeSponsorSubmission: noop,
       UserSignatureValidation: noop,
       Consume: noop,
@@ -503,9 +402,9 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
       return {
         discriminator: 'generic',
         handleRequirements: {
-          gasBoundBuild: { sponsorSlot: true, nonce: true },
-          preparedCommit: { sponsorSlot: true, nonce: true },
-          sponsorResult: { sponsorSlot: true },
+          gasBoundBuild: { nonce: true },
+          preparedCommit: {},
+          sponsorResult: {},
         },
         hooks: makeNoopHooks<'generic'>(() => ({
           nonceAcquire: { onchainLastNonce: 0n },
@@ -515,9 +414,9 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
     return {
       discriminator: 'promotion',
       handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true },
-        preparedCommit: { sponsorSlot: true },
-        sponsorResult: { sponsorSlot: true },
+        gasBoundBuild: {},
+        preparedCommit: {},
+        sponsorResult: {},
       },
       hooks: makeNoopHooks<'promotion'>(() => ({})),
     };
@@ -592,24 +491,10 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
     };
     expect(withReservation.hooks.RouteReservationBeforeBuild).toBeDefined();
   });
-
-  test('handleRequirements is per-stage with sponsorSlot=true mandatory at each stage', () => {
-    const reqs: SponsoredExecutionPolicy['handleRequirements'] = {
-      gasBoundBuild: { sponsorSlot: true },
-      preparedCommit: { sponsorSlot: true },
-      sponsorResult: { sponsorSlot: true },
-    };
-    expect(reqs.gasBoundBuild.sponsorSlot).toBe(true);
-    expect(reqs.preparedCommit.sponsorSlot).toBe(true);
-    expect(reqs.sponsorResult.sponsorSlot).toBe(true);
-    // Type-level: gasBoundBuild has NO `ledgerReservation` field. Attempting
-    // to add it would compile-error. Surrounding `tsc --noEmit` enforces this.
-    expect((reqs.gasBoundBuild as Record<string, unknown>).ledgerReservation).toBeUndefined();
-  });
 });
 
 // ─────────────────────────────────────────────
-// Section 8 — ReservationBase.release() never-throwing contract (F4 lock)
+// Section 7 — ReservationBase.release() never-throwing contract (F4 lock)
 // ─────────────────────────────────────────────
 
 describe('SponsoredExecution — ReservationBase release() contract', () => {
@@ -634,10 +519,8 @@ describe('SponsoredExecution — ReservationBase release() contract', () => {
 
     const r = new FailingTestReservation();
     await r.acquire();
-    expect(r.isAcquired()).toBe(true);
     // Must NOT throw — the contract is non-throwing.
     await expect(r.release()).resolves.toBeUndefined();
-    expect(r.isAcquired()).toBe(false);
     // The error must have been routed exactly once.
     expect(errors.length).toBe(1);
     expect((errors[0] as Error).message).toBe('infra release failure');
@@ -668,7 +551,7 @@ describe('SponsoredExecution — ReservationBase release() contract', () => {
 
   test('release() after transferOwnership() is a no-op for transferable reservations (ownership already passed to durable store)', async () => {
     // Sponsor slot is the canonical transferable reservation: ownership
-    // moves to the prepared-store entry on `PrepareStored` success and
+    // moves to the prepared-store entry after the store commit succeeds and
     // the sponsor lifecycle owns subsequent checkin. Inflight is
     // intentionally NOT transferable; this test uses
     // `SponsorSlotReservation` to drive the contract.
@@ -714,7 +597,6 @@ describe('SponsoredExecution — ReservationBase release() contract', () => {
     const r = new DoubleFailReservation();
     await r.acquire();
     await expect(r.release()).resolves.toBeUndefined();
-    expect(r.isAcquired()).toBe(false);
   });
 });
 

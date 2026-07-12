@@ -32,7 +32,10 @@ import { SponsorPool } from '../src/context.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64, toHex, toBase58 } from '@mysten/sui/utils';
-import type { PromotionPreparedTxEntry } from '../src/store/prepareTypes.js';
+import type {
+  PromotionPreparedTxDraft,
+  PromotionPreparedTxEntry,
+} from '../src/store/prepareTypes.js';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import type {
   SponsorResultCallback,
@@ -264,8 +267,7 @@ async function setup(opts?: {
   if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
   // Store in prepareStore with mode='promotion'
-  const entry: PromotionPreparedTxEntry = {
-    issuedAt: Date.now(),
+  const entry: PromotionPreparedTxDraft = {
     receiptId,
     reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
     txBytesHash: signed.txHash,
@@ -279,7 +281,7 @@ async function setup(opts?: {
     promotionId: TEST_PROMO_ID,
     userId: TEST_USER_ID,
   };
-  await prepareStore.store(receiptId, entry);
+  await prepareStore.store(entry);
 
   // Mock promotion store
   const promotionStore = {
@@ -357,8 +359,7 @@ describe('handlePromotionSponsor', () => {
     const { ctx, signed, executionLedger } = await setup();
 
     const genericReceiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
-    await ctx.prepareStore.store(genericReceiptId, {
-      issuedAt: Date.now(),
+    await ctx.prepareStore.store({
       receiptId: genericReceiptId,
       txBytesHash: signed.txHash,
       senderAddress: USER_ADDR,
@@ -1023,8 +1024,9 @@ describe('handlePromotionSponsor', () => {
     // the reservedGasMist field disagrees with the PTB's gasData.budget.
     const peeked = await prepareStore.peek(receiptId);
     if (!peeked || peeked.mode !== 'promotion') throw new Error('expected promotion entry');
-    await prepareStore.store(receiptId, {
-      ...peeked,
+    const { issuedAt: _issuedAt, ...draft } = peeked;
+    await prepareStore.store({
+      ...draft,
       reservedGasMist: peeked.reservedGasMist + 1n,
     });
 
@@ -1299,8 +1301,7 @@ describe('handlePromotionSponsor', () => {
     if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
     const txBytesHash = signed.txHash;
-    await prepareStore.store(receiptId, {
-      issuedAt: Date.now(),
+    await prepareStore.store({
       receiptId,
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n,
@@ -1313,7 +1314,7 @@ describe('handlePromotionSponsor', () => {
       mode: 'promotion',
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
-    } satisfies PromotionPreparedTxEntry);
+    } satisfies PromotionPreparedTxDraft);
 
     const future = new Date(Date.now() + 86_400_000).toISOString();
     const promotionStore = {
@@ -1400,8 +1401,7 @@ describe('handlePromotionSponsor', () => {
     if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
     const txBytesHash = signed.txHash;
-    await prepareStore.store(receiptId, {
-      issuedAt: Date.now(),
+    await prepareStore.store({
       receiptId,
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
@@ -1414,7 +1414,7 @@ describe('handlePromotionSponsor', () => {
       mode: 'promotion',
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
-    } satisfies PromotionPreparedTxEntry);
+    } satisfies PromotionPreparedTxDraft);
 
     const promotionStore = {
       get: async () => ({

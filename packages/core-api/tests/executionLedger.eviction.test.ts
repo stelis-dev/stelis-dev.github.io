@@ -12,19 +12,18 @@
 import { describe, it, expect } from 'vitest';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
-import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../src/store/prepareTypes.js';
+import type { PreparedTxEntry, PromotionPreparedTxDraft } from '../src/store/prepareTypes.js';
 
 const PROMO_ID = 'evict-promo-1';
 const USER_ID = 'evict-user-1';
 const PER_USER_ALLOWANCE = '5000000'; // 5M MIST
 const RESERVE_AMOUNT = 1_000_000n; // 1M MIST
 
-function makePromotionEntry(
-  overrides: Partial<PromotionPreparedTxEntry> = {},
-): PromotionPreparedTxEntry {
+function makePromotionDraft(
+  overrides: Partial<PromotionPreparedTxDraft> = {},
+): PromotionPreparedTxDraft {
   return {
     mode: 'promotion',
-    issuedAt: Date.now(),
     receiptId: 'receipt-evict-1',
     senderAddress: '0x' + '1'.repeat(64),
     txBytesHash: 'a'.repeat(64),
@@ -79,8 +78,7 @@ describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
       },
     );
 
-    const entry = makePromotionEntry();
-    await prepareStore.store(entry.receiptId, entry);
+    await prepareStore.store(makePromotionDraft());
 
     // Wait for TTL eviction to fire (TTL=50ms, evict interval=10ms)
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -129,7 +127,7 @@ describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
     );
 
     // Store first promotion entry
-    await prepareStore.store('r-old', makePromotionEntry({ receiptId: 'r-old' }));
+    await prepareStore.store(makePromotionDraft({ receiptId: 'r-old' }));
 
     // Release r-old first (so 2nd reserve is not blocked by concurrent_reservation)
     // Actually, we want r-old to remain reserved but be evicted by IP overflow.
@@ -137,11 +135,11 @@ describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
     // we accept that the IP overflow test focuses on the eviction → release chain only.
 
     // Store second entry for same IP → first is evicted
-    const entry2 = makePromotionEntry({
+    const entry2 = makePromotionDraft({
       receiptId: 'r-new',
       senderAddress: '0x' + '9'.repeat(64),
     });
-    await prepareStore.store('r-new', entry2);
+    await prepareStore.store(entry2);
 
     // Give microtask queue a chance to run the eviction callback
     await new Promise((resolve) => setTimeout(resolve, 20));

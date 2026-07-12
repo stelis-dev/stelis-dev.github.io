@@ -58,44 +58,36 @@ export type PolicyDiscriminator = 'generic' | 'promotion';
  * Per-stage handle requirement shapes. Different lifecycle boundaries carry
  * different reservation handle kinds:
  *
- *   - GasBoundBuild  — `SponsorSlot` is mandatory; generic adds `Nonce`
- *                       (acquired BEFORE build); Studio adds nothing
- *                       (`LedgerReservation` does not yet exist).
- *   - PrepareStoreCommit — `SponsorSlot` is mandatory; generic adds `Nonce`
- *                       (transferred to durable store); Studio adds
- *                       `LedgerReservation` (acquired AFTER build).
- *   - SponsorResult  — `SponsorSlot` is mandatory; Studio adds
- *                       `LedgerReservation` for entitlement
- *                       consume/release.
+ *   - GasBoundBuild — generic requires `Nonce` before build; Studio does not.
+ *   - PrepareStoreCommit — Studio requires `LedgerReservation` after build;
+ *     generic does not acquire another route-specific handle there.
+ *   - SponsorResult — Studio requires `LedgerReservation` for entitlement
+ *     consume/release; generic does not.
  *
- * Splitting the requirements at the execution policy boundary prevents the
- * runner from requiring `LedgerReservation` before the measured-gas amount
- * exists.
+ * Sponsor slot is unconditional in both runners, so it is not repeated as a
+ * policy requirement. Each declared value below is read by a runner and can
+ * change runtime acquisition or validation behavior.
  */
 export interface GasBoundBuildHandleRequirements {
-  readonly sponsorSlot: true;
-  readonly nonce?: boolean;
+  readonly nonce?: true;
   // ledgerReservation is intentionally absent because the reservation is
   // acquired after GasBoundBuild, once the measured amount exists.
 }
 
 export interface PreparedCommitHandleRequirements {
-  readonly sponsorSlot: true;
-  readonly nonce?: boolean;
-  readonly ledgerReservation?: boolean;
+  readonly ledgerReservation?: true;
 }
 
 export interface SponsorResultHandleRequirements {
-  readonly sponsorSlot: true;
-  readonly ledgerReservation?: boolean;
+  readonly ledgerReservation?: true;
   // nonce is intentionally absent — the in-PTB nonce match runs at
   // SharedPostconsumeChecks; nonce reservation handle has no sponsor result verb.
 }
 
 /**
- * Per-policy reservation handle requirement map keyed by lifecycle boundary.
- * The runner consults the matching boundary's requirements when constructing
- * inputs to the corresponding state.
+ * Per-policy route-specific handle requirements keyed by lifecycle boundary.
+ * Unconditional handles are absent; the runners consult every field declared
+ * here.
  */
 export interface SponsoredExecutionPolicyHandleRequirements {
   readonly gasBoundBuild: GasBoundBuildHandleRequirements;
@@ -227,7 +219,6 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
   readonly ChainSnapshot: (ctx: PreparePolicyHookContext) => MaybePromise<PrepareChainSnapshot<D>>;
   readonly ExecutionPolicySelected: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   readonly SlotFreePlan: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly ReceiptIdGenerated: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   readonly SponsorSlotReservationAcquired: (
     ctx: PreparePolicyHookContext,
     sponsorSlot: SponsorSlotReservationHandle,
@@ -266,18 +257,6 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
   ) => Promise<void> | void;
   readonly SelfCheck: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   readonly SponsorLeaseCommitted: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  // Post-store hooks (`PrepareStored`, `AwaitUserSignature`) fire AFTER
-  // the runner has stored the durable prepared-commit entry AND
-  // transferred ownership of every transferable reservation to that
-  // entry. They are observability-only by contract: any throw here
-  // propagates to the caller but the durable entry remains coherent —
-  // the resources it references stay owned by it (the runner's reverse
-  // cleanup is a no-op for transferable reservations after transfer).
-  // Do NOT use these hooks to mutate durable state; that work belongs
-  // before `PrepareStored`. See `runner.ts` State 14 comment for the
-  // boundary rationale.
-  readonly PrepareStored: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly AwaitUserSignature: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   // Pre-consume hooks: fire BEFORE the atomic consume succeeds, so they
   // see a context that carries no phase-local reservation handles. `txSender` is
   // still attacker-choosable at this point — abuse attribution is
@@ -362,10 +341,9 @@ void _exhaustiveCheck;
 void _noExtrasCheck;
 
 /**
- * Subset of states whose hook is mandatory in every execution policy. Optional
- * states (currently only the route-reservation entries) may be omitted
- * when the active policy does not need them — see `OPTIONAL_PREPARE_STATES`
- * in `states.ts`.
+ * Subset of prepare hooks required in every execution policy. The two
+ * route-reservation hooks may be omitted; the procedural runner decides whether
+ * to execute those actions from the policy's actual handle requirements.
  */
 export type MandatoryPrepareState = Exclude<
   PrepareState,
@@ -386,8 +364,8 @@ export interface SponsoredExecutionPolicy<D extends PolicyDiscriminator = Policy
   /** Route discriminator written into the prepared entry. */
   readonly discriminator: D;
   /**
-   * Per-stage handle requirements. The runner reads the matching
-   * boundary's requirements when constructing the input to that state.
+   * Route-specific handle requirements. The runners read these values to
+   * decide optional acquisition or validation behavior.
    */
   readonly handleRequirements: SponsoredExecutionPolicyHandleRequirements;
   /**

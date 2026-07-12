@@ -16,10 +16,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import type {
-  GenericPreparedTxEntry,
+  GenericPreparedTxDraft,
+  PreparedTxDraft,
   PreparedTxEntry,
   PrepareStoreAdapter,
-  PromotionPreparedTxEntry,
+  PromotionPreparedTxDraft,
 } from '../src/store/prepareTypes.js';
 import {
   PrepareSenderQuotaError,
@@ -42,6 +43,10 @@ export interface PrepareStoreHandle {
   store: PrepareStoreAdapter;
   /** Populated by the backend's onRelease callback, in call order. */
   releasedSlots: ReleasedSlot[];
+  /** Set the backend's authoritative clock to an exact millisecond value. */
+  setNowMs(nowMs: number): void;
+  /** Advance the backend's authoritative clock without sleeping. */
+  advanceNowMs(deltaMs: number): void;
   /** Per-test cleanup (timer disposal, etc). Must be idempotent. */
   dispose(): Promise<void> | void;
 }
@@ -74,9 +79,8 @@ const IP_2 = '10.0.0.1';
 const SENDER_A = '0xSENDER_A';
 const SENDER_B = '0xSENDER_B';
 
-function makeGeneric(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+function makeGeneric(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: 'pid-default',
     senderAddress: SENDER_A,
     nonce: 1n,
@@ -91,10 +95,9 @@ function makeGeneric(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPr
 }
 
 function makePromotion(
-  overrides: Partial<PromotionPreparedTxEntry> = {},
-): PromotionPreparedTxEntry {
+  overrides: Partial<PromotionPreparedTxDraft> = {},
+): PromotionPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: 'pid-promo-default',
     senderAddress: SENDER_A,
     reservedGasMist: 1_650_000n,
@@ -144,8 +147,11 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
   describe('store + consume', () => {
     it('store and consume — happy path', async () => {
       const h = await setup();
-      const entry = makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' });
-      await h.store.store('pid-1', entry);
+      h.setNowMs(1_700_000_000_123);
+      const draft = makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' });
+      const committed = await h.store.store(draft);
+      expect(committed.receiptId).toBe(draft.receiptId);
+      expect(committed.issuedAt).toBe(1_700_000_000_123);
 
       const result = await h.store.consume('pid-1', 'hash-1');
       expect(result).not.toBe('not_found');
@@ -160,7 +166,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
 
     it('consume is single-use — second consume returns not_found', async () => {
       const h = await setup();
-      await h.store.store('pid-1', makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' }));
+      await h.store.store(makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' }));
 
       const first = await h.store.consume('pid-1', 'hash-1');
       expect(typeof first).toBe('object');
@@ -177,9 +183,10 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
     it('stores and returns isolated current-shape records', async () => {
       const h = await setup();
       const input = makeGeneric({ receiptId: 'pid-isolated', txBytesHash: 'hash-original' });
-      await h.store.store('pid-isolated', input);
+      const committed = await h.store.store(input);
 
       (input as { txBytesHash: string }).txBytesHash = 'hash-mutated-input';
+      committed.txBytesHash = 'hash-mutated-return';
       const firstPeek = await h.store.peek('pid-isolated');
       expect(firstPeek?.txBytesHash).toBe('hash-original');
 
@@ -192,14 +199,25 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       expect((consumed as PreparedTxEntry).txBytesHash).toBe('hash-original');
     });
 
-    it('rejects a key/entry receipt mismatch before creating a record', async () => {
+    it('uses the draft receipt as the sole key and returns the same committed receipt', async () => {
       const h = await setup();
-      await expect(
-        h.store.store('key-receipt', makeGeneric({ receiptId: 'row-receipt' })),
-      ).rejects.toThrow('receiptId argument must match entry.receiptId');
-      await expect(h.store.peek('key-receipt')).resolves.toBeNull();
-      await expect(h.store.peek('row-receipt')).resolves.toBeNull();
-      expect(h.releasedSlots).toEqual([]);
+      h.setNowMs(42_000);
+      const draft = makeGeneric({ receiptId: 'draft-receipt' });
+      const committed = await h.store.store(draft);
+
+      expect(committed.receiptId).toBe('draft-receipt');
+      expect(committed.issuedAt).toBe(42_000);
+      await expect(h.store.peek('draft-receipt')).resolves.toEqual(committed);
+    });
+
+    it('rejects caller-provided issuedAt before creating a record', async () => {
+      const h = await setup();
+      const candidate = { ...makeGeneric({ receiptId: 'caller-time' }), issuedAt: 1 };
+
+      await expect(h.store.store(candidate as PreparedTxDraft)).rejects.toThrow(
+        /unexpected field set/,
+      );
+      await expect(h.store.peek('caller-time')).resolves.toBeNull();
     });
 
     it('rejects non-current runtime records before storing them', async () => {
@@ -209,7 +227,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const invalid: unknown[] = [
         { ...generic, unexpected: true },
         { ...generic, mode: 'future' },
-        { ...generic, issuedAt: '1' },
         { ...generic, nonce: -1n },
         { ...generic, orderId: 7 },
         { ...generic, promotionId: 'cross-mode' },
@@ -217,7 +234,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       ];
 
       for (const candidate of invalid) {
-        await expect(h.store.store('pid-invalid', candidate as PreparedTxEntry)).rejects.toThrow();
+        await expect(h.store.store(candidate as PreparedTxDraft)).rejects.toThrow();
       }
       await expect(h.store.peek('pid-invalid')).resolves.toBeNull();
     });
@@ -229,14 +246,13 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
     it('consume — expired entry releases slot', async () => {
       const h = await setup({ ttlMs: 100 });
       await h.store.store(
-        'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
           sponsorAddress: SLOT_A,
           txBytesHash: 'hash-1',
-          issuedAt: Date.now() - 200,
         }),
       );
+      h.advanceNowMs(101);
 
       const result = await h.store.consume('pid-1', 'hash-1');
       expect(result).toBe('expired');
@@ -247,10 +263,8 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
 
     it('peek — returns null for expired entry', async () => {
       const h = await setup({ ttlMs: 100 });
-      await h.store.store(
-        'pid-exp',
-        makeGeneric({ receiptId: 'pid-exp', issuedAt: Date.now() - 200 }),
-      );
+      await h.store.store(makeGeneric({ receiptId: 'pid-exp' }));
+      h.advanceNowMs(101);
       expect(await h.store.peek('pid-exp')).toBeNull();
     });
   });
@@ -261,7 +275,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
     it('consume — hash_mismatch releases slot', async () => {
       const h = await setup();
       await h.store.store(
-        'pid-1',
         makeGeneric({ receiptId: 'pid-1', sponsorAddress: SLOT_B, txBytesHash: 'correct-hash' }),
       );
 
@@ -279,36 +292,33 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
     it('IP max concurrent — oldest evicted and slot released on overflow', async () => {
       const h = await setup({ maxPerIp: 2 });
 
+      h.setNowMs(1_000);
       await h.store.store(
-        'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
           sponsorAddress: SLOT_A,
           txBytesHash: 'h1',
           clientIp: IP_1,
-          issuedAt: 1_000,
           senderAddress: SENDER_A,
         }),
       );
+      h.advanceNowMs(1);
       await h.store.store(
-        'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
           sponsorAddress: SLOT_B,
           txBytesHash: 'h2',
           clientIp: IP_1,
-          issuedAt: 2_000,
           senderAddress: SENDER_B,
         }),
       );
+      h.advanceNowMs(1);
       await h.store.store(
-        'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
           sponsorAddress: SLOT_C,
           txBytesHash: 'h3',
           clientIp: IP_1,
-          issuedAt: 3_000,
           // Distinct sender keeps this test focused on IP-overflow semantics
           // and avoids colliding with studio-user-quota eviction paths.
           senderAddress: '0xSENDER_C',
@@ -327,7 +337,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const h = await setup({ maxPerIp: 2 });
 
       await h.store.store(
-        'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
           sponsorAddress: SLOT_A,
@@ -337,7 +346,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         }),
       );
       await h.store.store(
-        'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
           sponsorAddress: SLOT_B,
@@ -347,7 +355,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         }),
       );
       await h.store.store(
-        'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
           sponsorAddress: SLOT_C,
@@ -362,42 +369,35 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
 
     it('consume cleans up IP index — allows new entries after consume', async () => {
       const h = await setup({ maxPerIp: 2 });
-      const base = Date.now();
 
       await h.store.store(
-        'pid-1',
         makeGeneric({
           receiptId: 'pid-1',
           sponsorAddress: SLOT_A,
           clientIp: IP_1,
           txBytesHash: 'h1',
           senderAddress: SENDER_A,
-          issuedAt: base,
         }),
       );
       await h.store.store(
-        'pid-2',
         makeGeneric({
           receiptId: 'pid-2',
           sponsorAddress: SLOT_B,
           clientIp: IP_1,
           txBytesHash: 'h2',
           senderAddress: SENDER_B,
-          issuedAt: base + 1,
         }),
       );
 
       await h.store.consume('pid-1', 'h1');
 
       await h.store.store(
-        'pid-3',
         makeGeneric({
           receiptId: 'pid-3',
           sponsorAddress: SLOT_C,
           clientIp: IP_1,
           txBytesHash: 'h3',
           senderAddress: '0xSENDER_C',
-          issuedAt: base + 2,
         }),
       );
 
@@ -413,7 +413,7 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
   describe('peek', () => {
     it('returns entry without consuming', async () => {
       const h = await setup();
-      await h.store.store('pid-1', makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' }));
+      await h.store.store(makeGeneric({ receiptId: 'pid-1', txBytesHash: 'hash-1' }));
       const peeked = await h.store.peek('pid-1');
       expect(peeked).not.toBeNull();
       expect(peeked!.txBytesHash).toBe('hash-1');
@@ -466,7 +466,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       expect(live).toBe(6n);
 
       await h.store.store(
-        'pid-live',
         makeGeneric({
           receiptId: 'pid-live',
           senderAddress: SENDER_A,
@@ -526,7 +525,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       // `userId`, which is absent on the generic path; the gate therefore
       // never runs.
       await h.store.store(
-        'g-1',
         makeGeneric({
           receiptId: 'g-1',
           sponsorAddress: SLOT_A,
@@ -535,7 +533,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         }),
       );
       await h.store.store(
-        'g-2',
         makeGeneric({
           receiptId: 'g-2',
           sponsorAddress: SLOT_B,
@@ -552,7 +549,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const h = await setup({ maxPerStudioUser: 2, maxPerIp: 10 });
 
       await h.store.store(
-        'p-1',
         makePromotion({
           receiptId: 'p-1',
           sponsorAddress: SLOT_A,
@@ -561,7 +557,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
         }),
       );
       await h.store.store(
-        'p-2',
         makePromotion({
           receiptId: 'p-2',
           sponsorAddress: SLOT_B,
@@ -571,7 +566,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       );
       await expect(
         h.store.store(
-          'p-3',
           makePromotion({
             receiptId: 'p-3',
             sponsorAddress: SLOT_C,
@@ -586,7 +580,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       const h = await setup({ maxPerStudioUser: 1, maxPerIp: 10 });
 
       await h.store.store(
-        'g-1',
         makeGeneric({
           receiptId: 'g-1',
           sponsorAddress: SLOT_A,
@@ -597,7 +590,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       // Promotion bucket is empty for this sender, so this must succeed
       // even though generic has an outstanding entry.
       await h.store.store(
-        'p-1',
         makePromotion({
           receiptId: 'p-1',
           sponsorAddress: SLOT_B,
@@ -614,7 +606,6 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       await expect(h.store.checkUserQuota('user-001')).resolves.toBe('ok');
 
       await h.store.store(
-        'p-1',
         makePromotion({
           receiptId: 'p-1',
           sponsorAddress: SLOT_A,
@@ -637,10 +628,10 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       // in CHECK_USER_QUOTA_SCRIPT. Both backends honor the same
       // STORE_SCRIPT-equivalent live-entry rule.
       //
-      // Test design: maxPerStudioUser=1 + 1 past-dated entry is the
+      // Test design: maxPerStudioUser=1 + one clock-expired entry is the
       // minimum case that distinguishes "count physical existence"
       // from "count logical liveness". With maxPerStudioUser=2 and
-      // multiple past-dated stores, STORE_SCRIPT's in-place compaction
+      // multiple expired stores, STORE_SCRIPT's in-place compaction
       // collapses the user index to one entry on each successive
       // store(), so a physical-existence count of 1 is still under
       // any quota >= 2 and the test would pass even under a buggy
@@ -655,20 +646,14 @@ export function runPrepareStoreConformanceTests(factory: PrepareStoreFactory): v
       // produce 'ok' for the wrong reason.
       const h = await setup({ maxPerStudioUser: 1, maxPerIp: 10 });
 
-      // Past-date issuedAt past the conformance ttlMs default so the
-      // entry lands already logically expired (same pattern as the
-      // consume/peek expiry conformance tests above). No real-time
-      // sleep needed.
-      const pastIssuedAt = Date.now() - 60_001;
       await h.store.store(
-        'p-old',
         makePromotion({
           receiptId: 'p-old',
           sponsorAddress: SLOT_A,
           txBytesHash: 'ph-old',
-          issuedAt: pastIssuedAt,
         }),
       );
+      h.advanceNowMs(60_001);
 
       // The single userIndex entry is logically expired. A precheck
       // that only counts physical existence would return exceeded

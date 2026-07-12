@@ -236,9 +236,8 @@ async function callObservabilityHookSwallow<Args extends unknown[]>(
 // ─────────────────────────────────────────────
 
 /**
- * Run the sponsor state machine. Walks every sponsor-side
- * state in the order declared by `SPONSOR_STATE_ORDER`, dispatching
- * the execution policy hook at each state, and returns the
+ * Run the sponsor state machine. Owns the procedural sponsor-side order,
+ * dispatches the execution policy hook at each step, and returns the
  * route-specific result built by `request.projectResult` on success.
  *
  * Cleanup contract:

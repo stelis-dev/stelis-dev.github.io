@@ -92,13 +92,12 @@ describe('InflightReservationImpl', () => {
     };
   }
 
-  test('acquire(route) acquires a handle and marks the reservation as acquired', async () => {
+  test('acquire(route) acquires a limiter handle', async () => {
     const releaseFn = vi.fn().mockResolvedValue(undefined);
     const limiter = makeLimiter({ release: releaseFn });
     const r = new InflightReservationImpl(limiter);
 
     await r.acquire('generic');
-    expect(r.isAcquired()).toBe(true);
     expect(limiter.tryAcquire).toHaveBeenCalledWith('generic');
   });
 
@@ -106,7 +105,6 @@ describe('InflightReservationImpl', () => {
     const limiter = makeLimiter(null);
     const r = new InflightReservationImpl(limiter);
     await expect(r.acquire('generic')).rejects.toBeInstanceOf(PrepareOverloadError);
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() invokes the handle release exactly once and is idempotent', async () => {
@@ -120,7 +118,6 @@ describe('InflightReservationImpl', () => {
     await r.release();
 
     expect(releaseFn).toHaveBeenCalledTimes(1);
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() emits PREPARE_INFLIGHT_RELEASE_FAILED with route + error message on throw', async () => {
@@ -193,7 +190,6 @@ describe('SponsorSlotReservationImpl', () => {
     expect(ev!.receiptId).toBe('0xRECEIPT');
     expect(ev!.reservationKind).toBe('SponsorSlot');
     expect(ev!.isLive()).toBe(true);
-    expect(r.isAcquired()).toBe(true);
   });
 
   test('acquire returns null when the pool is exhausted and stays in pending state', async () => {
@@ -201,7 +197,6 @@ describe('SponsorSlotReservationImpl', () => {
     const r = new SponsorSlotReservationImpl(pool);
     const ev = await r.acquire('0xRECEIPT');
     expect(ev).toBeNull();
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('commitToTxBytesHash forwards to pool.commit(sponsorAddress, receiptId, hash)', async () => {
@@ -229,7 +224,6 @@ describe('SponsorSlotReservationImpl', () => {
     await r.release();
 
     expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'h'.repeat(64));
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() before commitToTxBytesHash passes null to pool.checkin (reserved-stage hand-off)', async () => {
@@ -262,16 +256,6 @@ describe('SponsorSlotReservationImpl', () => {
     await r.release();
 
     expect(pool.checkin).not.toHaveBeenCalled();
-  });
-
-  test('reservationHandle returns the live token after acquire', async () => {
-    const pool = makePool({ sponsorAddress: '0xSP' });
-    const r = new SponsorSlotReservationImpl(pool);
-    await r.acquire('0xRECEIPT');
-
-    const handle = r.reservationHandle();
-    expect(handle.sponsorAddress).toBe('0xSP');
-    expect(handle.isLive()).toBe(true);
   });
 });
 
@@ -314,7 +298,6 @@ describe('NonceReservationImpl', () => {
     await r.release();
 
     expect(store.releaseReservation).toHaveBeenCalledWith('0xRECEIPT', '0xSENDER');
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() silently swallows store.releaseReservation throws', async () => {
@@ -428,7 +411,6 @@ describe('LedgerBudgetReservationImpl', () => {
     const r = new LedgerBudgetReservationImpl(ledger);
     const ev = await r.acquire(ACQUIRE_PARAMS);
     expect(ev).toBeNull();
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('consume(actualGasMist) forwards to ledger.consume and marks handle consumed', async () => {
@@ -457,7 +439,6 @@ describe('LedgerBudgetReservationImpl', () => {
     await r.release();
 
     expect(ledger.release).toHaveBeenCalledWith('0xR');
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() emits LEDGER_RELEASE_FAILED_IN_HANDLER on result.ok=false', async () => {
@@ -493,21 +474,6 @@ describe('LedgerBudgetReservationImpl', () => {
     expect(event!['triggerReason']).toBe('prepare_store_failed');
   });
 
-  test('setTriggerReason updates the structured-log payload before release', async () => {
-    const ledger = makeLedger({ releaseOk: false, releaseReason: 'reservation_not_found' });
-    const r = new LedgerBudgetReservationImpl(ledger);
-    await r.acquire(ACQUIRE_PARAMS);
-
-    r.setTriggerReason('sponsor_failed');
-    await r.release();
-
-    const event = findStructuredEvent(
-      { error: consoleErrorSpy, warn: consoleWarnSpy, info: consoleInfoSpy },
-      'LEDGER_RELEASE_FAILED_IN_HANDLER',
-    );
-    expect(event!['triggerReason']).toBe('sponsor_failed');
-  });
-
   test('transferOwnership() then release() does not call ledger.release', async () => {
     const ledger = makeLedger();
     const r = new LedgerBudgetReservationImpl(ledger);
@@ -517,34 +483,5 @@ describe('LedgerBudgetReservationImpl', () => {
     await r.release();
 
     expect(ledger.release).not.toHaveBeenCalled();
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 5 — module API
-// ─────────────────────────────────────────────
-
-describe('Concrete reservations — module API', () => {
-  test('directory internal barrel exposes the four concrete classes', async () => {
-    const barrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
-      string,
-      unknown
-    >;
-    expect(barrel.InflightReservationImpl).toBeDefined();
-    expect(barrel.SponsorSlotReservationImpl).toBeDefined();
-    expect(barrel.NonceReservationImpl).toBeDefined();
-    expect(barrel.LedgerBudgetReservationImpl).toBeDefined();
-  });
-
-  test('package main barrel does NOT re-export the concrete classes', async () => {
-    const mainBarrel = await import('@stelis/core-api');
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'InflightReservationImpl')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'SponsorSlotReservationImpl')).toBe(
-      false,
-    );
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'NonceReservationImpl')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'LedgerBudgetReservationImpl')).toBe(
-      false,
-    );
   });
 });

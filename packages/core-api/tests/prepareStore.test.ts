@@ -3,14 +3,14 @@
  *
  * The shared behavioral contract is exercised by
  * `prepareStore.conformance.ts`. Memory-only cases (background
- * eviction timing, stale-pending TTL compaction via real
- * setTimeout) live below under the "MemoryPrepareStore — impl-only"
+ * eviction timing and stale-pending TTL compaction via an injected clock)
+ * live below under the "MemoryPrepareStore — impl-only"
  * describe. Redis implements the same contract with different expiry
  * plumbing and is covered separately in `redisPrepareStore.test.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
-import type { GenericPreparedTxEntry, PreparedTxEntry } from '../src/store/prepareTypes.js';
+import type { GenericPreparedTxDraft, PreparedTxEntry } from '../src/store/prepareTypes.js';
 import {
   runPrepareStoreConformanceTests,
   type PrepareStoreFactory,
@@ -29,6 +29,7 @@ const memoryFactory: PrepareStoreFactory = ({
   maxOutstandingPerSender,
 }) => {
   const releasedSlots: ReleasedSlot[] = [];
+  let nowMs = 1_700_000_000_000;
   const store = new MemoryPrepareStore(
     (sponsorAddress, receiptId, txBytesHash) => {
       releasedSlots.push({ sponsorAddress, receiptId, txBytesHash });
@@ -41,12 +42,18 @@ const memoryFactory: PrepareStoreFactory = ({
     // the internal _evictExpired() directly as a white-box test.
     60_000,
     undefined,
-    undefined,
+    { nowMs: () => nowMs },
     maxOutstandingPerSender,
   );
   const handle: PrepareStoreHandle = {
     store,
     releasedSlots,
+    setNowMs: (value) => {
+      nowMs = value;
+    },
+    advanceNowMs: (deltaMs) => {
+      nowMs += deltaMs;
+    },
     dispose: () => store.dispose(),
   };
   return handle;
@@ -64,8 +71,8 @@ describe('MemoryPrepareStore — impl-only', () => {
   // These cases exercise behaviors that exist only on the in-memory
   // implementation and have no direct Redis equivalent:
   //   - background eviction timer driven by setInterval
-  //   - logical-expiry / stale-pending compaction that depends on
-  //     real setTimeout delay rather than PX TTL on a Redis key.
+  //   - logical-expiry / stale-pending compaction driven by the store's
+  //     injected clock rather than Redis TIME / PX TTL.
   // They are deliberately not part of the shared conformance suite.
 
   const IP_1 = '192.168.1.1';
@@ -79,9 +86,8 @@ describe('MemoryPrepareStore — impl-only', () => {
     expect(() => new MemoryPrepareStore(() => {}, 60_000, 2, 3, 1.5)).toThrow('safe integer');
   });
 
-  function makeEntry(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+  function makeDraft(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
     return {
-      issuedAt: Date.now(),
       receiptId: 'pid-default',
       senderAddress: '0xSENDER',
       nonce: 1n,
@@ -96,6 +102,7 @@ describe('MemoryPrepareStore — impl-only', () => {
   }
 
   let store: MemoryPrepareStore | null = null;
+  let nowMs = 1_000;
   const releasedSlots: Array<{
     sponsorAddress: string;
     receiptId: string;
@@ -104,6 +111,7 @@ describe('MemoryPrepareStore — impl-only', () => {
 
   function create(ttlMs: number): MemoryPrepareStore {
     releasedSlots.length = 0;
+    nowMs = 1_000;
     store = new MemoryPrepareStore(
       (sponsorAddress, receiptId, txBytesHash) => {
         releasedSlots.push({ sponsorAddress, receiptId, txBytesHash });
@@ -111,6 +119,9 @@ describe('MemoryPrepareStore — impl-only', () => {
       ttlMs,
       2,
       60_000,
+      60_000,
+      undefined,
+      { nowMs: () => nowMs },
     );
     return store;
   }
@@ -122,15 +133,8 @@ describe('MemoryPrepareStore — impl-only', () => {
 
   it('background eviction removes expired entries from map', async () => {
     const s = create(100);
-    await s.store(
-      'pid-1',
-      makeEntry({
-        receiptId: 'pid-1',
-        sponsorAddress: SLOT_A,
-        txBytesHash: 'hash-1',
-        issuedAt: Date.now() - 200,
-      }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-1', sponsorAddress: SLOT_A, txBytesHash: 'hash-1' }));
+    nowMs += 200;
 
     // White-box: invoke the private sweep. This is the only way to
     // verify the scheduled timer's behavior without waiting 15s.
@@ -155,15 +159,14 @@ describe('MemoryPrepareStore — impl-only', () => {
     const first = await s.reserveNonce(sender, 0n, 'mg-A');
     expect(first).toBe(1n);
     await s.store(
-      'mg-A',
-      makeEntry({
+      makeDraft({
         receiptId: 'mg-A',
         senderAddress: sender,
         nonce: 1n,
         txBytesHash: 'hash-mg',
-        issuedAt: Date.now() - 200,
       }),
     );
+    nowMs += 200;
     // Entry is logically expired (issuedAt + 100 < now) but not yet swept.
     const next = await s.reserveNonce(sender, 0n, 'mg-B');
     expect(next).toBe(1n);
@@ -179,11 +182,31 @@ describe('MemoryPrepareStore — impl-only', () => {
     expect(n2).toBe(2n);
     await s.releaseReservation('res-fresh', sender);
 
-    await new Promise((r) => setTimeout(r, 150));
+    nowMs += 150;
 
     const n3 = await s.reserveNonce(sender, 0n, 'res-after');
     expect(n3).toBe(1n);
     await s.releaseReservation('res-after', sender);
+  });
+
+  it('store stamps its injected clock once and returns an isolated committed entry', async () => {
+    const clockNow = vi.fn(() => 7_654_321);
+    store = new MemoryPrepareStore(() => {}, 60_000, 2, 3, 60_000, undefined, {
+      nowMs: clockNow,
+    });
+    const draft = makeDraft({ receiptId: 'clock-owned', txBytesHash: 'hash-original' });
+
+    const committed = await store.store(draft);
+
+    expect(clockNow).toHaveBeenCalledTimes(1);
+    expect(committed.issuedAt).toBe(7_654_321);
+    expect(committed.receiptId).toBe(draft.receiptId);
+    expect(draft).not.toHaveProperty('issuedAt');
+
+    committed.txBytesHash = 'mutated-return';
+    const peeked = await store.peek(draft.receiptId);
+    expect(peeked?.txBytesHash).toBe('hash-original');
+    expect(peeked?.issuedAt).toBe(7_654_321);
   });
 });
 
@@ -199,9 +222,8 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
   const SLOT_C = 'slot-c';
   const SENDER = '0xSENDER';
 
-  function makeEntry(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+  function makeDraft(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
     return {
-      issuedAt: Date.now(),
       receiptId: 'pid-default',
       senderAddress: SENDER,
       nonce: 1n,
@@ -216,13 +238,18 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
   }
 
   let store: MemoryPrepareStore | null = null;
+  let nowMs = 2_000;
 
   function create(ttlMs: number, maxPerIp = 2): MemoryPrepareStore {
+    nowMs = 2_000;
     store = new MemoryPrepareStore(
       () => Promise.reject(new Error('release-callback-failed')),
       ttlMs,
       maxPerIp,
       60_000,
+      60_000,
+      undefined,
+      { nowMs: () => nowMs },
     );
     return store;
   }
@@ -249,10 +276,8 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
 
   it('consume() expired — release rejection emits warn', async () => {
     const s = create(100);
-    await s.store(
-      'pid-1',
-      makeEntry({ receiptId: 'pid-1', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-1', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await s.consume('pid-1', 'hash-abc')).toBe('expired');
@@ -272,8 +297,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
   it('consume() hash_mismatch — release rejection emits warn', async () => {
     const s = create(60_000);
     await s.store(
-      'pid-2',
-      makeEntry({ receiptId: 'pid-2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
+      makeDraft({ receiptId: 'pid-2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -290,7 +314,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
 
   it('evictPreparedEntry() — release rejection emits warn', async () => {
     const s = create(60_000);
-    await s.store('pid-3', makeEntry({ receiptId: 'pid-3', sponsorAddress: SLOT_C }));
+    await s.store(makeDraft({ receiptId: 'pid-3', sponsorAddress: SLOT_C }));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.evictPreparedEntry('pid-3');
@@ -305,10 +329,8 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
 
   it('_evictExpired() background — release rejection emits warn', async () => {
     const s = create(100);
-    await s.store(
-      'pid-4',
-      makeEntry({ receiptId: 'pid-4', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-4', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       (s as unknown as { _evictExpired: () => void })._evictExpired();
@@ -327,8 +349,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
   it('store() IP eviction — release rejection emits warn', async () => {
     const s = create(60_000, 1);
     await s.store(
-      'pid-a',
-      makeEntry({
+      makeDraft({
         receiptId: 'pid-a',
         sponsorAddress: SLOT_A,
         clientIp: IP_2,
@@ -338,8 +359,7 @@ describe('MemoryPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_R
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
-        'pid-b',
-        makeEntry({
+        makeDraft({
           receiptId: 'pid-b',
           sponsorAddress: SLOT_B,
           clientIp: IP_2,
@@ -375,9 +395,8 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
   const SLOT_A = 'slot-a';
   const SLOT_B = 'slot-b';
 
-  function makeEntry(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+  function makeDraft(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
     return {
-      issuedAt: Date.now(),
       receiptId: 'pid-default',
       senderAddress: '0xSENDER',
       nonce: 1n,
@@ -392,8 +411,10 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
   }
 
   let store: MemoryPrepareStore | null = null;
+  let nowMs = 3_000;
 
   function createSyncThrowing(ttlMs: number, maxPerIp = 2): MemoryPrepareStore {
+    nowMs = 3_000;
     store = new MemoryPrepareStore(
       () => {
         throw new Error('release-sync-throw');
@@ -401,6 +422,9 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
       ttlMs,
       maxPerIp,
       60_000,
+      60_000,
+      undefined,
+      { nowMs: () => nowMs },
     );
     return store;
   }
@@ -427,10 +451,8 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
 
   it('consume() expired — sync throw emits warn', async () => {
     const s = createSyncThrowing(100);
-    await s.store(
-      'pid-s1',
-      makeEntry({ receiptId: 'pid-s1', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-s1', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await s.consume('pid-s1', 'hash-abc')).toBe('expired');
@@ -447,8 +469,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
   it('consume() hash_mismatch — sync throw emits warn', async () => {
     const s = createSyncThrowing(60_000);
     await s.store(
-      'pid-s2',
-      makeEntry({ receiptId: 'pid-s2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
+      makeDraft({ receiptId: 'pid-s2', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -465,10 +486,8 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
 
   it('_evictExpired() background — sync throw emits warn', async () => {
     const s = createSyncThrowing(100);
-    await s.store(
-      'pid-s4',
-      makeEntry({ receiptId: 'pid-s4', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-s4', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       (s as unknown as { _evictExpired: () => void })._evictExpired();
@@ -487,8 +506,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
   it('store() IP eviction — sync throw emits warn', async () => {
     const s = createSyncThrowing(60_000, 1);
     await s.store(
-      'pid-sa',
-      makeEntry({
+      makeDraft({
         receiptId: 'pid-sa',
         sponsorAddress: SLOT_A,
         clientIp: IP_2,
@@ -498,8 +516,7 @@ describe('MemoryPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
-        'pid-sb',
-        makeEntry({
+        makeDraft({
           receiptId: 'pid-sb',
           sponsorAddress: SLOT_B,
           clientIp: IP_2,
@@ -535,9 +552,8 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
   const SLOT_A = 'slot-a';
   const SLOT_B = 'slot-b';
 
-  function makeEntry(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
+  function makeDraft(overrides: Partial<GenericPreparedTxDraft> = {}): GenericPreparedTxDraft {
     return {
-      issuedAt: Date.now(),
       receiptId: 'pid-default',
       senderAddress: '0xSENDER',
       nonce: 1n,
@@ -552,12 +568,14 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
   }
 
   let store: MemoryPrepareStore | null = null;
+  let nowMs = 4_000;
 
   function createWithEvictCallback(
     ttlMs: number,
     onEntryEvict: (entry: PreparedTxEntry) => void | Promise<void>,
     maxPerIp = 2,
   ): MemoryPrepareStore {
+    nowMs = 4_000;
     store = new MemoryPrepareStore(
       () => {
         /* onRelease: succeed silently, this describe focuses on _onEntryEvict */
@@ -567,6 +585,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
       60_000,
       60_000,
       onEntryEvict,
+      { nowMs: () => nowMs },
     );
     return store;
   }
@@ -604,8 +623,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
       1,
     );
     await s.store(
-      'pid-a',
-      makeEntry({
+      makeDraft({
         receiptId: 'pid-a',
         sponsorAddress: SLOT_A,
         clientIp: IP_2,
@@ -615,8 +633,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
-        'pid-b',
-        makeEntry({
+        makeDraft({
           receiptId: 'pid-b',
           sponsorAddress: SLOT_B,
           clientIp: IP_2,
@@ -640,8 +657,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
   it('store() IP eviction — rejected promise emits warn', async () => {
     const s = createWithEvictCallback(60_000, () => Promise.reject(new Error('evict-reject')), 1);
     await s.store(
-      'pid-a',
-      makeEntry({
+      makeDraft({
         receiptId: 'pid-a',
         sponsorAddress: SLOT_A,
         clientIp: IP_2,
@@ -651,8 +667,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.store(
-        'pid-b',
-        makeEntry({
+        makeDraft({
           receiptId: 'pid-b',
           sponsorAddress: SLOT_B,
           clientIp: IP_2,
@@ -678,10 +693,8 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(100, () => {
       throw new Error('evict-sync-throw');
     });
-    await s.store(
-      'pid-exp',
-      makeEntry({ receiptId: 'pid-exp', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-exp', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await s.consume('pid-exp', 'hash-abc')).toBe('expired');
@@ -700,10 +713,8 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
 
   it('consume() expired — rejected promise emits warn', async () => {
     const s = createWithEvictCallback(100, () => Promise.reject(new Error('evict-reject')));
-    await s.store(
-      'pid-exp',
-      makeEntry({ receiptId: 'pid-exp', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-exp', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await s.consume('pid-exp', 'hash-abc')).toBe('expired');
@@ -726,8 +737,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
       throw new Error('evict-sync-throw');
     });
     await s.store(
-      'pid-hm',
-      makeEntry({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
+      makeDraft({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -748,8 +758,7 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
   it('consume() hash_mismatch — rejected promise emits warn', async () => {
     const s = createWithEvictCallback(60_000, () => Promise.reject(new Error('evict-reject')));
     await s.store(
-      'pid-hm',
-      makeEntry({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
+      makeDraft({ receiptId: 'pid-hm', sponsorAddress: SLOT_B, txBytesHash: 'correct' }),
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -772,10 +781,8 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
     const s = createWithEvictCallback(100, () => {
       throw new Error('evict-sync-throw');
     });
-    await s.store(
-      'pid-bg',
-      makeEntry({ receiptId: 'pid-bg', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-bg', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       (s as unknown as { _evictExpired: () => void })._evictExpired();
@@ -794,10 +801,8 @@ describe('MemoryPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT
 
   it('_evictExpired() background — rejected promise emits warn', async () => {
     const s = createWithEvictCallback(100, () => Promise.reject(new Error('evict-reject')));
-    await s.store(
-      'pid-bg',
-      makeEntry({ receiptId: 'pid-bg', sponsorAddress: SLOT_A, issuedAt: Date.now() - 200 }),
-    );
+    await s.store(makeDraft({ receiptId: 'pid-bg', sponsorAddress: SLOT_A }));
+    nowMs += 200;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       (s as unknown as { _evictExpired: () => void })._evictExpired();

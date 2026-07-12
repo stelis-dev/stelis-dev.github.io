@@ -298,14 +298,10 @@ describe('createGenericExecutionPolicy', () => {
 
     expect(policy.discriminator).toBe('generic');
     expect(policy.handleRequirements.gasBoundBuild).toEqual({
-      sponsorSlot: true,
       nonce: true,
     });
-    expect(policy.handleRequirements.preparedCommit).toEqual({
-      sponsorSlot: true,
-      nonce: true,
-    });
-    expect(policy.handleRequirements.sponsorResult).toEqual({ sponsorSlot: true });
+    expect(policy.handleRequirements.preparedCommit).toEqual({});
+    expect(policy.handleRequirements.sponsorResult).toEqual({});
     expect(policy.hooks.RouteReservationAfterBuild).toBeDefined();
   });
 
@@ -341,15 +337,18 @@ describe('createGenericExecutionPolicy', () => {
         store: vi.fn(),
       },
     };
-    const preparedCommitInputs = vi.fn();
+    const preparedDraftFields = vi.fn();
+    const projectResponse = vi.fn();
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     try {
       const err = await runPrepareStateMachine(
         host,
         {
-          hookContext: makePrepareHookCtx(),
-          preparedCommitInputs,
+          senderAddress: makePrepareHookCtx().senderAddress,
+          clientIp: makePrepareHookCtx().clientIp,
+          preparedDraftFields,
+          projectResponse,
         },
         policy,
       ).catch((caught: unknown) => caught);
@@ -367,7 +366,8 @@ describe('createGenericExecutionPolicy', () => {
       expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
       expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
       expect(host.prepareStore.store).not.toHaveBeenCalled();
-      expect(preparedCommitInputs).not.toHaveBeenCalled();
+      expect(preparedDraftFields).not.toHaveBeenCalled();
+      expect(projectResponse).not.toHaveBeenCalled();
       expect(recordSponsorFailure).not.toHaveBeenCalled();
 
       const buildEvents = infoSpy.mock.calls

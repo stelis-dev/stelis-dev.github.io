@@ -1,24 +1,11 @@
 /**
- * runPrepareStateMachine.test.ts — prepare-side `SponsoredExecution` runner.
+ * Prepare runner procedure and ownership-boundary tests.
  *
- * Pins the runner architecture and cleanup-ordering contracts:
- *
- *   - States walk in the order declared by `PREPARE_STATE_ORDER`.
- *   - Every state's policy hook fires exactly once on the success path.
- *   - Reservations are acquired in fixed order: inflight, sponsor slot,
- *     (optional) nonce, gas-bound build, (optional) ledger.
- *   - On any failure, reservations release in REVERSE acquired order.
- *   - Inflight ALWAYS releases (non-transferable).
- *   - Slot / nonce / ledger transfer ownership at the
- *     `AwaitUserSignature` boundary; their `release()` calls become
- *     no-ops on the success path.
- *
- * The test uses real `MemoryPrepareInflight`, `MemoryPrepareStore`,
- * and `MemoryPromotionExecutionLedger` adapters plus a real
- * `SponsorPool` (in-memory) so the runner-side acquire / release
- * actually exercises the production reservation classes.
+ * Expected traces are written independently from production declarations. Each
+ * success trace observes both policy hooks and the host ports that acquire,
+ * commit, store, and release resources.
  */
-import { describe, test, expect } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { toHex } from '@mysten/sui/utils';
 import {
@@ -30,161 +17,227 @@ import {
   type PrepareStateMachineRequest,
 } from '../src/session/sponsoredExecution/runner.js';
 import type {
-  SponsoredExecutionPolicy,
-  PolicyHooks,
-  PreparePolicyHookContext,
   GasBoundBuildResult,
-  PreparedCommitInputs,
+  PolicyHooks,
+  SponsoredExecutionPolicy,
 } from '../src/session/sponsoredExecution/index.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { SponsorPool } from '../src/context.js';
-import { PREPARE_STATE_ORDER } from '../src/session/sponsoredExecution/states.js';
-
-// ─────────────────────────────────────────────
-// Shared fixtures
-// ─────────────────────────────────────────────
 
 const SPONSOR_KP = Ed25519Keypair.generate();
-const TEST_HMAC_SECRET = 'pr-1-2-runner-test-hmac-secret-00000';
+const TEST_HMAC_SECRET = 'unit-8-prepare-runner-test-hmac-secret';
+const TEST_SENDER = `0x${'be'.repeat(32)}`;
+const TEST_PROMO = 'unit-8-promotion';
+const TEST_USER = 'unit-8-user';
+const TEST_CLIENT_IP = '127.0.0.1';
+const TEST_BUILD_RESULT: GasBoundBuildResult = {
+  txBytes: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]),
+  txBytesHash: 'a'.repeat(64),
+  measuredGasMist: 1_400_000n,
+};
 
-interface HookCallLog {
-  state: string;
-  args: unknown[];
+type Trace = string[];
+
+interface TestPrepareResponse {
+  readonly receiptId: string;
+  readonly draftReceiptId: string;
+  readonly txBytesHash: string;
 }
 
-function makeMockHooks(opts?: { buildResult?: GasBoundBuildResult; failAtState?: string }): {
-  hooks: SponsoredExecutionPolicy['hooks'];
-  log: HookCallLog[];
-} {
-  const log: HookCallLog[] = [];
-  const buildResult: GasBoundBuildResult = opts?.buildResult ?? {
-    txBytes: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]),
-    txBytesHash: 'a'.repeat(64),
-    measuredGasMist: 1_400_000n,
-  };
-  const recordingHook =
-    (state: string) =>
-    (...args: unknown[]) => {
-      log.push({ state, args });
-      if (opts?.failAtState === state) {
-        throw new Error(`policy fault at ${state}`);
-      }
-    };
-  const recordingObjectHook =
-    (state: string) =>
-    (...args: unknown[]) => {
-      log.push({ state, args });
-      if (opts?.failAtState === state) {
-        throw new Error(`policy fault at ${state}`);
-      }
-      return {};
-    };
+interface PolicyOptions {
+  readonly buildResult?: GasBoundBuildResult;
+  readonly failAtHook?: string;
+}
 
-  const hooks: PolicyHooks = {
-    Intent: recordingHook('Intent'),
-    RequestValidation: recordingHook('RequestValidation'),
-    InflightAdmission: recordingHook('InflightAdmission'),
-    ChainSnapshot: recordingObjectHook('ChainSnapshot'),
-    ExecutionPolicySelected: recordingHook('ExecutionPolicySelected'),
-    SlotFreePlan: recordingHook('SlotFreePlan'),
-    ReceiptIdGenerated: recordingHook('ReceiptIdGenerated'),
-    SponsorSlotReservationAcquired: recordingHook('SponsorSlotReservationAcquired'),
-    // Optional hooks — registered in the test policy so the
-    // state-walk test can observe whether the runner fires them. The
-    // runner consults `handleRequirements` to decide whether to
-    // acquire the matching reservation; once acquired, the hook fires
-    // for any policy-side observability.
-    RouteReservationBeforeBuild: recordingHook('RouteReservationBeforeBuild'),
-    RouteReservationAfterBuild: recordingHook('RouteReservationAfterBuild'),
-    GasBoundBuild: (...args: unknown[]) => {
-      log.push({ state: 'GasBoundBuild', args });
-      if (opts?.failAtState === 'GasBoundBuild') {
-        throw new Error('policy fault at GasBoundBuild');
-      }
+function recordHook(trace: Trace, name: string, failAtHook?: string): void {
+  trace.push(`hook:${name}`);
+  if (failAtHook === name) throw new Error(`policy fault at ${name}`);
+}
+
+function makeMockHooks(trace: Trace, options: PolicyOptions = {}): PolicyHooks {
+  const buildResult = options.buildResult ?? TEST_BUILD_RESULT;
+  const hook = (name: string) => () => recordHook(trace, name, options.failAtHook);
+  return {
+    Intent: hook('Intent'),
+    RequestValidation: hook('RequestValidation'),
+    InflightAdmission: hook('InflightAdmission'),
+    ChainSnapshot: () => {
+      recordHook(trace, 'ChainSnapshot', options.failAtHook);
+      return {};
+    },
+    ExecutionPolicySelected: hook('ExecutionPolicySelected'),
+    SlotFreePlan: hook('SlotFreePlan'),
+    SponsorSlotReservationAcquired: hook('SponsorSlotReservationAcquired'),
+    RouteReservationBeforeBuild: hook('RouteReservationBeforeBuild'),
+    GasBoundBuild: () => {
+      recordHook(trace, 'GasBoundBuild', options.failAtHook);
       return buildResult;
     },
-    SelfCheck: recordingHook('SelfCheck'),
-    SponsorLeaseCommitted: recordingHook('SponsorLeaseCommitted'),
-    PrepareStored: recordingHook('PrepareStored'),
-    AwaitUserSignature: recordingHook('AwaitUserSignature'),
-    DecodeSponsorSubmission: recordingHook('DecodeSponsorSubmission'),
-    UserSignatureValidation: recordingHook('UserSignatureValidation'),
-    Consume: recordingHook('Consume'),
-    SharedPostconsumeChecks: recordingObjectHook('SharedPostconsumeChecks'),
-    PolicyPostconsumeChecks: recordingObjectHook('PolicyPostconsumeChecks'),
-    Preflight: recordingHook('Preflight'),
-    PolicyApproval: recordingHook('PolicyApproval'),
-    SponsorSign: recordingHook('SponsorSign'),
-    Submit: recordingHook('Submit'),
-    ClassifySponsorResult: recordingHook('ClassifySponsorResult'),
-    Release: recordingHook('Release'),
-  };
-
-  return { hooks, log };
-}
-
-function makeGenericPolicy(opts?: Parameters<typeof makeMockHooks>[0]): {
-  policy: SponsoredExecutionPolicy<'generic'>;
-  log: HookCallLog[];
-} {
-  const { hooks, log } = makeMockHooks(opts);
-  const chainSnapshot = (...args: unknown[]) => {
-    log.push({ state: 'ChainSnapshot', args });
-    if (opts?.failAtState === 'ChainSnapshot') {
-      throw new Error('policy fault at ChainSnapshot');
-    }
-    return { nonceAcquire: { onchainLastNonce: 0n } };
-  };
-  return {
-    policy: {
-      discriminator: 'generic',
-      handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true, nonce: true },
-        preparedCommit: { sponsorSlot: true, nonce: true },
-        sponsorResult: { sponsorSlot: true },
-      },
-      hooks: { ...hooks, ChainSnapshot: chainSnapshot },
-    },
-    log,
+    RouteReservationAfterBuild: hook('RouteReservationAfterBuild'),
+    SelfCheck: hook('SelfCheck'),
+    SponsorLeaseCommitted: hook('SponsorLeaseCommitted'),
+    DecodeSponsorSubmission: () => {},
+    UserSignatureValidation: () => {},
+    Consume: () => {},
+    SharedPostconsumeChecks: () => ({}),
+    PolicyPostconsumeChecks: () => ({}),
+    Preflight: () => {},
+    PolicyApproval: () => {},
+    SponsorSign: () => {},
+    Submit: () => {},
+    ClassifySponsorResult: () => {},
+    Release: () => {},
   };
 }
 
-function makePromotionPolicy(opts?: Parameters<typeof makeMockHooks>[0]): {
-  policy: SponsoredExecutionPolicy<'promotion'>;
-  log: HookCallLog[];
-} {
-  const { hooks, log } = makeMockHooks(opts);
+function makeGenericPolicy(
+  trace: Trace = [],
+  options: PolicyOptions = {},
+): SponsoredExecutionPolicy<'generic'> {
+  const hooks = makeMockHooks(trace, options);
   return {
-    policy: {
-      discriminator: 'promotion',
-      handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true },
-        preparedCommit: { sponsorSlot: true, ledgerReservation: true },
-        sponsorResult: { sponsorSlot: true, ledgerReservation: true },
-      },
-      hooks,
+    discriminator: 'generic',
+    handleRequirements: {
+      gasBoundBuild: { nonce: true },
+      preparedCommit: {},
+      sponsorResult: {},
     },
-    log,
+    hooks: {
+      ...hooks,
+      ChainSnapshot: () => {
+        recordHook(trace, 'ChainSnapshot', options.failAtHook);
+        return { nonceAcquire: { onchainLastNonce: 0n } };
+      },
+    },
+  };
+}
+
+function makePromotionPolicy(
+  trace: Trace = [],
+  options: PolicyOptions = {},
+): SponsoredExecutionPolicy<'promotion'> {
+  return {
+    discriminator: 'promotion',
+    handleRequirements: {
+      gasBoundBuild: {},
+      preparedCommit: { ledgerReservation: true },
+      sponsorResult: { ledgerReservation: true },
+    },
+    hooks: makeMockHooks(trace, options),
+  };
+}
+
+/** Synthetic runner policy used only to prove cleanup of every handle kind. */
+function makeAllReservationPolicy(trace: Trace): SponsoredExecutionPolicy {
+  const promotion = makePromotionPolicy(trace);
+  return {
+    ...promotion,
+    handleRequirements: {
+      gasBoundBuild: { nonce: true },
+      preparedCommit: { ledgerReservation: true },
+      sponsorResult: { ledgerReservation: true },
+    },
+    hooks: {
+      ...promotion.hooks,
+      ChainSnapshot: () => {
+        recordHook(trace, 'ChainSnapshot');
+        return { nonceAcquire: { onchainLastNonce: 0n } };
+      },
+    },
   };
 }
 
 interface HostBuild {
-  host: PrepareStateMachineHost;
-  inflight: MemoryPrepareInflight;
-  prepareStore: MemoryPrepareStore;
-  ledger: MemoryPromotionExecutionLedger;
-  sponsorPool: SponsorPool;
+  readonly host: PrepareStateMachineHost;
+  readonly inflight: MemoryPrepareInflight;
+  readonly prepareStore: MemoryPrepareStore;
+  readonly ledger: MemoryPromotionExecutionLedger;
+  readonly sponsorPool: SponsorPool;
+  readonly observedReceiptIds: {
+    readonly checkout: string[];
+    readonly commit: string[];
+    readonly nonce: string[];
+    readonly store: string[];
+  };
 }
 
-function makeHost(): HostBuild {
+function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = {}): HostBuild {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const ledger = new MemoryPromotionExecutionLedger();
   const inflight = new MemoryPrepareInflight(8);
+  const observedReceiptIds = {
+    checkout: [] as string[],
+    commit: [] as string[],
+    nonce: [] as string[],
+    store: [] as string[],
+  };
+
+  const originalTryAcquire = inflight.tryAcquire.bind(inflight);
+  inflight.tryAcquire = async (route?: string) => {
+    trace.push('port:inflight.acquire');
+    const handle = await originalTryAcquire(route);
+    if (!handle) return null;
+    return {
+      release: async () => {
+        trace.push('port:inflight.release');
+        await handle.release();
+      },
+    };
+  };
+
+  const originalCheckout = sponsorPool.checkout.bind(sponsorPool);
+  sponsorPool.checkout = async (receiptId: string) => {
+    trace.push('port:sponsor.checkout');
+    observedReceiptIds.checkout.push(receiptId);
+    return originalCheckout(receiptId);
+  };
+  const originalCommit = sponsorPool.commit.bind(sponsorPool);
+  sponsorPool.commit = async (sponsorAddress, receiptId, txBytesHash) => {
+    trace.push('port:sponsor.commit');
+    observedReceiptIds.commit.push(receiptId);
+    await originalCommit(sponsorAddress, receiptId, txBytesHash);
+  };
+  const originalCheckin = sponsorPool.checkin.bind(sponsorPool);
+  sponsorPool.checkin = async (sponsorAddress, receiptId, txBytesHash) => {
+    trace.push('port:sponsor.checkin');
+    await originalCheckin(sponsorAddress, receiptId, txBytesHash);
+  };
+
+  const originalStore = prepareStore.store.bind(prepareStore);
+  prepareStore.store = async (draft) => {
+    trace.push('port:store');
+    observedReceiptIds.store.push(draft.receiptId);
+    if (options.storeError) throw options.storeError;
+    return originalStore(draft);
+  };
+  const originalReserveNonce = prepareStore.reserveNonce.bind(prepareStore);
+  prepareStore.reserveNonce = async (senderAddress, onchainLastNonce, reservationId) => {
+    trace.push('port:nonce.reserve');
+    observedReceiptIds.nonce.push(reservationId);
+    return originalReserveNonce(senderAddress, onchainLastNonce, reservationId);
+  };
+  const originalReleaseReservation = prepareStore.releaseReservation.bind(prepareStore);
+  prepareStore.releaseReservation = async (reservationId, senderAddress) => {
+    trace.push('port:nonce.release');
+    await originalReleaseReservation(reservationId, senderAddress);
+  };
+
+  const originalLedgerReserve = ledger.reserve.bind(ledger);
+  ledger.reserve = async (params) => {
+    trace.push('port:ledger.reserve');
+    return originalLedgerReserve(params);
+  };
+  const originalLedgerRelease = ledger.release.bind(ledger);
+  ledger.release = async (receiptId) => {
+    trace.push('port:ledger.release');
+    return originalLedgerRelease(receiptId);
+  };
+
   return {
     host: {
       inflightLimiter: inflight,
@@ -196,443 +249,362 @@ function makeHost(): HostBuild {
     prepareStore,
     ledger,
     sponsorPool,
+    observedReceiptIds,
   };
 }
 
-const TEST_RECEIPT_ID = `0x${toHex(new Uint8Array(32).fill(0xaa))}`;
-const TEST_SENDER = '0x' + 'be'.repeat(32);
-const TEST_PROMO = 'pr-1-2-promo-1';
-const TEST_USER = 'pr-1-2-user-1';
-
-const HOOK_CTX: PreparePolicyHookContext = {
-  receiptId: TEST_RECEIPT_ID,
-  senderAddress: TEST_SENDER,
-  clientIp: '127.0.0.1',
-};
-
-function makeGenericRequest(): PrepareStateMachineRequest {
+function makeGenericRequest(
+  trace: Trace = [],
+  options: { readonly projectionError?: Error } = {},
+): PrepareStateMachineRequest<TestPrepareResponse> {
   return {
-    hookContext: HOOK_CTX,
-    preparedCommitInputs: ({
-      receiptId,
-      txBytesHash,
-      sponsorSlot,
-      nonce,
-      buildResult: _buildResult,
-    }): PreparedCommitInputs => ({
-      mode: 'generic',
-      receiptId,
-      senderAddress: sponsorSlot.receiptId === receiptId ? TEST_SENDER : TEST_SENDER,
-      clientIp: HOOK_CTX.clientIp,
-      txBytesHash,
-      sponsorAddress: sponsorSlot.sponsorAddress,
-      executionPathKey: 'credit',
-      orderId: null,
-      nonce: nonce?.nonce ?? 0n,
-    }),
+    senderAddress: TEST_SENDER,
+    clientIp: TEST_CLIENT_IP,
+    preparedDraftFields: () => {
+      trace.push('request:preparedDraftFields');
+      return { executionPathKey: 'credit', orderId: null };
+    },
+    projectResponse: ({ draft }) => {
+      trace.push('request:projectResponse');
+      if (options.projectionError) throw options.projectionError;
+      return {
+        receiptId: draft.receiptId,
+        draftReceiptId: draft.receiptId,
+        txBytesHash: draft.txBytesHash,
+      };
+    },
   };
 }
 
-async function makePromotionRequest(host: HostBuild): Promise<PrepareStateMachineRequest> {
-  // Promotion requires an entitlement before the runner can reserve.
+async function makePromotionRequest(
+  host: HostBuild,
+  trace: Trace = [],
+  options: {
+    readonly allowanceMist?: string;
+    readonly projectionError?: Error;
+  } = {},
+): Promise<PrepareStateMachineRequest<TestPrepareResponse>> {
   await host.ledger.claim(TEST_PROMO, TEST_USER, {
     maxParticipants: 16,
-    perUserGasAllowanceMist: '100000000',
+    perUserGasAllowanceMist: options.allowanceMist ?? '100000000',
     useUntilAt: null,
   });
   return {
-    hookContext: HOOK_CTX,
+    senderAddress: TEST_SENDER,
+    clientIp: TEST_CLIENT_IP,
     ledgerAcquireParams: { promotionId: TEST_PROMO, userId: TEST_USER },
-    preparedCommitInputs: ({
-      receiptId,
-      txBytesHash,
-      sponsorSlot,
-      ledgerReservation,
-    }): PreparedCommitInputs => ({
-      mode: 'promotion',
-      receiptId,
-      senderAddress: TEST_SENDER,
-      clientIp: HOOK_CTX.clientIp,
-      txBytesHash,
-      sponsorAddress: sponsorSlot.sponsorAddress,
-      executionPathKey: `promotion:${TEST_PROMO}`,
-      orderId: null,
-      nonce: 0n,
-      promotionId: ledgerReservation?.promotionId ?? TEST_PROMO,
-      userId: ledgerReservation?.userId ?? TEST_USER,
-      reservedGasMist: ledgerReservation?.reservedGasMist ?? 0n,
-    }),
+    preparedDraftFields: () => {
+      trace.push('request:preparedDraftFields');
+      return { executionPathKey: `promotion:${TEST_PROMO}`, orderId: null };
+    },
+    projectResponse: ({ draft }) => {
+      trace.push('request:projectResponse');
+      if (options.projectionError) throw options.projectionError;
+      return {
+        receiptId: draft.receiptId,
+        draftReceiptId: draft.receiptId,
+        txBytesHash: draft.txBytesHash,
+      };
+    },
   };
 }
 
-// ─────────────────────────────────────────────
-// Section 1 — Generic happy path (state walking + ownership transfer)
-// ─────────────────────────────────────────────
+function alternateReceipt(fill: number): string {
+  return `0x${toHex(new Uint8Array(32).fill(fill))}`;
+}
 
-describe('runPrepareStateMachine — generic happy path', () => {
-  test('walks every prepare-side state in PREPARE_STATE_ORDER exactly once', async () => {
-    const { host } = makeHost();
-    const { policy, log } = makeGenericPolicy();
-    const request = makeGenericRequest();
+describe('runPrepareStateMachine procedural traces', () => {
+  test('generic hook and host-port order matches an independent literal trace', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace);
 
-    await runPrepareStateMachine(host, request, policy);
+    await runPrepareStateMachine(host.host, makeGenericRequest(trace), makeGenericPolicy(trace));
 
-    // The runner only walks the prepare-side states; sponsor states are
-    // out of scope for `runPrepareStateMachine`.
-    const expected = [...PREPARE_STATE_ORDER];
-    // Optional state RouteReservationBeforeBuild fires for generic
-    // (nonce required); RouteReservationAfterBuild does NOT fire for
-    // generic (no ledger).
-    const expectedFiltered = expected.filter((s) => s !== 'RouteReservationAfterBuild');
-    const actualStates = log.map((entry) => entry.state);
-    expect(actualStates).toEqual(expectedFiltered);
+    expect(trace).toEqual([
+      'hook:Intent',
+      'hook:RequestValidation',
+      'port:inflight.acquire',
+      'hook:InflightAdmission',
+      'hook:ChainSnapshot',
+      'hook:ExecutionPolicySelected',
+      'hook:SlotFreePlan',
+      'port:sponsor.checkout',
+      'hook:SponsorSlotReservationAcquired',
+      'port:nonce.reserve',
+      'hook:RouteReservationBeforeBuild',
+      'hook:GasBoundBuild',
+      'hook:SelfCheck',
+      'request:preparedDraftFields',
+      'request:projectResponse',
+      'port:sponsor.commit',
+      'hook:SponsorLeaseCommitted',
+      'port:store',
+      'port:inflight.release',
+    ]);
   });
 
-  test('returns receiptId + txBytes + commit projected through composePreparedCommit', async () => {
-    const { host, prepareStore } = makeHost();
-    const { policy } = makeGenericPolicy();
-    const request = makeGenericRequest();
+  test('promotion hook and host-port order matches an independent literal trace', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace);
+    const request = await makePromotionRequest(host, trace);
 
-    const result = await runPrepareStateMachine(host, request, policy);
+    const response = await runPrepareStateMachine(host.host, request, makePromotionPolicy(trace));
 
-    expect(result.receiptId).toBe(TEST_RECEIPT_ID);
-    expect(result.txBytes).toEqual(new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]));
-    expect(result.txBytesHash).toBe('a'.repeat(64));
-    expect(result.commit.mode).toBe('generic');
-    expect(result.commit.receiptId).toBe(TEST_RECEIPT_ID);
-
-    // prepareStore.peek finds the entry by receiptId, written through the
-    // runner's single
-    // composePreparedCommit call.
-    const peeked = await prepareStore.peek(TEST_RECEIPT_ID);
-    expect(peeked).not.toBeNull();
-    expect(peeked!.txBytesHash).toBe('a'.repeat(64));
-  });
-
-  test('inflight handle is released even after success (non-transferable)', async () => {
-    const { host, inflight } = makeHost();
-    const { policy } = makeGenericPolicy();
-    const request = makeGenericRequest();
-
-    expect(inflight.inflight).toBe(0);
-    await runPrepareStateMachine(host, request, policy);
-    // Inflight count returned to zero — inflight always releases.
-    expect(inflight.inflight).toBe(0);
-  });
-
-  test('sponsor slot stays committed in the pool after success (transferred to durable store)', async () => {
-    const { host, sponsorPool } = makeHost();
-    const { policy } = makeGenericPolicy();
-    const request = makeGenericRequest();
-
-    await runPrepareStateMachine(host, request, policy);
-
-    // Pool should still see the slot as in-use after success — the
-    // runner transferred ownership to the durable store. The sponsor
-    // lifecycle owns checkin from this point.
-    expect(sponsorPool.size - sponsorPool.addresses().length).toBeLessThanOrEqual(1);
-    // More directly: a second checkout should fail because the only
-    // slot is held by the durable store.
-    const secondCheckout = await sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xbb))}`);
-    expect(secondCheckout).toBeNull();
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 2 — Studio happy path
-// ─────────────────────────────────────────────
-
-describe('runPrepareStateMachine — Studio happy path', () => {
-  test('walks the promotion path with RouteReservationAfterBuild (no nonce, ledger present)', async () => {
-    const hostBuild = makeHost();
-    const { policy, log } = makePromotionPolicy();
-    const request = await makePromotionRequest(hostBuild);
-
-    const result = await runPrepareStateMachine(hostBuild.host, request, policy);
-
-    expect(result.commit.mode).toBe('promotion');
-
-    // Generic-only state RouteReservationBeforeBuild does NOT fire for
-    // promotion. Studio-only state RouteReservationAfterBuild DOES fire.
-    const states = log.map((e) => e.state);
-    expect(states).not.toContain('RouteReservationBeforeBuild');
-    expect(states).toContain('RouteReservationAfterBuild');
-  });
-
-  test('promotion ledger consumes the reservation slot (active reservation moves to durable store)', async () => {
-    const hostBuild = makeHost();
-    const { policy } = makePromotionPolicy();
-    const request = await makePromotionRequest(hostBuild);
-
-    await runPrepareStateMachine(hostBuild.host, request, policy);
-
-    const ent = await hostBuild.ledger.getEntitlement(TEST_PROMO, TEST_USER);
-    expect(ent!.activeReservationReceiptId).toBe(TEST_RECEIPT_ID);
-    expect(ent!.activeReservationAmountMist).toBe('1400000');
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 3 — Failure paths and reverse-order cleanup
-// ─────────────────────────────────────────────
-
-describe('runPrepareStateMachine — failure paths', () => {
-  test('fault at GasBoundBuild releases all reservations in reverse order', async () => {
-    const { host, inflight, sponsorPool } = makeHost();
-    const { policy } = makeGenericPolicy({ failAtState: 'GasBoundBuild' });
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(host, request, policy)).rejects.toThrow(
-      'policy fault at GasBoundBuild',
-    );
-
-    // Inflight slot returned. Sponsor pool slot returned (a second
-    // checkout succeeds). The nonce reservation was acquired AND
-    // released, so the prepareStore's pending-nonce set is empty.
-    expect(inflight.inflight).toBe(0);
-    const fresh = await sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xbc))}`);
-    expect(fresh).not.toBeNull();
-  });
-
-  test('fault at SelfCheck (after build) releases sponsor slot AND nonce AND inflight', async () => {
-    const { host, inflight, sponsorPool, prepareStore } = makeHost();
-    const { policy } = makeGenericPolicy({ failAtState: 'SelfCheck' });
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(host, request, policy)).rejects.toThrow();
-
-    expect(inflight.inflight).toBe(0);
-    expect(await prepareStore.peek(TEST_RECEIPT_ID)).toBeNull();
-    const fresh = await sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xbd))}`);
-    expect(fresh).not.toBeNull();
-  });
-
-  test('Studio fault after ledger acquire releases the ledger reservation', async () => {
-    const hostBuild = makeHost();
-    const { policy } = makePromotionPolicy({ failAtState: 'SelfCheck' });
-    const request = await makePromotionRequest(hostBuild);
-
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toThrow();
-
-    const ent = await hostBuild.ledger.getEntitlement(TEST_PROMO, TEST_USER);
-    expect(ent!.activeReservationReceiptId).toBeNull();
-  });
-
-  test('inflight ALWAYS releases — even when an early hook throws before any other reservation is acquired', async () => {
-    const { host, inflight } = makeHost();
-    const { policy } = makeGenericPolicy({ failAtState: 'ChainSnapshot' });
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(host, request, policy)).rejects.toThrow();
-    expect(inflight.inflight).toBe(0);
-  });
-
-  test('sponsor pool exhausted at SponsorSlotReservation throws RunnerSponsorSlotExhaustedError', async () => {
-    const hostBuild = makeHost();
-    // Pre-checkout the only slot so the runner sees a null result.
-    await hostBuild.sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xee))}`);
-
-    const { policy } = makeGenericPolicy();
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toBeInstanceOf(
-      RunnerSponsorSlotExhaustedError,
-    );
-    expect(hostBuild.inflight.inflight).toBe(0);
-  });
-
-  test('host misconfiguration (Studio policy without executionLedger) throws RunnerHostMisconfiguredError', async () => {
-    const hostBuild = makeHost();
-    const hostWithoutLedger: PrepareStateMachineHost = {
-      inflightLimiter: hostBuild.inflight,
-      sponsorPool: hostBuild.sponsorPool,
-      prepareStore: hostBuild.prepareStore,
-      // executionLedger intentionally omitted
-    };
-    const { policy } = makePromotionPolicy();
-    const request = await makePromotionRequest(hostBuild);
-
-    await expect(runPrepareStateMachine(hostWithoutLedger, request, policy)).rejects.toBeInstanceOf(
-      RunnerHostMisconfiguredError,
-    );
-    expect(hostBuild.inflight.inflight).toBe(0);
-  });
-
-  test('host misconfiguration (generic ChainSnapshot without nonceAcquire) throws RunnerHostMisconfiguredError', async () => {
-    const hostBuild = makeHost();
-    const generic = makeGenericPolicy();
-    // Deliberately widen to the runner's common boundary so the
-    // runtime fail-closed guard remains tested even though
-    // SponsoredExecutionPolicy<'generic'> requires nonceAcquire at type level.
-    const policy: SponsoredExecutionPolicy = {
-      ...generic.policy,
-      hooks: {
-        ...generic.policy.hooks,
-        ChainSnapshot: () => ({}),
-      },
-    };
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toBeInstanceOf(
-      RunnerHostMisconfiguredError,
-    );
-    expect(hostBuild.inflight.inflight).toBe(0);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 4 — Ledger reservation rejection (entitlement insufficient)
-// ─────────────────────────────────────────────
-
-describe('runPrepareStateMachine — ledger reservation rejection', () => {
-  test('throws RunnerLedgerReservationRejectedError when entitlement cannot cover measured gas', async () => {
-    const hostBuild = makeHost();
-    // Claim with very small allowance.
-    await hostBuild.ledger.claim(TEST_PROMO, TEST_USER, {
-      maxParticipants: 16,
-      perUserGasAllowanceMist: '100', // way below the 1.4M measuredGasMist
-      useUntilAt: null,
+    expect(trace).toEqual([
+      'hook:Intent',
+      'hook:RequestValidation',
+      'port:inflight.acquire',
+      'hook:InflightAdmission',
+      'hook:ChainSnapshot',
+      'hook:ExecutionPolicySelected',
+      'hook:SlotFreePlan',
+      'port:sponsor.checkout',
+      'hook:SponsorSlotReservationAcquired',
+      'hook:GasBoundBuild',
+      'port:ledger.reserve',
+      'hook:RouteReservationAfterBuild',
+      'hook:SelfCheck',
+      'request:preparedDraftFields',
+      'request:projectResponse',
+      'port:sponsor.commit',
+      'hook:SponsorLeaseCommitted',
+      'port:store',
+      'port:inflight.release',
+    ]);
+    await expect(host.prepareStore.peek(response.receiptId)).resolves.toMatchObject({
+      mode: 'promotion',
+      receiptId: response.receiptId,
+      nonce: 0n,
+      promotionId: TEST_PROMO,
+      userId: TEST_USER,
+      reservedGasMist: TEST_BUILD_RESULT.measuredGasMist,
     });
-    // Build returns 1.4M — over the 100-mist allowance.
-    const { policy } = makePromotionPolicy();
-    const request: PrepareStateMachineRequest = {
-      hookContext: HOOK_CTX,
-      ledgerAcquireParams: { promotionId: TEST_PROMO, userId: TEST_USER },
-      preparedCommitInputs: () => {
-        throw new Error('preparedCommitInputs should not be reached');
-      },
+    await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
+      activeReservationReceiptId: response.receiptId,
+      activeReservationAmountMist: TEST_BUILD_RESULT.measuredGasMist.toString(),
+    });
+  });
+});
+
+describe('runPrepareStateMachine commit boundary', () => {
+  test('success uses one generated receipt for response, draft, committed entry, and store key', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace);
+
+    const response = await runPrepareStateMachine(
+      host.host,
+      makeGenericRequest(trace),
+      makeGenericPolicy(trace),
+    );
+
+    expect(response.receiptId).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(response.draftReceiptId).toBe(response.receiptId);
+    expect(host.observedReceiptIds).toEqual({
+      checkout: [response.receiptId],
+      commit: [response.receiptId],
+      nonce: [response.receiptId],
+      store: [response.receiptId],
+    });
+    await expect(host.prepareStore.peek(response.receiptId)).resolves.toMatchObject({
+      receiptId: response.receiptId,
+      txBytesHash: TEST_BUILD_RESULT.txBytesHash,
+    });
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('response projection failure stores nothing and reverse-releases every acquired handle', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace);
+    const request = await makePromotionRequest(host, trace, {
+      projectionError: new Error('response projection failed'),
+    });
+
+    await expect(
+      runPrepareStateMachine(host.host, request, makeAllReservationPolicy(trace)),
+    ).rejects.toThrow('response projection failed');
+
+    expect(trace).not.toContain('port:store');
+    expect(trace.slice(-5)).toEqual([
+      'request:projectResponse',
+      'port:ledger.release',
+      'port:nonce.release',
+      'port:sponsor.checkin',
+      'port:inflight.release',
+    ]);
+    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
+    await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
+      activeReservationReceiptId: null,
+      activeReservationAmountMist: null,
+    });
+    expect(host.inflight.inflight).toBe(0);
+    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-projection')).resolves.toBe(
+      1n,
+    );
+    await host.prepareStore.releaseReservation('after-projection', TEST_SENDER);
+    await expect(host.sponsorPool.checkout(alternateReceipt(0xb1))).resolves.not.toBeNull();
+  });
+
+  test('response projection cannot mutate the runner-owned store draft', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace);
+    const request = makeGenericRequest(trace);
+
+    await expect(
+      runPrepareStateMachine(
+        host.host,
+        {
+          ...request,
+          projectResponse: ({ draft }) => {
+            (draft as { receiptId: string }).receiptId = alternateReceipt(0xc1);
+            return {
+              receiptId: draft.receiptId,
+              draftReceiptId: draft.receiptId,
+              txBytesHash: draft.txBytesHash,
+            };
+          },
+        },
+        makeGenericPolicy(trace),
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    expect(trace).not.toContain('port:sponsor.commit');
+    expect(trace).not.toContain('port:store');
+    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
+    await expect(host.prepareStore.peek(alternateReceipt(0xc1))).resolves.toBeNull();
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('store failure reverse-releases every acquired handle after the committed lease', async () => {
+    const trace: Trace = [];
+    const host = makeHost(trace, { storeError: new Error('prepare store failed') });
+    const request = await makePromotionRequest(host, trace);
+
+    await expect(
+      runPrepareStateMachine(host.host, request, makeAllReservationPolicy(trace)),
+    ).rejects.toThrow('prepare store failed');
+
+    expect(trace.slice(-5)).toEqual([
+      'port:store',
+      'port:ledger.release',
+      'port:nonce.release',
+      'port:sponsor.checkin',
+      'port:inflight.release',
+    ]);
+    await expect(host.prepareStore.peek(host.observedReceiptIds.store[0]!)).resolves.toBeNull();
+    await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
+      activeReservationReceiptId: null,
+      activeReservationAmountMist: null,
+    });
+    expect(host.inflight.inflight).toBe(0);
+    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-store')).resolves.toBe(1n);
+    await host.prepareStore.releaseReservation('after-store', TEST_SENDER);
+    await expect(host.sponsorPool.checkout(alternateReceipt(0xb2))).resolves.not.toBeNull();
+  });
+});
+
+describe('runPrepareStateMachine cleanup and admission failures', () => {
+  test('GasBoundBuild failure releases generic nonce, sponsor slot, and inflight admission', async () => {
+    const host = makeHost();
+
+    await expect(
+      runPrepareStateMachine(
+        host.host,
+        makeGenericRequest(),
+        makeGenericPolicy([], { failAtHook: 'GasBoundBuild' }),
+      ),
+    ).rejects.toThrow('policy fault at GasBoundBuild');
+
+    expect(host.inflight.inflight).toBe(0);
+    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
+    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-build')).resolves.toBe(1n);
+    await host.prepareStore.releaseReservation('after-build', TEST_SENDER);
+    await expect(host.sponsorPool.checkout(alternateReceipt(0xbc))).resolves.not.toBeNull();
+  });
+
+  test('promotion SelfCheck failure releases its ledger reservation', async () => {
+    const host = makeHost();
+    const request = await makePromotionRequest(host);
+
+    await expect(
+      runPrepareStateMachine(
+        host.host,
+        request,
+        makePromotionPolicy([], { failAtHook: 'SelfCheck' }),
+      ),
+    ).rejects.toThrow('policy fault at SelfCheck');
+
+    await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
+      activeReservationReceiptId: null,
+      activeReservationAmountMist: null,
+    });
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('an early ChainSnapshot failure still releases inflight admission', async () => {
+    const host = makeHost();
+
+    await expect(
+      runPrepareStateMachine(
+        host.host,
+        makeGenericRequest(),
+        makeGenericPolicy([], { failAtHook: 'ChainSnapshot' }),
+      ),
+    ).rejects.toThrow('policy fault at ChainSnapshot');
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('sponsor exhaustion is typed and releases inflight admission', async () => {
+    const host = makeHost();
+    await host.sponsorPool.checkout(alternateReceipt(0xee));
+
+    await expect(
+      runPrepareStateMachine(host.host, makeGenericRequest(), makeGenericPolicy()),
+    ).rejects.toBeInstanceOf(RunnerSponsorSlotExhaustedError);
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('promotion policy without an execution ledger fails closed', async () => {
+    const host = makeHost();
+    const request = await makePromotionRequest(host);
+    const hostWithoutLedger: PrepareStateMachineHost = {
+      inflightLimiter: host.host.inflightLimiter,
+      sponsorPool: host.host.sponsorPool,
+      prepareStore: host.host.prepareStore,
     };
 
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toBeInstanceOf(
-      RunnerLedgerReservationRejectedError,
-    );
-    // All reservations released — sponsor pool is back to a checkout-able state.
-    const fresh = await hostBuild.sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xff))}`);
-    expect(fresh).not.toBeNull();
+    await expect(
+      runPrepareStateMachine(hostWithoutLedger, request, makePromotionPolicy()),
+    ).rejects.toBeInstanceOf(RunnerHostMisconfiguredError);
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('generic policy without nonceAcquire snapshot fails closed', async () => {
+    const host = makeHost();
+    const generic = makeGenericPolicy();
+    const policy: SponsoredExecutionPolicy = {
+      ...generic,
+      hooks: { ...generic.hooks, ChainSnapshot: () => ({}) },
+    };
+
+    await expect(
+      runPrepareStateMachine(host.host, makeGenericRequest(), policy),
+    ).rejects.toBeInstanceOf(RunnerHostMisconfiguredError);
+    expect(host.inflight.inflight).toBe(0);
+  });
+
+  test('ledger rejection is typed and releases earlier resources', async () => {
+    const host = makeHost();
+    const request = await makePromotionRequest(host, [], { allowanceMist: '100' });
+
+    await expect(
+      runPrepareStateMachine(host.host, request, makePromotionPolicy()),
+    ).rejects.toBeInstanceOf(RunnerLedgerReservationRejectedError);
+    expect(host.inflight.inflight).toBe(0);
+    await expect(host.sponsorPool.checkout(alternateReceipt(0xff))).resolves.not.toBeNull();
   });
 });
 
-// ─────────────────────────────────────────────
-// Section 5 — Post-store boundary atomicity
-//
-// Durable visibility (the prepared-store entry) and resource ownership
-// (sponsor slot, nonce, ledger reservation) must not diverge across any
-// post-store hook failure.
-//
-// The runner transfers ownership of every transferable reservation
-// IMMEDIATELY after `prepareStore.store()`, before either `PrepareStored`
-// or `AwaitUserSignature` fires. Therefore:
-//   - if a post-store hook throws, the runner propagates the error,
-//   - the durable entry stays visible (it is coherent — it owns its
-//     resources),
-//   - transferable reservations skip release in the `finally` cleanup,
-//   - inflight always releases (non-transferable).
-// ─────────────────────────────────────────────
-
-describe('runPrepareStateMachine — post-store boundary atomicity', () => {
-  test('PrepareStored hook failure leaves durable entry AND keeps sponsor slot ownership (generic)', async () => {
-    const { host, inflight, sponsorPool, prepareStore } = makeHost();
-    const { policy } = makeGenericPolicy({ failAtState: 'PrepareStored' });
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(host, request, policy)).rejects.toThrow(
-      'policy fault at PrepareStored',
-    );
-
-    // Durable entry MUST remain visible — store() succeeded before the
-    // hook threw.
-    const peeked = await prepareStore.peek(TEST_RECEIPT_ID);
-    expect(peeked).not.toBeNull();
-    expect(peeked!.txBytesHash).toBe('a'.repeat(64));
-
-    // Sponsor slot ownership MUST stay with the durable entry. The pool
-    // has only one slot, and it is still committed to this receiptId.
-    const secondCheckout = await sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xaf))}`);
-    expect(secondCheckout).toBeNull();
-
-    // Inflight MUST release (non-transferable; always returns to zero).
-    expect(inflight.inflight).toBe(0);
-  });
-
-  test('AwaitUserSignature hook failure leaves durable entry AND keeps sponsor slot ownership (generic)', async () => {
-    const { host, inflight, sponsorPool, prepareStore } = makeHost();
-    const { policy } = makeGenericPolicy({ failAtState: 'AwaitUserSignature' });
-    const request = makeGenericRequest();
-
-    await expect(runPrepareStateMachine(host, request, policy)).rejects.toThrow(
-      'policy fault at AwaitUserSignature',
-    );
-
-    const peeked = await prepareStore.peek(TEST_RECEIPT_ID);
-    expect(peeked).not.toBeNull();
-
-    const secondCheckout = await sponsorPool.checkout(`0x${toHex(new Uint8Array(32).fill(0xb1))}`);
-    expect(secondCheckout).toBeNull();
-
-    expect(inflight.inflight).toBe(0);
-  });
-
-  test('PrepareStored hook failure keeps ledger reservation owned by durable entry (Studio)', async () => {
-    const hostBuild = makeHost();
-    const { policy } = makePromotionPolicy({ failAtState: 'PrepareStored' });
-    const request = await makePromotionRequest(hostBuild);
-
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toThrow(
-      'policy fault at PrepareStored',
-    );
-
-    // Durable entry visible.
-    const peeked = await hostBuild.prepareStore.peek(TEST_RECEIPT_ID);
-    expect(peeked).not.toBeNull();
-    expect(peeked!.mode).toBe('promotion');
-
-    // Ledger reservation MUST stay active — ownership transferred to
-    // the durable entry before the hook fired. A reverse cleanup that
-    // released the ledger reservation here would refund the
-    // entitlement while the entry still references it.
-    const ent = await hostBuild.ledger.getEntitlement(TEST_PROMO, TEST_USER);
-    expect(ent!.activeReservationReceiptId).toBe(TEST_RECEIPT_ID);
-    expect(ent!.activeReservationAmountMist).toBe('1400000');
-
-    // Sponsor slot still held by the durable entry.
-    const secondCheckout = await hostBuild.sponsorPool.checkout(
-      `0x${toHex(new Uint8Array(32).fill(0xb3))}`,
-    );
-    expect(secondCheckout).toBeNull();
-
-    // Inflight always releases.
-    expect(hostBuild.inflight.inflight).toBe(0);
-  });
-
-  test('AwaitUserSignature hook failure keeps ledger reservation owned by durable entry (Studio)', async () => {
-    const hostBuild = makeHost();
-    const { policy } = makePromotionPolicy({ failAtState: 'AwaitUserSignature' });
-    const request = await makePromotionRequest(hostBuild);
-
-    await expect(runPrepareStateMachine(hostBuild.host, request, policy)).rejects.toThrow(
-      'policy fault at AwaitUserSignature',
-    );
-
-    const peeked = await hostBuild.prepareStore.peek(TEST_RECEIPT_ID);
-    expect(peeked).not.toBeNull();
-
-    const ent = await hostBuild.ledger.getEntitlement(TEST_PROMO, TEST_USER);
-    expect(ent!.activeReservationReceiptId).toBe(TEST_RECEIPT_ID);
-
-    const secondCheckout = await hostBuild.sponsorPool.checkout(
-      `0x${toHex(new Uint8Array(32).fill(0xb5))}`,
-    );
-    expect(secondCheckout).toBeNull();
-
-    expect(hostBuild.inflight.inflight).toBe(0);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 6 — Module API
-// ─────────────────────────────────────────────
-
-describe('runPrepareStateMachine — module API', () => {
+describe('runPrepareStateMachine module API', () => {
   test('directory internal barrel exposes runner symbols', async () => {
     const barrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
       string,
@@ -644,7 +616,7 @@ describe('runPrepareStateMachine — module API', () => {
     expect(barrel.RunnerLedgerReservationRejectedError).toBeDefined();
   });
 
-  test('package main barrel does NOT re-export runner symbols', async () => {
+  test('package main barrel does not re-export runner symbols', async () => {
     const mainBarrel = await import('@stelis/core-api');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'runPrepareStateMachine')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'RunnerHostMisconfiguredError')).toBe(

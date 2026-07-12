@@ -7,11 +7,12 @@
  * compose → store path, NOT the build math or real PTB extraction.
  *
  * What this file CAN catch:
- *   - effective profile propagation (GenericPrepareBuildOutput.profile → store → response)
- *   - executionCostClaim propagation (GenericPrepareBuildOutput → store → response)
- *   - nonce propagation (reserveNonce → store → response)
+ *   - effective profile propagation to the response while excluding it from the store draft
+ *   - executionCostClaim propagation to the response while excluding it from the store draft
+ *   - runner-owned receipt propagation (build input → store draft → response)
+ *   - nonce propagation (reserveNonce → store draft → response)
  *   - cost response shape (exact 7-field key set)
- *   - prepared-commit projection wiring (no extra/missing fields)
+ *   - runner-composed draft wiring (policy supplies only route-owned fields)
  *
  * What this file CANNOT catch (inner steps are mocked):
  *   - real PTB serialization correctness — see `roundTripPtb.test.ts`
@@ -84,6 +85,7 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
+import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
@@ -215,7 +217,10 @@ function makeMockContext() {
       claim: vi.fn().mockResolvedValue('ok'),
     },
     prepareStore: {
-      store: vi.fn().mockResolvedValue(undefined),
+      store: vi.fn(async (draft: PreparedTxDraft) => ({
+        ...draft,
+        issuedAt: 1_741_680_000_000,
+      })),
       consume: vi.fn(),
       peek: vi.fn(),
       evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
@@ -344,17 +349,20 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
     expect(buildInput.profile).toBe('new_user');
     expect(buildInput.vaultObjectId).toBeNull();
+    expect(`0x${Buffer.from(buildInput.receiptId).toString('hex')}`).toBe(result.receiptId);
 
-    // Store entry persists coordination fields only. Settle copies
+    // Store draft carries coordination fields only. Settle copies
     // (`profile` / `executionCostClaim` etc.) are read from
     // `parseSettleArgs(txBytes)` at sponsor time, so this test locks
     // `nonce` (a true coordination field) plus the negative shape of
     // the settle copies that must not be persisted.
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry.nonce).toBe(7n);
-    expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('executionCostClaim');
-    expect(storedEntry).not.toHaveProperty('paymentInputSource');
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft.receiptId).toBe(result.receiptId);
+    expect(storedDraft.nonce).toBe(7n);
+    expect(storedDraft).not.toHaveProperty('issuedAt');
+    expect(storedDraft).not.toHaveProperty('profile');
+    expect(storedDraft).not.toHaveProperty('executionCostClaim');
+    expect(storedDraft).not.toHaveProperty('paymentInputSource');
   });
 
   // ── Case 2: with_vault, address_balance ──
@@ -385,14 +393,15 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
     expect(settleArgsCall.paymentInputTrace.source).toBe('address_balance');
 
-    // Store entry: nonce coordination retained, settle copies not
+    // Store draft: nonce coordination retained, settle copies not
     // persisted. Result.profile / result.cost.executionCostClaim above already
     // verify the values flow from GenericPrepareBuildOutput through the response; the
-    // store entry is not the assertion site for them.
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry.nonce).toBe(7n);
-    expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('executionCostClaim');
+    // store draft is not the assertion site for them.
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft.nonce).toBe(7n);
+    expect(storedDraft).not.toHaveProperty('issuedAt');
+    expect(storedDraft).not.toHaveProperty('profile');
+    expect(storedDraft).not.toHaveProperty('executionCostClaim');
   });
 
   // ── Case 3: credit_general, none_credit_only ──
@@ -424,17 +433,17 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(settleArgsCall.paymentInputTrace.source).toBe('none_credit_only');
     expect(settleArgsCall.paymentInputTrace.settleVariantClass).toBe('credit');
 
-    // Store entry does not persist settle copies (profile,
+    // Store draft does not persist settle copies (profile,
     // slippageBufferMist). Result.profile and result.cost.slippageBufferMist
     // above verify the values flow from GenericPrepareBuildOutput through the response.
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('slippageBufferMist');
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(storedDraft).not.toHaveProperty('profile');
+    expect(storedDraft).not.toHaveProperty('slippageBufferMist');
   });
 
-  // ── Case 4: store entry preserves only `txBytesHash` from GenericPrepareBuildOutput ──
+  // ── Case 4: store draft preserves only `txBytesHash` from GenericPrepareBuildOutput ──
 
-  it('persisted store entry projects txBytesHash from GenericPrepareBuildOutput and drops the 9 settle observability copies', async () => {
+  it('store draft projects txBytesHash from GenericPrepareBuildOutput and drops the 9 settle observability copies', async () => {
     mockQueryUserCredit.mockResolvedValue({
       vaultObjectId: null,
       credit: '0',
@@ -448,25 +457,26 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [, storedEntry] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
 
     // Coordination-only projection from GenericPrepareBuildOutput.
-    expect(storedEntry.txBytesHash).toBe(NEW_USER_BUILD_RESULT.txBytesHash);
+    expect(storedDraft.txBytesHash).toBe(NEW_USER_BUILD_RESULT.txBytesHash);
+    expect(storedDraft).not.toHaveProperty('issuedAt');
 
     // The 9 settle observability copies are not persisted. Sponsor reads
-    // each value from `parseSettleArgs(txBytes)`; the store entry is not
+    // each value from `parseSettleArgs(txBytes)`; the store draft is not
     // their carrier. GenericPrepareBuildOutput-only fields are also never persisted.
-    expect(storedEntry).not.toHaveProperty('executionCostClaim');
-    expect(storedEntry).not.toHaveProperty('simGas');
-    expect(storedEntry).not.toHaveProperty('gasVarianceFixedMist');
-    expect(storedEntry).not.toHaveProperty('slippageBufferMist');
-    expect(storedEntry).not.toHaveProperty('grossGas');
-    expect(storedEntry).not.toHaveProperty('profile');
-    expect(storedEntry).not.toHaveProperty('quoteTimestampMs');
-    expect(storedEntry).not.toHaveProperty('policyHash');
-    expect(storedEntry).not.toHaveProperty('quotedHostFeeMist');
-    expect(storedEntry).not.toHaveProperty('paymentInputSource');
-    expect(storedEntry).not.toHaveProperty('swapAmountSmallest');
+    expect(storedDraft).not.toHaveProperty('executionCostClaim');
+    expect(storedDraft).not.toHaveProperty('simGas');
+    expect(storedDraft).not.toHaveProperty('gasVarianceFixedMist');
+    expect(storedDraft).not.toHaveProperty('slippageBufferMist');
+    expect(storedDraft).not.toHaveProperty('grossGas');
+    expect(storedDraft).not.toHaveProperty('profile');
+    expect(storedDraft).not.toHaveProperty('quoteTimestampMs');
+    expect(storedDraft).not.toHaveProperty('policyHash');
+    expect(storedDraft).not.toHaveProperty('quotedHostFeeMist');
+    expect(storedDraft).not.toHaveProperty('paymentInputSource');
+    expect(storedDraft).not.toHaveProperty('swapAmountSmallest');
   });
 
   // ── Case 5: cost response shape locked ──

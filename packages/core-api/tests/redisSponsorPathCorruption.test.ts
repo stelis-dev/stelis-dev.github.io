@@ -40,7 +40,7 @@ import { SponsorPool } from '../src/context.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
-import type { GenericPreparedTxEntry } from '../src/store/prepareTypes.js';
+import type { GenericPreparedTxDraft } from '../src/store/prepareTypes.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
 
 // ─── Test constants ─────────────────────────────────────────────────────
@@ -129,9 +129,8 @@ async function buildValidTx(): Promise<{
   return { txBytes: bytes, encodedTxBytes: toBase64(bytes), txHash: hash };
 }
 
-function makePreparedEntry(txHash: string): GenericPreparedTxEntry {
+function makePreparedDraft(txHash: string): GenericPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: PAYMENT_ID,
     senderAddress: SENDER,
     nonce: 1n,
@@ -255,14 +254,14 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const userSig = await buildValidSignature(txBytes);
 
     // 3. Store a valid prepared entry through the real RedisPrepareStore.
-    const entry = makePreparedEntry(txHash);
-    entry.sponsorAddress = slot.sponsorAddress;
+    const draft = makePreparedDraft(txHash);
+    draft.sponsorAddress = slot.sponsorAddress;
     // Commit the lease to the prepared txBytesHash before store().
     // A post-store corruption path then
     // exercises the evictPreparedEntry → pool.checkin chain with the
     // committed txBytesHash.
     await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, txHash);
-    await prepareStore.store(PAYMENT_ID, entry);
+    await prepareStore.store(draft);
 
     // 4. Forge corruption by adding a field outside the exact current shape.
     const entryKey = `stelis:prepare:${PAYMENT_ID}`;
@@ -333,14 +332,14 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
 
     const { txBytes, encodedTxBytes, txHash } = await buildValidTx();
     const userSig = await buildValidSignature(txBytes);
-    const entry = makePreparedEntry(txHash);
-    entry.sponsorAddress = slot.sponsorAddress;
+    const draft = makePreparedDraft(txHash);
+    draft.sponsorAddress = slot.sponsorAddress;
     // Commit the lease to the prepared txBytesHash before store(). A
     // post-store corruption path then
     // exercises the evictPreparedEntry → pool.checkin chain with the
     // committed txBytesHash.
     await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, txHash);
-    await prepareStore.store(PAYMENT_ID, entry);
+    await prepareStore.store(draft);
 
     const entryKey = `stelis:prepare:${PAYMENT_ID}`;
 
@@ -431,10 +430,10 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const slot = await sponsorPool.checkout(PAYMENT_ID);
     if (!slot) throw new Error('expected slot');
     const legit = await buildValidTx();
-    const legitEntry = makePreparedEntry(legit.txHash);
-    legitEntry.sponsorAddress = slot.sponsorAddress;
+    const legitDraft = makePreparedDraft(legit.txHash);
+    legitDraft.sponsorAddress = slot.sponsorAddress;
     await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, legit.txHash);
-    await prepareStore.store(PAYMENT_ID, legitEntry);
+    await prepareStore.store(legitDraft);
 
     // 2. Attacker overwrites entry[PAYMENT_ID].txBytesHash to a
     //    hash of their choice, simulating Redis-write compromise.

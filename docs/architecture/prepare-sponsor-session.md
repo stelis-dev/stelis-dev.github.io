@@ -32,11 +32,18 @@ GenericPrepareBuildOutput              prepare/build.ts
    gasVarianceFixedMist, slippageBufferMist,
    grossGas, profile, paymentInputSource)
         │
-        │  composePreparedCommit()           session/sponsoredExecution/preparedCommit.ts
-        │  (shared prepare-store commit boundary used by generic + Studio)
+        │  runPrepareStateMachine()          session/sponsoredExecution/runner.ts
+        │  (runner combines request identity, acquired resources, build hash,
+        │   and route-owned path/order fields into the exact store draft)
+        ▼
+PreparedTxDraft                        store/prepareTypes.ts
+  (exact coordination-only shape; no caller-supplied issuedAt)
+        │
+        │  PrepareStoreAdapter.store(draft)
+        │  (Memory clock or Redis TIME stamps issuedAt exactly once)
         ▼
 PreparedTxEntry                        store/prepareTypes.ts
-  stored in PrepareStoreAdapter — coordination-only shape
+  committed by PrepareStoreAdapter — coordination-only shape
   ├─ txBytesHash           SHA-256 of txBytes; verified in consume() before /sponsor proceeds
   ├─ sponsorAddress       sponsor lease identity + gasOwner coordination
   ├─ receiptId, senderAddress, nonce  lease + nonce-reservation keys (generic outstanding-prepare quota is keyed by verified sender; promotion quota is keyed by verified `userId`)
@@ -146,21 +153,23 @@ after consumed (always):
 
 State transitions:
 
-| Transition                             | Trigger                                                                 | Source location                                                          |
-| -------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| entry → `reserved`                     | `runPrepareStateMachine()` acquires sponsor slot + nonce reservation    | `session/sponsoredExecution/runner.ts`                                   |
-| `reserved` → `stored`                  | `composePreparedCommit()` + `prepareStore.store()` + ownership transfer | `session/sponsoredExecution/runner.ts`                                   |
-| `stored` → `consumed`                  | `prepareStore.consume(receiptId, txBytesHash)` — atomic delete          | `session/sessionPrimitives.ts` (`consumeEntry`)                          |
-| `consumed` → `submitted`               | `signAndSubmit()` call                                                  | `session/sessionPrimitives.ts`                                           |
-| `submitted` → `executed` \| `reverted` | `execResult.success` branch                                             | `session/sponsoredExecution/sponsorRunner.ts` + SponsoredExecutionPolicy |
-| any → `expired`                        | background `_evictExpired()` or TTL check inside `consume()`            | `store/memoryPrepareStore.ts`, `store/redisPrepareStore.ts`              |
-| `consumed` → `released`                | `safeSlotCheckin()` in `finally` — runs on every post-consume path      | `session/sponsoredExecution/sponsorRunner.ts`                            |
+| Transition                             | Trigger                                                                                      | Source location                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| entry → `reserved`                     | `runPrepareStateMachine()` acquires sponsor slot + nonce reservation                         | `session/sponsoredExecution/runner.ts`                                   |
+| `reserved` → `stored`                  | compose draft + response, commit lease, `prepareStore.store(draft)`, then ownership transfer | `session/sponsoredExecution/runner.ts`                                   |
+| `stored` → `consumed`                  | `prepareStore.consume(receiptId, txBytesHash)` — atomic delete                               | `session/sessionPrimitives.ts` (`consumeEntry`)                          |
+| `consumed` → `submitted`               | `signAndSubmit()` call                                                                       | `session/sessionPrimitives.ts`                                           |
+| `submitted` → `executed` \| `reverted` | `execResult.success` branch                                                                  | `session/sponsoredExecution/sponsorRunner.ts` + SponsoredExecutionPolicy |
+| any → `expired`                        | background `_evictExpired()` or TTL check inside `consume()`                                 | `store/memoryPrepareStore.ts`, `store/redisPrepareStore.ts`              |
+| `consumed` → `released`                | `safeSlotCheckin()` in `finally` — runs on every post-consume path                           | `session/sponsoredExecution/sponsorRunner.ts`                            |
 
 The lifecycle states above are enforced by the shared sponsor execution
 runners. Prepare-side cleanup is owned by
-`session/sponsoredExecution/runner.ts`: acquired reservations release in
-reverse order on failure, and transferable resources move to the durable
-prepared commit immediately after `prepareStore.store()`. Sponsor-side slot
+`session/sponsoredExecution/runner.ts`: the final client response is projected
+before the lease/store boundary, acquired reservations release in reverse order
+on failure, and transferable resources move to the durable prepared entry
+immediately after `prepareStore.store(draft)` returns. Nothing fallible remains
+after that ownership transfer. Sponsor-side slot
 checkin is owned by `session/sponsoredExecution/sponsorRunner.ts` and runs in
 `finally` only after consume succeeds.
 
@@ -194,8 +203,9 @@ the `vaultObjectId` guard is authoritative — `profile` alone is not sufficient
 `profile` is not part of `PreparedTxEntry`. The store carries only
 the coordination fields the sponsor lifecycle needs; settle-execution
 values (including `profile`) are read at sponsor time from
-`parseSettleArgs(txBytes)` exclusively. `composePreparedCommit`
-projects only coordination fields into the store entry; the
+`parseSettleArgs(txBytes)` exclusively. The prepare runner constructs the exact
+coordination-only store draft, and the selected store adds the authoritative
+`issuedAt`; the
 effective profile the Host used is returned in the `/prepare` response
 and is the source of the "profile" value the client UX shows.
 
