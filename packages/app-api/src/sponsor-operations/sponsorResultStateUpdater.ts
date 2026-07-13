@@ -91,6 +91,8 @@ export interface SponsorResultCallbackDeps {
    * invokes it in a try/catch as defence-in-depth.
    */
   readonly onSlotStateChanged?: (slotAddress: string, state: SponsorSlotState) => void;
+  /** Nudge refill eligibility only after a source-account balance was observed and stored. */
+  readonly onSponsorRefillAccountObserved?: () => void | Promise<void>;
 }
 
 /**
@@ -182,7 +184,7 @@ export function createSponsorResultStateUpdater(
   }
 
   async function probeAndWriteSponsorRefillAccount(): Promise<void> {
-    await probeAndWriteSponsorRefillAccountState(
+    const balance = await probeAndWriteSponsorRefillAccountState(
       {
         sui: deps.sui,
         spendState: deps.spendState,
@@ -196,6 +198,9 @@ export function createSponsorResultStateUpdater(
         writeFailureMode: 'swallow',
       },
     );
+    if (balance !== null && deps.onSponsorRefillAccountObserved) {
+      await deps.onSponsorRefillAccountObserved();
+    }
   }
 
   return async function onSponsorResult(metadata: SponsorResultMetadata): Promise<void> {

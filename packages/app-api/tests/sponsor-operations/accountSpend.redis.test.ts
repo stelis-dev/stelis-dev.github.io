@@ -3,11 +3,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { startRealRedis, type RealRedisHandle } from '../../../core-api/tests/helpers/realRedis.js';
 import {
   createRedisSponsorOperationsState,
+  slotKey,
   SPONSOR_REFILL_ACCOUNT_KEY,
 } from '../../src/sponsor-operations/redisState.js';
 import {
   createSponsorRefillAccountSpendState,
   encodeSponsorRefillAccountWithdrawalIssuedReceipt,
+  FAIL_RESERVED_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+  RESERVE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
   type SponsorRefillAccountSpendStateStore,
 } from '../../src/sponsor-operations/accountSpendState.js';
 import { createSponsorRefillAccountDispatchLock } from '../../src/sponsor-operations/refillLock.js';
@@ -84,6 +87,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
         amountMist: '10',
         observedSlotBalanceMist: null,
         expectedSlotWriteSequence: null,
+        expectedSourceObservationWriteSequence: null,
         nonceKey,
       });
     const results = await Promise.all([
@@ -133,6 +137,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: null,
       expectedSlotWriteSequence: null,
+      expectedSourceObservationWriteSequence: null,
       nonceKey,
     };
     const reserved = await state.reserve(request);
@@ -185,10 +190,11 @@ describe('Sponsor Refill Account spend — real Redis', () => {
     });
     await expect(state.readWithdrawalReceipt(nonceKey)).resolves.toMatchObject({
       type: 'terminal',
-      operationId: request.operationId,
-      status: 'succeeded',
-      digest: 'digest-a',
-      error: null,
+      result: {
+        operationId: request.operationId,
+        status: 'succeeded',
+        digest: 'digest-a',
+      },
     });
     expect(
       (await redis!.client.eval("return redis.call('PTTL', KEYS[1])", [nonceKey], [])) as number,
@@ -203,6 +209,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '100',
       observedSlotBalanceMist: '0',
       expectedSlotWriteSequence: (await operationsState.readSlot(SLOT))!.writeSeq!,
+      expectedSourceObservationWriteSequence: null,
       nonceKey: null,
     });
     expect(refill.status).toBe('created');
@@ -210,9 +217,11 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       status: 'receipt',
       receipt: {
         type: 'terminal',
-        operationId: request.operationId,
-        status: 'succeeded',
-        digest: 'digest-a',
+        result: {
+          operationId: request.operationId,
+          status: 'succeeded',
+          digest: 'digest-a',
+        },
       },
     });
     expect(await state.read()).toMatchObject({ operationId: 'refill-b', state: 'reserved' });
@@ -231,6 +240,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: null,
       expectedSlotWriteSequence: null,
+      expectedSourceObservationWriteSequence: null,
       nonceKey,
     });
     if (reserved.status !== 'created') throw new Error('withdrawal reservation failed');
@@ -293,15 +303,17 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       }),
     ).resolves.toMatchObject({
       state: 'failed',
-      chainResult: 'failed',
-      terminalFailureKind: 'failed',
+      failureKind: 'failed',
+      error: 'MoveAbort',
       digest: 'failed-digest',
     });
     await expect(state.readWithdrawalReceipt(nonceKey)).resolves.toMatchObject({
       type: 'terminal',
-      status: 'failed',
-      digest: 'failed-digest',
-      error: 'MoveAbort',
+      result: {
+        status: 'failed',
+        digest: 'failed-digest',
+        error: 'MoveAbort',
+      },
     });
   });
 
@@ -318,6 +330,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: null,
       expectedSlotWriteSequence: null,
+      expectedSourceObservationWriteSequence: null,
       nonceKey,
     };
     const reserved = await state.reserve(request);
@@ -327,23 +340,292 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       expectedSequence: reserved.spend.sequence,
       lastError: 'source runway unavailable',
       failureKind: 'runway_blocked',
-      slotAddress: null,
+      requiredSourceBalanceMist: null,
     });
 
     expect(await state.read()).toMatchObject({
       operationId: request.operationId,
       state: 'failed',
-      terminalFailureKind: 'runway_blocked',
+      failureKind: 'runway_blocked',
     });
     await expect(state.reserve(request)).resolves.toMatchObject({
       status: 'receipt',
       receipt: {
         type: 'terminal',
-        operationId: request.operationId,
-        status: 'runway_blocked',
-        digest: null,
-        error: 'source runway unavailable',
+        result: {
+          operationId: request.operationId,
+          status: 'runway_blocked',
+          digest: null,
+          error: 'source runway unavailable',
+        },
       },
+    });
+  });
+
+  it('persists the exact source balance required before a runway-blocked refill is eligible again', async () => {
+    const state = createSpendState();
+    const operationsState = createRedisSponsorOperationsState({
+      client: redis!.client,
+      slotAddresses: [SLOT],
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+      lastError: '',
+    });
+    const slot = await operationsState.readSlot(SLOT);
+    const reserved = await state.reserve({
+      operationId: 'refill-runway',
+      kind: 'refill',
+      sourceAddress: SOURCE,
+      destinationAddress: SLOT,
+      slotAddress: SLOT,
+      amountMist: '100',
+      observedSlotBalanceMist: '0',
+      expectedSlotWriteSequence: slot!.writeSeq!,
+      expectedSourceObservationWriteSequence: null,
+      nonceKey: null,
+    });
+    if (reserved.status !== 'created') throw new Error('refill runway reservation failed');
+
+    await state.failReserved({
+      operationId: reserved.spend.operationId,
+      expectedSequence: reserved.spend.sequence,
+      lastError: 'source runway unavailable',
+      failureKind: 'runway_blocked',
+      requiredSourceBalanceMist: '237',
+    });
+
+    await expect(operationsState.readSlot(SLOT)).resolves.toMatchObject({
+      state: 'refill_failed',
+      refillOperationState: 'failed',
+      refillRequiredSourceBalanceMist: '237',
+    });
+  });
+
+  it('does not reserve an automatic refill after its source-balance observation changes', async () => {
+    const state = createSpendState();
+    const operationsState = createRedisSponsorOperationsState({
+      client: redis!.client,
+      slotAddresses: [SLOT],
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT, 0, {
+      state: 'refill_failed',
+      balanceMist: '0',
+      refillRequiredSourceBalanceMist: '240',
+    });
+    const initialCursor = await state.readAccountObservationCursor();
+    await state.updateAccountObservation(initialCursor, {
+      balanceMist: '250',
+      healthy: '1',
+      refillsRemaining: '1',
+      lastError: '',
+    });
+    const eligibleCursor = await state.readAccountObservationCursor();
+    await state.updateAccountObservation(eligibleCursor, {
+      balanceMist: '210',
+      healthy: '1',
+      refillsRemaining: '0',
+      lastError: '',
+    });
+
+    await expect(
+      state.reserve({
+        operationId: 'stale-automatic-refill',
+        kind: 'refill',
+        sourceAddress: SOURCE,
+        destinationAddress: SLOT,
+        slotAddress: SLOT,
+        amountMist: '100',
+        observedSlotBalanceMist: '0',
+        expectedSlotWriteSequence: (await operationsState.readSlot(SLOT))!.writeSeq!,
+        expectedSourceObservationWriteSequence: eligibleCursor.writeSequence,
+        nonceKey: null,
+      }),
+    ).resolves.toEqual({ status: 'source_changed' });
+    await expect(state.read()).resolves.toBeNull();
+    await expect(operationsState.readSlot(SLOT)).resolves.toMatchObject({
+      state: 'refill_failed',
+      refillRequiredSourceBalanceMist: '240',
+    });
+  });
+
+  it('does not let the reserved-failure Lua transition write a different slot projection', async () => {
+    const state = createSpendState();
+    const operationsState = createRedisSponsorOperationsState({
+      client: redis!.client,
+      slotAddresses: [SLOT, SLOT_B],
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT_B, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    const reserved = await state.reserve({
+      operationId: 'refill-slot-identity',
+      kind: 'refill',
+      sourceAddress: SOURCE,
+      destinationAddress: SLOT,
+      slotAddress: SLOT,
+      amountMist: '100',
+      observedSlotBalanceMist: '0',
+      expectedSlotWriteSequence: (await operationsState.readSlot(SLOT))!.writeSeq!,
+      expectedSourceObservationWriteSequence: null,
+      nonceKey: null,
+    });
+    if (reserved.status !== 'created') throw new Error('refill reservation failed');
+    const wrongSlotKey = slotKey(SLOT_B);
+
+    await expect(
+      redis!.client.eval(
+        FAIL_RESERVED_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+        [SPONSOR_REFILL_ACCOUNT_KEY, wrongSlotKey, SPONSOR_REFILL_ACCOUNT_KEY],
+        [
+          reserved.spend.operationId,
+          String(reserved.spend.sequence),
+          'source runway unavailable',
+          '1',
+          'runway_blocked',
+          '237',
+          '',
+          String(ACCEPTED_RECEIPT_TTL_MS),
+        ],
+      ),
+    ).resolves.toEqual(['SLOT_MISMATCH']);
+    await expect(state.read()).resolves.toMatchObject({
+      operationId: reserved.spend.operationId,
+      state: 'reserved',
+      slotAddress: SLOT,
+    });
+    await expect(operationsState.readSlot(SLOT_B)).resolves.toMatchObject({
+      state: 'low_balance',
+      refillRequiredSourceBalanceMist: null,
+    });
+  });
+
+  it('does not let the reservation Lua bind a refill to a different slot key', async () => {
+    const state = createSpendState();
+    const operationsState = createRedisSponsorOperationsState({
+      client: redis!.client,
+      slotAddresses: [SLOT, SLOT_B],
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT_B, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    const slot = await operationsState.readSlot(SLOT);
+
+    await expect(
+      redis!.client.eval(
+        RESERVE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+        [SPONSOR_REFILL_ACCOUNT_KEY, SPONSOR_REFILL_ACCOUNT_KEY, slotKey(SLOT_B)],
+        [
+          '0',
+          'refill-reservation-slot-identity',
+          'refill',
+          SOURCE,
+          SLOT,
+          SLOT,
+          '100',
+          '1',
+          '0',
+          String(slot!.writeSeq),
+          NETWORK,
+          '',
+          '',
+          String(ACCEPTED_RECEIPT_TTL_MS),
+          '',
+        ],
+      ),
+    ).resolves.toEqual(['SLOT_MISMATCH']);
+    await expect(state.read()).resolves.toBeNull();
+    await expect(operationsState.readSlot(SLOT_B)).resolves.toMatchObject({
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+  });
+
+  it('rejects terminal reconciliation against a slot other than the durable refill identity', async () => {
+    const state = createSpendState();
+    const operationsState = createRedisSponsorOperationsState({
+      client: redis!.client,
+      slotAddresses: [SLOT, SLOT_B],
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    await operationsState.updateSlotIfWriteSeq(SLOT_B, 0, {
+      state: 'low_balance',
+      balanceMist: '0',
+    });
+    const reserved = await state.reserve({
+      operationId: 'refill-terminal-slot-identity',
+      kind: 'refill',
+      sourceAddress: SOURCE,
+      destinationAddress: SLOT,
+      slotAddress: SLOT,
+      amountMist: '100',
+      observedSlotBalanceMist: '0',
+      expectedSlotWriteSequence: (await operationsState.readSlot(SLOT))!.writeSeq!,
+      expectedSourceObservationWriteSequence: null,
+      nonceKey: null,
+    });
+    if (reserved.status !== 'created') throw new Error('refill reservation failed');
+    const accountCursor = await state.readAccountObservationCursor();
+    const ready = await state.markReady({
+      operationId: reserved.spend.operationId,
+      expectedSequence: reserved.spend.sequence,
+      expectedAccountWriteSequence: accountCursor.writeSequence,
+      gasBudgetMist: '10',
+      transactionBytesBase64: 'AQ==',
+      signature: 'slot-identity-signature',
+      digest: 'slot-identity-digest',
+      sourceBalanceMist: '1000',
+      refillsRemaining: '9',
+    });
+    const reconciling = await state.markReconciling({
+      operationId: ready!.operationId,
+      expectedSequence: ready!.sequence,
+      chainResult: 'succeeded',
+      lastError: '',
+    });
+    const terminalCursor = await state.readAccountObservationCursor();
+    const wrongSlot = await operationsState.readSlot(SLOT_B);
+
+    await expect(
+      state.complete({
+        operationId: reconciling!.operationId,
+        expectedSequence: reconciling!.sequence,
+        expectedAccountWriteSequence: terminalCursor.writeSequence,
+        state: 'succeeded',
+        lastError: '',
+        account: { balanceMist: '890', healthy: '1', refillsRemaining: '8', lastError: '' },
+        slot: {
+          address: SLOT_B,
+          state: 'healthy',
+          balanceMist: '100',
+          lastError: '',
+          reconciliationResult: 'dispatch_succeeded',
+          expectedWriteSequence: wrongSlot!.writeSeq!,
+        },
+      }),
+    ).rejects.toThrow('terminal slot identity changed');
+    await expect(state.read()).resolves.toMatchObject({
+      operationId: reserved.spend.operationId,
+      state: 'reconciling',
+      slotAddress: SLOT,
+    });
+    await expect(operationsState.readSlot(SLOT_B)).resolves.toMatchObject({
+      state: 'low_balance',
+      balanceMist: '0',
     });
   });
 
@@ -366,6 +648,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '100',
       observedSlotBalanceMist: '0',
       expectedSlotWriteSequence: 1,
+      expectedSourceObservationWriteSequence: null,
       nonceKey: null,
     });
 
@@ -392,6 +675,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
         amountMist: '10',
         observedSlotBalanceMist: null,
         expectedSlotWriteSequence: null,
+        expectedSourceObservationWriteSequence: null,
         nonceKey: wrongNetworkNonce,
       }),
     ).rejects.toThrow('invalid network or schema');
@@ -411,6 +695,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: null,
       expectedSlotWriteSequence: null,
+      expectedSourceObservationWriteSequence: null,
       nonceKey,
     });
     expect(reserved.status).toBe('created');
@@ -462,6 +747,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: null,
       expectedSlotWriteSequence: null,
+      expectedSourceObservationWriteSequence: null,
       nonceKey,
     });
     if (reserved.status !== 'created') throw new Error('reservation did not succeed');
@@ -533,6 +819,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '100',
       observedSlotBalanceMist: '0',
       expectedSlotWriteSequence: 1,
+      expectedSourceObservationWriteSequence: null,
       nonceKey: null,
     });
     expect(reserved.status).toBe('created');
@@ -626,6 +913,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '10',
       observedSlotBalanceMist: '0',
       expectedSlotWriteSequence: 1,
+      expectedSourceObservationWriteSequence: null,
       nonceKey: null,
     });
     if (a.status !== 'created') throw new Error('operation A reservation failed');
@@ -677,6 +965,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       amountMist: '20',
       observedSlotBalanceMist: '10',
       expectedSlotWriteSequence: (await operationsState.readSlot(SLOT))!.writeSeq!,
+      expectedSourceObservationWriteSequence: null,
       nonceKey: null,
     });
     if (b.status !== 'created') throw new Error('operation B reservation failed');
@@ -845,7 +1134,8 @@ describe('Sponsor Refill Account spend — real Redis', () => {
     expect(new Set(submitRecords.map((record) => record.signature)).size).toBe(1);
 
     firstSubmitGate.resolve();
-    await expect(first).resolves.toMatchObject({ status: 'succeeded', digest: 'digest-1' });
+    const firstResult = await first;
+    expect(firstResult).toMatchObject({ status: 'succeeded', digest: 'digest-1' });
     await expect(second).resolves.toMatchObject({ status: 'busy', digest: 'digest-1' });
     expect(buildCount).toBe(1);
 
@@ -857,6 +1147,17 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       }),
     ).resolves.toMatchObject({ status: 'succeeded', digest: 'digest-2' });
     expect(buildCount).toBe(2);
+
+    const submitCountBeforeReplay = submitRecords.length;
+    await expect(
+      coordinatorA.withdraw({
+        destinationAddress: ADMIN,
+        amountMist: '10',
+        nonceKey: nonceA,
+      }),
+    ).resolves.toEqual(firstResult);
+    expect(buildCount).toBe(2);
+    expect(submitRecords).toHaveLength(submitCountBeforeReplay);
   });
 
   it('does not let an expired owner release the next lock owner', async () => {
@@ -959,8 +1260,8 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       });
 
     const results = await Promise.all([
-      makeCoordinator('same-slot-a').refill(SLOT),
-      makeCoordinator('same-slot-b').refill(SLOT),
+      makeCoordinator('same-slot-a').refill(SLOT, 'explicit'),
+      makeCoordinator('same-slot-b').refill(SLOT, 'explicit'),
     ]);
 
     expect(results.map((result) => result.status).sort()).toEqual(['not_needed', 'succeeded']);
@@ -1030,7 +1331,9 @@ describe('Sponsor Refill Account spend — real Redis', () => {
       confirmationTimeoutMs: 100,
     });
 
-    await expect(coordinator.refill(SLOT)).resolves.toMatchObject({ status: 'succeeded' });
+    await expect(coordinator.refill(SLOT, 'explicit')).resolves.toMatchObject({
+      status: 'succeeded',
+    });
     expect(buildCount).toBe(1);
     expect(submitCount).toBe(1);
     expect(await spendState.read()).toMatchObject({ state: 'succeeded' });
@@ -1121,7 +1424,7 @@ describe('Sponsor Refill Account spend — real Redis', () => {
         confirmationTimeoutMs: 100,
       });
 
-    const refill = makeCoordinator('reverse-refill').refill(SLOT);
+    const refill = makeCoordinator('reverse-refill').refill(SLOT, 'explicit');
     await vi.waitFor(() => expect(submittedDestinations).toEqual([SLOT]));
     const withdrawal = makeCoordinator('reverse-withdraw').withdraw({
       destinationAddress: ADMIN,
@@ -1318,13 +1621,13 @@ describe('Sponsor Refill Account spend — real Redis', () => {
 
     const first =
       scenario === 'refill-refill'
-        ? coordinatorA.refill(SLOT)
+        ? coordinatorA.refill(SLOT, 'explicit')
         : coordinatorA.withdraw({ destinationAddress: ADMIN, amountMist: '10', nonceKey: nonceA });
     await vi.waitFor(() => expect(submitCount).toBe(1));
     const second =
       scenario === 'withdrawal-withdrawal'
         ? coordinatorB.withdraw({ destinationAddress: ADMIN, amountMist: '11', nonceKey: nonceB })
-        : coordinatorB.refill(SLOT_B);
+        : coordinatorB.refill(SLOT_B, 'explicit');
     await sleep(30);
     expect(submitCount).toBe(1);
     expect(buildCount).toBe(1);

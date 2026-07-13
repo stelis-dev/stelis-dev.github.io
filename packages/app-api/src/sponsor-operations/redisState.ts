@@ -18,7 +18,11 @@
  */
 
 import type { RedisClientLike } from '@stelis/core-api';
-import { SPONSOR_SLOT_STATES, type SponsorSlotState } from '@stelis/contracts';
+import {
+  isPositiveU64DecimalString,
+  SPONSOR_SLOT_STATES,
+  type SponsorSlotState,
+} from '@stelis/contracts';
 
 export const REFILL_RECONCILIATION_RESULTS = [
   'not_needed',
@@ -72,6 +76,8 @@ export interface SlotWriteFields {
   refillOperationSequence?: string;
   /** Current durable state of the owning refill spend. */
   refillOperationState?: string;
+  /** Source balance required before a runway-blocked refill may be attempted again. */
+  refillRequiredSourceBalanceMist?: string;
 }
 
 /** Fields a caller may update on the sponsor refill account HASH. */
@@ -104,6 +110,7 @@ export interface SlotRead {
   readonly refillOperationId: string | null;
   readonly refillOperationSequence: number | null;
   readonly refillOperationState: string | null;
+  readonly refillRequiredSourceBalanceMist: string | null;
 }
 
 export interface SponsorRefillAccountRead {
@@ -162,7 +169,8 @@ export const READ_ALL_LUA = [
   "    redis.call('HGET', key, 'refillReconciliationResult') or '',",
   "    redis.call('HGET', key, 'refillOperationId') or '',",
   "    redis.call('HGET', key, 'refillOperationSequence') or '',",
-  "    redis.call('HGET', key, 'refillOperationState') or ''",
+  "    redis.call('HGET', key, 'refillOperationState') or '',",
+  "    redis.call('HGET', key, 'refillRequiredSourceBalanceMist') or ''",
   '  })',
   'end',
   'local sponsorKey = KEYS[#KEYS]',
@@ -244,6 +252,14 @@ function parseMistStringOrNull(raw: string | undefined): string | null {
   return /^(?:0|[1-9]\d*)$/.test(raw) ? raw : null;
 }
 
+function parseRefillRequiredSourceBalanceMist(raw: string | undefined): string | null {
+  if (raw === undefined || raw === '') return null;
+  if (!isPositiveU64DecimalString(raw)) {
+    throw new Error('Sponsor slot refill source balance threshold is malformed');
+  }
+  return raw;
+}
+
 function parseHealthyOrNull(raw: string | undefined): boolean | null {
   if (raw === undefined) return null;
   if (raw === '1') return true;
@@ -265,6 +281,13 @@ function flattenWriteFields(fields: Record<string, string | undefined>): string[
   return argv;
 }
 
+function validateSlotRead(slot: SlotRead): SlotRead {
+  if (slot.state === 'healthy' && slot.refillRequiredSourceBalanceMist !== null) {
+    throw new Error('Healthy sponsor slot cannot retain a refill source balance threshold');
+  }
+  return slot;
+}
+
 export function createRedisSponsorOperationsState(
   deps: RedisSponsorOperationsStateDeps,
 ): RedisSponsorOperationsState {
@@ -276,7 +299,7 @@ export function createRedisSponsorOperationsState(
     }
     const hash = await deps.client.hgetall(slotKey(address));
     if (!hash || Object.keys(hash).length === 0) return null;
-    return {
+    return validateSlotRead({
       address,
       state: parseSlotState(hash.state),
       balanceMist: parseMistStringOrNull(hash.balanceMist),
@@ -292,7 +315,10 @@ export function createRedisSponsorOperationsState(
       refillOperationId: parseStringOrNull(hash.refillOperationId),
       refillOperationSequence: parseIntOrNull(hash.refillOperationSequence),
       refillOperationState: parseStringOrNull(hash.refillOperationState),
-    };
+      refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(
+        hash.refillRequiredSourceBalanceMist,
+      ),
+    });
   }
 
   async function readSponsorRefillAccount(): Promise<SponsorRefillAccountRead | null> {
@@ -323,7 +349,19 @@ export function createRedisSponsorOperationsState(
         'RedisSponsorOperationsState.updateSlotIfWriteSeq: expectedWriteSeq must be a non-negative safe integer',
       );
     }
-    const argv = flattenWriteFields(fields as Record<string, string | undefined>);
+    const normalizedFields: SlotWriteFields =
+      fields.state === 'healthy' ? { ...fields, refillRequiredSourceBalanceMist: '' } : fields;
+    const requiredSourceBalanceMist = normalizedFields.refillRequiredSourceBalanceMist;
+    if (
+      requiredSourceBalanceMist !== undefined &&
+      requiredSourceBalanceMist !== '' &&
+      !isPositiveU64DecimalString(requiredSourceBalanceMist)
+    ) {
+      throw new Error(
+        'RedisSponsorOperationsState.updateSlotIfWriteSeq: refill source balance threshold must be a positive u64 decimal string',
+      );
+    }
+    const argv = flattenWriteFields(normalizedFields as Record<string, string | undefined>);
     const raw = await deps.client.eval(
       UPDATE_ENTITY_IF_SEQUENCE_LUA,
       [slotKey(address)],
@@ -373,7 +411,7 @@ export function createRedisSponsorOperationsState(
         throw new Error('RedisSponsorOperationsState.readAll: unexpected slot row address');
       }
 
-      return {
+      return validateSlotRead({
         address,
         state: parseSlotState(stringAt(row, 1)),
         balanceMist: parseMistStringOrNull(stringAt(row, 2)),
@@ -387,7 +425,8 @@ export function createRedisSponsorOperationsState(
         refillOperationId: parseStringOrNull(stringAt(row, 10)),
         refillOperationSequence: parseIntOrNull(stringAt(row, 11)),
         refillOperationState: parseStringOrNull(stringAt(row, 12)),
-      };
+        refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(stringAt(row, 13)),
+      });
     });
 
     const sponsorRefillAccount: SponsorRefillAccountRead = {

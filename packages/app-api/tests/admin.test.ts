@@ -190,7 +190,7 @@ function createMockCtx(): AppApiContext {
         operationId: 'operation-success',
         digest: '0xSUCCESS_DIGEST',
         amountMist: '1000000',
-        remainingBalanceMist: '500000000',
+        destinationAddress: ADMIN_ADDRESS,
       }),
       slotAddresses: ['0xslot'],
       sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
@@ -727,12 +727,35 @@ describe('admin routes', () => {
       expect(body.digest).toBe('0xSUCCESS_DIGEST');
       expect(body.amountMist).toBe('1000000');
       expect(body.recipient).toBeDefined();
-      expect(body.remainingBalanceMist).toBeDefined();
+      expect(body).not.toHaveProperty('remainingBalanceMist');
       expect(mockCtx.sponsorOperations.withdraw).toHaveBeenCalledWith({
         destinationAddress: ADMIN_ADDRESS,
         amountMist: validWithdrawBody.amountMist,
         nonceKey: `stelis:admin:withdraw_nonce:testnet:${validWithdrawBody.nonce}`,
       });
+    });
+
+    it('keeps the durable withdrawal success response when audit storage fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockRedis.lpush.mockRejectedValueOnce(new Error('audit Redis unavailable'));
+
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        digest: '0xSUCCESS_DIGEST',
+        amountMist: '1000000',
+        recipient: ADMIN_ADDRESS,
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[sponsor-refill-account/withdraw] Success audit write failed:',
+        expect.stringContaining('audit Redis unavailable'),
+      );
+      errorSpy.mockRestore();
     });
 
     it('binds signature verification and nonce reservation to the runtime network', async () => {

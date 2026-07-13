@@ -435,8 +435,12 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       refillTargetMist: refillTargetMist ?? null,
       onSlotStateChanged: (slotAddress, state) => {
         if (refillEnabled && state === 'low_balance') {
-          refillWorker.requestRefill(slotAddress);
+          refillWorker.requestObservedSlotRefill(slotAddress);
         }
+      },
+      onSponsorRefillAccountObserved: () => {
+        if (!refillEnabled) return;
+        return refillWorker.requestEligibleRefills();
       },
     });
     // ── 8g. Sponsored execution recorder ───────────────────────────────
@@ -453,23 +457,17 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // `studio` routes see the callback. HTTP listen has not started yet.
     host.onSponsorResult = fanOutSponsorResult(sponsorResultStateUpdater, sponsoredLogsRecorder);
 
-    // Bootstrap may have written `low_balance` / `refill_failed` for a
-    // slot that entered with a depleted balance. Queue those on process
-    // start here; steady-state terminal-callback requeue only covers a
-    // later `low_balance` observation.
+    // Use the stored source balance to queue low slots and runway failures
+    // whose exact threshold is satisfied. An unthresholded terminal failure
+    // has no balance-based recovery proof and remains explicit operator work.
     if (refillEnabled) {
-      const { slots } = await sponsorOperationsState.readAll();
-      for (const slot of slots) {
-        if (slot.state === 'low_balance' || slot.state === 'refill_failed') {
-          refillWorker.requestRefill(slot.address);
-        }
-      }
+      await refillWorker.requestEligibleRefills();
     }
 
     // ── 8g. Sponsor refill account bounded probe helper for admin reads and withdraws
     const probeHostRef = host;
     async function probeSponsorRefillAccount(): Promise<void> {
-      await probeAndWriteSponsorRefillAccountState(
+      const balance = await probeAndWriteSponsorRefillAccountState(
         {
           sui: probeHostRef.sui,
           spendState: sponsorRefillAccountSpendState,
@@ -483,6 +481,9 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
           writeFailureMode: 'throw',
         },
       );
+      if (refillEnabled && balance !== null) {
+        await refillWorker.requestEligibleRefills();
+      }
     }
 
     const sponsorOperations: AppSponsorOperations = {

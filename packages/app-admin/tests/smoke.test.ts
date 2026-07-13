@@ -212,7 +212,6 @@ describe('API client', () => {
             digest: '0xDIGEST',
             amountMist: '1000',
             recipient: '0x1',
-            remainingBalanceMist: '9000',
           }),
       }),
     );

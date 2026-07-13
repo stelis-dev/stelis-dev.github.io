@@ -54,7 +54,7 @@ describe('Sponsor Refill Account observation', () => {
 
   it('writes a sampled healthy balance against the unchanged spend sequence', async () => {
     const stub = spendState();
-    await probeAndWriteSponsorRefillAccountState(
+    const observed = await probeAndWriteSponsorRefillAccountState(
       {
         sui: suiBalance('250'),
         spendState: stub.state,
@@ -71,6 +71,7 @@ describe('Sponsor Refill Account observation', () => {
     expect(stub.writes).toEqual([
       { balanceMist: '250', healthy: '1', refillsRemaining: '2', lastError: '' },
     ]);
+    expect(observed).toBe(250n);
   });
 
   it('writes a degraded observation for an RPC or balance-shape failure', async () => {
@@ -133,7 +134,7 @@ describe('Sponsor Refill Account observation', () => {
           writeFailureMode: 'swallow',
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
     expect(stub.writes).toEqual([]);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
@@ -173,7 +174,7 @@ describe('Sponsor Refill Account observation', () => {
           writeFailureMode: 'swallow',
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
     expect(warnSpy).toHaveBeenCalled();
   });
 });

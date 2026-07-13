@@ -86,6 +86,7 @@ class StubRedis implements RedisClientLike {
           get('refillOperationId'),
           get('refillOperationSequence'),
           get('refillOperationState'),
+          get('refillRequiredSourceBalanceMist'),
         ];
       });
       const sponsorRefillAccountHash = this.hashes.get(keys[keys.length - 1] ?? '');
@@ -168,6 +169,42 @@ describe('createRedisSponsorOperationsState — writes', () => {
     expect(h!.get('lastObservedAtMs')).toBeDefined();
   });
 
+  it('preserves a refill threshold while degraded and clears it when the slot becomes healthy', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'refill_failed',
+      writeSeq: '4',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 4, { state: 'low_balance', balanceMist: '10' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'low_balance',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 5, { state: 'rpc_unreachable', balanceMist: '' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'rpc_unreachable',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 6, { state: 'healthy', balanceMist: '500' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'healthy',
+      refillRequiredSourceBalanceMist: null,
+    });
+  });
+
   it('updateSlotIfWriteSeq rejects unknown slot addresses', async () => {
     const state = createRedisSponsorOperationsState({
       client: redis,
@@ -176,6 +213,21 @@ describe('createRedisSponsorOperationsState — writes', () => {
     await expect(state.updateSlotIfWriteSeq(SLOT_B, 0, { state: 'healthy' })).rejects.toThrow(
       /unknown slot address/,
     );
+  });
+
+  it('rejects a malformed refill source balance threshold before writing the slot', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 0, {
+        state: 'refill_failed',
+        refillRequiredSourceBalanceMist: 'not-a-balance',
+      }),
+    ).rejects.toThrow('refill source balance threshold must be a positive u64 decimal string');
+    expect(redis.hashes.has(slotKey(SLOT_A))).toBe(false);
   });
 
   it('writeSeq is strictly monotonic per entity across updates', async () => {
@@ -261,6 +313,38 @@ describe('createRedisSponsorOperationsState — reads', () => {
       slotAddresses: [SLOT_A],
     });
     expect(await state.readSlot(SLOT_A)).toBeNull();
+  });
+
+  it('rejects a healthy slot that retains a refill source balance threshold', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'healthy',
+      writeSeq: '1',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(state.readSlot(SLOT_A)).rejects.toThrow(
+      'Healthy sponsor slot cannot retain a refill source balance threshold',
+    );
+  });
+
+  it('does not interpret a malformed refill source balance threshold as absent', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'refill_failed',
+      writeSeq: '1',
+      refillRequiredSourceBalanceMist: 'not-a-balance',
+    });
+
+    await expect(state.readSlot(SLOT_A)).rejects.toThrow(
+      'Sponsor slot refill source balance threshold is malformed',
+    );
   });
 
   it('readSlot parses fields after write', async () => {
@@ -387,6 +471,7 @@ describe('createRedisSponsorOperationsState — reads', () => {
         refillOperationId: null,
         refillOperationSequence: null,
         refillOperationState: null,
+        refillRequiredSourceBalanceMist: null,
       },
       {
         address: SLOT_B,
@@ -402,6 +487,7 @@ describe('createRedisSponsorOperationsState — reads', () => {
         refillOperationId: null,
         refillOperationSequence: null,
         refillOperationState: null,
+        refillRequiredSourceBalanceMist: null,
       },
     ]);
     expect(read.sponsorRefillAccount).toEqual({

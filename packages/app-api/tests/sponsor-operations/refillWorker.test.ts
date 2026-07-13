@@ -29,15 +29,36 @@ function slotRead(writeSeq: number, state: SlotRead['state'] = 'healthy'): SlotR
     refillOperationId: null,
     refillOperationSequence: null,
     refillOperationState: null,
+    refillRequiredSourceBalanceMist: null,
   };
 }
 
-function stateStub(reads: readonly SlotRead[] = [slotRead(4)]) {
+function stateStub(
+  reads: readonly SlotRead[] = [slotRead(4)],
+  readAllSlots: readonly SlotRead[] = [reads[reads.length - 1]!],
+  sourceBalances: readonly (string | null)[] = ['100'],
+) {
   let readIndex = 0;
+  let readAllIndex = 0;
   return {
+    readAll: vi.fn(async () => {
+      const balanceMist =
+        sourceBalances[Math.min(readAllIndex++, sourceBalances.length - 1)] ?? null;
+      return {
+        slots: readAllSlots,
+        sponsorRefillAccount: {
+          balanceMist,
+          healthy: balanceMist === null ? false : true,
+          refillsRemaining: balanceMist === null ? null : 1,
+          lastError: balanceMist === null ? 'unavailable' : null,
+          lastObservedAtMs: 1,
+          writeSeq: readAllIndex,
+        },
+      };
+    }),
     readSlot: vi.fn(async () => reads[Math.min(readIndex++, reads.length - 1)]),
     updateSlotIfWriteSeq: vi.fn(async () => true),
-  } satisfies Pick<RedisSponsorOperationsState, 'readSlot' | 'updateSlotIfWriteSeq'>;
+  } satisfies Pick<RedisSponsorOperationsState, 'readAll' | 'readSlot' | 'updateSlotIfWriteSeq'>;
 }
 
 describe('Sponsor operations refill trigger queue', () => {
@@ -138,12 +159,12 @@ describe('Sponsor operations refill trigger queue', () => {
 
     worker.requestRefill('0xslot');
     await vi.waitFor(() => expect(state.updateSlotIfWriteSeq).toHaveBeenCalledTimes(1));
-    expect(state.updateSlotIfWriteSeq).toHaveBeenCalledWith(
-      '0xslot',
-      4,
-      expect.objectContaining({ state: 'refill_failed', lastError: 'source balance unavailable' }),
-    );
+    expect(state.updateSlotIfWriteSeq).toHaveBeenCalledWith('0xslot', 4, {
+      lastError: 'source balance unavailable',
+    });
     await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
+    expect(refill).toHaveBeenNthCalledWith(1, '0xslot', 'explicit');
+    expect(refill).toHaveBeenNthCalledWith(2, '0xslot', 'retry');
     worker.dispose();
   });
 
@@ -163,11 +184,8 @@ describe('Sponsor operations refill trigger queue', () => {
 
     worker.requestRefill('0xslot');
     await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
-    expect(state.updateSlotIfWriteSeq).toHaveBeenCalledWith(
-      '0xslot',
-      0,
-      expect.objectContaining({ state: 'refill_failed', lastError: 'redis read unavailable' }),
-    );
+    expect(refill).toHaveBeenCalledWith('0xslot', 'retry');
+    expect(state.updateSlotIfWriteSeq).not.toHaveBeenCalled();
     worker.dispose();
   });
 
@@ -191,24 +209,21 @@ describe('Sponsor operations refill trigger queue', () => {
 
     worker.requestRefill('0xslot');
     await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
-    expect(refill).toHaveBeenNthCalledWith(1, '0xslot');
-    expect(refill).toHaveBeenNthCalledWith(2, '0xslot');
+    expect(refill).toHaveBeenNthCalledWith(1, '0xslot', 'explicit');
+    expect(refill).toHaveBeenNthCalledWith(2, '0xslot', 'explicit');
     await vi.waitFor(() => expect(state.readSlot).toHaveBeenCalledTimes(3));
     worker.dispose();
   });
 
-  it('retries a refill after the source-account runway blocks it', async () => {
+  it('does not retry a refill until a new balance observation re-enqueues it', async () => {
     const state = stateStub();
-    const refill = vi
-      .fn()
-      .mockResolvedValueOnce({
-        status: 'runway_blocked',
-        operationId: 'operation-runway',
-        digest: null,
-        amountMist: '10',
-        error: 'source runway unavailable',
-      })
-      .mockResolvedValueOnce({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
+    const refill = vi.fn().mockResolvedValue({
+      status: 'runway_blocked',
+      operationId: 'operation-runway',
+      digest: null,
+      amountMist: '10',
+      error: 'source runway unavailable',
+    });
     const worker = createSponsorOperationsRefillWorker({
       state,
       spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
@@ -216,8 +231,202 @@ describe('Sponsor operations refill trigger queue', () => {
     });
 
     worker.requestRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(refill).toHaveBeenCalledTimes(1);
+    worker.requestRefill('0xslot');
     await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(state.readSlot).toHaveBeenCalledTimes(3));
+    worker.dispose();
+  });
+
+  it('keeps a low-slot observation automatic when a runway threshold is present', async () => {
+    const blockedSlot = {
+      ...slotRead(4, 'refill_failed'),
+      refillRequiredSourceBalanceMist: '200',
+    };
+    const refill = vi.fn().mockResolvedValue({ status: 'not_eligible', slotAddress: '0xslot' });
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([blockedSlot]),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestObservedSlotRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    expect(refill).toHaveBeenCalledWith('0xslot', 'slot_observed');
+    worker.dispose();
+  });
+
+  it('turns a low-slot observation without a runway threshold into one refill attempt', async () => {
+    const refill = vi
+      .fn()
+      .mockResolvedValue({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([slotRead(4, 'low_balance'), slotRead(5, 'healthy')]),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestObservedSlotRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    expect(refill).toHaveBeenCalledWith('0xslot', 'slot_observed');
+    worker.dispose();
+  });
+
+  it('keeps an explicit refill request distinct from automatic runway eligibility', async () => {
+    const blockedSlot = {
+      ...slotRead(4, 'refill_failed'),
+      refillRequiredSourceBalanceMist: '200',
+    };
+    const refill = vi
+      .fn()
+      .mockResolvedValue({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([blockedSlot]),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    expect(refill).toHaveBeenCalledWith('0xslot', 'explicit');
+    worker.dispose();
+  });
+
+  it('revalidates an in-flight low-slot hint after the first attempt records a runway threshold', async () => {
+    const initial = slotRead(4, 'low_balance');
+    const blocked = {
+      ...slotRead(5, 'refill_failed'),
+      refillRequiredSourceBalanceMist: '200',
+    };
+    const gate = deferred<{
+      status: 'runway_blocked';
+      operationId: string;
+      digest: null;
+      amountMist: string;
+      error: string;
+    }>();
+    const refill = vi
+      .fn()
+      .mockImplementationOnce(() => gate.promise)
+      .mockResolvedValueOnce({ status: 'not_eligible', slotAddress: '0xslot' });
+    const state = stateStub([initial, blocked]);
+    const worker = createSponsorOperationsRefillWorker({
+      state,
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    worker.requestObservedSlotRefill('0xslot');
+    gate.resolve({
+      status: 'runway_blocked',
+      operationId: 'operation-runway',
+      digest: null,
+      amountMist: '10',
+      error: 'source runway unavailable',
+    });
+
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
+    expect(refill).toHaveBeenNthCalledWith(2, '0xslot', 'slot_observed');
+    worker.dispose();
+  });
+
+  it('re-enqueues a runway-blocked refill only when the observed source balance reaches its threshold', async () => {
+    const blockedSlot = {
+      ...slotRead(4, 'refill_failed'),
+      refillRequiredSourceBalanceMist: '200',
+    };
+    const state = stateStub([blockedSlot], [blockedSlot], ['199', '200']);
+    const refill = vi
+      .fn()
+      .mockResolvedValue({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
+    const worker = createSponsorOperationsRefillWorker({
+      state,
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    await worker.requestEligibleRefills();
+    await Promise.resolve();
+    expect(refill).not.toHaveBeenCalled();
+
+    await worker.requestEligibleRefills();
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    expect(refill).toHaveBeenCalledWith('0xslot', 'source_observed');
+    worker.dispose();
+  });
+
+  it('uses a source-balance observation to recover an unthresholded low slot', async () => {
+    const lowSlot = slotRead(4, 'low_balance');
+    const refill = vi
+      .fn()
+      .mockResolvedValue({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([lowSlot, slotRead(5, 'healthy')], [lowSlot]),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    await worker.requestEligibleRefills();
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    worker.dispose();
+  });
+
+  it('does not treat source balance as evidence to retry an unthresholded terminal failure', async () => {
+    const failedSlot = slotRead(4, 'refill_failed');
+    const refill = vi.fn();
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([failedSlot], [failedSlot], ['1000']),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    await worker.requestEligibleRefills();
+    await Promise.resolve();
+    expect(refill).not.toHaveBeenCalled();
+    worker.dispose();
+  });
+
+  it('keeps coalesced source observations automatic when the latest balance decreases', async () => {
+    const initial = slotRead(4, 'low_balance');
+    const threshold = {
+      ...slotRead(5, 'refill_failed'),
+      refillRequiredSourceBalanceMist: '240',
+    };
+    const gate = deferred<{
+      status: 'runway_blocked';
+      operationId: string;
+      digest: null;
+      amountMist: string;
+      error: string;
+    }>();
+    const refill = vi
+      .fn()
+      .mockImplementationOnce(() => gate.promise)
+      .mockResolvedValueOnce({ status: 'not_eligible', slotAddress: '0xslot' });
+    const worker = createSponsorOperationsRefillWorker({
+      state: stateStub([initial, threshold], [threshold], ['250', '210']),
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestRefill('0xslot');
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(1));
+    worker.requestObservedSlotRefill('0xslot');
+    await worker.requestEligibleRefills();
+    await worker.requestEligibleRefills();
+    gate.resolve({
+      status: 'runway_blocked',
+      operationId: 'operation-runway',
+      digest: null,
+      amountMist: '10',
+      error: 'source runway unavailable',
+    });
+
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
+    expect(refill).toHaveBeenNthCalledWith(2, '0xslot', 'source_observed');
     worker.dispose();
   });
 
@@ -249,6 +458,31 @@ describe('Sponsor operations refill trigger queue', () => {
     worker.dispose();
   });
 
+  it('does not promote an automatic refill to explicit work after a busy result', async () => {
+    const state = stateStub([slotRead(4, 'low_balance'), slotRead(5, 'low_balance')]);
+    const refill = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 'busy',
+        operationId: 'blocking-withdrawal',
+        digest: 'blocking-digest',
+        error: 'another account spend was recovered',
+      })
+      .mockResolvedValueOnce({ status: 'not_eligible', slotAddress: '0xslot' });
+    const worker = createSponsorOperationsRefillWorker({
+      state,
+      spendCoordinator: { refill } as unknown as SponsorRefillAccountSpendCoordinator,
+      retryDelayMs: 10,
+    });
+
+    worker.requestObservedSlotRefill('0xslot');
+
+    await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
+    expect(refill).toHaveBeenNthCalledWith(1, '0xslot', 'slot_observed');
+    expect(refill).toHaveBeenNthCalledWith(2, '0xslot', 'slot_observed');
+    worker.dispose();
+  });
+
   it('requeues a successful refill when its terminal slot observation is still low', async () => {
     const state = stateStub([
       slotRead(4, 'low_balance'),
@@ -263,7 +497,6 @@ describe('Sponsor operations refill trigger queue', () => {
         operationId: 'operation-a',
         digest: 'digest-a',
         amountMist: '10',
-        remainingBalanceMist: '100',
       })
       .mockResolvedValueOnce({ status: 'not_needed', slotAddress: '0xslot', balanceMist: '10' });
     const worker = createSponsorOperationsRefillWorker({

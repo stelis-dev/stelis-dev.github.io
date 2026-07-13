@@ -125,7 +125,6 @@ export interface SponsorRefillAccountWithdrawalResponse {
   digest: string;
   amountMist: string;
   recipient: string;
-  remainingBalanceMist: string;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -542,19 +541,10 @@ export function parseSponsorRefillAccountWithdrawalResponse(
   value: unknown,
 ): SponsorRefillAccountWithdrawalResponse {
   const raw = record(value, 'SponsorRefillAccountWithdrawalResponse');
-  onlyKeys(
-    raw,
-    ['digest', 'amountMist', 'recipient', 'remainingBalanceMist'],
-    'SponsorRefillAccountWithdrawalResponse',
-  );
+  onlyKeys(raw, ['digest', 'amountMist', 'recipient'], 'SponsorRefillAccountWithdrawalResponse');
   return {
     digest: stringField(raw, 'digest', 'SponsorRefillAccountWithdrawalResponse'),
     amountMist: decimalField(raw, 'amountMist', 'SponsorRefillAccountWithdrawalResponse'),
     recipient: stringField(raw, 'recipient', 'SponsorRefillAccountWithdrawalResponse'),
-    remainingBalanceMist: decimalField(
-      raw,
-      'remainingBalanceMist',
-      'SponsorRefillAccountWithdrawalResponse',
-    ),
   };
 }

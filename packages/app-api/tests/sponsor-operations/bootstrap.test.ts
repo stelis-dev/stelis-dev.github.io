@@ -98,6 +98,7 @@ function makeSlotRead(
     refillOperationId: fields.refillOperationId ?? null,
     refillOperationSequence: fields.refillOperationSequence ?? null,
     refillOperationState: fields.refillOperationState ?? null,
+    refillRequiredSourceBalanceMist: fields.refillRequiredSourceBalanceMist ?? null,
   };
 }
 
@@ -150,6 +151,29 @@ describe('bootstrapSponsorOperations', () => {
       sponsorRefillAccountBalanceTimeoutMs: 500,
     });
     expect(stub.slotWrites[0].fields.state).toBe('low_balance');
+  });
+
+  it('does not overwrite a runway eligibility threshold while a boot observation remains low', async () => {
+    const stub = makeStubState({
+      [SLOT_A]: makeSlotRead('refill_failed', {
+        writeSeq: 4,
+        refillRequiredSourceBalanceMist: '237',
+      }),
+    });
+    await bootstrapSponsorOperations({
+      sui: makeStubSui(async () => '0'),
+      state: stub.state,
+      spendState: stub.spendState,
+      slotAddresses: [SLOT_A],
+      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
+      refillTargetMist: 100n,
+      slotBalanceTimeoutMs: 500,
+      sponsorRefillAccountBalanceTimeoutMs: 500,
+    });
+
+    expect(stub.slotWrites[0].fields.state).toBe('low_balance');
+    expect(stub.slotWrites[0].fields).not.toHaveProperty('refillRequiredSourceBalanceMist');
   });
 
   it('writes rpc_unreachable + lastError when a slot probe rejects', async () => {

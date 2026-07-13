@@ -658,23 +658,33 @@ export function createAdminRoutes(
         throw new Error('Withdrawal returned a refill-only result');
       }
 
-      const { digest, remainingBalanceMist } = result;
-      if (remainingBalanceMist === null) {
-        throw new Error('Successful withdrawal is missing remainingBalanceMist');
-      }
+      const {
+        digest,
+        amountMist: completedAmountMist,
+        destinationAddress: completedDestinationAddress,
+      } = result;
 
-      await writeAdminAuditLog(redis, {
-        event: 'WITHDRAWAL_SUCCESS',
-        ts: ts(),
-        ip,
-        detail: `${amountMist} MIST → ${recipientAddress} (${digest})`,
-      });
+      try {
+        await writeAdminAuditLog(redis, {
+          event: 'WITHDRAWAL_SUCCESS',
+          ts: ts(),
+          ip,
+          detail: `${completedAmountMist} MIST → ${completedDestinationAddress} (${digest})`,
+        });
+      } catch (auditError) {
+        // The durable terminal result is already authoritative. Audit storage
+        // failure must not turn a confirmed withdrawal into an HTTP failure.
+        // eslint-disable-next-line no-console
+        console.error(
+          '[sponsor-refill-account/withdraw] Success audit write failed:',
+          safeErrorSummary(auditError),
+        );
+      }
 
       const response: SponsorRefillAccountWithdrawalResponse = {
         digest,
-        amountMist,
-        recipient: recipientAddress,
-        remainingBalanceMist,
+        amountMist: completedAmountMist,
+        recipient: completedDestinationAddress,
       };
       return c.json(response);
     } catch (err) {

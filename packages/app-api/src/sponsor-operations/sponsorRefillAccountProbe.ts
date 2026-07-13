@@ -53,10 +53,11 @@ function logSponsorRefillAccountWriteFailure(payload: {
 export async function probeAndWriteSponsorRefillAccountState(
   deps: SponsorRefillAccountProbeDeps,
   options: ProbeAndWriteSponsorRefillAccountStateOptions,
-): Promise<void> {
+): Promise<bigint | null> {
   const observationCursor = await deps.spendState.readAccountObservationCursor();
   let fields: SponsorRefillAccountWriteFields;
   let probeError: string | undefined;
+  let observedBalance: bigint | null = null;
 
   try {
     const balance = await withTimeout(
@@ -67,6 +68,7 @@ export async function probeAndWriteSponsorRefillAccountState(
         return parseChainBalanceMist(res.balance.balance, 'Sponsor refill account balance');
       },
     );
+    observedBalance = balance;
     fields = {
       balanceMist: balance.toString(),
       healthy: '1',
@@ -88,6 +90,7 @@ export async function probeAndWriteSponsorRefillAccountState(
     if (!updated && options.writeFailureMode === 'throw') {
       throw new Error('Sponsor Refill Account changed during the balance probe');
     }
+    return updated ? observedBalance : null;
   } catch (writeErr) {
     logSponsorRefillAccountWriteFailure({
       source: options.source,
@@ -98,5 +101,6 @@ export async function probeAndWriteSponsorRefillAccountState(
     if (options.writeFailureMode === 'throw') {
       throw writeErr instanceof Error ? writeErr : new Error(String(writeErr));
     }
+    return null;
   }
 }

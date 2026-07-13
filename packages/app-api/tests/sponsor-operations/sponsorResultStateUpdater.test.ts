@@ -65,7 +65,11 @@ function sui(getBalance: (owner: string) => Promise<string>): SuiGrpcClient {
 function updater(
   stubs: ReturnType<typeof stateStubs>,
   getBalance: (owner: string) => Promise<string>,
-  options?: { payoutRecipient?: string; onSlotStateChanged?: (state: string) => void },
+  options?: {
+    payoutRecipient?: string;
+    onSlotStateChanged?: (state: string) => void;
+    onSponsorRefillAccountObserved?: () => void;
+  },
 ) {
   return createSponsorResultStateUpdater({
     sui: sui(getBalance),
@@ -80,6 +84,7 @@ function updater(
     onSlotStateChanged: options?.onSlotStateChanged
       ? (_address, state) => options.onSlotStateChanged!(state)
       : undefined,
+    onSponsorRefillAccountObserved: options?.onSponsorRefillAccountObserved,
   });
 }
 
@@ -117,13 +122,16 @@ describe('Sponsor result state updater', () => {
 
   it('updates the Sponsor Refill Account only for a successful payout into that account', async () => {
     const stubs = stateStubs();
+    const onObserved = vi.fn();
     const callback = updater(stubs, async (owner) => (owner === ACCOUNT ? '500' : '150'), {
       payoutRecipient: ACCOUNT,
+      onSponsorRefillAccountObserved: onObserved,
     });
     await callback(metadata('success'));
     expect(stubs.accountWrites).toEqual([
       { balanceMist: '500', healthy: '1', refillsRemaining: '2', lastError: '' },
     ]);
+    expect(onObserved).toHaveBeenCalledWith();
 
     const failed = stateStubs();
     await updater(failed, async () => '500', { payoutRecipient: ACCOUNT })(

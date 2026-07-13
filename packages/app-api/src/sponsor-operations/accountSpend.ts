@@ -14,12 +14,21 @@ import type {
   SponsorRefillAccountDispatchLock,
   SponsorRefillAccountDispatchLockHandle,
 } from './refillLock.js';
-import type { RedisSponsorOperationsState, SlotRead } from './redisState.js';
+import type {
+  RedisSponsorOperationsState,
+  SlotRead,
+  SponsorRefillAccountRead,
+} from './redisState.js';
 import {
   isActiveSponsorRefillAccountSpend,
+  type ReadySponsorRefillAccountSpend,
+  type ReconcilingSponsorRefillAccountSpend,
+  type ReservedSponsorRefillAccountSpend,
   type SponsorRefillAccountSpend,
   type SponsorRefillAccountSpendStateStore,
   type SponsorRefillAccountWithdrawalReceipt,
+  type SponsorRefillAccountWithdrawalTerminalResult,
+  type TerminalSponsorRefillAccountSpend,
 } from './accountSpendState.js';
 import { parseChainBalanceMist } from './balanceParsing.js';
 import { normalizeSponsorOperationsLastError } from './lastError.js';
@@ -72,7 +81,7 @@ export type SponsorRefillAccountSpendResult =
       readonly operationId: string;
       readonly digest: string;
       readonly amountMist: string;
-      readonly remainingBalanceMist: string | null;
+      readonly destinationAddress: string;
     }
   | {
       readonly status: 'failed';
@@ -104,6 +113,42 @@ export type SponsorRefillAccountSpendResult =
   | { readonly status: 'nonce_missing' }
   | { readonly status: 'not_needed'; readonly slotAddress: string; readonly balanceMist: string };
 
+export type SponsorRefillAccountRefillReason =
+  | 'explicit'
+  | 'slot_observed'
+  | 'source_observed'
+  | 'retry';
+
+export type SponsorRefillAccountRefillResult =
+  | SponsorRefillAccountSpendResult
+  | { readonly status: 'not_eligible'; readonly slotAddress: string };
+
+export function isAutomaticSponsorRefillEligible(
+  slot: SlotRead | null,
+  source: SponsorRefillAccountRead,
+  reason: Exclude<SponsorRefillAccountRefillReason, 'explicit'>,
+): boolean {
+  if (slot === null) return false;
+  const required = slot.refillRequiredSourceBalanceMist;
+  const sourceMeetsRequiredBalance =
+    required !== null &&
+    source.healthy === true &&
+    source.balanceMist !== null &&
+    source.writeSeq !== null &&
+    BigInt(source.balanceMist) >= BigInt(required);
+
+  if (reason === 'slot_observed') {
+    return slot.state === 'low_balance' && required === null;
+  }
+  if (slot.state === 'low_balance') {
+    return required === null || sourceMeetsRequiredBalance;
+  }
+  if (slot.state === 'rpc_unreachable') {
+    return reason === 'retry' && (required === null || sourceMeetsRequiredBalance);
+  }
+  return slot.state === 'refill_failed' && required !== null && sourceMeetsRequiredBalance;
+}
+
 export interface SponsorRefillAccountSpendCoordinatorDeps {
   readonly state: SponsorRefillAccountSpendStateStore;
   readonly operationsState: RedisSponsorOperationsState;
@@ -128,7 +173,10 @@ export interface SponsorRefillAccountSpendCoordinator {
     readonly amountMist: string;
     readonly nonceKey: string;
   }): Promise<SponsorRefillAccountSpendResult>;
-  refill(slotAddress: string): Promise<SponsorRefillAccountSpendResult>;
+  refill(
+    slotAddress: string,
+    reason: SponsorRefillAccountRefillReason,
+  ): Promise<SponsorRefillAccountRefillResult>;
   recoverActiveSpend(): Promise<SponsorRefillAccountSpendResult | null>;
 }
 
@@ -418,6 +466,10 @@ export function createSponsorRefillAccountSpendCoordinator(
 
   const sourceRunwayMist = deps.runwayTargetMist * BigInt(deps.sponsorSlotCount);
 
+  function spendDigest(spend: SponsorRefillAccountSpend): string | null {
+    return 'digest' in spend ? spend.digest : null;
+  }
+
   async function acquireDispatchLock(): Promise<SponsorRefillAccountDispatchLockHandle> {
     const deadlineMs = Date.now() + deps.dispatchTimeoutMs;
     while (true) {
@@ -485,9 +537,10 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function failReserved(
-    spend: SponsorRefillAccountSpend,
+    spend: ReservedSponsorRefillAccountSpend,
     error: unknown,
     status: 'failed' | 'runway_blocked',
+    requiredSourceBalanceMist: bigint | null = null,
   ): Promise<SponsorRefillAccountSpendResult> {
     const message = normalizeSponsorOperationsLastError(error);
     const failed = await deps.state.failReserved({
@@ -495,7 +548,7 @@ export function createSponsorRefillAccountSpendCoordinator(
       expectedSequence: spend.sequence,
       lastError: message,
       failureKind: status,
-      slotAddress: spend.slotAddress,
+      requiredSourceBalanceMist: requiredSourceBalanceMist?.toString() ?? null,
     });
     if (failed === null) {
       const current = await deps.state.read();
@@ -505,22 +558,16 @@ export function createSponsorRefillAccountSpendCoordinator(
       return {
         status: 'pending',
         operationId: spend.operationId,
-        digest: spend.digest,
+        digest: null,
         amountMist: spend.amountMist,
         error: 'Sponsor Refill Account spend changed while recording preparation failure',
       };
     }
-    return {
-      status,
-      operationId: failed.operationId,
-      digest: null,
-      amountMist: failed.amountMist,
-      error: failed.lastError ?? message,
-    };
+    return projectTerminalSpend(failed);
   }
 
   function pendingReserved(
-    spend: SponsorRefillAccountSpend,
+    spend: ReservedSponsorRefillAccountSpend,
     error: unknown,
   ): SponsorRefillAccountSpendResult {
     return {
@@ -533,13 +580,12 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function requireVisibleChainResult(
-    spend: SponsorRefillAccountSpend,
+    spend: ReconcilingSponsorRefillAccountSpend,
     operation: string,
   ): Promise<SponsorRefillAccountSpendResult | null> {
-    if (spend.digest === null || spend.chainResult === null) return null;
     try {
       const lookup = await withTimeout(operation, deps.confirmationTimeoutMs, () =>
-        deps.boundary.lookup(spend.digest!),
+        deps.boundary.lookup(spend.digest),
       );
       if (lookup.status === 'not_found') {
         return {
@@ -573,7 +619,7 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function prepareReservedSpend(
-    spend: SponsorRefillAccountSpend,
+    spend: ReservedSponsorRefillAccountSpend,
   ): Promise<SponsorRefillAccountSpendResult | SponsorRefillAccountSpend> {
     let built: BuiltSponsorRefillAccountSpend;
     const preparationDeadlineMs = Date.now() + deps.dispatchTimeoutMs;
@@ -621,6 +667,9 @@ export function createSponsorRefillAccountSpendCoordinator(
         spend,
         `Sponsor Refill Account spend would leave ${postBalance.toString()} MIST below runway ${sourceRunwayMist.toString()} MIST`,
         'runway_blocked',
+        spend.kind === 'refill'
+          ? sourceRunwayMist + BigInt(spend.amountMist) + built.gasBudgetMist
+          : null,
       );
     }
 
@@ -639,7 +688,7 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function observeRefillTerminal(
-    spend: SponsorRefillAccountSpend,
+    spend: ReconcilingSponsorRefillAccountSpend,
     chainResult: SponsorRefillAccountChainResult,
   ): Promise<
     | { readonly status: 'not_applicable' }
@@ -707,15 +756,12 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function reconcileSpend(
-    spend: SponsorRefillAccountSpend,
+    spend: ReconcilingSponsorRefillAccountSpend,
   ): Promise<SponsorRefillAccountSpendResult> {
-    if (spend.state !== 'reconciling' || spend.chainResult === null || spend.digest === null) {
-      throw new Error('Sponsor Refill Account spend is not ready for reconciliation');
-    }
     const chainResult: SponsorRefillAccountChainResult = {
       digest: spend.digest,
       success: spend.chainResult === 'succeeded',
-      error: spend.lastError,
+      error: spend.chainResult === 'failed' ? spend.error : null,
     };
     const chainVisibility = await requireVisibleChainResult(
       spend,
@@ -792,26 +838,11 @@ export function createSponsorRefillAccountSpendCoordinator(
       };
     }
 
-    if (chainResult.success) {
-      return {
-        status: 'succeeded',
-        operationId: spend.operationId,
-        digest: chainResult.digest,
-        amountMist: spend.amountMist,
-        remainingBalanceMist: accountObservation.balance?.toString() ?? null,
-      };
-    }
-    return {
-      status: 'failed',
-      operationId: spend.operationId,
-      digest: chainResult.digest,
-      amountMist: spend.amountMist,
-      error: normalizeSponsorOperationsLastError(chainResult.error ?? 'transaction failed'),
-    };
+    return projectTerminalSpend(completed);
   }
 
   async function beginReconciliation(
-    spend: SponsorRefillAccountSpend,
+    spend: ReadySponsorRefillAccountSpend,
     chainResult: SponsorRefillAccountChainResult,
   ): Promise<SponsorRefillAccountSpendResult> {
     const next = await deps.state.markReconciling({
@@ -834,16 +865,8 @@ export function createSponsorRefillAccountSpendCoordinator(
   }
 
   async function driveReadySpend(
-    spend: SponsorRefillAccountSpend,
+    spend: ReadySponsorRefillAccountSpend,
   ): Promise<SponsorRefillAccountSpendResult> {
-    if (
-      spend.transactionBytesBase64 === null ||
-      spend.signature === null ||
-      spend.digest === null ||
-      spend.gasBudgetMist === null
-    ) {
-      throw new Error('Sponsor Refill Account ready spend is missing transaction identity');
-    }
     const transactionBytes = fromBase64(spend.transactionBytesBase64);
     await deps.boundary.validateSignedIdentity({
       sourceAddress: spend.sourceAddress,
@@ -859,7 +882,7 @@ export function createSponsorRefillAccountSpendCoordinator(
       lookup = await withTimeout(
         `sponsorRefillAccountSpend.lookup(${spend.digest})`,
         deps.confirmationTimeoutMs,
-        () => deps.boundary.lookup(spend.digest!),
+        () => deps.boundary.lookup(spend.digest),
       );
     } catch (error) {
       return {
@@ -876,7 +899,7 @@ export function createSponsorRefillAccountSpendCoordinator(
       const result = await withTimeout(
         `sponsorRefillAccountSpend.submit(${spend.digest})`,
         deps.dispatchTimeoutMs,
-        () => deps.boundary.submit(transactionBytes, spend.signature!, spend.digest!),
+        () => deps.boundary.submit(transactionBytes, spend.signature, spend.digest),
       );
       return beginReconciliation(spend, result);
     } catch (submitError) {
@@ -884,7 +907,7 @@ export function createSponsorRefillAccountSpendCoordinator(
         const afterSubmit = await withTimeout(
           `sponsorRefillAccountSpend.lookupAfterSubmit(${spend.digest})`,
           deps.confirmationTimeoutMs,
-          () => deps.boundary.lookup(spend.digest!),
+          () => deps.boundary.lookup(spend.digest),
         );
         if (afterSubmit.status === 'found') {
           return beginReconciliation(spend, afterSubmit.result);
@@ -918,7 +941,7 @@ export function createSponsorRefillAccountSpendCoordinator(
         return {
           status: 'pending',
           operationId: spend.operationId,
-          digest: spend.digest,
+          digest: null,
           amountMist: spend.amountMist,
           error: 'Sponsor Refill Account spend was superseded during preparation',
         };
@@ -927,25 +950,70 @@ export function createSponsorRefillAccountSpendCoordinator(
     }
     if (spend.state === 'ready') return driveReadySpend(spend);
     if (spend.state === 'reconciling') return reconcileSpend(spend);
+    return projectTerminalSpend(spend);
+  }
+
+  function projectTerminalSpend(
+    spend: TerminalSponsorRefillAccountSpend,
+  ): SponsorRefillAccountSpendResult {
+    if (spend.kind === 'withdrawal') {
+      return projectWithdrawalTerminalResult(
+        spend.state === 'succeeded'
+          ? {
+              status: 'succeeded',
+              operationId: spend.operationId,
+              sourceAddress: spend.sourceAddress,
+              destinationAddress: spend.destinationAddress,
+              amountMist: spend.amountMist,
+              digest: spend.digest,
+            }
+          : {
+              status: spend.failureKind,
+              operationId: spend.operationId,
+              sourceAddress: spend.sourceAddress,
+              destinationAddress: spend.destinationAddress,
+              amountMist: spend.amountMist,
+              digest: spend.digest,
+              error: spend.error,
+            },
+      );
+    }
     if (spend.state === 'succeeded') {
       return {
         status: 'succeeded',
         operationId: spend.operationId,
-        digest: spend.digest!,
+        digest: spend.digest,
         amountMist: spend.amountMist,
-        remainingBalanceMist: null,
+        destinationAddress: spend.destinationAddress,
       };
     }
-    const failureStatus = spend.terminalFailureKind;
-    if (failureStatus === null) {
-      throw new Error('Sponsor Refill Account failed spend is missing its terminal failure kind');
-    }
     return {
-      status: failureStatus,
+      status: spend.failureKind,
       operationId: spend.operationId,
       digest: spend.digest,
       amountMist: spend.amountMist,
-      error: spend.lastError ?? 'Sponsor Refill Account spend failed',
+      error: spend.error,
+    };
+  }
+
+  function projectWithdrawalTerminalResult(
+    result: SponsorRefillAccountWithdrawalTerminalResult,
+  ): SponsorRefillAccountSpendResult {
+    if (result.status === 'succeeded') {
+      return {
+        status: 'succeeded',
+        operationId: result.operationId,
+        digest: result.digest,
+        amountMist: result.amountMist,
+        destinationAddress: result.destinationAddress,
+      };
+    }
+    return {
+      status: result.status,
+      operationId: result.operationId,
+      digest: result.digest,
+      amountMist: result.amountMist,
+      error: result.error,
     };
   }
 
@@ -958,31 +1026,17 @@ export function createSponsorRefillAccountSpendCoordinator(
     },
   ): Promise<SponsorRefillAccountSpendResult | null> {
     if (receipt.type === 'issued') return null;
+    const identity = receipt.type === 'terminal' ? receipt.result : receipt;
     if (
-      receipt.operationId !== input.operationId ||
-      receipt.sourceAddress !== deps.sourceAddress ||
-      receipt.destinationAddress !== input.destinationAddress ||
-      receipt.amountMist !== input.amountMist
+      identity.operationId !== input.operationId ||
+      identity.sourceAddress !== deps.sourceAddress ||
+      identity.destinationAddress !== input.destinationAddress ||
+      identity.amountMist !== input.amountMist
     ) {
       return { status: 'nonce_missing' };
     }
     if (receipt.type === 'terminal') {
-      if (receipt.status === 'succeeded') {
-        return {
-          status: 'succeeded',
-          operationId: receipt.operationId,
-          digest: receipt.digest!,
-          amountMist: receipt.amountMist,
-          remainingBalanceMist: null,
-        };
-      }
-      return {
-        status: receipt.status,
-        operationId: receipt.operationId,
-        digest: receipt.digest,
-        amountMist: receipt.amountMist,
-        error: receipt.error!,
-      };
+      return projectWithdrawalTerminalResult(receipt.result);
     }
     const current = await deps.state.read();
     if (current === null || current.operationId !== receipt.operationId) {
@@ -1005,7 +1059,7 @@ export function createSponsorRefillAccountSpendCoordinator(
     return {
       status: 'busy',
       operationId: blockingSpend.operationId,
-      digest: blockingSpend.digest,
+      digest: spendDigest(blockingSpend),
       error:
         recovered.status === 'pending'
           ? recovered.error
@@ -1020,8 +1074,9 @@ export function createSponsorRefillAccountSpendCoordinator(
     readonly amountMist: string;
     readonly observedSlotBalanceMist: string | null;
     readonly expectedSlotWriteSequence: number | null;
+    readonly expectedSourceObservationWriteSequence: number | null;
     readonly nonceKey: string | null;
-  }): Promise<SponsorRefillAccountSpendResult> {
+  }): Promise<SponsorRefillAccountSpendResult | { readonly status: 'source_changed' }> {
     const reservation = await deps.state.reserve({
       operationId: input.operationId,
       kind: input.kind,
@@ -1031,6 +1086,7 @@ export function createSponsorRefillAccountSpendCoordinator(
       amountMist: input.amountMist,
       observedSlotBalanceMist: input.observedSlotBalanceMist,
       expectedSlotWriteSequence: input.expectedSlotWriteSequence,
+      expectedSourceObservationWriteSequence: input.expectedSourceObservationWriteSequence,
       nonceKey: input.nonceKey,
     });
     if (reservation.status === 'receipt') {
@@ -1044,6 +1100,7 @@ export function createSponsorRefillAccountSpendCoordinator(
       return result;
     }
     if (reservation.status === 'nonce_missing') return { status: 'nonce_missing' };
+    if (reservation.status === 'source_changed') return { status: 'source_changed' };
     if (reservation.status === 'slot_changed') {
       return {
         status: 'pending',
@@ -1115,28 +1172,27 @@ export function createSponsorRefillAccountSpendCoordinator(
         const recovered = await driveSpend(current);
         return busyBehindDifferentSpend(current, recovered);
       }
-      if (current !== null) {
-        const visibilityPending = await requireVisibleChainResult(
-          current,
-          `sponsorRefillAccountSpend.previous(${current.digest ?? 'none'})`,
-        );
-        if (visibilityPending !== null) {
-          return busyBehindDifferentSpend(current, visibilityPending);
-        }
-      }
-      return executeReserved({
+      const result = await executeReserved({
         operationId,
         kind: 'withdrawal',
         destinationAddress: input.destinationAddress,
         amountMist: input.amountMist,
         observedSlotBalanceMist: null,
         expectedSlotWriteSequence: null,
+        expectedSourceObservationWriteSequence: null,
         nonceKey: input.nonceKey,
       });
+      if (result.status === 'source_changed') {
+        throw new Error('Withdrawal reservation unexpectedly carried source-balance evidence');
+      }
+      return result;
     });
   }
 
-  async function refill(slotAddress: string): Promise<SponsorRefillAccountSpendResult> {
+  async function refill(
+    slotAddress: string,
+    reason: SponsorRefillAccountRefillReason,
+  ): Promise<SponsorRefillAccountRefillResult> {
     const refillTargetMist = deps.refillTargetMist;
     if (!deps.refillEnabled || refillTargetMist === null) {
       return {
@@ -1155,17 +1211,24 @@ export function createSponsorRefillAccountSpendCoordinator(
         if (sameSlot) return recovered;
         return busyBehindDifferentSpend(current, recovered);
       }
-      if (current !== null) {
-        const visibilityPending = await requireVisibleChainResult(
-          current,
-          `sponsorRefillAccountSpend.previous(${current.digest ?? 'none'})`,
-        );
-        if (visibilityPending !== null) {
-          return busyBehindDifferentSpend(current, visibilityPending);
-        }
-      }
 
-      const previous: SlotRead | null = await deps.operationsState.readSlot(slotAddress);
+      let previous: SlotRead | null;
+      let expectedSourceObservationWriteSequence: number | null = null;
+      if (reason !== 'explicit') {
+        const snapshot = await deps.operationsState.readAll();
+        previous = snapshot.slots.find((slot) => slot.address === slotAddress) ?? null;
+        if (previous === null) {
+          throw new Error('Automatic sponsor refill targeted an unknown slot');
+        }
+        if (!isAutomaticSponsorRefillEligible(previous, snapshot.sponsorRefillAccount, reason)) {
+          return { status: 'not_eligible', slotAddress };
+        }
+        if (previous.refillRequiredSourceBalanceMist !== null) {
+          expectedSourceObservationWriteSequence = snapshot.sponsorRefillAccount.writeSeq;
+        }
+      } else {
+        previous = await deps.operationsState.readSlot(slotAddress);
+      }
       const expectedWriteSeq = previous?.writeSeq ?? 0;
       const balance = await withTimeout(
         `sponsorRefillAccountSpend.getSlotBalance(${slotAddress})`,
@@ -1188,6 +1251,7 @@ export function createSponsorRefillAccountSpendCoordinator(
             refillOperationId: '',
             refillOperationSequence: '',
             refillOperationState: '',
+            refillRequiredSourceBalanceMist: '',
           },
         );
         if (!updated) {
@@ -1195,15 +1259,17 @@ export function createSponsorRefillAccountSpendCoordinator(
         }
         return { status: 'not_needed', slotAddress, balanceMist: balance.toString() };
       }
-      return executeReserved({
+      const result = await executeReserved({
         operationId: randomUUID(),
         kind: 'refill',
         destinationAddress: slotAddress,
         amountMist: amountMist.toString(),
         observedSlotBalanceMist: balance.toString(),
         expectedSlotWriteSequence: expectedWriteSeq,
+        expectedSourceObservationWriteSequence,
         nonceKey: null,
       });
+      return result.status === 'source_changed' ? { status: 'not_eligible', slotAddress } : result;
     });
   }
 

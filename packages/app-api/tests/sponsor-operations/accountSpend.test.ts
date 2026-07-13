@@ -105,25 +105,20 @@ function createMemorySpendState(nonces: Set<string>) {
         return { status: 'active', spend: current };
       }
       spendSequence += 1;
-      const spend = save({
+      const common = {
         network: 'testnet',
         operationId: input.operationId,
-        kind: input.kind,
         sourceAddress: input.sourceAddress,
         destinationAddress: input.destinationAddress,
-        slotAddress: input.slotAddress,
-        nonceKey: input.nonceKey,
         amountMist: input.amountMist,
-        gasBudgetMist: null,
-        transactionBytesBase64: null,
-        signature: null,
-        digest: null,
         sequence: spendSequence,
         state: 'reserved',
-        chainResult: null,
-        terminalFailureKind: null,
-        lastError: null,
-      });
+      } as const;
+      const spend = save(
+        input.kind === 'refill'
+          ? { ...common, kind: 'refill', slotAddress: input.slotAddress!, nonceKey: null }
+          : { ...common, kind: 'withdrawal', slotAddress: null, nonceKey: input.nonceKey! },
+      );
       if (input.nonceKey !== null) {
         receipts.set(input.nonceKey, {
           type: 'accepted',
@@ -167,13 +162,16 @@ function createMemorySpendState(nonces: Set<string>) {
         return null;
       }
       spendSequence += 1;
-      return save({
+      const reconciling = {
         ...current,
         sequence: spendSequence,
         state: 'reconciling',
-        chainResult: input.chainResult,
-        lastError: input.lastError || null,
-      });
+      } as const;
+      return save(
+        input.chainResult === 'succeeded'
+          ? { ...reconciling, chainResult: 'succeeded' }
+          : { ...reconciling, chainResult: 'failed', error: input.lastError },
+      );
     },
     async complete(input) {
       if (
@@ -184,24 +182,51 @@ function createMemorySpendState(nonces: Set<string>) {
         return null;
       }
       spendSequence += 1;
-      const completed = save({
-        ...current,
+      const common = {
+        network: current.network,
+        operationId: current.operationId,
+        sourceAddress: current.sourceAddress,
+        destinationAddress: current.destinationAddress,
+        amountMist: current.amountMist,
         sequence: spendSequence,
-        state: input.state,
-        terminalFailureKind: input.state === 'failed' ? 'failed' : null,
-        lastError: input.lastError || null,
-      });
+        ...(current.kind === 'refill'
+          ? { kind: 'refill' as const, slotAddress: current.slotAddress, nonceKey: null }
+          : { kind: 'withdrawal' as const, slotAddress: null, nonceKey: current.nonceKey }),
+      } as const;
+      const completed = save(
+        input.state === 'succeeded'
+          ? { ...common, state: 'succeeded', digest: current.digest }
+          : {
+              ...common,
+              state: 'failed',
+              digest: current.digest,
+              failureKind: 'failed',
+              error: input.lastError,
+            },
+      );
       if (completed.nonceKey !== null) {
         receipts.set(completed.nonceKey, {
           type: 'terminal',
           network: 'testnet',
-          operationId: completed.operationId,
-          sourceAddress: completed.sourceAddress,
-          destinationAddress: completed.destinationAddress,
-          amountMist: completed.amountMist,
-          status: input.state,
-          digest: completed.digest,
-          error: input.state === 'succeeded' ? null : completed.lastError,
+          result:
+            completed.state === 'succeeded'
+              ? {
+                  status: 'succeeded',
+                  operationId: completed.operationId,
+                  sourceAddress: completed.sourceAddress,
+                  destinationAddress: completed.destinationAddress,
+                  amountMist: completed.amountMist,
+                  digest: completed.digest,
+                }
+              : {
+                  status: completed.failureKind,
+                  operationId: completed.operationId,
+                  sourceAddress: completed.sourceAddress,
+                  destinationAddress: completed.destinationAddress,
+                  amountMist: completed.amountMist,
+                  digest: completed.digest,
+                  error: completed.error,
+                },
         });
       }
       return completed;
@@ -216,23 +241,33 @@ function createMemorySpendState(nonces: Set<string>) {
       }
       spendSequence += 1;
       const failed = save({
-        ...current,
+        network: current.network,
+        operationId: current.operationId,
+        sourceAddress: current.sourceAddress,
+        destinationAddress: current.destinationAddress,
+        amountMist: current.amountMist,
+        ...(current.kind === 'refill'
+          ? { kind: 'refill' as const, slotAddress: current.slotAddress, nonceKey: null }
+          : { kind: 'withdrawal' as const, slotAddress: null, nonceKey: current.nonceKey }),
         sequence: spendSequence,
         state: 'failed',
-        terminalFailureKind: input.failureKind,
-        lastError: input.lastError,
+        digest: null,
+        failureKind: input.failureKind,
+        error: input.lastError,
       });
       if (failed.nonceKey !== null) {
         receipts.set(failed.nonceKey, {
           type: 'terminal',
           network: 'testnet',
-          operationId: failed.operationId,
-          sourceAddress: failed.sourceAddress,
-          destinationAddress: failed.destinationAddress,
-          amountMist: failed.amountMist,
-          status: input.failureKind,
-          digest: null,
-          error: input.lastError,
+          result: {
+            status: input.failureKind,
+            operationId: failed.operationId,
+            sourceAddress: failed.sourceAddress,
+            destinationAddress: failed.destinationAddress,
+            amountMist: failed.amountMist,
+            digest: null,
+            error: input.lastError,
+          },
         });
       }
       return failed;
@@ -253,11 +288,19 @@ function createMemorySpendState(nonces: Set<string>) {
   return { state, snapshots, current: () => current };
 }
 
-function createOperationsState(slotBalanceMist = '0'): RedisSponsorOperationsState {
+function createOperationsState(
+  slotBalanceMist = '0',
+  automatic?: {
+    readonly slotState?: SlotRead['state'];
+    readonly requiredSourceBalanceMist?: string | null;
+    readonly sourceBalanceMist?: string | null;
+    readonly sourceHealthy?: boolean | null;
+  },
+): RedisSponsorOperationsState {
   let writeSeq = 1;
   let slot: SlotRead = {
     address: SLOT,
-    state: 'low_balance',
+    state: automatic?.slotState ?? 'low_balance',
     balanceMist: slotBalanceMist,
     lastError: null,
     lastObservedAtMs: 1,
@@ -269,6 +312,7 @@ function createOperationsState(slotBalanceMist = '0'): RedisSponsorOperationsSta
     refillOperationId: null,
     refillOperationSequence: null,
     refillOperationState: null,
+    refillRequiredSourceBalanceMist: automatic?.requiredSourceBalanceMist ?? null,
   };
   return {
     async updateSlotIfWriteSeq(address, expected, fields) {
@@ -308,6 +352,10 @@ function createOperationsState(slotBalanceMist = '0'): RedisSponsorOperationsSta
           fields.refillOperationState === ''
             ? null
             : (fields.refillOperationState ?? slot.refillOperationState),
+        refillRequiredSourceBalanceMist:
+          fields.refillRequiredSourceBalanceMist === ''
+            ? null
+            : (fields.refillRequiredSourceBalanceMist ?? slot.refillRequiredSourceBalanceMist),
         writeSeq,
       } as SlotRead;
       return true;
@@ -316,14 +364,21 @@ function createOperationsState(slotBalanceMist = '0'): RedisSponsorOperationsSta
       return address === SLOT ? slot : null;
     },
     async readSponsorRefillAccount() {
-      return null;
+      return {
+        balanceMist: automatic?.sourceBalanceMist ?? null,
+        healthy: automatic?.sourceHealthy ?? null,
+        refillsRemaining: null,
+        lastError: null,
+        lastObservedAtMs: 1,
+        writeSeq: 1,
+      };
     },
     async readAll() {
       return {
         slots: [slot],
         sponsorRefillAccount: {
-          balanceMist: null,
-          healthy: null,
+          balanceMist: automatic?.sourceBalanceMist ?? null,
+          healthy: automatic?.sourceHealthy ?? null,
           refillsRemaining: null,
           lastError: null,
           lastObservedAtMs: null,
@@ -354,6 +409,7 @@ function createBoundary(options?: {
   simulateGate?: Promise<void>;
   submitGate?: Promise<void>;
   onSubmit?: (bytes: Uint8Array, signature: string, digest: string) => Promise<void> | void;
+  getBalance?: (address: string) => Promise<bigint> | bigint;
 }) {
   let buildCount = 0;
   let lookupCount = 0;
@@ -374,6 +430,7 @@ function createBoundary(options?: {
     }
   >();
   const submissions: SubmittedIdentity[] = [];
+  const lookupDigests: string[] = [];
 
   function assertIdentity(input: {
     readonly sourceAddress: string;
@@ -442,6 +499,7 @@ function createBoundary(options?: {
     },
     async lookup(digest) {
       lookupCount += 1;
+      lookupDigests.push(digest);
       if (lookupMode === 'unknown') throw new Error('rpc unavailable');
       return lookupMode === 'found' || visibleDigests.has(digest)
         ? { status: 'found', result: { digest, success: true, error: null } }
@@ -470,6 +528,7 @@ function createBoundary(options?: {
       return { digest, success: true, error: null };
     },
     async getBalance(address) {
+      if (options?.getBalance) return options.getBalance(address);
       return address === SOURCE ? sourceBalance : slotBalance;
     },
   };
@@ -477,6 +536,7 @@ function createBoundary(options?: {
     boundary,
     buildCount: () => buildCount,
     lookupCount: () => lookupCount,
+    lookupDigests: () => lookupDigests,
     validateCount: () => validateCount,
     submissions: () => submissions,
     submitCount: () => submissions.length,
@@ -494,11 +554,12 @@ function coordinator(input: {
   target?: bigint;
   count?: number;
   dispatchTimeoutMs?: number;
+  dispatchLock?: SponsorRefillAccountDispatchLock;
 }) {
   return createSponsorRefillAccountSpendCoordinator({
     state: input.state,
     operationsState: input.operationsState ?? createOperationsState(),
-    dispatchLock: createMemoryLock(),
+    dispatchLock: input.dispatchLock ?? createMemoryLock(),
     boundary: input.boundary,
     network: 'testnet',
     sourceAddress: SOURCE,
@@ -514,6 +575,99 @@ function coordinator(input: {
 }
 
 describe('Sponsor Refill Account spend coordinator', () => {
+  it('rejects an automatic refill inside the account lock when current source evidence is below the runway threshold', async () => {
+    const memory = createMemorySpendState(new Set());
+    const chain = createBoundary();
+    const operationsState = createOperationsState('0', {
+      slotState: 'refill_failed',
+      requiredSourceBalanceMist: '240',
+      sourceBalanceMist: '210',
+      sourceHealthy: true,
+    });
+
+    const result = await coordinator({
+      state: memory.state,
+      operationsState,
+      boundary: chain.boundary,
+    }).refill(SLOT, 'source_observed');
+
+    expect(result).toEqual({ status: 'not_eligible', slotAddress: SLOT });
+    expect(chain.buildCount()).toBe(0);
+    expect(memory.current()).toBeNull();
+  });
+
+  it('does not let a slot observation borrow source-balance authority recorded elsewhere', async () => {
+    const memory = createMemorySpendState(new Set());
+    const chain = createBoundary();
+    const operationsState = createOperationsState('0', {
+      slotState: 'refill_failed',
+      requiredSourceBalanceMist: '240',
+      sourceBalanceMist: '250',
+      sourceHealthy: true,
+    });
+
+    const result = await coordinator({
+      state: memory.state,
+      operationsState,
+      boundary: chain.boundary,
+    }).refill(SLOT, 'slot_observed');
+
+    expect(result).toEqual({ status: 'not_eligible', slotAddress: SLOT });
+    expect(chain.buildCount()).toBe(0);
+    expect(memory.current()).toBeNull();
+  });
+
+  it('rechecks automatic refill evidence after acquiring the account lock', async () => {
+    const memory = createMemorySpendState(new Set());
+    const chain = createBoundary();
+    const baseOperationsState = createOperationsState('0', {
+      slotState: 'refill_failed',
+      requiredSourceBalanceMist: '240',
+      sourceBalanceMist: '250',
+      sourceHealthy: true,
+    });
+    let currentSourceBalanceMist = '250';
+    const operationsState: RedisSponsorOperationsState = {
+      ...baseOperationsState,
+      async readAll() {
+        const snapshot = await baseOperationsState.readAll();
+        return {
+          ...snapshot,
+          sponsorRefillAccount: {
+            ...snapshot.sponsorRefillAccount,
+            balanceMist: currentSourceBalanceMist,
+          },
+        };
+      },
+    };
+    const lockEntered = deferred<void>();
+    const releaseAcquire = deferred<void>();
+    const dispatchLock: SponsorRefillAccountDispatchLock = {
+      async acquire(address) {
+        lockEntered.resolve(undefined);
+        await releaseAcquire.promise;
+        return { token: 'delayed-lock', sponsorRefillAccountAddress: address };
+      },
+      async release() {},
+    };
+    const spend = coordinator({
+      state: memory.state,
+      operationsState,
+      dispatchLock,
+      boundary: chain.boundary,
+    });
+
+    const resultPromise = spend.refill(SLOT, 'source_observed');
+    await lockEntered.promise;
+    currentSourceBalanceMist = '210';
+    releaseAcquire.resolve(undefined);
+    const result = await resultPromise;
+
+    expect(result).toEqual({ status: 'not_eligible', slotAddress: SLOT });
+    expect(chain.buildCount()).toBe(0);
+    expect(memory.current()).toBeNull();
+  });
+
   it('persists exact ready identity before submitting it', async () => {
     const nonce = 'nonce:ready-before-submit';
     const memory = createMemorySpendState(new Set([nonce]));
@@ -570,7 +724,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
       target: 100n,
     });
 
-    const result = await spend.refill(SLOT);
+    const result = await spend.refill(SLOT, 'explicit');
 
     expect(result).toMatchObject({ status: 'succeeded', amountMist: '100' });
     expect(memory.current()).toMatchObject({ state: 'succeeded', amountMist: '100' });
@@ -776,6 +930,32 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(chain.submitCount()).toBe(0);
   });
 
+  it('projects a reserved failure from the durable terminal returned by the state store', async () => {
+    const nonce = 'nonce:durable-failure-authority';
+    const memory = createMemorySpendState(new Set([nonce]));
+    const state: SponsorRefillAccountSpendStateStore = {
+      ...memory.state,
+      async failReserved(input) {
+        return memory.state.failReserved({
+          ...input,
+          failureKind: 'failed',
+          requiredSourceBalanceMist: null,
+        });
+      },
+    };
+    const chain = createBoundary({ sourceBalance: 300n, gasBudget: 37n });
+    const spend = coordinator({
+      state,
+      boundary: chain.boundary,
+      target: 100n,
+      count: 2,
+    });
+
+    await expect(
+      spend.withdraw({ destinationAddress: ADMIN, amountMist: '100', nonceKey: nonce }),
+    ).resolves.toMatchObject({ status: 'failed', amountMist: '100' });
+  });
+
   it('recovers a submitted transaction whose response was lost by looking up the same digest', async () => {
     const nonce = 'nonce:lost-response';
     const memory = createMemorySpendState(new Set([nonce]));
@@ -797,6 +977,80 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(submission?.signature).toBe(ready.signature);
     expect(submission?.digest).toBe(ready.digest);
     expect(result).toMatchObject({ status: 'succeeded', digest: ready.digest });
+
+    const countsBeforeReplay = {
+      builds: chain.buildCount(),
+      submits: chain.submitCount(),
+      lookups: chain.lookupCount(),
+      validations: chain.validateCount(),
+    };
+    const replay = await coordinator({ state: memory.state, boundary: chain.boundary }).withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonce,
+    });
+    expect(replay).toEqual(result);
+    expect({
+      builds: chain.buildCount(),
+      submits: chain.submitCount(),
+      lookups: chain.lookupCount(),
+      validations: chain.validateCount(),
+    }).toEqual(countsBeforeReplay);
+  });
+
+  it('keeps a confirmed withdrawal successful when the terminal balance observation fails', async () => {
+    const nonce = 'nonce:terminal-balance-unavailable';
+    const memory = createMemorySpendState(new Set([nonce]));
+    let sourceReads = 0;
+    const chain = createBoundary({
+      getBalance(address) {
+        if (address !== SOURCE) return 0n;
+        sourceReads += 1;
+        if (sourceReads === 1) return 10_000n;
+        throw new Error('source balance unavailable after execution');
+      },
+    });
+    const spend = coordinator({ state: memory.state, boundary: chain.boundary });
+
+    const first = await spend.withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonce,
+    });
+    expect(first).toMatchObject({ status: 'succeeded', amountMist: '100' });
+    expect(memory.current()).toMatchObject({ state: 'succeeded' });
+
+    const replay = await spend.withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonce,
+    });
+    expect(replay).toEqual(first);
+    expect(sourceReads).toBe(2);
+  });
+
+  it('does not re-query a previous terminal digest before admitting the next spend', async () => {
+    const nonceA = 'nonce:terminal-admission-a';
+    const nonceB = 'nonce:terminal-admission-b';
+    const memory = createMemorySpendState(new Set([nonceA, nonceB]));
+    const chain = createBoundary();
+    const spend = coordinator({ state: memory.state, boundary: chain.boundary });
+
+    const first = await spend.withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonceA,
+    });
+    expect(first).toMatchObject({ status: 'succeeded' });
+    if (first.status !== 'succeeded') throw new Error('first withdrawal did not succeed');
+    const lookupStart = chain.lookupDigests().length;
+    chain.setLookup('unknown');
+
+    await expect(
+      spend.withdraw({ destinationAddress: ADMIN, amountMist: '100', nonceKey: nonceB }),
+    ).resolves.toMatchObject({ status: 'pending', amountMist: '100' });
+    expect(chain.buildCount()).toBe(2);
+    expect(chain.lookupDigests().slice(lookupStart)).not.toContain(first.digest);
   });
 
   it('recovers timeout-late-success by the same digest without rebuilding or resubmitting', async () => {
