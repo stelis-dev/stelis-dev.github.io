@@ -68,6 +68,15 @@ function setRequiredEnvironment(): void {
   vi.stubEnv('SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS', '15000');
 }
 
+function setStudioEnvironment(allowedTargets: string): void {
+  vi.stubEnv('ADMIN_JWT_SECRET', 'studio-admin-jwt-secret-00000000');
+  vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
+  vi.stubEnv('STUDIO_ALLOWED_TARGETS', allowedTargets);
+  // Target validation runs before trust parsing; these tests intentionally
+  // isolate the target boundary from JWT key construction.
+  vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', '{}');
+}
+
 beforeEach(async () => {
   vi.clearAllMocks();
   state.rpcAuthValue = null;
@@ -174,5 +183,23 @@ describe('runBootValidation runtime input', () => {
 
     expect(state.createRedisClient).not.toHaveBeenCalled();
     expect(state.validateChainIdentity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'xyz::coin::zero',
+    '::coin::zero',
+    '0x::coin::zero',
+    '0x2::::zero',
+    '0x2::coin::bad-name',
+  ])('rejects an unreachable Studio target at boot: %s', async (target) => {
+    setStudioEnvironment(target);
+    await expect(runBootValidation()).rejects.toThrow('STUDIO_ALLOWED_TARGETS entry');
+  });
+
+  it('rejects Studio targets that collide after package-address canonicalization', async () => {
+    setStudioEnvironment(`0x2::coin::zero,0x${'0'.repeat(63)}2::coin::zero`);
+    await expect(runBootValidation()).rejects.toThrow(
+      'STUDIO_ALLOWED_TARGETS contains duplicate entry after canonicalization',
+    );
   });
 });

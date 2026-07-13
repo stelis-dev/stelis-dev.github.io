@@ -2,7 +2,7 @@
  * Redis adapter for sponsored execution log + aggregate.
  *
  * All writes go through a single Lua script so that:
- *   - idempotency check (`SET NX`, no TTL),
+ *   - exact-replay / conflicting-result check by receipt (no TTL),
  *   - per-mode + all-mode aggregate updates (`HINCRBY` on int64 string fields),
  *   - recent-list append + createdAt sort + cap
  * are atomic per emit. This mirrors `RedisPromotionExecutionLedger`'s
@@ -17,12 +17,12 @@
  *             cumulativeLossMist, lossCount   (int64 string)
  *   stelis:sponsored_logs:recent                           LIST
  *     createdAt newest-first JSON-serialised SponsoredExecutionLogEntry, capped.
- *   stelis:sponsored_logs:idem:{mode|receiptId|outcome}    STRING (NX, no TTL)
+ *   stelis:sponsored_logs:idem:{receiptId}                 STRING fingerprint (no TTL)
  *
- * Idempotency contract: the idem key is set with `NX` and no TTL so the
- * lifetime aggregate stays honest across restarts. Operators may flush
- * the `stelis:sponsored_logs:idem:*` namespace during scheduled maintenance;
- * the adapter never expires keys on its own.
+ * Replay contract: the receipt key stores the accepted result fingerprint
+ * with no TTL so the lifetime aggregate stays honest across restarts. The
+ * adapter never expires or clears these keys; clearing them while retaining
+ * the aggregate would remove its replay proof.
  *
  * Signed int64 headroom: -9_223_372_036_854_775_808 to
  * 9_223_372_036_854_775_807. Sufficient for lifetime totals at expected
@@ -38,13 +38,14 @@ import type {
   SponsoredExecutionMode,
 } from './types.js';
 import {
-  parseSignedMistString,
+  parseSignedDecimalString,
   parseSponsoredExecutionLogEntry,
-  parseUnsignedMistString,
+  parseUnsignedDecimalString,
 } from './types.js';
 import {
   SPONSORED_LOGS_RECENT_DEFAULT_CAP,
-  sponsoredLogIdempotencyKey,
+  sponsoredLogReceiptConflict,
+  sponsoredLogReplayFingerprint,
   type SponsoredLogsStoreAdapter,
 } from './store.js';
 
@@ -54,15 +55,15 @@ const IDEM_PREFIX = `${KEY_PREFIX}:idem`;
 const AGG_PREFIX = `${KEY_PREFIX}:agg`;
 
 /**
- * Lua script — atomic append. Returns `1` on first append, `0` on
- * duplicate (idempotency hit; no aggregate or recent change).
+ * Lua script — atomic append. Returns `APPENDED` on first append,
+ * `DUPLICATE` for an exact replay, and `CONFLICT` when the receipt was
+ * already recorded with different result data.
  *
  * Numeric ARGV are signed-decimal strings. HINCRBY accepts signed
  * decimal strings as the increment.
  *
- * The idempotency key is set with `NX` and no TTL so the aggregate stays
- * honest for the adapter's full lifetime. The key set is operator-flushable
- * out-of-band; the script never expires entries.
+ * The receipt fingerprint has no TTL so the aggregate stays honest for
+ * the adapter's full lifetime. The script never expires entries.
  */
 const APPEND_SCRIPT = `
 local idempotencyKey = KEYS[1]
@@ -71,17 +72,22 @@ local aggModeKey = KEYS[3]
 local recentKey = KEYS[4]
 
 local entryJson = ARGV[1]
-local execDelta = ARGV[2]
-local isKnown = ARGV[3]
-local netDelta = ARGV[4]
-local lossAmountDelta = ARGV[5]
-local lossDelta = ARGV[6]
-local recentCap = tonumber(ARGV[7])
+local fingerprint = ARGV[2]
+local execDelta = ARGV[3]
+local isKnown = ARGV[4]
+local netDelta = ARGV[5]
+local lossAmountDelta = ARGV[6]
+local lossDelta = ARGV[7]
+local recentCap = tonumber(ARGV[8])
 
-local set = redis.call('SET', idempotencyKey, '1', 'NX')
-if not set then
-  return 0
+local recordedFingerprint = redis.call('GET', idempotencyKey)
+if recordedFingerprint then
+  if recordedFingerprint == fingerprint then
+    return 'DUPLICATE'
+  end
+  return 'CONFLICT'
 end
+redis.call('SET', idempotencyKey, fingerprint)
 
 redis.call('HINCRBY', aggAllKey, 'sponsoredExecutions', execDelta)
 redis.call('HINCRBY', aggModeKey, 'sponsoredExecutions', execDelta)
@@ -118,7 +124,7 @@ for i = 1, keep do
   redis.call('RPUSH', recentKey, rows[i])
 end
 
-return 1
+return 'APPENDED'
 `.trim();
 
 /**
@@ -150,8 +156,8 @@ function aggKey(mode: SponsoredExecutionAggregateMode): string {
   return `${AGG_PREFIX}:${mode}`;
 }
 
-function idemKey(entry: SponsoredExecutionLogEntry): string {
-  return `${IDEM_PREFIX}:${sponsoredLogIdempotencyKey(entry)}`;
+function idemKey(receiptId: string): string {
+  return `${IDEM_PREFIX}:${receiptId}`;
 }
 
 function compareCreatedAtDesc(
@@ -185,15 +191,21 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       // Validate the signed-decimal shape so HINCRBY does not receive a
       // malformed argument; primary error preserved at the recorder's
       // try/catch boundary.
-      const hostNet = parseSignedMistString(currentEntry.hostNetMist!, 'hostNetMist');
+      const hostNet = parseSignedDecimalString(currentEntry.hostNetMist!, 'hostNetMist');
       isKnown = true;
       netDelta = hostNet.toString();
       lossAmountDelta = hostNet < 0n ? hostNet.toString() : '0';
       lossDelta = hostNet < 0n ? '1' : '0';
     }
-    const keys = [idemKey(currentEntry), aggKey('all'), aggKey(currentEntry.mode), RECENT_KEY];
+    const keys = [
+      idemKey(currentEntry.receiptId),
+      aggKey('all'),
+      aggKey(currentEntry.mode),
+      RECENT_KEY,
+    ];
     const args = [
       JSON.stringify(currentEntry),
+      sponsoredLogReplayFingerprint(currentEntry),
       '1',
       isKnown ? '1' : '0',
       netDelta,
@@ -201,7 +213,14 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       lossDelta,
       this.recentCap.toString(),
     ];
-    await this.client.eval(APPEND_SCRIPT, keys, args);
+    const result = await this.client.eval(APPEND_SCRIPT, keys, args);
+    if (result === 'APPENDED' || result === 'DUPLICATE') return;
+    if (result === 'CONFLICT') {
+      throw sponsoredLogReceiptConflict(currentEntry.receiptId);
+    }
+    throw new Error(
+      `sponsoredLogs.redisStore: unexpected append script return: ${JSON.stringify(result)}`,
+    );
   }
 
   async getSummary(mode: SponsoredExecutionAggregateMode): Promise<SponsoredExecutionAggregate> {
@@ -214,13 +233,13 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     const [exec, cumulativeNet, loss, cumulativeLoss] = result as readonly unknown[];
     return {
       mode,
-      sponsoredExecutions: parseUnsignedMistString(exec, 'sponsoredExecutions').toString(),
-      lossCount: parseUnsignedMistString(loss, 'lossCount').toString(),
-      cumulativeHostNetMist: parseSignedMistString(
+      sponsoredExecutions: parseUnsignedDecimalString(exec, 'sponsoredExecutions').toString(),
+      lossCount: parseUnsignedDecimalString(loss, 'lossCount').toString(),
+      cumulativeHostNetMist: parseSignedDecimalString(
         cumulativeNet,
         'cumulativeHostNetMist',
       ).toString(),
-      cumulativeLossMist: parseSignedMistString(cumulativeLoss, 'cumulativeLossMist').toString(),
+      cumulativeLossMist: parseSignedDecimalString(cumulativeLoss, 'cumulativeLossMist').toString(),
     };
   }
 

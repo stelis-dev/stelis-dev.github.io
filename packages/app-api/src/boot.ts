@@ -40,7 +40,7 @@ import {
   getSettlementSwapPathRegistryPath,
   parseSettlementSwapPathRegistryJson,
 } from './settlementSwapPathRegistry.js';
-import { hashTarget, parseDeveloperJwtTrustConfig } from '@stelis/core-api/studio';
+import { canonicalizePromotionTarget, parseDeveloperJwtTrustConfig } from '@stelis/core-api/studio';
 import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
 import type { ContextRuntimeInput } from './context.js';
@@ -491,23 +491,25 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         '[app-api] STUDIO_ALLOWED_TARGETS must contain at least one pkg::mod::fn entry',
       );
     }
+    // Canonicalize once at boot. Runtime policies compare these exact strings.
+    const allowedTargets = new Set<string>();
     for (const t of targets) {
-      if (t.split('::').length !== 3) {
+      let canonicalTarget: string;
+      try {
+        canonicalTarget = canonicalizePromotionTarget(t);
+      } catch (error) {
         throw new Error(
-          `[app-api] STUDIO_ALLOWED_TARGETS entry "${t}" is not valid pkg::mod::fn format`,
+          `[app-api] STUDIO_ALLOWED_TARGETS entry "${t}" is invalid: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
       }
-    }
-    // Duplicate detection after canonicalization (fail-fast)
-    const seen = new Set<string>();
-    for (const t of targets) {
-      const hash = hashTarget(t);
-      if (seen.has(hash)) {
+      if (allowedTargets.has(canonicalTarget)) {
         throw new Error(
           `[app-api] STUDIO_ALLOWED_TARGETS contains duplicate entry after canonicalization: "${t}"`,
         );
       }
-      seen.add(hash);
+      allowedTargets.add(canonicalTarget);
     }
 
     // STUDIO_DEVELOPER_JWT_TRUST_JSON — parsed and validated at boot (single issuer object)
@@ -530,7 +532,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     }
 
     studioRuntimeInput = {
-      globalTargetHashes: seen,
+      globalAllowedTargets: allowedTargets,
       developerJwtTrustConfig,
       developerJwtVerifyUrl: verifyUrl,
     };

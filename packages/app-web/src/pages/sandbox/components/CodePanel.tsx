@@ -56,7 +56,8 @@ if (otherCoinIds.length > 0) {
 const [transferCoin] = tx.splitCoins(primaryCoin, [tx.pure.u64(transferMist)]);
 tx.transferObjects([transferCoin], recipientAddress);
 
-// No SUI needed — gas is paid in ${tokenSymbol}.
+// The Host pays SUI gas; settlement recovers the cost from User Vault credit
+// or supported ${tokenSymbol} value.
 const result = await sdk.executeSponsored(tx, {
   client,              // SuiGrpcClient
   prepareAuthorizationSigner: async (messageBytes) => {

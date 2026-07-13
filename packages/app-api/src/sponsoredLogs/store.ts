@@ -6,11 +6,12 @@
  *   - RedisSponsoredLogsStore  (production).
  *
  * Adapter semantics:
- *   - `append` is idempotent on `(mode, receiptId, outcome)`.
- *     Retries / duplicate dispatches MUST NOT double-count aggregates.
- *     The dedup record MUST persist for the adapter's full lifetime
- *     (Redis: NX with no TTL; memory: unbounded set; DB-style stores:
- *     unique constraint).
+ *   - `append` identifies one sponsored execution by `receiptId`.
+ *     An exact result replay is a no-op; a different result for the same
+ *     receipt is a conflict and MUST NOT mutate either projection.
+ *     The recorded receipt fingerprint MUST persist for the adapter's
+ *     full lifetime (Redis: no TTL; memory: unbounded map; DB-style
+ *     stores: unique receipt constraint plus current-result fingerprint).
  *     `receiptId` is non-null by `SponsoredExecutionLogEntry` contract
  *     (the recorder is invoked from `finally` after `consume()`, where
  *     the sponsor result callback contract guarantees a non-null receiptId).
@@ -26,6 +27,7 @@
  *     recent rows.
  */
 
+import { createHash } from 'node:crypto';
 import type {
   SponsoredExecutionAggregate,
   SponsoredExecutionAggregateMode,
@@ -35,8 +37,8 @@ import type {
 export interface SponsoredLogsStoreAdapter {
   /**
    * Append a sponsored execution log entry. Recorder calls this once per
-   * sponsor result callback. Implementations MUST be idempotent on the
-   * idempotency tuple defined above.
+   * sponsor result callback. Implementations MUST enforce the receipt
+   * identity and replay contract defined above.
    */
   append(entry: SponsoredExecutionLogEntry): Promise<void>;
 
@@ -60,9 +62,18 @@ export interface SponsoredLogsStoreAdapter {
 export const SPONSORED_LOGS_RECENT_DEFAULT_CAP = 200;
 
 /**
- * Build the canonical idempotency key for an entry: `mode|receiptId|outcome`.
- * `receiptId` is non-null by the `SponsoredExecutionLogEntry` contract.
+ * Fingerprint the complete current result for replay comparison.
+ *
+ * `createdAt` is intentionally excluded: a retried recorder callback may
+ * observe a different host clock while describing the same execution.
+ * Every identity, outcome, digest, and economics field is included in a
+ * fixed order so any substantive drift for a receipt is rejected.
  */
-export function sponsoredLogIdempotencyKey(entry: SponsoredExecutionLogEntry): string {
-  return `${entry.mode}|${entry.receiptId}|${entry.outcome}`;
+export function sponsoredLogReplayFingerprint(entry: SponsoredExecutionLogEntry): string {
+  const { createdAt: _createdAt, ...replayIdentity } = entry;
+  return createHash('sha256').update(JSON.stringify(replayIdentity)).digest('hex');
+}
+
+export function sponsoredLogReceiptConflict(receiptId: string): Error {
+  return new Error(`sponsoredLogs: conflicting result for receiptId ${receiptId}`);
 }

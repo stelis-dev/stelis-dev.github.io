@@ -2,7 +2,6 @@ import { lazy, Suspense, useState, useCallback } from 'react';
 import { useStudioSDK } from './hooks/useStudioSDK';
 import { ConnectionPanel } from './components/ConnectionPanel';
 import { DeveloperJwtPanel } from './components/DeveloperJwtPanel';
-import { AllowedTargetsBuilder } from './components/AllowedTargetsBuilder';
 import { DebugPanel, type DebugEntry } from './components/DebugPanel';
 import { WalletProvider } from '../sandbox/components/WalletProvider';
 
@@ -65,8 +64,6 @@ export function PromotionPage() {
               />
             </div>
           </div>
-
-          <AllowedTargetsBuilder />
 
           <WalletProvider>
             <Suspense

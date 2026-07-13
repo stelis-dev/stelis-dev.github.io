@@ -93,6 +93,51 @@ class PromotionBodyParseError extends Error {
   }
 }
 
+const CREATE_PROMOTION_BODY_FIELDS = new Set([
+  'type',
+  'displayName',
+  'description',
+  'maxParticipants',
+  'perUserGasAllowanceMist',
+  'claimDeadlineAt',
+  'postClaimUseWindowMs',
+  'startAt',
+]);
+
+const UPDATE_PROMOTION_BODY_FIELDS = new Set([
+  'displayName',
+  'description',
+  'maxParticipants',
+  'perUserGasAllowanceMist',
+  'claimDeadlineAt',
+  'postClaimUseWindowMs',
+  'startAt',
+]);
+
+const PROMOTION_STATUS_BODY_FIELDS = new Set(['status', 'reason']);
+
+/**
+ * Promotion writes accept only their current public JSON shape. Rejecting an
+ * unknown field prevents removed or misspelled policy inputs from appearing to
+ * succeed while the Host silently ignores them.
+ */
+function parseExactPromotionBody(
+  value: unknown,
+  allowedFields: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new PromotionBodyParseError('Invalid request body: must be a JSON object');
+  }
+
+  const body = value as Record<string, unknown>;
+  for (const field of Object.keys(body)) {
+    if (!allowedFields.has(field)) {
+      throw new PromotionBodyParseError(`Unknown field: ${field}`);
+    }
+  }
+  return body;
+}
+
 function parseRequiredString(body: Record<string, unknown>, field: string): string {
   const v = body[field];
   if (typeof v !== 'string' || v.length === 0) {
@@ -796,10 +841,10 @@ export function createAdminRoutes(
       if (!ctx.promotionStore) {
         return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
       }
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as Record<
-        string,
-        unknown
-      >;
+      const body = parseExactPromotionBody(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        CREATE_PROMOTION_BODY_FIELDS,
+      );
 
       // Only gas_sponsorship is creatable.
       if (body.type !== 'gas_sponsorship') {
@@ -876,10 +921,10 @@ export function createAdminRoutes(
         return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
       }
       const id = c.req.param('id');
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as Record<
-        string,
-        unknown
-      >;
+      const body = parseExactPromotionBody(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        UPDATE_PROMOTION_BODY_FIELDS,
+      );
 
       const input: import('@stelis/core-api/studio').UpdatePromotionInput = {};
 
@@ -936,10 +981,10 @@ export function createAdminRoutes(
         return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
       }
       const id = c.req.param('id');
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as Record<
-        string,
-        unknown
-      >;
+      const body = parseExactPromotionBody(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        PROMOTION_STATUS_BODY_FIELDS,
+      );
       if (!body.status || typeof body.status !== 'string') {
         return c.json({ error: 'Missing required field: status' }, 400);
       }

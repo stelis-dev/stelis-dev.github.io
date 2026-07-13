@@ -18,7 +18,7 @@
  */
 import { describe, test, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
   handlePromotionSponsor,
   PromotionSponsorError,
@@ -59,7 +59,7 @@ const TEST_USER_ID = 'sponsor-user-1';
 const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
 const ALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin';
-const GLOBAL_TARGET_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
+const GLOBAL_ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]);
 const TEST_DEEPBOOK_PACKAGE_ID = '0xdef';
 
 // Fixed test keypairs
@@ -334,7 +334,7 @@ async function setup(opts?: {
     sponsorPool,
     prepareStore,
     abuseBlocker,
-    globalTargetHashes: GLOBAL_TARGET_HASHES,
+    globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
     usageStore,
   };
 
@@ -447,8 +447,8 @@ describe('handlePromotionSponsor', () => {
   test('preserves entry + reservation on disallowed MoveCall target', async () => {
     const { ctx, signed, receiptId, executionLedger } = await setup();
 
-    // Use ctx with empty global target hashes → all targets disallowed
-    ctx.globalTargetHashes = new Set<string>();
+    // Use ctx with an empty global target set → all targets are disallowed.
+    ctx.globalAllowedTargets = new Set<string>();
 
     await expect(
       handlePromotionSponsor(ctx, {
@@ -1285,7 +1285,7 @@ describe('handlePromotionSponsor', () => {
 
     // Claim with an open use-window so the startAt gate is the only failing check.
     await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
-      maxParticipants: 0,
+      maxParticipants: 1,
       perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
@@ -1355,7 +1355,7 @@ describe('handlePromotionSponsor', () => {
       sponsorPool,
       prepareStore,
       abuseBlocker,
-      globalTargetHashes: GLOBAL_TARGET_HASHES,
+      globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
     };
 
     try {
@@ -1385,7 +1385,7 @@ describe('handlePromotionSponsor', () => {
 
     // Claim with expired use window
     await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
-      maxParticipants: 0,
+      maxParticipants: 1,
       perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: new Date(Date.now() - 86400_000).toISOString(),
     });
@@ -1454,7 +1454,7 @@ describe('handlePromotionSponsor', () => {
       sponsorPool,
       prepareStore,
       abuseBlocker,
-      globalTargetHashes: GLOBAL_TARGET_HASHES,
+      globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
     };
 
     try {
@@ -1739,7 +1739,7 @@ describe('handlePromotionSponsor', () => {
 
   test('recorder degradation: DISALLOWED_TARGET preserves 403 and emits recorder-failed warn', async () => {
     const { ctx, receiptId, signed } = await setup();
-    ctx.globalTargetHashes = new Set<string>();
+    ctx.globalAllowedTargets = new Set<string>();
 
     const recordSpy = vi
       .spyOn(ctx.abuseBlocker, 'recordSponsorFailure')
@@ -1892,7 +1892,7 @@ describe('handlePromotionSponsor', () => {
 
   test('does not let over-cap padding hide disallowed-target abuse', async () => {
     const { ctx, receiptId } = await setup();
-    ctx.globalTargetHashes = new Set<string>();
+    ctx.globalAllowedTargets = new Set<string>();
     const submission = await buildCommandCountTx(17);
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 

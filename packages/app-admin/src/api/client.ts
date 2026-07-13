@@ -319,9 +319,9 @@ export type SponsoredLogsMode = 'all' | 'generic' | 'promotion';
 
 export interface SponsoredExecutionAggregate {
   mode: SponsoredLogsMode;
-  /** Unsigned decimal MIST string. */
+  /** Unsigned decimal count, with at most one execution per receipt. */
   sponsoredExecutions: string;
-  /** Unsigned decimal count. */
+  /** Unsigned decimal count of known negative-host-net executions. */
   lossCount: string;
   /** Sum of known host net rows. */
   cumulativeHostNetMist: string;

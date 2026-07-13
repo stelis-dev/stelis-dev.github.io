@@ -8,12 +8,12 @@
  * Store-shape contract:
  *   - Only the current exact shape is accepted. There is no versioned or
  *     compatibility reader.
- *   - Idempotency key is `(mode, receiptId, outcome)`. Persistent stores
- *     must enforce this as a unique constraint so retries do not
- *     double-count.
- *   - Numeric fields are exact MIST decimal strings (`hostNetMist`,
- *     `cumulativeHostNetMist`, and `cumulativeLossMist` are signed).
- *     Accounting paths must never coerce them to JS `number`.
+ *   - `receiptId` is the one sponsored-execution identity. Persistent
+ *     stores accept an exact replay of the same result but reject a
+ *     different result for an already-recorded receipt.
+ *   - Log-entry economic amount fields are exact MIST decimal strings
+ *     (`hostNetMist` is signed). Accounting paths must never coerce them
+ *     to JS `number`.
  *   - All numeric fields are `null` when `economicsStatus === "unknown"`,
  *     including `hostFeeMist` — the recorder MUST NOT coerce an
  *     unknown fee to `"0"` (numeric honesty: do not invent values).
@@ -46,7 +46,7 @@ export interface SponsoredExecutionLogEntry {
    * sponsored-execution recorder is invoked from the SponsoredExecutionPolicy `Release`
    * hook after `consume()`, where `prepared.receiptId` is required by the
    * sponsor result callback contract (`SponsorResultMetadata.receiptId`).
-   * Idempotency key composition relies on this non-null guarantee.
+   * Store identity relies on this non-null guarantee.
    */
   readonly receiptId: string;
   readonly digest: string | null;
@@ -140,13 +140,13 @@ function requireNullableDecimal(value: unknown, field: string, signed: boolean):
   return requireDecimal(value, field, signed);
 }
 
-/** Validate and parse a signed MIST decimal string into a bigint. */
-export function parseSignedMistString(value: unknown, field: string): bigint {
+/** Validate and parse a canonical signed decimal string into a bigint. */
+export function parseSignedDecimalString(value: unknown, field: string): bigint {
   return BigInt(requireDecimal(value, field, true));
 }
 
-/** Validate and parse an unsigned MIST decimal string into a bigint. */
-export function parseUnsignedMistString(value: unknown, field: string): bigint {
+/** Validate and parse a canonical unsigned decimal string into a bigint. */
+export function parseUnsignedDecimalString(value: unknown, field: string): bigint {
   return BigInt(requireDecimal(value, field, false));
 }
 
@@ -267,9 +267,9 @@ export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecut
  */
 export interface SponsoredExecutionAggregate {
   readonly mode: SponsoredExecutionAggregateMode;
-  /** Unsigned count of sponsored executions in the aggregate. */
+  /** Unsigned count of accepted recorder rows, with at most one row per receipt. */
   readonly sponsoredExecutions: string;
-  /** Unsigned cumulative `Loss Count`. */
+  /** Unsigned subset count whose known `hostNetMist` is negative. */
   readonly lossCount: string;
   /** Sum of known `hostNetMist` values in MIST. */
   readonly cumulativeHostNetMist: string;

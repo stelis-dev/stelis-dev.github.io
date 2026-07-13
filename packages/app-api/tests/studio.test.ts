@@ -240,7 +240,7 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
     promotionStore: studioEnabled ? ({} as never) : null,
     usageStore: null,
     executionLedger: studioEnabled ? ({} as never) : null,
-    studioGlobalTargetHashes: studioEnabled ? new Set<string>() : null,
+    studioGlobalAllowedTargets: studioEnabled ? new Set<string>() : null,
     developerJwtTrustConfig: studioEnabled ? TEST_TRUST_CONFIG : null,
     developerJwtVerifyUrl: null,
     redis: {} as never,
@@ -338,9 +338,9 @@ describe('studio routes', () => {
       expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
-    it('returns 503 (not 401) when globalTargetHashes missing AND Authorization is missing', async () => {
+    it('returns 503 (not 401) when globalAllowedTargets missing AND Authorization is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = null;
+      ctx.studioGlobalAllowedTargets = null;
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -352,7 +352,7 @@ describe('studio routes', () => {
 
     it('returns 401 when Authorization header is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -364,7 +364,7 @@ describe('studio routes', () => {
 
     it('returns 400 when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -376,7 +376,7 @@ describe('studio routes', () => {
 
     it('returns 429 when IP is blocked', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const { checkBlockedRequest } = await import('@stelis/core-api');
       vi.mocked(checkBlockedRequest).mockResolvedValueOnce({
@@ -393,7 +393,7 @@ describe('studio routes', () => {
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const { checkBlockedRequest, BlockCheckUnavailableError } = await import('@stelis/core-api');
       vi.mocked(checkBlockedRequest).mockRejectedValueOnce(new BlockCheckUnavailableError());
@@ -409,7 +409,7 @@ describe('studio routes', () => {
 
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
@@ -427,7 +427,7 @@ describe('studio routes', () => {
 
     it('returns 400 when required fields are missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -439,7 +439,7 @@ describe('studio routes', () => {
 
     it('returns 200 with prepare result on valid request', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -456,7 +456,7 @@ describe('studio routes', () => {
 
     it('checks IP, userId, and promotionId rate-limit keys on successful prepare', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
         method: 'POST',
@@ -472,7 +472,7 @@ describe('studio routes', () => {
 
     it('passes PromotionPrepareError statusHint through', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionPrepareError } = await import('@stelis/core-api/studio');
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new PromotionPrepareError('Test error', 'TEST_CODE', 409),
@@ -490,7 +490,7 @@ describe('studio routes', () => {
 
     it('returns 503 when the sponsor operations gate is closed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
         status: 503,
         body: {
@@ -515,7 +515,7 @@ describe('studio routes', () => {
 
     it('returns 401 AUTH_FAILED when developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Invalid signature'));
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
@@ -530,7 +530,7 @@ describe('studio routes', () => {
 
     it('returns 422 when handler throws PrepareValidationError (DRY_RUN_FAILED)', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new MockPrepareValidationError('DRY_RUN_FAILED', 'Dry-run failed: MoveAbort'),
       );
@@ -547,7 +547,7 @@ describe('studio routes', () => {
 
     it('returns 429 when handler throws PrepareStudioUserQuotaError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new MockPrepareStudioUserQuotaError('0xVICTIM', 3),
       );
@@ -564,7 +564,7 @@ describe('studio routes', () => {
 
     it('returns 503 PREPARE_OVERLOADED with Retry-After when handler throws PrepareOverloadError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(new MockPrepareOverloadError(5, 5));
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
@@ -581,7 +581,7 @@ describe('studio routes', () => {
     // S-15 companion: route-level contract — FundsWithdrawal(Sponsor) rejection
     it('returns 403 with SPONSOR_WITHDRAWAL_FORBIDDEN on PromotionPrepareError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionPrepareError } = await import('@stelis/core-api/studio');
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new PromotionPrepareError(
@@ -630,9 +630,9 @@ describe('studio routes', () => {
     });
 
     // Precedence: 503 infrastructure failures must outrank 401 auth.
-    it('returns 503 (not 401) when globalTargetHashes missing AND Authorization is malformed', async () => {
+    it('returns 503 (not 401) when globalAllowedTargets missing AND Authorization is malformed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = null;
+      ctx.studioGlobalAllowedTargets = null;
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -644,7 +644,7 @@ describe('studio routes', () => {
 
     it('returns 503 (not 401) when sponsor operations gate is closed AND Authorization is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
         status: 503,
         headers: {},
@@ -664,7 +664,7 @@ describe('studio routes', () => {
 
     it('returns 401 when Authorization header is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -676,7 +676,7 @@ describe('studio routes', () => {
 
     it('returns 400 when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -688,7 +688,7 @@ describe('studio routes', () => {
 
     it('returns 429 when IP is blocked', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const { checkBlockedRequest } = await import('@stelis/core-api');
       vi.mocked(checkBlockedRequest).mockResolvedValueOnce({
@@ -705,7 +705,7 @@ describe('studio routes', () => {
 
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
@@ -723,7 +723,7 @@ describe('studio routes', () => {
 
     it('returns 400 when required fields are missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -735,7 +735,7 @@ describe('studio routes', () => {
 
     it('returns 200 with sponsor result on valid request', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -755,7 +755,7 @@ describe('studio routes', () => {
 
     it('checks IP, userId, and promotionId rate-limit keys on successful sponsor', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
@@ -775,7 +775,7 @@ describe('studio routes', () => {
       // not fire a wake signal. Callback-side state writes are locked
       // in `sponsorPromotionSponsored.test.ts`.
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError('TX reverted', 'ONCHAIN_REVERT', 422),
@@ -791,7 +791,7 @@ describe('studio routes', () => {
 
     it('passes PromotionSponsorError statusHint through', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError('Budget exhausted', 'BUDGET_EXHAUSTED', 409),
@@ -813,7 +813,7 @@ describe('studio routes', () => {
     // `SponsorFailureSubcode` values are exposed publicly.
     it('propagates classified PromotionSponsorError subcode into the route response body', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError(
@@ -838,7 +838,7 @@ describe('studio routes', () => {
 
     it('omits subcode in the route response body when the PromotionSponsorError is unclassified', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError(
@@ -861,7 +861,7 @@ describe('studio routes', () => {
 
     it('returns 503 when the sponsor operations gate is closed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
         status: 503,
         body: {
@@ -882,7 +882,7 @@ describe('studio routes', () => {
 
     it('returns 401 AUTH_FAILED when developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalTargetHashes = new Set<string>();
+      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Expired token'));
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {

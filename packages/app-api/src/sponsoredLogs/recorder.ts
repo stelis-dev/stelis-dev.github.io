@@ -20,7 +20,7 @@
  * Failure semantics:
  *   - never throws — primary sponsor response must not be affected.
  *   - store.append rejection emits `SPONSORED_LOGS_RECORDER_FAILED` with
- *     enough context for triage (digest, mode, outcome, error message).
+ *     enough context for triage (receipt, digest, mode, outcome, error message).
  *   - aggregate-vs-recent atomicity is the store adapter's responsibility
  *     (Lua-atomic in Redis). The recorder does NOT split the write.
  */
@@ -91,6 +91,7 @@ export function createSponsoredLogsRecorder(
           stage: 'build_entry',
           mode: metadata.route,
           outcome: metadata.outcome,
+          receipt_id: metadata.receiptId,
           digest: metadata.digest,
           error: buildErr instanceof Error ? buildErr.message : String(buildErr),
         },
@@ -108,6 +109,7 @@ export function createSponsoredLogsRecorder(
           stage: 'store_append',
           mode: metadata.route,
           outcome: metadata.outcome,
+          receipt_id: metadata.receiptId,
           digest: metadata.digest,
           error: writeErr instanceof Error ? writeErr.message : String(writeErr),
         },
@@ -206,6 +208,7 @@ export function fanOutSponsorResult(
             callback_index: i,
             route: metadata.route,
             sponsor_address: metadata.sponsorAddress,
+            receipt_id: metadata.receiptId,
             // digest is the cross-reference key documented in
             // `docs/operations.md` (`SPONSOR_RESULT_CALLBACK_FAILED`
             // → recorder/state failure correlation by digest/sponsor address).

@@ -187,7 +187,7 @@ export function ensureUpdatableFields(existing: Promotion, input: UpdatePromotio
  *
  * Checks:
  * 1. gas_sponsorship: maxParticipants must be > 0 (prevent uncapped commitments)
- * 2. gas_sponsorship: perUserGasAllowanceMist must be > 0 when maxParticipants > 0
+ * 2. gas_sponsorship: perUserGasAllowanceMist must be > 0
  * 3. gas_sponsorship: perUserGasAllowanceMist must be ≤
  *    `MAX_PROMOTION_LEDGER_VALUE_MIST` so the value fits Redis-Lua int64
  *    arithmetic (see `executionLedger.ts` constant comment for why the

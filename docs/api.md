@@ -147,6 +147,18 @@ The submitted `txBytes` must match the prepared record bound to `receiptId`. The
 The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call and at most `MAX_FINAL_COMMANDS = 16` commands. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
 The `executionCostClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
+## Error Responses
+
+Every Relay API error response contains an `error` string. Domain failures also
+contain a `code` from the current route-specific error enum. Transport-level
+failures may omit `code`; rate-limit responses contain `retryAfterMs` and a
+`Retry-After` header instead. Clients must preserve the `error` message and
+optional metadata even when `code` is absent.
+
+`CLIENT_IP_UNRESOLVED` is a current shared route-boundary error code. Relay
+prepare/sponsor and Studio routes can return it before admission state is
+touched when the Host cannot establish a trusted client IP.
+
 ## Studio Promotion Routes
 
 Studio promotion routes require:

@@ -187,7 +187,7 @@ function SponsoredLogsTable({
         </thead>
         <tbody>
           {entries.map((e) => (
-            <SponsoredLogsRow key={`${e.mode}|${e.receiptId}|${e.outcome}`} entry={e} />
+            <SponsoredLogsRow key={e.receiptId} entry={e} />
           ))}
         </tbody>
       </table>

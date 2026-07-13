@@ -1,47 +1,48 @@
 /**
  * promotionTargetPolicy — unit tests.
  *
- * Tests target hashing (shared canonicalize + sha256 helper).
+ * Tests the one canonical target representation shared by boot and runtime.
  * Target enforcement is global via STUDIO_ALLOWED_TARGETS.
  */
 import { describe, it, expect } from 'vitest';
-import { hashTarget, hashTargets } from '../src/studio/promotionTargetPolicy.js';
-import { createHash } from 'node:crypto';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 
-describe('hashTarget', () => {
-  it('hashes a fully-qualified target correctly', () => {
-    // normalizeSuiAddress('0x2') pads to full 64-char hex
-    const fullPkg = '0x0000000000000000000000000000000000000000000000000000000000000002';
-    const expected = createHash('sha256').update(`${fullPkg}::coin::transfer`).digest('hex');
-    const result = hashTarget('0x2::coin::transfer');
-    expect(result).toBe(expected);
+describe('canonicalizePromotionTarget', () => {
+  it('normalizes a short package address into the exact runtime target', () => {
+    expect(canonicalizePromotionTarget('0x2::coin::transfer')).toBe(
+      '0x0000000000000000000000000000000000000000000000000000000000000002::coin::transfer',
+    );
   });
 
   it('normalizes short package addresses', () => {
-    const hash1 = hashTarget('0x2::coin::transfer');
-    const hash2 = hashTarget(
-      '0x0000000000000000000000000000000000000000000000000000000000000002::coin::transfer',
+    expect(canonicalizePromotionTarget('0x2::coin::transfer')).toBe(
+      canonicalizePromotionTarget(
+        '0x0000000000000000000000000000000000000000000000000000000000000002::coin::transfer',
+      ),
     );
-    expect(hash1).toBe(hash2);
   });
 
-  it('throws on invalid target format', () => {
-    expect(() => hashTarget('not_a_target')).toThrow('Invalid target format');
-    expect(() => hashTarget('0x2::coin')).toThrow('Invalid target format');
-    expect(() => hashTarget('')).toThrow('Invalid target format');
+  it('rejects malformed target segments instead of creating unreachable policy', () => {
+    expect(() => canonicalizePromotionTarget('not_a_target')).toThrow('Invalid target format');
+    expect(() => canonicalizePromotionTarget('0x2::coin')).toThrow('Invalid target format');
+    expect(() => canonicalizePromotionTarget('xyz::coin::transfer')).toThrow(
+      'Invalid target package address',
+    );
+    expect(() => canonicalizePromotionTarget('::coin::transfer')).toThrow(
+      'Invalid target package address',
+    );
+    expect(() => canonicalizePromotionTarget('0x::coin::transfer')).toThrow(
+      'Invalid target package address',
+    );
+    expect(() => canonicalizePromotionTarget('0x2::::transfer')).toThrow(
+      'Invalid target module identifier',
+    );
+    expect(() => canonicalizePromotionTarget('0x2::coin::bad-name')).toThrow(
+      'Invalid target function identifier',
+    );
   });
-});
 
-describe('hashTargets', () => {
-  it('hashes all targets in array', () => {
-    const targets = ['0x2::coin::transfer', '0x3::token::mint'];
-    const result = hashTargets(targets);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe(hashTarget('0x2::coin::transfer'));
-    expect(result[1]).toBe(hashTarget('0x3::token::mint'));
-  });
-
-  it('returns empty array for empty input', () => {
-    expect(hashTargets([])).toEqual([]);
+  it('accepts current Move identifier syntax', () => {
+    expect(canonicalizePromotionTarget('0x2::_module::do_thing2')).toMatch(/::_module::do_thing2$/);
   });
 });

@@ -19,7 +19,7 @@ interface EndpointDef {
   fields: FieldDef[];
 }
 
-const endpoints: EndpointDef[] = [
+export const PLAYGROUND_ENDPOINTS: EndpointDef[] = [
   { id: 'status', method: 'GET', path: '/relay/status', desc: 'Health check', fields: [] },
   {
     id: 'config',
@@ -37,6 +37,23 @@ const endpoints: EndpointDef[] = [
       { name: 'txKindBytes', type: 'body', placeholder: 'base64...' },
       { name: 'senderAddress', type: 'body', placeholder: '0x...' },
       { name: 'settlementTokenType', type: 'body', placeholder: '0x...::deep::DEEP (required)' },
+      { name: 'txKindBytesHash', type: 'body', placeholder: '64 lowercase hex chars' },
+      {
+        name: 'prepareAuthorizationTimestampMs',
+        type: 'body',
+        placeholder: 'Unix timestamp in milliseconds',
+        valueType: 'number',
+      },
+      {
+        name: 'prepareAuthorizationRequestNonce',
+        type: 'body',
+        placeholder: 'client-generated nonce',
+      },
+      {
+        name: 'prepareAuthorizationSignature',
+        type: 'body',
+        placeholder: 'Sui personal-message signature',
+      },
       { name: 'slippageBps', type: 'body', placeholder: '200', valueType: 'number' },
       { name: 'gasMarginBps', type: 'body', placeholder: '1000', valueType: 'number' },
       { name: 'orderId', type: 'body', placeholder: 'order-123 (optional)' },
@@ -67,13 +84,27 @@ function parseSafeIntegerInput(name: string, value: string): number {
   return parsed;
 }
 
+export function buildPlaygroundRequestBody(
+  ep: EndpointDef,
+  values: Readonly<Record<string, string>>,
+) {
+  const body: Record<string, unknown> = {};
+  for (const field of ep.fields) {
+    const value = values[field.name];
+    if (field.type !== 'body' || !value) continue;
+    body[field.name] =
+      field.valueType === 'number' ? parseSafeIntegerInput(field.name, value) : value;
+  }
+  return body;
+}
+
 export function PlaygroundPage() {
   const [selected, setSelected] = useState('status');
   const [values, setValues] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<{ status: number; body: string } | null>(null);
 
-  const ep = endpoints.find((e) => e.id === selected)!;
+  const ep = PLAYGROUND_ENDPOINTS.find((e) => e.id === selected)!;
 
   const handleExecute = async () => {
     setLoading(true);
@@ -90,20 +121,9 @@ export function PlaygroundPage() {
         if (qs) url += '?' + qs;
         init.method = 'GET';
       } else {
-        const body: Record<string, unknown> = {};
-        ep.fields
-          .filter((f) => f.type === 'body')
-          .forEach((f) => {
-            if (values[f.name]) {
-              body[f.name] =
-                f.valueType === 'number'
-                  ? parseSafeIntegerInput(f.name, values[f.name])
-                  : values[f.name];
-            }
-          });
         init.method = 'POST';
         init.headers = { 'Content-Type': 'application/json' };
-        init.body = JSON.stringify(body);
+        init.body = JSON.stringify(buildPlaygroundRequestBody(ep, values));
       }
       const res = await fetch(url, init);
       const text = await res.text();
@@ -133,15 +153,9 @@ export function PlaygroundPage() {
       const qs = params.toString();
       return `curl "${RELAY_API_ORIGIN}${ep.path}${qs ? '?' + qs : ''}"`;
     }
-    const body: Record<string, string> = {};
-    ep.fields
-      .filter((f) => f.type === 'body')
-      .forEach((f) => {
-        if (values[f.name]) body[f.name] = values[f.name];
-      });
     return `curl -X POST "${RELAY_API_ORIGIN}${ep.path}" \\
   -H "Content-Type: application/json" \\
-  -d '${JSON.stringify(body)}'`;
+  -d '${JSON.stringify(buildPlaygroundRequestBody(ep, values))}'`;
   };
 
   return (
@@ -150,11 +164,13 @@ export function PlaygroundPage() {
       <p className="page-subtitle">
         Select an endpoint, fill in the parameters, and click Execute. Prepare-stage simulation
         failures return 422 domain errors, so compare responses against
-        <code>docs/api.md</code> instead of assuming every failure is an internal crash.
+        <code>docs/api.md</code> instead of assuming every failure is an internal crash. A raw
+        prepare request requires a wallet-produced signature over the canonical authorization
+        message; use the Sandbox or SDK for the managed wallet flow.
       </p>
 
       <div className="tabs">
-        {endpoints.map((e) => (
+        {PLAYGROUND_ENDPOINTS.map((e) => (
           <button
             key={e.id}
             className={`tab ${selected === e.id ? 'active' : ''}`}

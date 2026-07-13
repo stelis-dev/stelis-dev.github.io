@@ -47,11 +47,8 @@ export interface PromotionPrepareContext {
    * Consistent with how generic prepare handles the config dependency.
    */
   getConfig: () => Promise<OnchainConfig>;
-  /**
-   * Pre-computed sha256 hex hashes of STUDIO_ALLOWED_TARGETS entries.
-   * Global host-level MoveCall target enforcement.
-   */
-  globalTargetHashes: Set<string>;
+  /** Canonical STUDIO_ALLOWED_TARGETS entries for Host-level MoveCall enforcement. */
+  globalAllowedTargets: ReadonlySet<string>;
 }
 
 /** Request parameters for promotion prepare. */
@@ -108,7 +105,7 @@ export async function handlePromotionPrepare(
       executionLedger: ctx.executionLedger,
       sponsorPool: ctx.sponsorPool,
       prepareStore: ctx.prepareStore,
-      globalTargetHashes: ctx.globalTargetHashes,
+      globalAllowedTargets: ctx.globalAllowedTargets,
       getConfig: ctx.getConfig,
     },
     prepare: {

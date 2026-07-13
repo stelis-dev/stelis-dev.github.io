@@ -57,6 +57,11 @@ Network is auto-detected from the Relay API, and the sample page selects the mat
 | `/sandbox`    | Full transaction sandbox with wallet integration          |
 | `/promotion`  | Studio-mode promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
 
+The `/promotion` test transaction calls `0x2::coin::zero` and
+`0x2::coin::destroy_zero`. A Host operator must include both raw targets in
+`STUDIO_ALLOWED_TARGETS` before booting or restarting the Host. The page and the
+developer JWT do not change this Host-wide policy.
+
 ## Handoff
 
 - Need the current HTTP route and field reference: [`../../docs/api.md`](../../docs/api.md)

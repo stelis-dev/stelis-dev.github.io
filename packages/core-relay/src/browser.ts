@@ -123,9 +123,6 @@ export type {
 export { parseSettleArgs, ParseSettleArgsError, ARG_INDEX_MAP } from './parseSettleArgs.js';
 export type { ArgIndexMap } from './parseSettleArgs.js';
 
-// ── R-10 target canonicalization (browser-safe) ──────────────────────────────
-export { canonicalizeTarget } from './canonicalizeTarget.js';
-
 // NOTE: `computePolicyHash` / `PolicyFields` were moved out of this
 // package because policy hashing is server-only. The current owner is
 // core-api's internal `src/policyHash.ts` server module (no public

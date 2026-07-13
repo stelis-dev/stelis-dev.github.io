@@ -327,7 +327,7 @@ describe('DashboardPage integration', () => {
     );
   });
 
-  it('renders sponsored logs KPI as compact executions over losses without a standalone section title', async () => {
+  it('renders sponsored logs KPI as compact losses over executions without a standalone section title', async () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({

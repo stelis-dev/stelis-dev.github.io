@@ -495,13 +495,13 @@ describe('computeTotalRequiredBudgetMist', () => {
     ).toBe('1000000000');
   });
 
-  it('returns 0 when maxParticipants is 0 (unlimited)', () => {
-    expect(
+  it('rejects maxParticipants=0 as outside the current finite promotion contract', () => {
+    expect(() =>
       computeTotalRequiredBudgetMist({
         maxParticipants: 0,
         perUserGasAllowanceMist: '10000000',
       }),
-    ).toBe('0');
+    ).toThrow('maxParticipants must be a positive safe integer');
   });
 
   it('handles large values without overflow', () => {

@@ -38,7 +38,7 @@ interface PromotionPolicyContext {
   promotionStore: PromotionStoreAdapter;
   executionLedger: PromotionExecutionLedger;
   abuseBlocker: AbuseBlockerAdapter;
-  globalTargetHashes: Set<string>;
+  globalAllowedTargets: ReadonlySet<string>;
 }
 
 interface PromotionPolicyInput {
@@ -222,7 +222,7 @@ export async function validatePromotionPreconsumePolicy(
   }
 
   // S2 — allowed targets.
-  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalTargetHashes);
+  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalAllowedTargets);
   if (targetFailure) {
     await recordSponsorAbuseForTargetPolicy(ctx, input, peeked, targetFailure);
     throw sponsorPolicyErrorForTargetPolicy(targetFailure);

@@ -35,7 +35,7 @@ import { bcs } from '@mysten/sui/bcs';
 import { toBase64, toBase58 } from '@mysten/sui/utils';
 import { GAS_VARIANCE_FIXED_MIST } from '@stelis/core-relay';
 import { SETTLE_WITH_CREDIT_FUNCTION, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
-import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 
 // ─────────────────────────────────────────────
 // Module mocks (vi.hoisted ensures availability in factories)
@@ -539,7 +539,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
 const STUDIO_USER_ID = 'studio-user-1';
 const STUDIO_ALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin';
-const STUDIO_GLOBAL_TARGET_HASHES = new Set(hashTargets([STUDIO_ALLOWED_TARGET]));
+const STUDIO_GLOBAL_ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(STUDIO_ALLOWED_TARGET)]);
 
 /**
  * Mock SuiGrpcClient for the Studio prepare path. Studio prepare invokes
@@ -634,7 +634,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
       packageId: '0x0',
       configId: '0x0',
     }),
-    globalTargetHashes: STUDIO_GLOBAL_TARGET_HASHES,
+    globalAllowedTargets: STUDIO_GLOBAL_ALLOWED_TARGETS,
   };
 
   const sponsorCtx: PromotionSponsorContext = {
@@ -646,7 +646,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     sponsorPool,
     prepareStore,
     abuseBlocker,
-    globalTargetHashes: STUDIO_GLOBAL_TARGET_HASHES,
+    globalAllowedTargets: STUDIO_GLOBAL_ALLOWED_TARGETS,
     usageStore: null,
   };
 

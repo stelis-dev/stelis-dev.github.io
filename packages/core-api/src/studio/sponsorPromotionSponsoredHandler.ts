@@ -53,8 +53,8 @@ export interface PromotionSponsorContext {
   abuseBlocker: AbuseBlockerAdapter;
   /** Usage store — record completed sponsor events. */
   usageStore?: PromotionUsageStoreAdapter | null;
-  /** Pre-computed sha256 hex hashes of STUDIO_ALLOWED_TARGETS entries. */
-  globalTargetHashes: Set<string>;
+  /** Canonical STUDIO_ALLOWED_TARGETS entries for Host-level MoveCall enforcement. */
+  globalAllowedTargets: ReadonlySet<string>;
   /** Optional host-provided sponsor result callback. */
   onSponsorResult?: SponsorResultCallback;
 }

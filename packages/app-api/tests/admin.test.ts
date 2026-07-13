@@ -142,7 +142,7 @@ function createMockCtx(): AppApiContext {
     promotionStore: null,
     usageStore: null,
     executionLedger: null,
-    studioGlobalTargetHashes: null,
+    studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
     failoverTransport: {
@@ -915,7 +915,6 @@ describe('admin routes', () => {
       mockReadJsonBodyWithLimit.mockResolvedValueOnce({
         type: 'gas_sponsorship',
         displayName: 'Test',
-        allowedTargets: ['0xPKG::mod::fn'],
       });
       const res = await app.request('/api/promotions', {
         method: 'POST',
@@ -986,6 +985,82 @@ describe('admin routes', () => {
         };
         expect(body.promotion.status).toBe('draft');
         expect(body.promotion.type).toBe('gas_sponsorship');
+      });
+
+      it('POST /api/promotions rejects removed fields before creating a record', async () => {
+        const create = vi.spyOn(mockCtx.promotionStore!, 'create');
+        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
+          type: 'gas_sponsorship',
+          displayName: 'Removed policy field',
+          maxParticipants: 10,
+          perUserGasAllowanceMist: '1000000',
+          allowedTargets: ['0x1::module::function'],
+        });
+
+        const res = await app.request('/api/promotions', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({ error: 'Unknown field: allowedTargets' });
+        expect(create).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        { label: 'null', body: null },
+        { label: 'array', body: [] },
+      ])(
+        'POST /api/promotions rejects a $label body before creating a record',
+        async ({ body }) => {
+          const create = vi.spyOn(mockCtx.promotionStore!, 'create');
+          mockReadJsonBodyWithLimit.mockResolvedValueOnce(body);
+
+          const res = await app.request('/api/promotions', {
+            method: 'POST',
+            body: JSON.stringify({}),
+          });
+
+          expect(res.status).toBe(400);
+          await expect(res.json()).resolves.toEqual({
+            error: 'Invalid request body: must be a JSON object',
+          });
+          expect(create).not.toHaveBeenCalled();
+        },
+      );
+
+      it('PUT /api/promotions/:id rejects create-only fields before updating a record', async () => {
+        const update = vi.spyOn(mockCtx.promotionStore!, 'update');
+        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
+          displayName: 'Ignored type attempt',
+          type: 'gas_sponsorship',
+        });
+
+        const res = await app.request('/api/promotions/any', {
+          method: 'PUT',
+          body: JSON.stringify({}),
+        });
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({ error: 'Unknown field: type' });
+        expect(update).not.toHaveBeenCalled();
+      });
+
+      it('POST /api/promotions/:id/status rejects unrelated fields before transitioning a record', async () => {
+        const transition = vi.spyOn(mockCtx.promotionStore!, 'transitionStatus');
+        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
+          status: 'active',
+          displayName: 'Ignored rename attempt',
+        });
+
+        const res = await app.request('/api/promotions/any/status', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({ error: 'Unknown field: displayName' });
+        expect(transition).not.toHaveBeenCalled();
       });
 
       it('POST /api/promotions success emits a PROMOTION_CREATE audit entry', async () => {
@@ -1262,7 +1337,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'unsupported_type',
           displayName: 'Bad',
-          allowedTargets: ['0xPKG::mod::fn'],
         });
 
         const res = await app.request('/api/promotions', {
@@ -1359,7 +1433,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Budget Check',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 200,
           perUserGasAllowanceMist: '5000000',
         });
@@ -1387,7 +1460,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Temporal Fields',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 50,
           perUserGasAllowanceMist: '1000000',
           claimDeadlineAt: deadline,
@@ -1429,7 +1501,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Recalc',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 100,
           perUserGasAllowanceMist: '10000000',
         });
@@ -1463,7 +1534,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Activate Me',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 100,
           perUserGasAllowanceMist: '10000000',
         });
@@ -1728,7 +1798,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Active',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 50,
           perUserGasAllowanceMist: '5000000',
         });
@@ -1832,7 +1901,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'ClaimedUsers Test',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 10,
           perUserGasAllowanceMist: '5000000',
         });
@@ -1883,7 +1951,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Summary ClaimCount Test',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 10,
           perUserGasAllowanceMist: '5000000',
         });
@@ -1949,7 +2016,6 @@ describe('admin routes', () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
           type: 'gas_sponsorship',
           displayName: 'Summary Test',
-          allowedTargets: ['0xPKG::mod::fn'],
           maxParticipants: 10,
           perUserGasAllowanceMist: '5000000',
         });

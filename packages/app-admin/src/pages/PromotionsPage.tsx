@@ -606,7 +606,7 @@ export function PromotionsPage() {
                   <td>
                     <StatusBadge status={p.status} />
                   </td>
-                  <td>{p.maxParticipants === 0 ? '∞' : p.maxParticipants}</td>
+                  <td>{p.maxParticipants}</td>
                   <td style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
                     {formatMist(p.totalRequiredBudgetMist)}
                   </td>

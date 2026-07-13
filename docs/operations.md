@@ -192,7 +192,7 @@ Studio promotion routes are available when the Host boots with all required Stud
 
 When these variables are present, the Host runs in dual mode: generic relay routes and Studio promotion routes are both active. Without the complete Studio configuration, the Host runs the generic relay routes only.
 
-`STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation rejects an empty list, malformed entries, and duplicates after canonicalization. The Host precomputes target hashes and promotion prepare/sponsor requests must match those targets.
+`STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation canonicalizes package addresses and rejects an empty list, malformed entries, and canonical duplicates. Promotion prepare and sponsor requests compare every MoveCall with that same boot-time set.
 
 `STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds.
 

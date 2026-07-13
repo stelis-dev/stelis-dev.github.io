@@ -5,13 +5,13 @@
  * GET /studio/promotions, GET /studio/promotions/:id, and
  * POST /studio/promotions/:id/{claim,prepare,sponsor}.
  * Intentionally does NOT own: promotionStore/executionLedger null-guard, studio
- * mode, globalTargetHashes, sponsor operations gate, body parse, handler call,
+ * mode, globalAllowedTargets, sponsor operations gate, body parse, handler call,
  * per-route error mapping. Those stay in the route because their guard set and
  * messages differ per operation.
  *
  * Shape — plain async helper, NOT a Hono middleware. Routes call it
  * explicitly AFTER their route-local 503 guards (studio mode, stores,
- * globalTargetHashes, sponsor operations gate) have passed. This preserves the original
+ * globalAllowedTargets, sponsor operations gate) have passed. This preserves the original
  * guard precedence: 503 infrastructure failures always outrank 401/429.
  * Binding this as `app.post(path, middleware, handler)` would run JWT/block/
  * rate-limit before the 503 guards — that ordering is not permitted.

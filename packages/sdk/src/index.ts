@@ -55,15 +55,6 @@ export type {
 export { checkSettlementSwapPathLiquidity } from './swap.js';
 export type { SettlementSwapPathLiquidityStatus, HopStatus, LiquidityStatusCode } from './swap.js';
 
-/**
- * Browser-safe re-export of canonicalizeTarget for allowedTargets hashing.
- *
- * Runtime helper implementation: @stelis/core-relay/canonicalizeTarget
- * (re-exported via @stelis/core-relay/browser). canonicalizeTarget stays
- * inside core-relay because @stelis/contracts is a data-only package.
- */
-export { canonicalizeTarget } from '@stelis/core-relay/browser';
-
 // ─────────────────────────────────────────────
 // Credit query (shared trust root via core-relay)
 // ─────────────────────────────────────────────

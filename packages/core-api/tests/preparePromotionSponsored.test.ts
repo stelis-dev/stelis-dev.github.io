@@ -13,7 +13,7 @@
  *   - Use window expiry
  */
 import { describe, test, expect, vi } from 'vitest';
-import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
   handlePromotionPrepare,
   PromotionPrepareError,
@@ -45,7 +45,7 @@ const TEST_HMAC_SECRET = 'prepare-promotion-test-hmac-secret-000';
 
 const ALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin';
-const GLOBAL_TARGET_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
+const GLOBAL_ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]);
 
 const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
 const SIMULATION_GAS_USED = {
@@ -166,7 +166,7 @@ async function setup() {
       packageId: '0x0',
       configId: '0x0',
     }),
-    globalTargetHashes: GLOBAL_TARGET_HASHES,
+    globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
   };
 
   return { ctx, promotionStore, executionLedger, prepareStore, promoId };
@@ -459,7 +459,7 @@ describe('handlePromotionPrepare', () => {
 
   test('does not let an over-cap Promotion hide a disallowed target', async () => {
     const { ctx, promoId } = await setup();
-    ctx.globalTargetHashes = new Set<string>();
+    ctx.globalAllowedTargets = new Set<string>();
     const txKindBytes = await buildCommandCountTxKindBytes(17);
 
     await expect(
@@ -579,11 +579,12 @@ describe('handlePromotionPrepare', () => {
     const { ctx, promoId, executionLedger } = await setup();
 
     // Claim with a use window that has already expired
-    await executionLedger.claim(promoId, 'user-expired', {
-      maxParticipants: 0,
+    const claim = await executionLedger.claim(promoId, 'user-expired', {
+      maxParticipants: BASE_PROMO.maxParticipants,
       perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: new Date(Date.now() - 86400_000).toISOString(),
     });
+    expect(claim.ok).toBe(true);
 
     const txKind = await buildTestTxKindBytes();
 

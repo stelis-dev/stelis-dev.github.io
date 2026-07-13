@@ -299,6 +299,23 @@ describe('StelisClient', () => {
       }
     });
 
+    it('preserves an uncoded rate-limit error message and retry metadata', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ error: 'Rate limit exceeded', retryAfterMs: 2500 }, 429),
+      );
+
+      try {
+        await client.getStatus();
+        expect.fail('Expected StelisApiException');
+      } catch (e) {
+        const err = e as StelisApiException;
+        expect(err).toBeInstanceOf(StelisApiException);
+        expect(err.code).toBe('UNKNOWN');
+        expect(err.message).toBe('Rate limit exceeded');
+        expect(err.meta).toEqual({ retryAfterMs: 2500 });
+      }
+    });
+
     it('throws a readable error on successful but non-JSON response', async () => {
       mockFetch.mockResolvedValueOnce(
         new Response('<html>ok</html>', {

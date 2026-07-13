@@ -43,6 +43,9 @@ node scripts/onchain-tests/empty-execution-benchmark.mjs --execute --phase spons
 The sponsored phase exits before submitting any transaction if the selected
 settlement token balance is zero or below
 `STELIS_ONCHAIN_MIN_SETTLEMENT_TOKEN_RAW`.
+`STELIS_ONCHAIN_SLIPPAGE_BPS` configures prepare slippage tolerance (default
+200, maximum 500). Set `STELIS_ONCHAIN_REQUIRE_ZERO_SUI_FOR_SPONSORED=true` to
+make the script reject a sponsored run whenever the test wallet holds SUI.
 
 If the Relay API returns a rate-limit response, the script waits for the
 provided retry interval and retries the same prepare or sponsor step. Rate-limit

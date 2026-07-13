@@ -85,9 +85,12 @@ Only the owner can include it in transactions. No third party, including the Hos
 
 ---
 
-## Function Visibility Table
+## Product Interface Functions
 
-### `public` — Externally Callable (used from SDK-built transactions)
+This table lists the current product operations. It is not an exhaustive dump
+of public bytecode helpers, read-only accessors, or testing-only functions.
+
+### `public` — Host-Built Settlement, Owner, and Administration Operations
 
 | Function                         | Module   | Signature                                                                                                                                                                                                                                                                                             | Description                                                                                                                   |
 | -------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -114,7 +117,7 @@ Only the owner can include it in transactions. No third party, including the Hos
 > **Withdrawal policy**: `vault::withdraw_amount()` exists on-chain as an owner-only helper, but it is intentionally not part of the sponsored execution allowlist or SDK API.
 > Supported sponsored PTBs only expose full withdrawal through `withdraw()`.
 
-### `public(package)` — Internal Only (NOT callable from SDK)
+### Selected `public(package)` Settlement Internals
 
 | Function                  | Module   | Description                                                                                                                        |
 | ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |

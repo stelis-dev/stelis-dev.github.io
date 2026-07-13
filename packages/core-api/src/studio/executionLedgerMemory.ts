@@ -142,8 +142,8 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
   // ── Claim ──────────────────────────────────
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
-    if (!Number.isSafeInteger(opts.maxParticipants) || opts.maxParticipants < 0) {
-      throw new Error('maxParticipants must be a non-negative safe integer');
+    if (!Number.isSafeInteger(opts.maxParticipants) || opts.maxParticipants <= 0) {
+      throw new Error('maxParticipants must be a positive safe integer');
     }
     const perUserGasAllowanceMist = parseNonNegativeDecimalBigInt(
       opts.perUserGasAllowanceMist,
@@ -159,13 +159,11 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
         `perUserGasAllowanceMist (${perUserGasAllowanceMist.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()})`,
       );
     }
-    if (opts.maxParticipants > 0) {
-      const totalBudgetBigInt = BigInt(opts.maxParticipants) * perUserGasAllowanceMist;
-      if (totalBudgetBigInt > MAX_PROMOTION_LEDGER_VALUE_MIST) {
-        throw new Error(
-          `total budget (maxParticipants × perUserGasAllowanceMist = ${totalBudgetBigInt.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()})`,
-        );
-      }
+    const totalBudgetBigInt = BigInt(opts.maxParticipants) * perUserGasAllowanceMist;
+    if (totalBudgetBigInt > MAX_PROMOTION_LEDGER_VALUE_MIST) {
+      throw new Error(
+        `total budget (maxParticipants × perUserGasAllowanceMist = ${totalBudgetBigInt.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()})`,
+      );
     }
 
     // Get or create claim index for this promotion
@@ -181,7 +179,7 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     }
 
     // Capacity check
-    if (opts.maxParticipants > 0 && promoClaims.size >= opts.maxParticipants) {
+    if (promoClaims.size >= opts.maxParticipants) {
       return { ok: false, reason: 'capacity_exceeded' };
     }
 
@@ -384,10 +382,8 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
       return { availableMist: 0n, reservedMist: 0n, consumedMist: 0n };
     }
     const total =
-      config.maxParticipants === 0
-        ? MAX_PROMOTION_LEDGER_VALUE_MIST
-        : BigInt(config.maxParticipants) *
-          parseNonNegativeDecimalBigInt(config.perUserGasAllowanceMist, 'perUserGasAllowanceMist');
+      BigInt(config.maxParticipants) *
+      parseNonNegativeDecimalBigInt(config.perUserGasAllowanceMist, 'perUserGasAllowanceMist');
     return { availableMist: total, reservedMist: 0n, consumedMist: 0n };
   }
 
@@ -459,16 +455,9 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     let budget = this.budgets.get(promotionId);
     if (!budget) {
       const config = this.promoConfig.get(promotionId);
-      // maxParticipants=0 means unlimited capacity → budget is effectively unlimited.
-      // Use the same `MAX_PROMOTION_LEDGER_VALUE_MIST` ceiling that the
-      // bound check enforces (≈9M SUI in MIST) so the sentinel stays
-      // inside Lua-double precision when this Memory adapter is swapped
-      // for the Redis adapter.
       const total = config
-        ? config.maxParticipants === 0
-          ? MAX_PROMOTION_LEDGER_VALUE_MIST
-          : BigInt(config.maxParticipants) *
-            parseNonNegativeDecimalBigInt(config.perUserGasAllowanceMist, 'perUserGasAllowanceMist')
+        ? BigInt(config.maxParticipants) *
+          parseNonNegativeDecimalBigInt(config.perUserGasAllowanceMist, 'perUserGasAllowanceMist')
         : 0n;
       budget = {
         totalMist: total,

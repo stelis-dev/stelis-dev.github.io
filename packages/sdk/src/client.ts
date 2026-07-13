@@ -230,10 +230,10 @@ export class StelisClient {
     const data = parseJsonIfPossible(raw);
 
     if (!res.ok) {
-      const code = isStelisApiError(data) ? data.code : 'UNKNOWN';
-      const message = isStelisApiError(data)
-        ? data.error
-        : (summarizeHttpBody(raw) ?? res.statusText ?? `HTTP ${res.status}`);
+      const apiError = isStelisApiError(data) ? data : undefined;
+      const code = apiError?.code ?? 'UNKNOWN';
+      const message =
+        apiError?.error ?? summarizeHttpBody(raw) ?? res.statusText ?? `HTTP ${res.status}`;
       // Preserve extra fields (minSettleMist, requiredTotalIn, subcode, etc.)
       const extra =
         typeof data === 'object' && data !== null
@@ -297,17 +297,17 @@ function resolveTimeoutMs(name: string, value: number | undefined, fallback: num
 }
 
 /**
- * Narrow an unknown API error response to StelisApiError shape.
- * Checks at runtime that `code` and `error` fields are present as strings.
+ * Narrow an unknown API error response to the common StelisApiError shape.
+ * `error` is universal. `code` is optional because uncoded transport failures
+ * and rate-limit responses are also current Host responses.
  */
 function isStelisApiError(value: unknown): value is StelisApiError {
   return (
     typeof value === 'object' &&
     value !== null &&
-    'code' in value &&
-    typeof (value as Record<string, unknown>).code === 'string' &&
     'error' in value &&
-    typeof (value as Record<string, unknown>).error === 'string'
+    typeof (value as Record<string, unknown>).error === 'string' &&
+    (!('code' in value) || typeof (value as Record<string, unknown>).code === 'string')
   );
 }
 

@@ -105,8 +105,8 @@ export type {
 } from './promotionClaimHandler.js';
 export { handlePromotionClaim } from './promotionClaimHandler.js';
 
-// Target policy — hashing helper
-export { hashTarget, hashTargets } from './promotionTargetPolicy.js';
+// Target policy — canonical Host allowlist representation
+export { canonicalizePromotionTarget } from './promotionTargetPolicy.js';
 
 // Promotion abuse policy
 export type { PromotionAbuseCode, PromotionAbuseMeta } from './promotionAbusePolicy.js';

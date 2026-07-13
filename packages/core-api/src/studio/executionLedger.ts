@@ -61,10 +61,8 @@ export const PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS = 15_000;
  *   `if delta > 0`/`if afterDeduct < 0` and arithmetic like
  *   `local absD = -delta` would silently misbehave once the values
  *   crossed the JS-safe-integer ceiling.
- * - The Memory ledger and the existing `MAX_BUDGET` sentinel for
- *   `maxParticipants === 0` already use exactly this constant, so
- *   pinning the cap at `Number.MAX_SAFE_INTEGER` keeps Memory and Redis
- *   conformance aligned without introducing a third magic number.
+ * - Pinning the cap at `Number.MAX_SAFE_INTEGER` keeps Memory and Redis
+ *   conformance aligned with the promotion activation bound.
  *
  * Practical scale is cataloged with `MAX_PROMOTION_LEDGER_VALUE_MIST` in
  * docs/parameters.md#studio-ledger-limits. Any realistic promotion stays
@@ -118,8 +116,7 @@ export interface PromotionExecutionLedger {
    *     `BudgetState`.
    *
    * Either way, after a successful claim the next `reserve()` sees a
-   * fully materialized budget equal to `maxParticipants × perUserGasAllowanceMist`
-   * (or the unlimited sentinel when `maxParticipants === 0`).
+   * fully materialized budget equal to `maxParticipants × perUserGasAllowanceMist`.
    *
    * @param promotionId - Promotion to claim.
    * @param userId - User claiming the promotion.

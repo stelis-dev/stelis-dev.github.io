@@ -324,14 +324,14 @@
     "relayError": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["error", "code"],
+      "required": ["error"],
       "properties": {
         "error": {
           "type": "string"
         },
         "code": {
           "type": "string",
-          "description": "Error code string. See knownPrepareErrorCode and knownSponsorErrorCode for documented current enums."
+          "description": "Optional domain error code. Uncoded transport failures and rate-limit responses omit this field. See knownPrepareErrorCode and knownSponsorErrorCode for documented current enums."
         },
         "retryAfterMs": {
           "type": "integer",
@@ -359,6 +359,7 @@
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",
+        "CLIENT_IP_UNRESOLVED",
         "PREPARE_AUTH_TIMESTAMP_INVALID",
         "PREPARE_AUTH_NONCE_INVALID",
         "PREPARE_AUTH_TX_KIND_HASH_INVALID",
@@ -426,6 +427,7 @@
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",
+        "CLIENT_IP_UNRESOLVED",
         "PREPARED_TX_NOT_FOUND",
         "PREPARED_TX_EXPIRED",
         "SENDER_SIGNATURE_INVALID",
@@ -497,7 +499,8 @@
           "$ref": "#/$defs/mistString"
         },
         "remainingParticipantSlots": {
-          "type": ["integer", "null"]
+          "type": "integer",
+          "minimum": 0
         },
         "userRemainingGasAllowanceMist": {
           "type": ["string", "null"],
@@ -759,6 +762,7 @@
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",
+        "CLIENT_IP_UNRESOLVED",
         "AUTH_FAILED",
         "AUTH_JWT_INVALID",
         "ABUSE_BLOCKED",
@@ -796,6 +800,7 @@
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",
+        "CLIENT_IP_UNRESOLVED",
         "AUTH_FAILED",
         "AUTH_JWT_INVALID",
         "ABUSE_BLOCKED",

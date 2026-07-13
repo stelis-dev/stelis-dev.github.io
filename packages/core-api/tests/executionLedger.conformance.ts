@@ -106,14 +106,10 @@ export function runLedgerConformanceTests(
       expect(result.reason).toBe('capacity_exceeded');
     });
 
-    it('allows unlimited claims when maxParticipants = 0', async () => {
-      const opts = defaultClaimOpts({ maxParticipants: 0 });
-      const r1 = await ledger.claim(PROMO_ID, USER_A, opts);
-      const r2 = await ledger.claim(PROMO_ID, USER_B, opts);
-      const r3 = await ledger.claim(PROMO_ID, USER_C, opts);
-      expect(r1.ok).toBe(true);
-      expect(r2.ok).toBe(true);
-      expect(r3.ok).toBe(true);
+    it('rejects maxParticipants = 0 instead of creating an uncapped budget', async () => {
+      await expect(
+        ledger.claim(PROMO_ID, USER_A, defaultClaimOpts({ maxParticipants: 0 })),
+      ).rejects.toThrow('maxParticipants must be a positive safe integer');
     });
 
     it('rejects non-safe participant counts and non-decimal allowance strings', async () => {
@@ -123,7 +119,7 @@ export function runLedgerConformanceTests(
           USER_A,
           defaultClaimOpts({ maxParticipants: Number.MAX_SAFE_INTEGER + 1 }),
         ),
-      ).rejects.toThrow('maxParticipants must be a non-negative safe integer');
+      ).rejects.toThrow('maxParticipants must be a positive safe integer');
 
       await expect(
         ledger.claim(PROMO_ID, USER_A, defaultClaimOpts({ perUserGasAllowanceMist: '1e6' })),

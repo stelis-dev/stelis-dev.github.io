@@ -71,15 +71,14 @@ describe('computePromotionAdminSummary', () => {
     expect(summary.totalConsumedBudgetMist).toBe('5000000');
   });
 
-  it('returns null remainingParticipantSlots when maxParticipants is 0', () => {
-    const summary = computePromotionAdminSummary(makePromoConfig({ maxParticipants: 0 }), 5, {
-      availableMist: 0n,
-      reservedMist: 0n,
-      consumedMist: 0n,
-    });
-
-    expect(summary.remainingParticipantSlots).toBeNull();
-    expect(summary.totalRequiredBudgetMist).toBe('0');
+  it('rejects maxParticipants=0 instead of presenting an unlimited summary', () => {
+    expect(() =>
+      computePromotionAdminSummary(makePromoConfig({ maxParticipants: 0 }), 5, {
+        availableMist: 0n,
+        reservedMist: 0n,
+        consumedMist: 0n,
+      }),
+    ).toThrow('maxParticipants must be a positive safe integer');
   });
 
   it('separates consumed and reserved from budget snapshot', () => {
@@ -360,7 +359,7 @@ describe('computePromotionListItem', () => {
     expect(item.unavailableReason).toBeNull();
   });
 
-  it('returns null remainingParticipantSlots when maxParticipants=0', () => {
+  it('treats an invalid maxParticipants=0 read model as having no remaining slots', () => {
     const item = computePromotionListItem(
       makePromoConfig({ maxParticipants: 0 }) as Promotion,
       null,
@@ -368,7 +367,8 @@ describe('computePromotionListItem', () => {
       0n,
     );
 
-    expect(item.remainingParticipantSlots).toBeNull();
+    expect(item.remainingParticipantSlots).toBe(0);
+    expect(item.canClaim).toBe(false);
   });
 
   it('remainingParticipantSlots never goes below 0', () => {

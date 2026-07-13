@@ -12,10 +12,11 @@ import type {
   SponsoredExecutionLogEntry,
   SponsoredExecutionMode,
 } from './types.js';
-import { parseSignedMistString, parseSponsoredExecutionLogEntry } from './types.js';
+import { parseSignedDecimalString, parseSponsoredExecutionLogEntry } from './types.js';
 import {
   SPONSORED_LOGS_RECENT_DEFAULT_CAP,
-  sponsoredLogIdempotencyKey,
+  sponsoredLogReceiptConflict,
+  sponsoredLogReplayFingerprint,
   type SponsoredLogsStoreAdapter,
 } from './store.js';
 
@@ -64,14 +65,14 @@ export interface MemorySponsoredLogsStoreOptions {
 }
 
 /**
- * In-memory `SponsoredLogsStoreAdapter`. Append is idempotent on
- * `(mode, receiptId, outcome)`; aggregate update and recent append are
- * NOT co-atomic (recent append is best-effort by contract).
+ * In-memory `SponsoredLogsStoreAdapter`. One receipt records one exact
+ * result; aggregate update and recent append are NOT co-atomic (recent
+ * append is best-effort by contract).
  */
 export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
   private readonly aggregates: Map<SponsoredExecutionAggregateMode, MutableAggregate> = new Map();
   private readonly recent: SponsoredExecutionLogEntry[] = [];
-  private readonly seenKeys: Set<string> = new Set();
+  private readonly receiptFingerprints: Map<string, string> = new Map();
   private readonly recentCap: number;
 
   constructor(options: MemorySponsoredLogsStoreOptions = {}) {
@@ -83,23 +84,26 @@ export class MemorySponsoredLogsStore implements SponsoredLogsStoreAdapter {
 
   async append(entry: SponsoredExecutionLogEntry): Promise<void> {
     const currentEntry = parseSponsoredExecutionLogEntry(entry);
-    const key = sponsoredLogIdempotencyKey(currentEntry);
-    if (this.seenKeys.has(key)) {
-      return;
-    }
+    const fingerprint = sponsoredLogReplayFingerprint(currentEntry);
 
     // Validate up front — a rejected append MUST NOT poison the
-    // idempotency set, otherwise a later well-formed retry of the same
-    // (mode, receiptId, outcome) would no-op silently. Mirrors the
+    // receipt map, otherwise a later well-formed retry of the same
+    // receipt would conflict silently. Mirrors the
     // Redis adapter, which validates before invoking the Lua script.
     let hostNet: bigint | null = null;
     if (currentEntry.economicsStatus === 'known') {
-      hostNet = parseSignedMistString(currentEntry.hostNetMist!, 'hostNetMist');
+      hostNet = parseSignedDecimalString(currentEntry.hostNetMist!, 'hostNetMist');
     }
 
-    // Validation passed — claim the idempotency key now (adapter
+    const recordedFingerprint = this.receiptFingerprints.get(currentEntry.receiptId);
+    if (recordedFingerprint !== undefined) {
+      if (recordedFingerprint === fingerprint) return;
+      throw sponsoredLogReceiptConflict(currentEntry.receiptId);
+    }
+
+    // Validation passed — claim this exact receipt result now (adapter
     // lifetime persistent; production uses Redis).
-    this.seenKeys.add(key);
+    this.receiptFingerprints.set(currentEntry.receiptId, fingerprint);
 
     // Aggregate update — `all` plus per-mode scope.
     const scopes: readonly SponsoredExecutionAggregateMode[] = ['all', currentEntry.mode];

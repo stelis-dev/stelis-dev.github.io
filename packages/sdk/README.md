@@ -45,7 +45,13 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 | **Shared boundary**         | choose `settlementToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
 | **Out of scope for Stelis** | wallet custody, MCP runtime, agent autonomy, and human approval UX                                                                             |
 
-> The SDK does not retry Host errors. It returns Host failures as `StelisApiException` or `StelisSponsoredError` with the Host-provided code, and retry/backoff policy belongs on your side. Capacity codes include `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`, `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`. `ABUSE_BLOCKED` includes `retryAfterMs`; raw HTTP clients also receive `Retry-After` for `PREPARE_OVERLOADED`.
+> The SDK does not retry Host errors. It returns Host failures as
+> `StelisApiException` or `StelisSponsoredError`, preserving a Host domain code
+> when one is present and using `UNKNOWN` for uncoded transport responses.
+> Retry/backoff policy belongs on your side. Capacity codes include
+> `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`,
+> `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`.
+> Rate-limit metadata such as `retryAfterMs` is preserved on the exception.
 > Missing token support is resolved by the Host operator updating `packages/app-api/settlement-swap-paths.json` on a product-owned `Studio` or `Host` deployment, not by SDK customization.
 
 ## Purpose
@@ -79,7 +85,6 @@ The supported npm entry points are:
 - `getPromotionUserState()` — standalone server-to-server promotion detail
 - `checkSettlementSwapPathLiquidity()` — DeepBook pool liquidity check
 - `queryUserCredit()` — on-chain vault/credit lookup
-- `canonicalizeTarget()` — R-10 allowedTargets hashing (browser-safe)
 - `STELIS_CONTRACT_IDS`, `DEEPBOOK_IDS` — built-in on-chain contract IDs
 - exported response, config, and promotion types
 
@@ -209,7 +214,9 @@ Use this shortcut before you connect product-specific flows:
 
 ### `executeSponsored()` — One-liner (Recommended)
 
-SDK handles everything: coin query → `swap_and_settle` (single MoveCall) → prepare → sign → sponsor.
+The SDK validates and serializes the user's `TransactionKind`, signs the prepare
+authorization, and runs the prepare → user-sign → sponsor flow. The Host resolves
+funding and appends the current settlement suffix during `/relay/prepare`.
 The user transaction may contain at most 11 commands; the Host reserves up to five commands for settlement inside the 16-command final policy.
 
 ```typescript
@@ -224,7 +231,7 @@ const result = await sdk.executeSponsored(tx, {
   prepareAuthorizationSigner,
   signer: wallet.signTransaction,
   addr: userAddress,
-  settlementToken: { type: DEEP_TYPE }, // amount auto-calculated from prepare cost + exchange rate
+  settlementToken: { type: DEEP_TYPE }, // Host resolves funding and swap amount during /prepare
   orderId: 'invoice-2026-001', // optional: external reference for payment tracking
 });
 console.log(result.digest);
@@ -507,14 +514,13 @@ const result = await stelis.executeSponsored(tx, {
 console.log(`Digest: ${result.digest}`);
 ```
 
-For the simplest UX, use the same token for the item price and the Stelis settlement token.
-That keeps the user-facing breakdown straightforward:
+The item price and execution-cost estimate use different units in this callback:
 
 - `Item price: 100.00 USDC`
-- `Estimated gas: 0.50 USDC`
-- `Estimated total: 100.50 USDC`
+- `Estimated execution cost: 0.0005 SUI`
 
-Use `onGasEstimate` callback for pre-sign cost display.
+Do not add these display values without an explicit, current conversion. Use
+`onGasEstimate` for the post-prepare SUI cost display.
 `estimateGas()` is still useful as an early estimate, but the stronger number is
 the one produced after the payment commands are already inside the PTB.
 
@@ -682,18 +688,17 @@ Choose monorepo source helpers instead when:
 | 3    | `EVaultNotRegistered`     | No vault found for this address             |
 | 4    | `EVaultMismatch`          | Vault object doesn't match registered vault |
 
-### Gas Auto-Calculation
+### Host-Authoritative Settlement Funding
 
-When `settlementToken.amount` is omitted, the SDK auto-calculates swap amount:
+`executeSponsored()` does not accept a caller-selected settlement amount. During
+`/relay/prepare`, the Host resolves User Vault credit and settlement-token
+funding, obtains the current DeepBook quote, applies the configured margin and
+book constraints, and builds the settlement suffix.
 
-1. **Needed SUI** = `executionCostClaim + fee + protocolFee` (from the prepare response)
-2. **Payment amount** = `neededSuiMist × FLOAT_SCALING(1e9) / midPrice × margin`
-   - `midPrice` is DeepBook's raw u64: `quote_smallest × 1e9 / base_smallest`
-   - `baseForQuote` (e.g. DEEP→SUI): `microDEEP = neededMist × 1e9 / midPrice`
-3. **Direction-aware book constraints**
-   - `baseForQuote`: apply `minSize` + `lotSize` directly to payment input.
-   - `quoteForBase`: convert first-hop `minSize` (base units) to quote input via
-     `minQuote = ceil(ceil(minSize × hop1MidPrice / 1e9) × 1.15)`.
+`estimateGas()` is a separate, non-authoritative UX preview. Its
+`intentGasBudget` and `gasMarginBps` inputs affect only that preview. After a
+successful prepare, `onGasEstimate` receives the stronger transaction-specific
+cost as MIST, a human-readable SUI value, and the `SUI` symbol.
 
 Surplus SUI is stored in the user's vault as credit and automatically
 deducted in subsequent transactions.

@@ -188,7 +188,7 @@ export type CreateUsageEventInput = Omit<UsageEvent, 'createdAt'>;
 
 /** Options for ExecutionLedger.claim(). */
 export interface ClaimOpts {
-  /** Maximum allowed participants. 0 = unlimited. */
+  /** Maximum allowed participants. Must be a positive safe integer. */
   maxParticipants: number;
   /** Per-user gas allowance in MIST. */
   perUserGasAllowanceMist: string;
@@ -263,7 +263,6 @@ export type ReleaseFailureReason = 'reservation_not_found';
  * Compute total required budget for a promotion in MIST.
  *
  * Pure derivation: maxParticipants * perUserGasAllowanceMist.
- * Returns '0' if maxParticipants is 0 (unlimited — budget cannot be pre-computed).
  * Returns string for bigint-safe representation.
  *
  * This is a read-model / display helper, not an execution safety gate. It
@@ -275,9 +274,8 @@ export type ReleaseFailureReason = 'reservation_not_found';
 export function computeTotalRequiredBudgetMist(
   promotion: Pick<Promotion, 'maxParticipants' | 'perUserGasAllowanceMist'>,
 ): string {
-  if (promotion.maxParticipants === 0) return '0';
-  if (!Number.isSafeInteger(promotion.maxParticipants) || promotion.maxParticipants < 0) {
-    throw new Error('maxParticipants must be a non-negative safe integer');
+  if (!Number.isSafeInteger(promotion.maxParticipants) || promotion.maxParticipants <= 0) {
+    throw new Error('maxParticipants must be a positive safe integer');
   }
   if (!/^(?:0|[1-9]\d*)$/.test(promotion.perUserGasAllowanceMist)) {
     throw new Error('perUserGasAllowanceMist must be a non-negative decimal integer string');

@@ -281,8 +281,8 @@ export function StatusPage() {
       {/* Footer */}
       <footer className="status-footer">
         <p>
-          Shared Settlement Network — Stelis Host v{APP_VERSION} · {networkLabel} ·{' '}
-          <Link to="/docs">API Docs</Link> · <Link to="/playground">Playground</Link>
+          Stelis Host v{APP_VERSION} · {networkLabel} · <Link to="/docs">API Docs</Link> ·{' '}
+          <Link to="/playground">Playground</Link>
         </p>
         <p className="footer-note">
           This page shows publicly safe aggregate metrics only. Internal operational metrics are not

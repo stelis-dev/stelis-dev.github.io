@@ -4,8 +4,9 @@
  * summary).
  *
  * Display contract:
- *   - Numeric values are exact MIST strings from the API; this component
- *     only formats them for display via `mistToSui`.
+ *   - Aggregate counts and MIST amounts are exact decimal strings from
+ *     the API. Only MIST fields pass through `mistToSui`; counts use
+ *     integer-only compaction.
  *   - Losses and sponsored executions are displayed as
  *     `lossCount / sponsoredExecutions`; count compaction is display-only
  *     and the exact API strings remain available in the value title.

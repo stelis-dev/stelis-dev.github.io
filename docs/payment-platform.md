@@ -9,7 +9,7 @@ This document defines the product terms used by SDK, web app, and API package do
 | Host | A deployed `@stelis/app-api` execution environment that exposes the Relay API |
 | Relay API | The `/relay/*` HTTP interface exposed by a Host |
 | Host operator | The party that deploys and operates a Host and its Admin app |
-| Admin app | The operator tool used to manage Host settings, sponsor state, settlement swap paths, and operating policy |
+| Admin app | The operator tool used to inspect Host configuration and sponsor state, operate Sponsor Refill Account withdrawals, inspect and clear security blocks, and manage Studio promotions. Settlement swap paths and Host policy are configured outside the Admin app. |
 | Studio | Promotion and policy-controlled flows layered on the same Host |
 | settlement token | A token accepted by a Host as the source for execution-cost settlement. API fields may use `settlementTokenType` for the token's Sui coin type. |
 | User Vault | A user-owned Move object that stores reusable settlement credit. User Vault credit remains user-owned, is not Host-owned balance, and cannot be treated as Host liquidity. |

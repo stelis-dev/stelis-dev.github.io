@@ -160,7 +160,7 @@ function createMockCtx(): AppApiContext {
     promotionStore: null,
     usageStore: null,
     executionLedger: null,
-    studioGlobalTargetHashes: null,
+    studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
     dispose: vi.fn(),

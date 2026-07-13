@@ -1,7 +1,9 @@
 /**
- * promotion.test.ts — promotion page wiring, mode gating, canonicalizeTarget parity,
- * S-15 compliance, S-16b security, R-10 coverage, debug panel acceptance.
+ * promotion.test.ts — promotion page wiring, mode gating, GasCoin exclusion,
+ * target-policy alignment, and debug panel behavior.
  */
+import { Transaction } from '@mysten/sui/transactions';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { describe, it, expect } from 'vitest';
 
 // ── Page export ────────────────────────────────────────────────────────────
@@ -46,47 +48,9 @@ describe('Mode gating', () => {
   });
 });
 
-// ── R-10 canonicalizeTarget browser/server parity ──────────────────────────
+// ── GasCoin exclusion ──────────────────────────────────────────────────────
 
-describe('canonicalizeTarget parity', () => {
-  it('browser export matches server export (behavioral parity, not identity)', async () => {
-    // tsup bundles @stelis/sdk and @stelis/sdk/server as independent entries, so the
-    // function is inlined twice and identity (.toBe) does not hold. The guarantee we
-    // care about is behavioral equality: both re-exports must use the same logic
-    // from core-relay/canonicalizeTarget.
-    const browserMod = await import('@stelis/sdk');
-    const serverMod = await import('@stelis/sdk/server');
-    const samples: Array<[string, string, string]> = [
-      ['0x2', 'coin', 'transfer'],
-      ['0x' + 'ab'.repeat(32), 'pool', 'swap_exact_quote_for_base'],
-      ['0x0', 'sui', 'SUI'],
-    ];
-    for (const [pkg, mod, fn] of samples) {
-      expect(browserMod.canonicalizeTarget(pkg, mod, fn)).toBe(
-        serverMod.canonicalizeTarget(pkg, mod, fn),
-      );
-    }
-  });
-
-  it('produces correct canonical format', async () => {
-    const { canonicalizeTarget } = await import('@stelis/sdk');
-    const result = canonicalizeTarget('0x2', 'coin', 'transfer');
-    expect(result).toBe(
-      '0x0000000000000000000000000000000000000000000000000000000000000002::coin::transfer',
-    );
-  });
-
-  it('full-length address passes through unchanged', async () => {
-    const { canonicalizeTarget } = await import('@stelis/sdk');
-    const fullAddr = '0x' + 'ab'.repeat(32);
-    const result = canonicalizeTarget(fullAddr, 'pool', 'swap_exact_quote_for_base');
-    expect(result).toBe(`${fullAddr}::pool::swap_exact_quote_for_base`);
-  });
-});
-
-// ── S-15: GasCoin compliance ───────────────────────────────────────────────
-
-describe('S-15 GasCoin compliance', () => {
+describe('GasCoin exclusion', () => {
   it('StudioExecutionPanel does not use tx.gas or forbidden commands', async () => {
     const fs = await import('fs');
     const path = await import('path');
@@ -150,9 +114,9 @@ describe('Promotion SDK integration', () => {
   });
 });
 
-// ── R-10: MoveCall target presence ─────────────────────────────────────────
+// ── MoveCall target presence ────────────────────────────────────────────────
 
-describe('R-10 allowedTargets coverage', () => {
+describe('allowed target coverage', () => {
   it('StudioExecutionPanel tracks moveCallTargets for debug', async () => {
     const fs = await import('fs');
     const path = await import('path');
@@ -185,44 +149,39 @@ describe('Promotion page inputs', () => {
   });
 });
 
-// ── AllowedTargets auto-fill ───────────────────────────────────────────────
+// ── Host target-policy alignment ───────────────────────────────────────────
 
-describe('AllowedTargets auto-fill', () => {
-  it('AllowedTargetsBuilder has auto-fill for test TX targets', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../src/pages/promotion/components/AllowedTargetsBuilder.tsx'),
-      'utf-8',
-    );
-    // Must auto-fill both MoveCall targets used by StudioExecutionPanel
-    expect(src).toContain('autoFillTestTargets');
-    expect(src).toContain("'0x2', 'coin', 'zero'");
-    expect(src).toContain("'0x2', 'coin', 'destroy_zero'");
-  });
+describe('Studio test transaction target policy', () => {
+  it('builds exactly the MoveCall targets shown as the required Host configuration', async () => {
+    const {
+      buildStudioTestTransaction,
+      STUDIO_TEST_ALLOWED_TARGETS_CONFIG,
+      STUDIO_TEST_MOVECALL_TARGETS,
+    } = await import('../src/pages/promotion/components/StudioExecutionPanel');
 
-  it('AllowedTargetsBuilder and StudioExecutionPanel use the same MoveCall targets', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const builderSrc = fs.readFileSync(
-      path.resolve(__dirname, '../src/pages/promotion/components/AllowedTargetsBuilder.tsx'),
-      'utf-8',
+    const { tx, moveCallTargets } = buildStudioTestTransaction();
+    const kindBytes = await tx.build({ onlyTransactionKind: true });
+    const commands = Transaction.fromKind(kindBytes).getData().commands as Array<{
+      $kind: string;
+      MoveCall?: { package: string; module: string; function: string };
+    }>;
+
+    expect(moveCallTargets).toBe(STUDIO_TEST_MOVECALL_TARGETS);
+    expect(commands).toHaveLength(STUDIO_TEST_MOVECALL_TARGETS.length);
+    expect(commands.map((command) => command.$kind)).toEqual(['MoveCall', 'MoveCall']);
+    expect(
+      commands.map((command) => ({
+        package: normalizeSuiAddress(command.MoveCall!.package),
+        module: command.MoveCall!.module,
+        function: command.MoveCall!.function,
+      })),
+    ).toEqual(
+      STUDIO_TEST_MOVECALL_TARGETS.map((target) => {
+        const [packageId, module, fn] = target.split('::');
+        return { package: normalizeSuiAddress(packageId), module, function: fn };
+      }),
     );
-    const panelSrc = fs.readFileSync(
-      path.resolve(__dirname, '../src/pages/promotion/components/StudioExecutionPanel.tsx'),
-      'utf-8',
-    );
-    // Both generated paths must reference coin::zero and coin::destroy_zero
-    expect(builderSrc).toContain("'0x2', 'coin', 'zero'");
-    expect(builderSrc).toContain("'0x2', 'coin', 'destroy_zero'");
-    expect(panelSrc).toContain("'0x2::coin::zero'");
-    expect(panelSrc).toContain("'0x2::coin::destroy_zero'");
-    // Panel must use MoveCall (not forbidden commands)
-    expect(panelSrc).toContain('tx.moveCall');
-    expect(panelSrc).not.toContain('tx.splitCoins');
-    expect(panelSrc).not.toContain('tx.transferObjects');
-    // Panel must consume the coin::zero result (Coin<T> has no drop)
-    expect(panelSrc).toContain('zeroCoin');
+    expect(STUDIO_TEST_ALLOWED_TARGETS_CONFIG).toBe(STUDIO_TEST_MOVECALL_TARGETS.join(','));
   });
 });
 
@@ -311,11 +270,6 @@ describe('Promotion component exports', () => {
   it('DeveloperJwtPanel is exported', async () => {
     const mod = await import('../src/pages/promotion/components/DeveloperJwtPanel');
     expect(mod.DeveloperJwtPanel).toBeDefined();
-  });
-
-  it('AllowedTargetsBuilder is exported', async () => {
-    const mod = await import('../src/pages/promotion/components/AllowedTargetsBuilder');
-    expect(mod.AllowedTargetsBuilder).toBeDefined();
   });
 
   it('DebugPanel is exported', async () => {

@@ -8,7 +8,7 @@
  *
  * Layers:
  *   S1 — PTB structure (MoveCall-only + GasCoin forbidden)
- *   S2 — STUDIO_ALLOWED_TARGETS hash match
+ *   S2 — STUDIO_ALLOWED_TARGETS canonical target match
  *   S3 — promotion active + entitlement claimed + use-window active
  *
  * The normal 1..MAX_FINAL_COMMANDS admission range is checked only after S1/S2
@@ -22,7 +22,7 @@
  * prepare/sponsor boundary. This module does not touch raw Sui SDK command
  * shape; callers are responsible for normalization before invocation.
  *
- * Boot-time target hashing stays in `promotionTargetPolicy.ts` (separate concern).
+ * Boot-time target canonicalization stays in `promotionTargetPolicy.ts`.
  *
  * @module studio/validation
  */
@@ -35,7 +35,7 @@ import {
   MAX_FINAL_COMMANDS,
 } from '@stelis/core-relay';
 import type { PtbCommand } from '@stelis/contracts';
-import { hashTarget } from './promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from './promotionTargetPolicy.js';
 import type { Promotion, Entitlement } from './domain.js';
 
 // ─────────────────────────────────────────────
@@ -55,7 +55,7 @@ export type PromotionCommandCountFailure = {
  * S1 — validate PTB command structure for promotion flows.
  *
  * - Rejects any non-MoveCall command.
- * - Rejects any MoveCall arg referencing GasCoin (S-15).
+ * - Rejects any MoveCall arg referencing GasCoin.
  *
  * Prepare-only `FundsWithdrawal(Sponsor)` check is a separate guard (see
  * `validatePromotionSponsorWithdrawal` below). Sponsor preconsume relies on
@@ -90,7 +90,7 @@ export function validatePromotionCommandCount(
 }
 
 // ─────────────────────────────────────────────
-// Prepare-only sponsor-withdrawal guard (S-15 companion)
+// Prepare-only sponsor-withdrawal guard
 // ─────────────────────────────────────────────
 
 export type SponsorWithdrawalFailure = { code: 'SPONSOR_WITHDRAWAL_FORBIDDEN' };
@@ -119,21 +119,21 @@ export interface TargetPolicyFailure {
 }
 
 /**
- * S2 — validate that all MoveCall targets hash-match the global allowlist.
+ * S2 — validate that all MoveCall targets match the global canonical allowlist.
  *
- * R-10 enforcement. Canonical hashing delegated to `hashTarget()`
- * (promotionTargetPolicy.ts — shared canonicalize + sha256 helper).
+ * Delegates the one current target representation to
+ * `canonicalizePromotionTarget()`.
  */
 export function validatePromotionTargets(
   commands: readonly PtbCommand[],
-  allowedHashes: Set<string>,
+  allowedTargets: ReadonlySet<string>,
 ): TargetPolicyFailure | null {
   const disallowed: string[] = [];
 
   for (const cmd of commands) {
     if (!isMoveCall(cmd)) continue;
     const rawTarget = `${cmd.packageId}::${cmd.module}::${cmd.function}`;
-    if (!allowedHashes.has(hashTarget(rawTarget))) {
+    if (!allowedTargets.has(canonicalizePromotionTarget(rawTarget))) {
       disallowed.push(rawTarget);
     }
   }

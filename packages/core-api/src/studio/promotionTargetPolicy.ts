@@ -1,48 +1,46 @@
 /**
- * Promotion Target Policy — MoveCall target hashing helper.
+ * Promotion target policy — canonical `package::module::function` authority.
  *
- * This module defines conversion of
- * raw `package::module::function` strings to sha256 hex hashes.
- *
- * Representation bridge:
- *   - Host env (STUDIO_ALLOWED_TARGETS): raw `package::module::function` strings
- *   - Runtime (context, validateAllowedTargets): sha256 hex hashes
- *
- * Exports:
- *   1. hashTarget() — canonical hash for a single raw target string
- *   2. hashTargets() — batch hash for an array
+ * `STUDIO_ALLOWED_TARGETS`, the boot snapshot, and prepare/sponsor validation
+ * all use this one representation. Target hashes are intentionally not part of
+ * the domain contract: exact canonical strings are simpler and preserve the
+ * operator-visible value that owns the policy.
  *
  * @module promotionTargetPolicy
  */
 
-import { createHash } from 'node:crypto';
-import { canonicalizeTarget } from '@stelis/core-relay';
+import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
 
-// ─────────────────────────────────────────────
-// Hashing
-// ─────────────────────────────────────────────
+const MOVE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SUI_ADDRESS_LITERAL = /^0x[0-9a-fA-F]{1,64}$/;
 
 /**
- * Parse a raw `package::module::function` string and return its sha256 hex hash.
+ * Parse and canonicalize one current Studio target.
  *
- * Uses canonicalizeTarget (normalizeSuiAddress(pkg)::mod::fn) → sha256.
- *
- * @throws if the target string does not match `X::Y::Z` format.
+ * The package address is normalized so short and full Sui addresses compare
+ * identically. Module and function segments must be Move identifiers; accepting
+ * an impossible target at boot would create policy that can never match a PTB.
  */
-export function hashTarget(rawTarget: string): string {
+export function canonicalizePromotionTarget(rawTarget: string): string {
   const parts = rawTarget.split('::');
   if (parts.length !== 3) {
     throw new Error(`Invalid target format: "${rawTarget}". Expected "package::module::function".`);
   }
-  const [pkg, mod, fn] = parts;
-  const canonical = canonicalizeTarget(pkg, mod, fn);
-  return createHash('sha256').update(canonical).digest('hex');
-}
 
-/**
- * Batch hash an array of raw target strings.
- * @see hashTarget
- */
-export function hashTargets(rawTargets: string[]): string[] {
-  return rawTargets.map(hashTarget);
+  const [packageId, moduleName, functionName] = parts;
+  if (!SUI_ADDRESS_LITERAL.test(packageId)) {
+    throw new Error(`Invalid target package address: "${packageId}".`);
+  }
+  const canonicalPackageId = normalizeSuiAddress(packageId);
+  if (!isValidSuiAddress(canonicalPackageId)) {
+    throw new Error(`Invalid target package address: "${packageId}".`);
+  }
+  if (!MOVE_IDENTIFIER.test(moduleName)) {
+    throw new Error(`Invalid target module identifier: "${moduleName}".`);
+  }
+  if (!MOVE_IDENTIFIER.test(functionName)) {
+    throw new Error(`Invalid target function identifier: "${functionName}".`);
+  }
+
+  return `${canonicalPackageId}::${moduleName}::${functionName}`;
 }

@@ -310,7 +310,25 @@ describe('createSponsoredLogsRecorder — failure semantics', () => {
     const recorderFailed = events.find((e) => e.event === 'SPONSORED_LOGS_RECORDER_FAILED');
     expect(recorderFailed).toBeDefined();
     expect(recorderFailed?.stage).toBe('store_append');
+    expect(recorderFailed?.receipt_id).toBe('r1');
     expect(recorderFailed?.error).toBe('store boom');
+  });
+
+  it('entry-build rejection carries receipt identity even without a usable digest', async () => {
+    const cb = createSponsoredLogsRecorder({
+      store: new CapturingStore(),
+      clock: () => new Date(Number.NaN),
+    });
+    await expect(cb(makeMetadata({ digest: null, receiptId: 'r-build' }))).resolves.toBeUndefined();
+    const events = warnSpy.mock.calls
+      .map((c) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
+      .filter(Boolean) as Record<string, unknown>[];
+    const recorderFailed = events.find((e) => e.event === 'SPONSORED_LOGS_RECORDER_FAILED');
+    expect(recorderFailed).toMatchObject({
+      stage: 'build_entry',
+      receipt_id: 'r-build',
+      digest: null,
+    });
   });
 });
 
@@ -379,6 +397,7 @@ describe('fanOutSponsorResult', () => {
     expect(fanFailed?.source).toBe('sponsored_logs_fanout');
     expect(fanFailed?.callback_index).toBe(0);
     expect(fanFailed?.route).toBe('generic');
+    expect(fanFailed?.receipt_id).toBe('r1');
     expect(fanFailed?.error).toBe('child boom');
     // digest is the cross-reference key in `docs/operations.md`:
     // operators correlate fanOut failures with `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`
@@ -402,6 +421,7 @@ describe('fanOutSponsorResult', () => {
       .filter(Boolean) as Record<string, unknown>[];
     const fanFailed = events.find((e) => e.event === 'SPONSOR_RESULT_CALLBACK_FAILED');
     expect(fanFailed).toBeDefined();
+    expect(fanFailed?.receipt_id).toBe('r1');
     expect(fanFailed?.digest).toBeNull();
     warnSpy.mockRestore();
   });

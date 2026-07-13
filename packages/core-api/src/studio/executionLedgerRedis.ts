@@ -128,10 +128,8 @@ local existing = redis.call('GET', KEYS[1])
 if existing then return existing end
 
 local maxP = tonumber(ARGV[2])
-if maxP > 0 then
-  local cnt = redis.call('SCARD', KEYS[2])
-  if cnt >= maxP then return -1 end
-end
+local cnt = redis.call('SCARD', KEYS[2])
+if cnt >= maxP then return -1 end
 
 -- Create claim record
 redis.call('SET', KEYS[1], ARGV[5])
@@ -180,10 +178,8 @@ if not ok or type(record) ~= 'table' or record.status ~= 'active' then
 end
 
 local maxP = tonumber(ARGV[2])
-if maxP > 0 then
-  local cnt = redis.call('SCARD', KEYS[2])
-  if cnt >= maxP then return -1 end
-end
+local cnt = redis.call('SCARD', KEYS[2])
+if cnt >= maxP then return -1 end
 
 -- Create claim record
 redis.call('SET', KEYS[1], ARGV[5])
@@ -496,8 +492,8 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
   // ── Claim ──────────────────────────────────
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
-    if (!Number.isSafeInteger(opts.maxParticipants) || opts.maxParticipants < 0) {
-      throw new Error('maxParticipants must be a non-negative safe integer');
+    if (!Number.isSafeInteger(opts.maxParticipants) || opts.maxParticipants <= 0) {
+      throw new Error('maxParticipants must be a positive safe integer');
     }
     const perUserBigInt = parseNonNegativeDecimalBigInt(
       opts.perUserGasAllowanceMist,
@@ -516,13 +512,11 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
         `perUserGasAllowanceMist (${perUserBigInt.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()}); promotion would create Redis values that fail Lua int64 arithmetic`,
       );
     }
-    if (opts.maxParticipants > 0) {
-      const totalBudgetBigInt = BigInt(opts.maxParticipants) * perUserBigInt;
-      if (totalBudgetBigInt > MAX_PROMOTION_LEDGER_VALUE_MIST) {
-        throw new Error(
-          `total budget (maxParticipants × perUserGasAllowanceMist = ${totalBudgetBigInt.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()}); promotion would create Redis values that fail Lua int64 arithmetic`,
-        );
-      }
+    const totalBudgetBigInt = BigInt(opts.maxParticipants) * perUserBigInt;
+    if (totalBudgetBigInt > MAX_PROMOTION_LEDGER_VALUE_MIST) {
+      throw new Error(
+        `total budget (maxParticipants × perUserGasAllowanceMist = ${totalBudgetBigInt.toString()}) exceeds MAX_PROMOTION_LEDGER_VALUE_MIST (${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()}); promotion would create Redis values that fail Lua int64 arithmetic`,
+      );
     }
     const perUserGasAllowanceMist = perUserBigInt.toString();
     const now = new Date().toISOString();
@@ -532,14 +526,8 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
       status: 'active',
     };
 
-    // Budget lazy-init (NX-safe): set available to total if not exists.
-    // maxParticipants=0 means unlimited capacity → use the same
-    // `MAX_PROMOTION_LEDGER_VALUE_MIST` ceiling as the bound check
-    // above, which keeps the sentinel inside Lua-double precision.
-    const totalBudget =
-      opts.maxParticipants > 0
-        ? (BigInt(opts.maxParticipants) * BigInt(perUserGasAllowanceMist)).toString()
-        : MAX_PROMOTION_LEDGER_VALUE_MIST.toString();
+    // Budget lazy-init (NX-safe): set available to the finite configured total.
+    const totalBudget = (BigInt(opts.maxParticipants) * BigInt(perUserGasAllowanceMist)).toString();
     await this.redis.set(budgetAvailKey(promotionId), totalBudget, { nx: true });
     // Ensure aggregate keys exist (NX-safe)
     await this.redis.set(budgetResTotalKey(promotionId), '0', { nx: true });

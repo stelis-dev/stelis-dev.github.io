@@ -225,7 +225,7 @@ export function createStudioRoutes(
       if (!ctx.promotionStore || !ctx.executionLedger) {
         return c.json({ error: 'Promotion system not available' }, 503);
       }
-      if (!ctx.studioGlobalTargetHashes) {
+      if (!ctx.studioGlobalAllowedTargets) {
         return c.json({ error: 'Global target policy not configured' }, 503);
       }
 
@@ -262,7 +262,7 @@ export function createStudioRoutes(
         prepareStore: ctx.host.prepareStore,
         prepareInflightLimiter: ctx.host.prepareInflightLimiter,
         getConfig: ctx.host.getConfig.bind(ctx.host),
-        globalTargetHashes: ctx.studioGlobalTargetHashes,
+        globalAllowedTargets: ctx.studioGlobalAllowedTargets,
       };
 
       const result: PromotionPrepareResponse = await handlePromotionPrepare(prepareCtx, {
@@ -304,7 +304,7 @@ export function createStudioRoutes(
       if (!ctx.promotionStore || !ctx.executionLedger) {
         return c.json({ error: 'Promotion system not available' }, 503);
       }
-      if (!ctx.studioGlobalTargetHashes) {
+      if (!ctx.studioGlobalAllowedTargets) {
         return c.json({ error: 'Global target policy not configured' }, 503);
       }
 
@@ -341,7 +341,7 @@ export function createStudioRoutes(
         prepareStore: ctx.host.prepareStore,
         abuseBlocker: ctx.host.abuseBlocker,
         usageStore: ctx.usageStore ?? null,
-        globalTargetHashes: ctx.studioGlobalTargetHashes,
+        globalAllowedTargets: ctx.studioGlobalAllowedTargets,
         onSponsorResult: ctx.host.onSponsorResult,
       };
 

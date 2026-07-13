@@ -12,6 +12,10 @@ const PAYMENT_PLATFORM_DOC_URL = REPO_DOCS_BASE_URL
   ? `${REPO_DOCS_BASE_URL}/docs/payment-platform.md#product-family-terms`
   : null;
 
+export function docAnchor(baseUrl: string | null, anchor: string): string | null {
+  return baseUrl ? `${baseUrl}#${anchor}` : null;
+}
+
 interface EndpointOverview {
   method: 'GET' | 'POST';
   path: string;
@@ -38,7 +42,7 @@ const endpoints: EndpointOverview[] = [
       'Minimal success payload: { ok: true }',
       'Good first probe for CI smoke checks and operational dashboards',
     ],
-    docHref: `${API_DOC_URL}#get-relay-status`,
+    docHref: docAnchor(API_DOC_URL, 'get-relay-status'),
   },
   {
     method: 'GET',
@@ -50,7 +54,7 @@ const endpoints: EndpointOverview[] = [
       'Returns packageId, settlementPayoutRecipient payout address, supportedSettlementSwapPaths, and quoted fee fields',
       'Use this before constructing production client assumptions',
     ],
-    docHref: `${API_DOC_URL}#get-relay-config`,
+    docHref: docAnchor(API_DOC_URL, 'get-relay-config'),
   },
   {
     method: 'POST',
@@ -59,11 +63,11 @@ const endpoints: EndpointOverview[] = [
     detail:
       'Prepare performs dry-run pricing, issues a one-time receiptId and monotonic nonce, and returns the txBytes that the user must sign.',
     highlights: [
-      'Required body: txKindBytes, senderAddress, settlementTokenType',
+      'Required body: txKindBytes, senderAddress, settlementTokenType, txKindBytesHash, and the three prepare-authorization fields',
       'Optional body: slippageBps, gasMarginBps, orderId',
       'Dry-run rejections return 422 domain codes such as DRY_RUN_FAILED and DRY_RUN_NO_GAS',
     ],
-    docHref: `${API_DOC_URL}#post-relay-prepare`,
+    docHref: docAnchor(API_DOC_URL, 'post-relay-prepare'),
   },
   {
     method: 'POST',
@@ -75,7 +79,7 @@ const endpoints: EndpointOverview[] = [
       'Required body: txBytes, userSignature, receiptId',
       'Post-consume drift returns REPREPARE_REQUIRED instead of exposing generic L2_* codes',
     ],
-    docHref: `${API_DOC_URL}#post-relay-sponsor`,
+    docHref: docAnchor(API_DOC_URL, 'post-relay-sponsor'),
   },
 ];
 
@@ -99,7 +103,7 @@ const integrationSteps = [
   {
     title: '1. Install the SDK',
     code: `npm install @stelis/sdk`,
-    desc: 'The SDK handles config resolution, sponsored PTB construction, and the full prepare/sponsor flow.',
+    desc: 'The SDK resolves Host config, validates and serializes the user TransactionKind, signs prepare authorization, and runs the prepare/sponsor flow.',
   },
   {
     title: '2. Connect to the Host',
@@ -118,8 +122,8 @@ console.log(sdk.network);`,
 
 const tx = new Transaction();
 // Add only your business logic Move calls here.
-// The SDK appends the settlement step and runs the Relay API flow.`,
-    desc: 'Keep the PTB focused on business intent. Gas abstraction and sponsor flow stay in the SDK layer.',
+// The Host appends the settlement suffix during /relay/prepare.`,
+    desc: 'Keep the PTB focused on business intent. The SDK transports the intent and signatures; the Host owns settlement construction and sponsorship.',
   },
   {
     title: '4. Execute through the sponsored relay',
@@ -359,13 +363,14 @@ export function DocsPage() {
       </section>
 
       <div className="docs-callout" style={{ marginTop: 32 }}>
-        <strong>Common error shape</strong>
+        <strong>Error response fields</strong>
         <code className="docs-callout-code">
           {'{ "error": "<message>", "code": "<ERROR_CODE>" }'}
         </code>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          All Relay API endpoints use this shape. See <code>docs/api.md</code> for the full error
-          code reference.
+          Every error includes <code>error</code>. Domain errors also include <code>code</code>;
+          rate-limit responses may instead include <code>retryAfterMs</code>. See{' '}
+          <code>docs/api.md</code> for route-specific semantics.
         </span>
       </div>
 

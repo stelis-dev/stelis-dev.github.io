@@ -63,7 +63,7 @@ function makeMockRedis(): {
   client: RedisClientLike;
   evalSpy: ReturnType<typeof vi.fn>;
 } {
-  const evalSpy = vi.fn().mockResolvedValue(1);
+  const evalSpy = vi.fn().mockResolvedValue('APPENDED');
   const client: RedisClientLike = {
     eval: evalSpy,
     get: vi.fn().mockResolvedValue(null),
@@ -85,22 +85,26 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(evalSpy).toHaveBeenCalledTimes(1);
     const [script, keys, args] = evalSpy.mock.calls[0];
     expect(keys).toHaveLength(4);
-    expect(keys[0]).toBe('stelis:sponsored_logs:idem:generic|r1|success');
+    expect(keys[0]).toBe('stelis:sponsored_logs:idem:r1');
     expect(keys[1]).toBe('stelis:sponsored_logs:agg:all');
     expect(keys[2]).toBe('stelis:sponsored_logs:agg:generic');
     expect(keys[3]).toBe('stelis:sponsored_logs:recent');
-    // ARGV order: entryJson, execDelta, isKnown, netDelta,
+    // ARGV order: entryJson, fingerprint, execDelta, isKnown, netDelta,
     // lossAmountDelta, lossDelta, recentCap.
-    expect(args).toHaveLength(7);
-    expect(args[1]).toBe('1');
-    expect(args[2]).toBe('1'); // known
-    expect(args[3]).toBe('5000'); // cumulative host net delta
-    expect(args[4]).toBe('0'); // cumulativeLoss delta
-    expect(args[5]).toBe('0'); // not a loss
-    // Idempotency contract: SET NX without PX so dedup persists for the
-    // adapter lifetime (no TTL).
+    expect(args).toHaveLength(8);
+    expect(args[1]).toMatch(/^[a-f0-9]{64}$/);
+    expect(args[2]).toBe('1');
+    expect(args[3]).toBe('1'); // known
+    expect(args[4]).toBe('5000'); // cumulative host net delta
+    expect(args[5]).toBe('0'); // cumulativeLoss delta
+    expect(args[6]).toBe('0'); // not a loss
+    // The script stores one fingerprint per receipt without expiry and
+    // distinguishes exact replay from a contradictory result.
     expect(typeof script).toBe('string');
-    expect(script).toMatch(/SET',\s*idempotencyKey,\s*'1',\s*'NX'\)/);
+    expect(script).toContain("redis.call('GET', idempotencyKey)");
+    expect(script).toContain("redis.call('SET', idempotencyKey, fingerprint)");
+    expect(script).toContain("return 'DUPLICATE'");
+    expect(script).toContain("return 'CONFLICT'");
     expect(script).not.toMatch(/'PX'/);
     expect(script).toContain('table.sort');
     expect(script).toContain('createdAt');
@@ -111,10 +115,10 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     const store = new RedisSponsoredLogsStore(client);
     await store.append(makeUnknownEntry('r-unk'));
     const [, , args] = evalSpy.mock.calls[0];
-    expect(args[2]).toBe('0'); // isKnown
-    expect(args[3]).toBe('0'); // net delta
+    expect(args[3]).toBe('0'); // isKnown
     expect(args[4]).toBe('0');
     expect(args[5]).toBe('0');
+    expect(args[6]).toBe('0');
   });
 
   it('flags loss when hostNetMist is negative', async () => {
@@ -127,9 +131,9 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
       }),
     );
     const [, , args] = evalSpy.mock.calls[0];
-    expect(args[3]).toBe('-7000'); // netDelta
-    expect(args[4]).toBe('-7000'); // lossAmountDelta
-    expect(args[5]).toBe('1'); // lossDelta
+    expect(args[4]).toBe('-7000'); // netDelta
+    expect(args[5]).toBe('-7000'); // lossAmountDelta
+    expect(args[6]).toBe('1'); // lossDelta
   });
 
   it('serializes the entry as JSON for the recent list', async () => {
@@ -141,6 +145,32 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     const parsed = JSON.parse(args[0]);
     expect(parsed.receiptId).toBe('r-json');
     expect(parsed.economicsStatus).toBe('known');
+  });
+
+  it('accepts duplicate and rejects conflicting script results', async () => {
+    const duplicate = makeMockRedis();
+    duplicate.evalSpy.mockResolvedValueOnce('DUPLICATE');
+    await expect(
+      new RedisSponsoredLogsStore(duplicate.client).append(
+        makeKnownEntry({ receiptId: 'r-replay' }),
+      ),
+    ).resolves.toBeUndefined();
+
+    const conflict = makeMockRedis();
+    conflict.evalSpy.mockResolvedValueOnce('CONFLICT');
+    await expect(
+      new RedisSponsoredLogsStore(conflict.client).append(
+        makeKnownEntry({ receiptId: 'r-conflict' }),
+      ),
+    ).rejects.toThrow(/conflicting result for receiptId r-conflict/);
+  });
+
+  it('rejects an unexpected append script result', async () => {
+    const { client, evalSpy } = makeMockRedis();
+    evalSpy.mockResolvedValueOnce(1);
+    await expect(
+      new RedisSponsoredLogsStore(client).append(makeKnownEntry({ receiptId: 'r-bad-return' })),
+    ).rejects.toThrow(/unexpected append script return/);
   });
 
   it('throws when known entry is missing hostNetMist (and never calls eval)', async () => {

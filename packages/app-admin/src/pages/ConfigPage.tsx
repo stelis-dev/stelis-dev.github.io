@@ -215,7 +215,7 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Maximum SUI a sponsor can claim from a single vault in one transaction"
+                  title="Maximum execution-cost claim that one settlement transaction may recover"
                 >
                   Max Claim
                 </td>
@@ -226,7 +226,7 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Minimum SUI required to initiate a settle operation on the vault"
+                  title="Minimum SUI input for token-funded settlement; credit-only settlement is exempt"
                 >
                   Min Settle
                 </td>

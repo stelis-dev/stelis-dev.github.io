@@ -4,7 +4,6 @@
  * Provides:
  *   1. verifySettleEventAgainstExpected — verify a SettleEvent against application-owned fields
  *   2. extractSettleEvents              — extract decoded SettleEvent summaries for reconciliation
- *   3. canonicalizeTarget      — allowedTargets hashing helper
  *
  * The raw BCS decoder (settleEventDecoder.ts) stays internal to this
  * package: the verifier and extractor consume it directly, and no
@@ -17,4 +16,3 @@ export {
 } from './verifySettleEventAgainstExpected.js';
 export type { ExpectedSettleEventFields } from '@stelis/contracts';
 export { extractSettleEvents, type ExtractedSettleEventSummary } from './extractSettleEvents.js';
-export { canonicalizeTarget } from '@stelis/core-relay/browser';

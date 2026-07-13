@@ -31,13 +31,13 @@ import {
   validatePromotionEligibility,
   checkPromotionTemporalGate,
 } from '../src/studio/validation.js';
-import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 
 const ALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin';
 const DISALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::evil::drain';
-const ALLOWED_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
+const ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]);
 
 // ─────────────────────────────────────────────
 // PtbCommand helpers (flat normalized shape, not raw SDK shape)
@@ -179,14 +179,14 @@ describe('validatePromotionSponsorWithdrawal (prepare-only companion)', () => {
 
 describe('validatePromotionTargets (S2)', () => {
   it('returns null when all MoveCall targets are allowed', () => {
-    const result = validatePromotionTargets([moveCallCmd(ALLOWED_TARGET)], ALLOWED_HASHES);
+    const result = validatePromotionTargets([moveCallCmd(ALLOWED_TARGET)], ALLOWED_TARGETS);
     expect(result).toBeNull();
   });
 
   it('collects disallowed targets', () => {
     const result = validatePromotionTargets(
       [moveCallCmd(ALLOWED_TARGET), moveCallCmd(DISALLOWED_TARGET)],
-      ALLOWED_HASHES,
+      ALLOWED_TARGETS,
     );
     expect(result).not.toBeNull();
     expect(result!.code).toBe('DISALLOWED_TARGET');
@@ -194,7 +194,7 @@ describe('validatePromotionTargets (S2)', () => {
   });
 
   it('skips non-MoveCall commands', () => {
-    const result = validatePromotionTargets([otherCmd('SplitCoins')], ALLOWED_HASHES);
+    const result = validatePromotionTargets([otherCmd('SplitCoins')], ALLOWED_TARGETS);
     // Non-MoveCall is not a target failure — S1 catches it separately.
     expect(result).toBeNull();
   });
@@ -203,7 +203,7 @@ describe('validatePromotionTargets (S2)', () => {
     const commands = await realMoveCallCommands((tx) => {
       tx.moveCall({ target: DISALLOWED_TARGET as `${string}::${string}::${string}` });
     });
-    const result = validatePromotionTargets(commands, ALLOWED_HASHES);
+    const result = validatePromotionTargets(commands, ALLOWED_TARGETS);
     expect(result).not.toBeNull();
     expect(result!.code).toBe('DISALLOWED_TARGET');
     expect(result!.disallowedTargets).toEqual([DISALLOWED_TARGET]);

@@ -56,7 +56,10 @@ A client connects to a Host. The Host advertises its supported settlement swap p
 
 The Host execution role is internal to a Host. It appears in settlement fields and implementation names such as `settlementPayoutRecipient`, `executionCostClaim`, `hostFee`, and internal execution flow. Stelis does not present those internal roles as the public product unit.
 
-The Admin app is the tool a Host operator uses to manage Host settings, sponsor state, settlement swap paths, and operating policy.
+The Admin app lets a Host operator inspect Host configuration and sponsor state,
+operate Sponsor Refill Account withdrawals, inspect and clear security blocks,
+and manage Studio promotions. Settlement swap paths and Host policy are
+configured outside the Admin app.
 
 A developer can connect to an existing Host to start, or operate a Host when their app, protocol, token, settlement swap path, fee policy, or risk policy needs direct control.
 

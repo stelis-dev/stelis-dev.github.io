@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { MemorySponsoredLogsStore } from '../src/sponsoredLogs/memoryStore.js';
-import { sponsoredLogIdempotencyKey } from '../src/sponsoredLogs/store.js';
 import type {
   SponsoredExecutionLogEntry,
   SponsoredExecutionMode,
@@ -67,13 +66,6 @@ function makeUnknownEntry(
     failureReason: overrides.failureReason ?? 'SPONSOR_EXEC_GAS_USED_MISSING',
   };
 }
-
-describe('sponsoredLogIdempotencyKey', () => {
-  it('builds a stable key from mode|receiptId|outcome', () => {
-    const entry = makeKnownEntry({ receiptId: 'r1', mode: 'generic', outcome: 'success' });
-    expect(sponsoredLogIdempotencyKey(entry)).toBe('generic|r1|success');
-  });
-});
 
 describe('MemorySponsoredLogsStore — append and aggregate', () => {
   it('updates per-mode and all-mode aggregates on a single known entry', async () => {
@@ -159,7 +151,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(all.cumulativeLossMist).toBe('0');
   });
 
-  it('append is idempotent on (mode, receiptId, outcome)', async () => {
+  it('accepts an exact receipt replay even when recorder time changes', async () => {
     const store = new MemorySponsoredLogsStore();
     const e = makeKnownEntry({ receiptId: 'r-dup', mode: 'generic' });
     await store.append(e);
@@ -172,8 +164,8 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(recent).toHaveLength(1);
   });
 
-  it('idempotency persists past the recent cap (no seenKeys drop)', async () => {
-    // Lock for store-contract idempotency lifetime: dedup tuples MUST
+  it('receipt replay protection persists past the recent cap', async () => {
+    // Lock for store-contract replay lifetime: receipt fingerprints MUST
     // persist for the adapter's full lifetime. After the recent list
     // rolls past its cap, re-appending an early tuple must still be
     // dropped without double-counting the aggregate.
@@ -195,7 +187,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
         }),
       );
     }
-    // Replay the early tuple. Idempotency must still drop it.
+    // Replay the early result. The receipt fingerprint must still drop it.
     await store.append(early);
     await store.append({ ...early, createdAt: '2099-01-01T00:00:00.000Z' });
 
@@ -204,21 +196,37 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(all.cumulativeHostNetMist).toBe('11');
   });
 
-  it('different outcomes for same receiptId are NOT deduped', async () => {
+  it('rejects a different outcome for one receipt without changing projections', async () => {
     const store = new MemorySponsoredLogsStore();
     await store.append(makeKnownEntry({ receiptId: 'r-mix', mode: 'generic', outcome: 'success' }));
-    await store.append(
-      makeKnownEntry({
-        receiptId: 'r-mix',
-        mode: 'generic',
-        outcome: 'onchain_revert',
-        hostNetMist: '-100',
-      }),
-    );
+    await expect(
+      store.append(
+        makeKnownEntry({
+          receiptId: 'r-mix',
+          mode: 'generic',
+          outcome: 'onchain_revert',
+          hostNetMist: '-100',
+        }),
+      ),
+    ).rejects.toThrow(/conflicting result for receiptId r-mix/);
     const all = await store.getSummary('all');
-    expect(all.sponsoredExecutions).toBe('2');
-    expect(all.lossCount).toBe('1');
-    expect(all.cumulativeHostNetMist).toBe('4900');
+    expect(all.sponsoredExecutions).toBe('1');
+    expect(all.lossCount).toBe('0');
+    expect(all.cumulativeHostNetMist).toBe('5000');
+    expect(await store.getRecent('all', 10)).toHaveLength(1);
+  });
+
+  it('rejects changed economics under the same receipt and outcome', async () => {
+    const store = new MemorySponsoredLogsStore();
+    const entry = makeKnownEntry({ receiptId: 'r-economics', mode: 'generic' });
+    await store.append(entry);
+    await expect(store.append({ ...entry, hostNetMist: '4999' })).rejects.toThrow(
+      /conflicting result for receiptId r-economics/,
+    );
+    expect(await store.getSummary('all')).toMatchObject({
+      sponsoredExecutions: '1',
+      cumulativeHostNetMist: '5000',
+    });
   });
 
   it('all-mode aggregate equals sum of per-mode aggregates', async () => {
@@ -304,9 +312,9 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     await expect(store.append(bad)).rejects.toThrow();
   });
 
-  it('rejected append does NOT poison idempotency — well-formed retry of same key still records', async () => {
-    // Idempotency contract: validation must run before the
-    // (mode, receiptId, outcome) tuple is claimed in seenKeys.
+  it('rejected append does NOT claim a receipt — a well-formed retry still records', async () => {
+    // Receipt contract: validation must run before the receipt
+    // fingerprint is recorded.
     // Otherwise a malformed entry would silently swallow the
     // legitimate retry.
     const store = new MemorySponsoredLogsStore();
@@ -325,7 +333,7 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(beforeRetry.sponsoredExecutions).toBe('0');
     expect(beforeRetry.cumulativeHostNetMist).toBe('0');
 
-    // Same (mode, receiptId, outcome) tuple, well-formed payload —
+    // Same receipt, well-formed payload —
     // must record into aggregate AND recent.
     const wellFormed = makeKnownEntry({
       receiptId: 'r-retry',
@@ -342,8 +350,8 @@ describe('MemorySponsoredLogsStore — append and aggregate', () => {
     expect(recent).toHaveLength(1);
     expect(recent[0].receiptId).toBe('r-retry');
 
-    // And a *third* append with the same key should now be deduped
-    // (well-formed has claimed the idempotency slot).
+    // And a *third* exact append should now be deduped
+    // (well-formed has claimed the receipt).
     await store.append(wellFormed);
     const final = await store.getSummary('all');
     expect(final.sponsoredExecutions).toBe('1');

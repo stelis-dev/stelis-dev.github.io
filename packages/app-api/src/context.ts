@@ -90,11 +90,11 @@ export interface AppApiContext {
   /** Unified execution ledger — null in generic-only */
   executionLedger: PromotionExecutionLedger | null;
   /**
-   * Pre-computed sha256 hex hashes of STUDIO_ALLOWED_TARGETS entries.
+   * Canonical STUDIO_ALLOWED_TARGETS entries from the boot snapshot.
    * Used for global MoveCall target policy enforcement at prepare/sponsor time.
    * null in generic-only mode.
    */
-  studioGlobalTargetHashes: Set<string> | null;
+  studioGlobalAllowedTargets: ReadonlySet<string> | null;
   /** Parsed developer JWT trust config for studio auth. null in generic-only mode. */
   developerJwtTrustConfig: DeveloperJwtTrustConfig | null;
   /** Optional developer-side JWT validity callback URL. null if not configured. */
@@ -180,7 +180,7 @@ export interface ContextRuntimeInput {
     readonly withdrawalReceiptTtlMs: number;
   };
   readonly studio: {
-    readonly globalTargetHashes: Set<string>;
+    readonly globalAllowedTargets: ReadonlySet<string>;
     readonly developerJwtTrustConfig: DeveloperJwtTrustConfig;
     readonly developerJwtVerifyUrl: string | null;
   } | null;
@@ -514,11 +514,11 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       console.log('[app-api] Studio context created (dual mode)');
     }
 
-    // ── 9b2. Global target policy hash set ────────────────────────────
-    // Pre-compute sha256 hashes of STUDIO_ALLOWED_TARGETS entries at boot.
+    // ── 9b2. Global target policy set ─────────────────────────────────
+    // STUDIO_ALLOWED_TARGETS entries were canonicalized at boot.
     // Used by Studio prepare/sponsor sponsored execution policies for global MoveCall target enforcement.
-    let studioGlobalTargetHashes: Set<string> | null = null;
-    if (input.studio) studioGlobalTargetHashes = input.studio.globalTargetHashes;
+    let studioGlobalAllowedTargets: ReadonlySet<string> | null = null;
+    if (input.studio) studioGlobalAllowedTargets = input.studio.globalAllowedTargets;
 
     // ── 9b3. Developer JWT trust config ───────────────────────────────
     let developerJwtTrustConfig: DeveloperJwtTrustConfig | null = null;
@@ -562,7 +562,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       promotionStore,
       usageStore,
       executionLedger,
-      studioGlobalTargetHashes,
+      studioGlobalAllowedTargets,
       developerJwtTrustConfig,
       developerJwtVerifyUrl,
       failoverTransport: input.failoverTransport,

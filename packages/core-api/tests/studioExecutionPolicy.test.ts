@@ -36,7 +36,7 @@ import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js'
 import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import type { OnchainConfig } from '@stelis/core-relay';
-import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
   grpcSimulationFailure,
   grpcSimulationSuccess,
@@ -199,7 +199,7 @@ function makeContext(
       getByUser: vi.fn(),
       getByPromotion: vi.fn(),
     },
-    globalTargetHashes: new Set(hashTargets([ALLOWED_TARGET])),
+    globalAllowedTargets: new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]),
     getConfig: vi.fn(),
     onSponsorResult: undefined,
     ...overrides,

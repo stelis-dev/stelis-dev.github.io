@@ -28,8 +28,8 @@ import { checkPromotionTemporalGate } from './validation.js';
 export interface PromotionAdminSummary {
   /** Number of users who have claimed this promotion. */
   claimedUsers: number;
-  /** Remaining participant slots. null if no cap. */
-  remainingParticipantSlots: number | null;
+  /** Remaining participant slots under the finite promotion cap. */
+  remainingParticipantSlots: number;
   /** Total budget consumed so far in MIST. */
   totalConsumedBudgetMist: string;
   /** Total budget currently reserved (in-flight) in MIST. */
@@ -70,8 +70,7 @@ export function computePromotionAdminSummary(
 ): PromotionAdminSummary {
   const totalRequired = BigInt(computeTotalRequiredBudgetMist(promotion));
 
-  const remainingSlots =
-    promotion.maxParticipants > 0 ? promotion.maxParticipants - claimedCount : null;
+  const remainingSlots = Math.max(0, promotion.maxParticipants - claimedCount);
 
   return {
     claimedUsers: claimedCount,
@@ -142,8 +141,7 @@ export function computeUserPromotionDetail(
   // (PROMOTION_NOT_STARTED) records keep distinct reasons instead of
   // falling through to `not_claimed`.
   if (!entitlement) {
-    const slotsAvailable =
-      promotion.maxParticipants === 0 || claimedCount < promotion.maxParticipants;
+    const slotsAvailable = claimedCount < promotion.maxParticipants;
     const temporalOk = temporal === null;
     const canClaim = temporalOk && !claimDeadlinePassed && slotsAvailable;
 
@@ -230,8 +228,8 @@ export interface PromotionListItem {
   canUseSponsoredAction: boolean;
   /** Remaining promotion budget in MIST. */
   promotionRemainingBudgetMist: string;
-  /** Remaining participant slots. null if unlimited. */
-  remainingParticipantSlots: number | null;
+  /** Remaining participant slots under the finite promotion cap. */
+  remainingParticipantSlots: number;
   /** User's remaining gas allowance. null if not claimed. */
   userRemainingGasAllowanceMist: string | null;
   /** Why the user cannot use sponsored actions. null if available. */
@@ -259,8 +257,7 @@ export function computePromotionListItem(
 ): PromotionListItem {
   const userDetail = computeUserPromotionDetail(promotion, entitlement, claimedCount, now);
 
-  const remainingParticipantSlots =
-    promotion.maxParticipants === 0 ? null : Math.max(0, promotion.maxParticipants - claimedCount);
+  const remainingParticipantSlots = Math.max(0, promotion.maxParticipants - claimedCount);
 
   return {
     promotionId: promotion.promotionId,

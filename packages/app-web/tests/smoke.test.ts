@@ -394,6 +394,15 @@ describe('Page exports', () => {
     expect(mod.PlaygroundPage).toBeDefined();
   });
 
+  it('Docs page omits source anchors when no repository URL is configured', async () => {
+    const mod = await import('../src/pages/Docs');
+    expect(mod.DocsPage).toBeDefined();
+    expect(mod.docAnchor(null, 'get-relay-status')).toBeNull();
+    expect(mod.docAnchor('https://example.test/docs/api.md', 'get-relay-status')).toBe(
+      'https://example.test/docs/api.md#get-relay-status',
+    );
+  });
+
   it('Sandbox page is exported', async () => {
     const mod = await import('../src/pages/sandbox');
     expect(mod.SandboxPage).toBeDefined();
@@ -411,13 +420,46 @@ describe('Endpoint routes', () => {
     expect(src).toContain('`${RELAY_API_BASE}/config`');
   });
 
-  it('Playground endpoints match app-api /relay/* routes', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const src = fs.readFileSync(path.resolve(__dirname, '../src/pages/Playground.tsx'), 'utf-8');
-    expect(src).toContain("path: '/relay/status'");
-    expect(src).toContain("path: '/relay/config'");
-    expect(src).toContain("path: '/relay/prepare'");
-    expect(src).toContain("path: '/relay/sponsor'");
+  it('Playground prepare uses the current signed request fields and JSON number types', async () => {
+    const { PLAYGROUND_ENDPOINTS, buildPlaygroundRequestBody } =
+      await import('../src/pages/Playground');
+    const prepare = PLAYGROUND_ENDPOINTS.find((endpoint) => endpoint.id === 'prepare');
+    expect(prepare).toBeDefined();
+    expect(prepare!.fields.map((field) => field.name)).toEqual([
+      'txKindBytes',
+      'senderAddress',
+      'settlementTokenType',
+      'txKindBytesHash',
+      'prepareAuthorizationTimestampMs',
+      'prepareAuthorizationRequestNonce',
+      'prepareAuthorizationSignature',
+      'slippageBps',
+      'gasMarginBps',
+      'orderId',
+    ]);
+
+    expect(
+      buildPlaygroundRequestBody(prepare!, {
+        txKindBytes: 'kind',
+        senderAddress: '0x1',
+        settlementTokenType: '0x2::coin::COIN',
+        txKindBytesHash: 'ab'.repeat(32),
+        prepareAuthorizationTimestampMs: '1760000000000',
+        prepareAuthorizationRequestNonce: 'nonce-1',
+        prepareAuthorizationSignature: 'signature',
+        slippageBps: '200',
+        gasMarginBps: '1000',
+      }),
+    ).toEqual({
+      txKindBytes: 'kind',
+      senderAddress: '0x1',
+      settlementTokenType: '0x2::coin::COIN',
+      txKindBytesHash: 'ab'.repeat(32),
+      prepareAuthorizationTimestampMs: 1760000000000,
+      prepareAuthorizationRequestNonce: 'nonce-1',
+      prepareAuthorizationSignature: 'signature',
+      slippageBps: 200,
+      gasMarginBps: 1000,
+    });
   });
 });

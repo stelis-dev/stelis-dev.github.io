@@ -119,7 +119,7 @@ export interface StudioPolicyContext {
   };
   readonly abuseBlocker?: AbuseBlockerAdapter;
   readonly usageStore?: PromotionUsageStoreAdapter | null;
-  readonly globalTargetHashes: Set<string>;
+  readonly globalAllowedTargets: ReadonlySet<string>;
   readonly getConfig?: () => Promise<OnchainConfig>;
   readonly onSponsorResult?: SponsorResultCallback;
 }
@@ -535,7 +535,7 @@ async function runStudioRequestValidation(
 
   const targetFailure = validatePromotionTargets(
     normalizedCommands,
-    options.context.globalTargetHashes,
+    options.context.globalAllowedTargets,
   );
   if (targetFailure) {
     throw prepare.errors.prepare(

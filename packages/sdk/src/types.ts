@@ -72,7 +72,10 @@ import type { SettleProfile } from '@stelis/contracts';
 
 export interface StelisApiError {
   error: string;
-  code: string;
+  /** Present for domain-coded Host failures; omitted by uncoded transport failures. */
+  code?: string;
+  /** Present on rate-limit and temporary-capacity responses when available. */
+  retryAfterMs?: number;
 }
 
 // ─────────────────────────────────────────────
@@ -123,11 +126,6 @@ export interface StelisConnectOptions {
 export interface SettlementToken {
   /** Full coin type string from supportedSettlementSwapPaths. */
   type: string;
-  /**
-   * Amount in human-readable units (e.g. '5').
-   * If omitted, the SDK auto-calculates from the quote (recommended).
-   */
-  amount?: string;
 }
 
 /** Options for sdk.prepareSponsored() */
@@ -140,15 +138,11 @@ export interface PrepareSponsoredOptions {
   prepareAuthorizationSigner: (messageBytes: Uint8Array) => Promise<string>;
   /** Settlement token to swap to SUI internally. Required. */
   settlementToken: SettlementToken;
-  /** Intended gas budget in MIST. Default: `DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST`. */
-  intentGasBudget?: number;
   /** Slippage tolerance in basis points. Default: `DEFAULT_SLIPPAGE_BPS`. */
   slippageBps?: number;
   /**
-   * Extra margin added to the auto-calculated gas amount, in basis points.
-   * Default: `DEFAULT_GAS_MARGIN_BPS`.
-   * Only applies when settlementToken.amount is not explicitly set.
-   * Covers price movement between quote time and swap execution.
+   * Extra margin applied by the Host while preparing settlement funding, in
+   * basis points. When omitted, the Host applies its current default.
    */
   gasMarginBps?: number;
   /** Optional order ID — external reference for payment tracking. Max 128 UTF-8 bytes. */
@@ -323,7 +317,7 @@ export interface PromotionListItem {
   canClaim: boolean;
   canUseSponsoredAction: boolean;
   promotionRemainingBudgetMist: string;
-  remainingParticipantSlots: number | null;
+  remainingParticipantSlots: number;
   userRemainingGasAllowanceMist: string | null;
   unavailableReason: PromotionUnavailableReason | null;
 }

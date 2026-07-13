@@ -19,9 +19,29 @@ import { useAppConfig } from '../../../AppConfigContext';
  * An unused Coin result triggers UNUSED_VALUE_WITHOUT_DROP at Sui runtime.
  * coin::destroy_zero is the standard way to dispose of zero-balance coins.
  */
-const TEST_MOVECALL_ZERO = '0x2::coin::zero';
-const TEST_MOVECALL_DESTROY = '0x2::coin::destroy_zero';
+export const STUDIO_TEST_MOVECALL_TARGETS = ['0x2::coin::zero', '0x2::coin::destroy_zero'] as const;
+export const STUDIO_TEST_ALLOWED_TARGETS_CONFIG = STUDIO_TEST_MOVECALL_TARGETS.join(',');
 const TEST_TYPE_ARG = '0x2::sui::SUI';
+
+/** Build the exact transaction exercised by the Studio test page. */
+export function buildStudioTestTransaction(): {
+  tx: Transaction;
+  moveCallTargets: readonly string[];
+} {
+  const tx = new Transaction();
+
+  const [zeroCoin] = tx.moveCall({
+    target: STUDIO_TEST_MOVECALL_TARGETS[0],
+    typeArguments: [TEST_TYPE_ARG],
+  });
+  tx.moveCall({
+    target: STUDIO_TEST_MOVECALL_TARGETS[1],
+    typeArguments: [TEST_TYPE_ARG],
+    arguments: [zeroCoin],
+  });
+
+  return { tx, moveCallTargets: STUDIO_TEST_MOVECALL_TARGETS };
+}
 
 interface StudioExecutionPanelProps {
   sdk: StelisSDK | null;
@@ -83,31 +103,9 @@ export function StudioExecutionPanel({
    * This is required because Coin<T> has `key, store` but NOT `drop`.
    * An unused Coin result would trigger UNUSED_VALUE_WITHOUT_DROP at runtime.
    *
-   * Both targets must be in the JWT's allowedTargets. Use the
-   * AllowedTargetsBuilder auto-fill to generate correct hashes.
+   * Both raw targets must be present in the Host's STUDIO_ALLOWED_TARGETS
+   * boot configuration. The page and developer JWT do not modify that policy.
    */
-  const buildTestTx = (): { tx: Transaction; moveCallTargets: string[] } => {
-    const tx = new Transaction();
-    const moveCallTargets: string[] = [];
-
-    // Step 1: coin::zero<SUI> — creates a zero-balance coin
-    const [zeroCoin] = tx.moveCall({
-      target: TEST_MOVECALL_ZERO,
-      typeArguments: [TEST_TYPE_ARG],
-    });
-    moveCallTargets.push(TEST_MOVECALL_ZERO);
-
-    // Step 2: coin::destroy_zero<SUI> — consumes the coin (no return value)
-    tx.moveCall({
-      target: TEST_MOVECALL_DESTROY,
-      typeArguments: [TEST_TYPE_ARG],
-      arguments: [zeroCoin],
-    });
-    moveCallTargets.push(TEST_MOVECALL_DESTROY);
-
-    return { tx, moveCallTargets };
-  };
-
   const handleExecute = async () => {
     if (!sdk || !account || !developerJwt || !promotionId.trim()) return;
     setStatus('preparing');
@@ -116,7 +114,7 @@ export function StudioExecutionPanel({
 
     try {
       // ── Step 1: Build MoveCall-only test TX ───────────────────────
-      const { tx, moveCallTargets } = buildTestTx();
+      const { tx, moveCallTargets } = buildStudioTestTransaction();
 
       onDebugEntry({
         label: 'TX Build',
@@ -234,6 +232,11 @@ export function StudioExecutionPanel({
       {!developerJwt && <div className="promo-warning">⚠️ Provide a developer JWT above.</div>}
       {!sdk && <div className="promo-warning">⚠️ Connect to a studio endpoint first.</div>}
       {!promotionId.trim() && <div className="promo-warning">⚠️ Enter a Promotion ID above.</div>}
+      <div className="promo-warning">
+        Host prerequisite: include <code>{STUDIO_TEST_ALLOWED_TARGETS_CONFIG}</code> in{' '}
+        <code>STUDIO_ALLOWED_TARGETS</code> before booting or restarting the Host. This page and the
+        developer JWT cannot change the Host target policy.
+      </div>
 
       <button
         onClick={handleExecute}
