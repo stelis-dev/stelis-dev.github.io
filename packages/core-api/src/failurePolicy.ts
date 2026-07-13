@@ -175,9 +175,11 @@ export interface FailurePolicy {
 /**
  * `normal` rows whose subject counter has a storage family
  * (`subjectCounterFamily` returns `'sim_tier'` or `'revert'`). Currently
- * five entries: DRY_RUN_FAILED / PREFLIGHT_FAILED /
- * SPONSOR_PREFLIGHT_FAILED (sim_tier) and ONCHAIN_REVERT /
- * SPONSOR_ONCHAIN_FAILED (revert).
+ * three entries: DRY_RUN_FAILED / PREFLIGHT_FAILED (sim_tier) and
+ * ONCHAIN_REVERT (revert). Generic Relay API result codes
+ * (`SPONSOR_PREFLIGHT_FAILED`, `SPONSOR_ONCHAIN_FAILED`) are transport
+ * projections; the underlying event has already been recorded under the
+ * shared sponsor recorder code.
  */
 const COUNT_BOTH: AbuseImpact = { ip: 'count', subject: 'count' };
 /**
@@ -189,7 +191,9 @@ const IP_ONLY: AbuseImpact = { ip: 'count', subject: 'skip' };
 /**
  * `manipulation` / `ignored` / `drift` / `infra` rows, plus a small set
  * of `normal` rows that intentionally bypass abuse counters
- * (BAD_REQUEST, L3_* server-side math, PREPARE_STUDIO_USER_QUOTA_EXCEEDED).
+ * (BAD_REQUEST, L3_* server-side math, PREPARE_STUDIO_USER_QUOTA_EXCEEDED,
+ * and generic sponsor result codes that are transport projections of an
+ * event already recorded under the shared recorder vocabulary).
  * For manipulation rows specifically, long-block is applied via the
  * classification predicate, not via this field.
  */
@@ -212,14 +216,14 @@ const NO_BODY_EXTRAS: readonly ('digest' | 'subcode' | 'meta')[] = [];
  * mapper preserves the override; the table records the default.
  */
 export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
-  // ── Body / parse failures (host-route boundary) ───────────────────
+  // ── Request-shape failures ────────────────────────────────────────
   BAD_REQUEST: {
     code: 'BAD_REQUEST',
     classification: 'normal',
     httpStatus: 400,
     abuseImpact: SKIP_BOTH,
     bodyFields: NO_BODY_EXTRAS,
-    notes: 'Body validation rejection from host route or RequestBodyParseError.',
+    notes: 'Request body, parse, or normal command-admission rejection.',
   },
   REQUEST_BODY_TOO_LARGE: {
     code: 'REQUEST_BODY_TOO_LARGE',
@@ -427,13 +431,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     bodyFields: ['meta'],
     notes: 'Market condition; subcode-level carve-out applies at sponsor time.',
   },
-  NO_COINS_FOUND: {
-    code: 'NO_COINS_FOUND',
-    classification: 'normal',
-    httpStatus: 422,
-    abuseImpact: IP_ONLY,
-    bodyFields: ['meta'],
-  },
   PAYMENT_COIN_CONFLICT: {
     code: 'PAYMENT_COIN_CONFLICT',
     classification: 'normal',
@@ -463,7 +460,7 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     httpStatus: 422,
     abuseImpact: SKIP_BOTH,
     bodyFields: ['meta'],
-    notes: 'R-9 prefix-coin withdrawal mismatch.',
+    notes: 'User-prefix address-balance withdrawal cannot be accounted exactly.',
   },
   SLIPPAGE_QUERY_FAILED: {
     code: 'SLIPPAGE_QUERY_FAILED',
@@ -791,19 +788,19 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     code: 'SPONSOR_PREFLIGHT_FAILED',
     classification: 'normal',
     httpStatus: 422,
-    abuseImpact: COUNT_BOTH,
+    abuseImpact: SKIP_BOTH,
     bodyFields: ['subcode'],
     notes:
-      'Sim-tier counter; subcode-level carve-out via ADDRESS_CARVE_OUT_SUBCODES + MARKET_VOLATILITY_CARVE_OUT_SUBCODES skips non-IP.',
+      'Generic Relay API transport projection. Abuse was already recorded under the shared PREFLIGHT_FAILED recorder code.',
   },
   SPONSOR_ONCHAIN_FAILED: {
     code: 'SPONSOR_ONCHAIN_FAILED',
     classification: 'normal',
     httpStatus: 422,
-    abuseImpact: COUNT_BOTH,
+    abuseImpact: SKIP_BOTH,
     bodyFields: ['digest', 'subcode'],
     notes:
-      'On-chain revert counter; subcode-level carve-out also applies (ADDRESS_CARVE_OUT_SUBCODES + MARKET_VOLATILITY_CARVE_OUT_SUBCODES).',
+      'Generic Relay API transport projection. Abuse was already recorded under the shared ONCHAIN_REVERT recorder code.',
   },
   SPONSOR_CONGESTION: {
     code: 'SPONSOR_CONGESTION',
@@ -996,7 +993,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     httpStatus: 422,
     abuseImpact: COUNT_BOTH,
     bodyFields: ['subcode'],
-    notes: 'Promotion-route preflight code (mirror of generic SPONSOR_PREFLIGHT_FAILED).',
+    notes:
+      'Shared sponsor recorder code for both routes; market subcodes skip the subject sim-tier only here.',
   },
   ONCHAIN_REVERT: {
     code: 'ONCHAIN_REVERT',
@@ -1004,7 +1002,8 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     httpStatus: 422,
     abuseImpact: COUNT_BOTH,
     bodyFields: ['subcode'],
-    notes: 'Promotion-route revert code (mirror of generic SPONSOR_ONCHAIN_FAILED).',
+    notes:
+      'Shared sponsor recorder code for both routes; market subcodes increment the subject revert family.',
   },
   GAS_EFFECTS_MISSING: {
     code: 'GAS_EFFECTS_MISSING',

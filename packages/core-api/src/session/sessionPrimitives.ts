@@ -4,15 +4,17 @@
  * These functions extract the structural duplication between
  * handleSponsor (generic) and handlePromotionSponsor (promotion).
  *
- * Internal to core-api. Not exported from the package barrel.
  * Mode-specific policy (generic re-validation, promotion entitlement)
- * remains in each handler.
+ * remains internal. The narrow current-Sui result parser is also consumed by
+ * app-api so Host execution boundaries share one fail-closed SDK-union authority.
  */
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { verifyTransactionSignature } from '@mysten/sui/verify';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiClientTypes } from '@mysten/sui/client';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_CHECKIN_FAILED } from '../observability/events.js';
 import type { SponsorPoolAdapter } from '../context.js';
@@ -192,23 +194,209 @@ export class GasOwnerMismatchError extends Error {
 // Preflight simulation
 // ─────────────────────────────────────────────
 
-/**
- * gRPC simulation result shape for FailedTransaction parsing.
- * Internal — matches the transport shape from @mysten/sui/grpc.
- */
-interface GrpcFailedTx {
-  $kind: 'FailedTransaction';
-  FailedTransaction: {
-    digest?: string;
-    status?: { error?: { message?: string; $kind?: string } };
-    effects?: { gasUsed?: GasUsedFields };
+type RuntimeRecord = Record<string, unknown>;
+type CurrentExecutionErrorKind = SuiClientTypes.ExecutionError['$kind'];
+
+const CURRENT_EXECUTION_ERROR_KINDS = [
+  'MoveAbort',
+  'SizeError',
+  'CommandArgumentError',
+  'TypeArgumentError',
+  'PackageUpgradeError',
+  'IndexError',
+  'CoinDenyListError',
+  'CongestedObjects',
+  'ObjectIdError',
+  'Unknown',
+] as const satisfies readonly CurrentExecutionErrorKind[];
+
+type NormalizedExecutionError = {
+  readonly kind: CurrentExecutionErrorKind;
+  readonly message: string;
+};
+
+type NormalizedExecutionStatus =
+  | { readonly success: true; readonly error: null }
+  | { readonly success: false; readonly error: NormalizedExecutionError };
+
+export type ParsedSuiTransactionResult =
+  | {
+      readonly kind: 'success';
+      readonly digest: string;
+      readonly effects: RuntimeRecord;
+      readonly gasUsed: GasUsedFields | null;
+    }
+  | {
+      readonly kind: 'failure';
+      readonly digest: string;
+      readonly effects: RuntimeRecord;
+      readonly gasUsed: GasUsedFields | null;
+      readonly error: NormalizedExecutionError;
+    };
+
+function isRuntimeRecord(value: unknown): value is RuntimeRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function rejectUnknownExecutionErrorKind(_kind: never): false {
+  return false;
+}
+
+function isCurrentExecutionErrorKind(value: unknown): value is CurrentExecutionErrorKind {
+  if (typeof value !== 'string') return false;
+  const kind = value as CurrentExecutionErrorKind;
+  switch (kind) {
+    case 'MoveAbort':
+    case 'SizeError':
+    case 'CommandArgumentError':
+    case 'TypeArgumentError':
+    case 'PackageUpgradeError':
+    case 'IndexError':
+    case 'CoinDenyListError':
+    case 'CongestedObjects':
+    case 'ObjectIdError':
+    case 'Unknown':
+      return true;
+    default:
+      return rejectUnknownExecutionErrorKind(kind);
+  }
+}
+
+function readCurrentExecutionError(value: unknown): NormalizedExecutionError | null {
+  if (!isRuntimeRecord(value) || typeof value.message !== 'string') return null;
+  if (!isCurrentExecutionErrorKind(value.$kind)) return null;
+
+  const kind = value.$kind;
+  for (const candidate of CURRENT_EXECUTION_ERROR_KINDS) {
+    const hasPayload = Object.prototype.hasOwnProperty.call(value, candidate);
+    if ((candidate === kind) !== hasPayload) return null;
+  }
+
+  if (kind === 'Unknown') {
+    if (value.Unknown !== null) return null;
+  } else if (kind === 'CongestedObjects') {
+    const payload = value.CongestedObjects;
+    if (
+      !isRuntimeRecord(payload) ||
+      typeof payload.name !== 'string' ||
+      !Array.isArray(payload.objects) ||
+      !payload.objects.every((objectId) => typeof objectId === 'string')
+    ) {
+      return null;
+    }
+  } else if (value[kind] == null) {
+    return null;
+  }
+
+  return { kind, message: value.message };
+}
+
+function readCurrentExecutionStatus(value: unknown): NormalizedExecutionStatus | null {
+  if (!isRuntimeRecord(value)) return null;
+  if (value.success === true) {
+    return value.error === null ? { success: true, error: null } : null;
+  }
+  if (value.success !== false) return null;
+  const error = readCurrentExecutionError(value.error);
+  return error ? { success: false, error } : null;
+}
+
+function isCanonicalGasAmount(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value);
+}
+
+function normalizeGasUsed(value: unknown): GasUsedFields | null {
+  if (!isRuntimeRecord(value)) return null;
+  if (
+    !isCanonicalGasAmount(value.computationCost) ||
+    !isCanonicalGasAmount(value.storageCost) ||
+    !isCanonicalGasAmount(value.storageRebate)
+  ) {
+    return null;
+  }
+  return {
+    computationCost: value.computationCost,
+    storageCost: value.storageCost,
+    storageRebate: value.storageRebate,
   };
 }
 
-/** Effects shape that may contain status and gasUsed. */
-interface GrpcEffectsWithStatus {
-  status?: { success?: boolean; error?: { message?: string; $kind?: string } };
-  gasUsed?: GasUsedFields;
+function readTerminalPayload(
+  value: unknown,
+  expectedSuccess: boolean,
+): {
+  readonly digest: string;
+  readonly status: NormalizedExecutionStatus;
+  readonly effects: RuntimeRecord;
+  readonly gasUsed: GasUsedFields | null;
+} | null {
+  if (!isRuntimeRecord(value)) return null;
+  if (typeof value.digest !== 'string' || value.digest.length === 0) return null;
+
+  const status = readCurrentExecutionStatus(value.status);
+  if (!status || status.success !== expectedSuccess) return null;
+  if (!isRuntimeRecord(value.effects)) return null;
+
+  const effectsStatus = readCurrentExecutionStatus(value.effects.status);
+  if (!effectsStatus || !isDeepStrictEqual(value.status, value.effects.status)) return null;
+  if (value.effects.transactionDigest !== value.digest) return null;
+
+  return {
+    digest: value.digest,
+    status,
+    effects: value.effects,
+    gasUsed: normalizeGasUsed(value.effects.gasUsed),
+  };
+}
+
+export function parseSuiTransactionResult(value: unknown): ParsedSuiTransactionResult | null {
+  if (!isRuntimeRecord(value)) return null;
+
+  if (value.$kind === 'Transaction') {
+    if (value.FailedTransaction !== undefined) return null;
+    const payload = readTerminalPayload(value.Transaction, true);
+    if (!payload || !payload.status.success) return null;
+    return {
+      kind: 'success',
+      digest: payload.digest,
+      effects: payload.effects,
+      gasUsed: payload.gasUsed,
+    };
+  }
+
+  if (value.$kind === 'FailedTransaction') {
+    if (value.Transaction !== undefined) return null;
+    const payload = readTerminalPayload(value.FailedTransaction, false);
+    if (!payload || payload.status.success) return null;
+    return {
+      kind: 'failure',
+      digest: payload.digest,
+      effects: payload.effects,
+      gasUsed: payload.gasUsed,
+      error: payload.status.error,
+    };
+  }
+
+  return null;
+}
+
+function isConfirmedCongestion(kind: CurrentExecutionErrorKind): boolean {
+  switch (kind) {
+    case 'CongestedObjects':
+      return true;
+    case 'MoveAbort':
+    case 'SizeError':
+    case 'CommandArgumentError':
+    case 'TypeArgumentError':
+    case 'PackageUpgradeError':
+    case 'IndexError':
+    case 'CoinDenyListError':
+    case 'ObjectIdError':
+    case 'Unknown':
+      return false;
+    default:
+      return rejectUnknownExecutionErrorKind(kind);
+  }
 }
 
 /**
@@ -224,31 +412,17 @@ export async function runPreflight(
     transaction: txBytes,
     include: { effects: true },
   });
-
-  // Check for FailedTransaction $kind
-  const simFailed = simResult as unknown as { $kind?: string } & Partial<GrpcFailedTx>;
-  if (simFailed.$kind === 'FailedTransaction') {
-    const f = simFailed.FailedTransaction;
-    const reason = f?.status?.error?.message ?? f?.status?.error?.$kind ?? 'unknown';
-    return { success: false, reason };
+  const terminal = parseSuiTransactionResult(simResult);
+  if (!terminal) {
+    return { success: false, reason: 'Simulation returned malformed terminal result' };
   }
-
-  // Primary success path
-  const simTx = simResult.Transaction;
-  if (!simTx) {
-    return { success: false, reason: 'Simulation returned no transaction result' };
+  if (terminal.kind === 'failure') {
+    return { success: false, reason: terminal.error.message };
   }
-  if (!simTx.status?.success) {
-    const reason = simTx.status?.error?.message ?? simTx.status?.error?.$kind ?? 'unknown';
-    return { success: false, reason };
+  if (!terminal.gasUsed) {
+    return { success: false, reason: 'Simulation returned no valid gasUsed' };
   }
-
-  const simEffects = simTx.effects as unknown as GrpcEffectsWithStatus | null | undefined;
-  if (!simEffects?.gasUsed) {
-    return { success: false, reason: 'Simulation returned no gasUsed' };
-  }
-
-  return { success: true, gasUsed: simEffects.gasUsed };
+  return { success: true, gasUsed: terminal.gasUsed };
 }
 
 // ─────────────────────────────────────────────
@@ -259,133 +433,108 @@ export async function runPreflight(
  * Add the sponsor signature and submit a transaction on-chain.
  * Returns a normalized ExecResult.
  *
- * Infrastructure-level network errors (not on-chain reverts) are re-thrown.
+ * Every exception after the sponsor signature is issued is re-thrown as
+ * `SponsorPostSignatureUncertaintyError`. Only a validated terminal result can
+ * establish congestion or on-chain execution.
  *
- * The pool `sign(slotId, receiptId, txBytes)` signature pins lease
- * verification to `HMAC(secret, receiptId || slotId || hash(txBytes))`,
+ * The pool `sign(sponsorAddress, receiptId, txBytes)` signature pins lease
+ * verification to `HMAC(secret, receiptId || sponsorAddress || hash(txBytes))`,
  * compared against the committed proof the prepare runner installed at
- * `sponsorPool.commit(slot, receiptId, buildResult.txBytesHash)`.
- * `receiptId` is the lease identity carried through the HTTP contract; a
+ * `sponsorPool.commit(sponsorAddress, receiptId, buildResult.txBytesHash)`.
+ * `sponsorAddress` is the lease identity; `receiptId` and the committed hash
+ * bind that lease to one prepared transaction. A
  * Redis-only attacker cannot produce a matching proof for any other
  * `txBytes` because the HMAC secret stays in process env.
  */
 /**
- * Marker thrown by `signAndSubmit` ONLY when `sui.executeTransaction()`
- * raises a non-congestion exception, i.e. AFTER the sponsor signature
- * was already issued by `pool.sign()` and the TX may have reached the
- * network. Pre-signature failures from `pool.sign()` (such as
- * `SponsorLeaseExpiredError`) propagate unchanged and never wrap into
- * this marker, because the sponsor signature was never issued for
- * those — the leak-free post-signature consume policy must not apply.
+ * Typed post-signature uncertainty. Thrown after `pool.sign()` issued the
+ * sponsor signature when the Host cannot prove a terminal on-chain result:
+ * an RPC exception, a missing transaction union member, or a malformed
+ * terminal status/digest.
  *
- * Handlers use `instanceof SponsorSubmitInfraError` to discriminate
- * post-signature submit-infra (stamp `submit_infra_unknown`, lock
- * sponsor result economics, promotion path consumes the reservation) from
- * pre-signature lease/HMAC failures (no marker, no consume — promotion
- * releases via the existing pre-submit cleanup; generic just rethrows
- * to the route catch-all).
+ * Pre-signature failures from `pool.sign()` propagate unchanged. Route
+ * policies use this type, not message text, to distinguish the uncertain
+ * post-signature branch from failures that cannot have submitted a sponsor-
+ * signed transaction.
  *
- * `cause` carries the original RPC error so callers can read its
- * `.message` for the marker payload without re-wrapping.
+ * `cause` carries the underlying RPC or terminal-shape error so callers can
+ * preserve the original public error message after recording the typed stage.
  */
-export class SponsorSubmitInfraError extends Error {
+export class SponsorPostSignatureUncertaintyError extends Error {
+  readonly executionStage = 'after_sponsor_signature' as const;
   override readonly cause: unknown;
-  constructor(submitErr: unknown) {
-    const msg = submitErr instanceof Error ? submitErr.message : String(submitErr);
+  constructor(cause: unknown) {
+    const msg = cause instanceof Error ? cause.message : String(cause);
     super(msg);
-    this.name = 'SponsorSubmitInfraError';
-    this.cause = submitErr;
+    this.name = 'SponsorPostSignatureUncertaintyError';
+    this.cause = cause;
   }
 }
 
 export async function signAndSubmit(
   pool: SponsorPoolAdapter,
   sui: SuiGrpcClient,
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
 ): Promise<ExecResult> {
   // Pool throws SponsorLeaseExpiredError directly if the committed HMAC
-  // lease proof for (receiptId, slotId, hash(txBytes)) does not match
+  // lease proof for (receiptId, sponsorAddress, hash(txBytes)) does not match
   // the Redis value — including the case where `entry.txBytesHash` was
   // overwritten under a live committed lease, because the committed
   // Redis proof still references the original commit digest. Pre-sign
   // failures rethrow unchanged: the sponsor signature was NOT issued
-  // for them, so post-signature submit-infra policies (consume,
-  // recorder marker) must not apply.
-  const sponsorSig = await pool.sign(slotId, receiptId, txBytes);
+  // for them, so post-signature uncertainty policies (entitlement consume
+  // and sponsored-execution recording) must not apply.
+  const sponsorSig = await pool.sign(sponsorAddress, receiptId, txBytes);
 
-  let execResult: Awaited<ReturnType<typeof sui.executeTransaction>>;
   try {
-    execResult = await sui.executeTransaction({
+    const execResult = await sui.executeTransaction({
       transaction: txBytes,
       signatures: [userSignature, sponsorSig.signature],
       include: { effects: true, events: true },
     });
-  } catch (submitErr) {
-    const msg = submitErr instanceof Error ? submitErr.message : String(submitErr);
-    if (msg.includes('ExecutionCancelledDueToSharedObjectCongestion')) {
-      // Network-level cancellation — no on-chain execution → no paid gas.
-      return { success: false, digest: '', reason: msg, isCongestion: true, gasUsed: null };
+
+    const terminal = parseSuiTransactionResult(execResult);
+    if (!terminal) {
+      throw new Error('Transaction execution returned malformed terminal result');
     }
-    // Post-signature uncertainty — wrap the raw error in the marker
-    // class so handlers can opt this single class into the
-    // submit-infra cleanup path (and ONLY this class) without
-    // pattern-matching on stack traces or message strings.
-    throw new SponsorSubmitInfraError(submitErr);
-  }
 
-  // Check for FailedTransaction return value
-  const execFailed = execResult as unknown as { $kind?: string } & Partial<GrpcFailedTx>;
-  if (execFailed.$kind === 'FailedTransaction' && execFailed.FailedTransaction) {
-    const failed = execFailed.FailedTransaction;
-    const errMsg = failed.status?.error?.message ?? failed.status?.error?.$kind ?? 'unknown';
-    const isCongestion =
-      failed.status?.error?.$kind === 'ExecutionCancelledDueToSharedObjectCongestion' ||
-      errMsg.includes('ExecutionCancelledDueToSharedObjectCongestion');
-    // Try to preserve gas accounting for FailedTransaction reverts that
-    // burned gas before failing. `effects.gasUsed` may be present even on
-    // failure; absent on congestion-class returns.
-    const failedGasUsed = failed.effects?.gasUsed ?? null;
+    if (terminal.kind === 'failure') {
+      if (isConfirmedCongestion(terminal.error.kind)) {
+        return {
+          success: false,
+          executionStage: 'after_sponsor_signature',
+          digest: terminal.digest,
+          reason: terminal.error.message,
+          isCongestion: true,
+          gasUsed: null,
+        };
+      }
+      return {
+        success: false,
+        executionStage: 'on_chain',
+        digest: terminal.digest,
+        reason: terminal.error.message,
+        isCongestion: false,
+        gasUsed: terminal.gasUsed,
+      };
+    }
+
     return {
-      success: false,
-      digest: failed.digest ?? '',
-      reason: errMsg,
-      isCongestion,
-      gasUsed: failedGasUsed,
+      success: true,
+      executionStage: 'on_chain',
+      digest: terminal.digest,
+      effects: terminal.effects,
+      gasUsed: terminal.gasUsed,
     };
+  } catch (submitErr) {
+    if (submitErr instanceof SponsorPostSignatureUncertaintyError) {
+      throw submitErr;
+    }
+    throw new SponsorPostSignatureUncertaintyError(submitErr);
   }
-
-  const tx = execResult.Transaction;
-  if (!tx) {
-    throw new Error('Transaction execution returned no result');
-  }
-
-  // Fallback status check — execution returned a Transaction object whose
-  // effects mark the run as failed. Effects may still carry gasUsed.
-  const failedEffects = tx.effects as unknown as GrpcEffectsWithStatus | undefined;
-  const status = failedEffects?.status;
-  if (status?.success === false) {
-    const reason = status.error?.message ?? status.error?.$kind ?? 'unknown';
-    return {
-      success: false,
-      digest: tx.digest,
-      reason,
-      isCongestion: false,
-      gasUsed: failedEffects?.gasUsed ?? null,
-    };
-  }
-
-  // Extract gasUsed from successful execution (may be null — callers must handle)
-  const txEffects = tx.effects as unknown as GrpcEffectsWithStatus | null | undefined;
-
-  return {
-    success: true,
-    digest: tx.digest,
-    effects: tx.effects,
-    gasUsed: txEffects?.gasUsed ?? null,
-  };
 }
 
 // ─────────────────────────────────────────────
@@ -396,7 +545,7 @@ export async function signAndSubmit(
  * Best-effort slot checkin with structured error logging.
  * Safe to call in finally blocks — never throws.
  *
- * The pool `checkin` signature is `(slotId, receiptId, txBytesHash | null)`.
+ * The pool `checkin` signature is `(sponsorAddress, receiptId, txBytesHash | null)`.
  * Callers pass the prepare commit hash (`txBytesHash`) when releasing a
  * committed lease, and `null` when releasing a lease that only reached the
  * reservation window (for example build/commit failure before
@@ -408,17 +557,17 @@ export async function signAndSubmit(
  */
 export async function safeSlotCheckin(
   pool: SponsorPoolAdapter,
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytesHash: string | null,
 ): Promise<void> {
   try {
-    await pool.checkin(slotId, receiptId, txBytesHash);
+    await pool.checkin(sponsorAddress, receiptId, txBytesHash);
   } catch (checkinErr) {
     logStructuredEvent(
       SPONSOR_POOL_CHECKIN_FAILED,
       {
-        slotId,
+        sponsor_address: sponsorAddress,
         error: checkinErr instanceof Error ? checkinErr.message : String(checkinErr),
       },
       'error',

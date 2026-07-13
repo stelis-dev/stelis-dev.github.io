@@ -8,20 +8,20 @@ function makeKnownEntry(
     receiptId: string;
   },
 ): SponsoredExecutionLogEntry {
+  const mode = overrides.mode ?? 'generic';
+  const promotion = mode === 'promotion';
   return {
-    schemaVersion: 1,
     createdAt: overrides.createdAt ?? '2026-04-26T16:00:00.000Z',
-    mode: overrides.mode ?? 'generic',
+    mode,
     outcome: overrides.outcome ?? 'success',
     receiptId: overrides.receiptId,
     digest: '0xdigest',
     senderAddress: '0xsender',
     sponsorAddress: '0xsponsor',
-    slotId: '0xslot',
     executionPathKey: 'rk',
     orderIdHash: null,
-    promotionId: null,
-    userId: null,
+    promotionId: promotion ? 'promo-1' : null,
+    userId: promotion ? 'user-1' : null,
     recoveredGasMist: '12000',
     hostPaidGasMist: '8000',
     hostNetMist: overrides.hostNetMist ?? '5000',
@@ -36,16 +36,14 @@ function makeKnownEntry(
 
 function makeUnknownEntry(receiptId: string): SponsoredExecutionLogEntry {
   return {
-    schemaVersion: 1,
     createdAt: '2026-04-26T16:00:00.000Z',
     mode: 'generic',
     outcome: 'success',
     receiptId,
     digest: null,
-    senderAddress: null,
-    sponsorAddress: null,
-    slotId: null,
-    executionPathKey: null,
+    senderAddress: '0xsender',
+    sponsorAddress: '0xsponsor',
+    executionPathKey: 'rk',
     orderIdHash: null,
     promotionId: null,
     userId: null,
@@ -152,7 +150,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
       ...makeKnownEntry({ receiptId: 'r-bad' }),
       hostNetMist: null,
     };
-    await expect(store.append(bad)).rejects.toThrow(/known economics entry missing/);
+    await expect(store.append(bad)).rejects.toThrow(/hostNetMist/);
     // Validation must run before the Lua script so a rejected append
     // never claims the idempotency key on Redis.
     expect(evalSpy).not.toHaveBeenCalled();
@@ -203,6 +201,21 @@ describe('RedisSponsoredLogsStore — getSummary script wiring', () => {
     evalSpy.mockResolvedValueOnce('bad');
     const store = new RedisSponsoredLogsStore(client);
     await expect(store.getSummary('generic')).rejects.toThrow(/unexpected summary/);
+  });
+
+  it('rejects malformed aggregate decimals instead of inventing zero', async () => {
+    const malformed = [
+      [10, '0', '0', '0'],
+      ['01', '0', '0', '0'],
+      ['0', 'not-a-decimal', '0', '0'],
+      ['0', '0', '-1', '0'],
+      ['0', '0', '0', '-0'],
+    ];
+    for (const result of malformed) {
+      const { client, evalSpy } = makeMockRedis();
+      evalSpy.mockResolvedValueOnce(result);
+      await expect(new RedisSponsoredLogsStore(client).getSummary('all')).rejects.toThrow();
+    }
   });
 });
 
@@ -283,12 +296,31 @@ describe('RedisSponsoredLogsStore — getRecent script wiring', () => {
   it('skips entries failing shape check', async () => {
     const { client, evalSpy } = makeMockRedis();
     evalSpy.mockResolvedValueOnce([
-      JSON.stringify({ schemaVersion: 999, mode: 'generic' }),
+      JSON.stringify({ ...makeKnownEntry({ receiptId: 'extra-field' }), unexpected: true }),
       JSON.stringify(makeKnownEntry({ receiptId: 'ok' })),
     ]);
     const store = new RedisSponsoredLogsStore(client);
     const entries = await store.getRecent('all', 5);
     expect(entries.map((e) => e.receiptId)).toEqual(['ok']);
+  });
+
+  it('skips current-shape rows with wrong fields or non-canonical decimal strings', async () => {
+    const { client, evalSpy } = makeMockRedis();
+    const valid = makeKnownEntry({ receiptId: 'ok' });
+    const { sponsorAddress: _missing, ...missingField } = valid;
+    evalSpy.mockResolvedValueOnce([
+      JSON.stringify({ ...valid, mode: 'unknown' }),
+      JSON.stringify({ ...valid, outcome: 'congestion' }),
+      JSON.stringify({ ...valid, hostFeeMist: '01' }),
+      JSON.stringify({ ...valid, recoveredGasMist: 12000 }),
+      JSON.stringify({ ...valid, recoveredGasMist: '-1' }),
+      JSON.stringify({ ...valid, hostPaidGasMist: '-1' }),
+      JSON.stringify(missingField),
+      JSON.stringify(valid),
+    ]);
+    const store = new RedisSponsoredLogsStore(client);
+    const entries = await store.getRecent('all', 10);
+    expect(entries.map((entry) => entry.receiptId)).toEqual(['ok']);
   });
 
   it('limit <= 0 returns empty without calling eval', async () => {

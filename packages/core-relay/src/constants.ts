@@ -7,8 +7,16 @@
 // Off-chain only constants (core-relay-interior)
 // ─────────────────────────────────────────────
 
-/** Layer 1: PTB command count upper bound */
-export const MAX_COMMANDS = 16;
+/** Final Host-built PTB command count upper bound. */
+export const MAX_FINAL_COMMANDS = 16;
+
+/**
+ * Generic user TransactionKind command cap.
+ *
+ * The current generic compiler can append at most five commands, so the user
+ * prefix reserves that suffix inside the 16-command final Host policy.
+ */
+export const MAX_GENERIC_USER_COMMANDS = 11;
 
 /** Sui Clock shared object ID (protocol-level constant) */
 export const SUI_CLOCK_OBJECT_ID = '0x6';

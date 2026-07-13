@@ -25,7 +25,7 @@ const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
 
 /**
  * Auth config for an authenticated endpoint.
- * Secret value is resolved from `process.env[valueEnv]` at boot time.
+ * Secret value is resolved from the boot-snapshotted env lookup.
  */
 export interface SuiRpcEndpointAuthConfig {
   /** HTTP header name to carry the auth token (e.g. "x-token", "Authorization"). */
@@ -56,7 +56,7 @@ export interface SuiRpcEndpointRawConfig {
  *
  * @param json     Raw JSON string (rpc.json file content)
  * @param network  Active app-api NETWORK value
- * @param envLookup  Function to resolve env vars (default: process.env lookup).
+ * @param envLookup  Boot-snapshotted lookup for auth.valueEnv secrets.
  *                   Injected for testability.
  * @returns        Non-empty array of resolved endpoint configs
  * @throws         Error on invalid JSON, missing fields, or missing env vars
@@ -64,7 +64,7 @@ export interface SuiRpcEndpointRawConfig {
 export function parseEndpointConfigJson(
   json: string,
   network: SuiNetwork,
-  envLookup: (name: string) => string | undefined = (name) => process.env[name],
+  envLookup: (name: string) => string | undefined,
 ): SuiRpcEndpointConfig[] {
   const trimmed = json.trim();
   if (trimmed === '') {
@@ -275,13 +275,13 @@ function isLocalDevelopmentHost(hostname: string): boolean {
  * Auth secrets are resolved from env vars referenced by auth.valueEnv.
  *
  * @param filePath   Override file path for testing. Default: package-local rpc.json.
- * @param envLookup  Function to resolve env vars (default: process.env lookup).
+ * @param envLookup  Boot-snapshotted lookup for auth.valueEnv secrets.
  * @returns          Non-empty array of resolved endpoint configs
  */
 export function loadRpcConfig(
   network: SuiNetwork,
-  filePath?: string,
-  envLookup: (name: string) => string | undefined = (name) => process.env[name],
+  filePath: string | undefined,
+  envLookup: (name: string) => string | undefined,
 ): SuiRpcEndpointConfig[] {
   const resolvedPath = filePath ?? defaultRpcJsonPath();
 

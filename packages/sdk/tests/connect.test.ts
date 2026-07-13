@@ -4,7 +4,7 @@
  * Tests verify:
  * - pinnedPackageId validation (S-16 step 2)
  * - rogue Host packageId rejection (S-16 step 1)
- * - strict integrityPolicyVersion and config field parsing
+ * - strict current config field parsing
  * - settlement swap path integrity fail-closed (settlementSwapDirection ↔ hops ↔ swapDirection)
  * - studioEndpoint mode guard
  *
@@ -14,11 +14,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
-const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<PrepareResponse>>();
+const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<RelayPrepareResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function ({ endpoint }: { endpoint: string }) {
@@ -43,7 +43,6 @@ vi.mock('../src/client.js', () => ({
 // ── Module-level mock: integrity ────────────────────────────────────────────────
 vi.mock('../src/integrity.js', () => ({
   verifyPtbIntegrity: vi.fn(),
-  SUPPORTED_INTEGRITY_POLICY_VERSION: 1,
   StelisIntegrityError: class StelisIntegrityError extends Error {
     constructor(msg: string) {
       super(msg);
@@ -92,7 +91,6 @@ function makeConfig(overrides: Partial<RelayConfigResponse> = {}): RelayConfigRe
     ],
     quotedHostFeeMist: '100000',
     protocolFlatFeeMist: '20000',
-    integrityPolicyVersion: 1,
     ...overrides,
   };
 }
@@ -140,64 +138,23 @@ describe('StelisSDK.connect — pinnedPackageId policy', () => {
 });
 
 // ─────────────────────────────────────────────
-// _verifyIntegrity — policy version + config field tests
+// Config field tests
 // ─────────────────────────────────────────────
 
-describe('StelisSDK — integrityPolicyVersion handshake', () => {
-  it('config without integrityPolicyVersion is rejected at connect', async () => {
-    const invalid = { ...makeConfig() };
-    delete (invalid as Record<string, unknown>).integrityPolicyVersion;
-    stubConfig(invalid);
+describe('StelisSDK — current config fields', () => {
+  it('rejects fields outside the current Relay config contract', async () => {
+    stubConfig({ ...makeConfig(), obsoleteField: 1 });
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'integrityPolicyVersion must be an integer >= 1',
+      'obsoleteField is not a current field',
     );
   });
-
-  it('config with integrityPolicyVersion: 1 — version is 1', async () => {
-    stubConfig(makeConfig({ integrityPolicyVersion: 1 }));
-    const sdk = await StelisSDK.connect('http://primary/api');
-    expect(sdk.config.integrityPolicyVersion).toBe(1);
-  });
-
-  it('config with invalid integrityPolicyVersion (string) is rejected at connect', async () => {
-    const configWithStringVersion = {
-      ...makeConfig(),
-      integrityPolicyVersion: '1' as unknown as number,
-    };
-    stubConfig(configWithStringVersion);
-    await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'integrityPolicyVersion must be an integer >= 1',
-    );
-  });
-
-  it('config with unsafe integrityPolicyVersion is rejected at connect', async () => {
-    stubConfig(makeConfig({ integrityPolicyVersion: Number.MAX_SAFE_INTEGER + 1 }));
-    await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'Number.MAX_SAFE_INTEGER',
-    );
-  });
-
-  it('config with integrityPolicyVersion: 0 is rejected (must be >= 1)', async () => {
-    stubConfig({ ...makeConfig(), integrityPolicyVersion: 0 });
-    await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'integrityPolicyVersion must be an integer >= 1',
-    );
-  });
-
-  it('config with integrityPolicyVersion: 1.5 is rejected (must be integer)', async () => {
-    stubConfig({ ...makeConfig(), integrityPolicyVersion: 1.5 });
-    await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'integrityPolicyVersion must be an integer >= 1',
-    );
-  });
-
   it('config with unsafe-integer lotSize is rejected at connect', async () => {
     const config = makeConfig();
     (config.supportedSettlementSwapPaths[0] as Record<string, unknown>).lotSize =
       Number.MAX_SAFE_INTEGER + 1;
     stubConfig(config);
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'lotSize or minSize must be non-negative safe integers',
+      'lotSize must be a safe integer',
     );
   });
 
@@ -206,7 +163,7 @@ describe('StelisSDK — integrityPolicyVersion handshake', () => {
     delete (config.supportedSettlementSwapPaths[0] as Record<string, unknown>).lotSize;
     stubConfig(config);
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'missing lotSize or minSize',
+      'lotSize must be a safe integer',
     );
   });
 
@@ -215,14 +172,14 @@ describe('StelisSDK — integrityPolicyVersion handshake', () => {
     delete (invalid as Record<string, unknown>).quotedHostFeeMist;
     stubConfig(invalid);
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'quotedHostFeeMist must be a non-negative integer string',
+      'quotedHostFeeMist must be a string',
     );
   });
 
   it('config with non-decimal fee strings is rejected at connect', async () => {
     stubConfig({ ...makeConfig(), protocolFlatFeeMist: '1.5' });
     await expect(StelisSDK.connect('http://primary/api')).rejects.toThrow(
-      'protocolFlatFeeMist must be a non-negative integer string',
+      'protocolFlatFeeMist must be a canonical non-negative decimal string',
     );
   });
 });
@@ -266,7 +223,7 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('settlementSwapDirection must be one of');
+    ).rejects.toThrow('settlementSwapDirection is invalid');
   });
 
   it('rejects invalid settlementSwapDirection value', async () => {
@@ -276,7 +233,7 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('settlementSwapDirection must be one of');
+    ).rejects.toThrow('settlementSwapDirection is invalid');
   });
 
   it('rejects swapDirection ↔ settlementSwapDirection mismatch (baseForQuote direction with quoteForBase hop)', async () => {
@@ -286,7 +243,7 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow("inconsistent with settlementSwapDirection 'baseForQuote'");
+    ).rejects.toThrow('hops do not match settlementSwapDirection');
   });
 
   it('rejects missing hops array', async () => {
@@ -322,7 +279,7 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow("swapDirection must be 'baseForQuote' | 'quoteForBase'");
+    ).rejects.toThrow('swapDirection is invalid');
   });
 
   it('rejects fee metadata drift between effectiveFeeRateBps and hop feeBps', async () => {
@@ -332,7 +289,7 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('feeBps (20) must equal effectiveFeeRateBps (25)');
+    ).rejects.toThrow('feeBps must equal effectiveFeeRateBps');
   });
 
   it('rejects fee metadata over 100%', async () => {
@@ -342,6 +299,6 @@ describe('parseRelayConfigResponse — settlement swap path integrity fail-close
     stubConfig(bad);
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
-    ).rejects.toThrow('effectiveFeeRateBps must be a safe integer in [0, 10000]');
+    ).rejects.toThrow('feeBps must be in [0, 10000]');
   });
 });

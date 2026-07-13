@@ -55,7 +55,9 @@ describe('StelisClient', () => {
             policyHash: '0x' + 'ab'.repeat(32),
           }),
         ) // prepare
-        .mockResolvedValueOnce(jsonResponse({ digest: '0x1', effects: {} })) // sponsor
+        .mockResolvedValueOnce(
+          jsonResponse({ digest: '0x1', effects: {}, executionCostClaim: '1' }),
+        ) // sponsor
         .mockResolvedValueOnce(jsonResponse({ promotions: [] })) // listPromotions
         .mockResolvedValueOnce(
           jsonResponse({ txBytes: 'b64', receiptId: 'r1', estimatedGasMist: '1000' }),
@@ -114,7 +116,7 @@ describe('StelisClient', () => {
       const prepareData = {
         txBytes: 'base64txbytes',
         receiptId: '0x7a3f',
-        gasBudget: '5000000',
+        nonce: '1',
         cost: {
           simGas: '2000000',
           gasVarianceFixedMist: '200000',
@@ -124,6 +126,9 @@ describe('StelisClient', () => {
           executionCostClaim: '2120000',
           grossGas: '3000000',
         },
+        profile: 'new_user',
+        quoteTimestampMs: 1_700_000_000_000,
+        policyHash: '0x' + 'ab'.repeat(32),
       };
 
       mockFetch.mockResolvedValueOnce(jsonResponse(prepareData));
@@ -151,6 +156,7 @@ describe('StelisClient', () => {
       const prepareData = {
         txBytes: 'base64txbytes',
         receiptId: '0x7a3f',
+        nonce: '1',
         cost: {
           simGas: '2000000',
           gasVarianceFixedMist: '200000',
@@ -160,6 +166,9 @@ describe('StelisClient', () => {
           executionCostClaim: '2120000',
           grossGas: '3000000',
         },
+        profile: 'new_user',
+        quoteTimestampMs: 1_700_000_000_000,
+        policyHash: '0x' + 'ab'.repeat(32),
         orderId: 'test-123',
       };
 
@@ -188,6 +197,7 @@ describe('StelisClient', () => {
       const sponsorData = {
         digest: '0xresult',
         effects: { status: { success: true } },
+        executionCostClaim: '1',
       };
 
       mockFetch.mockResolvedValueOnce(jsonResponse(sponsorData));
@@ -214,6 +224,7 @@ describe('StelisClient', () => {
       const sponsorData = {
         digest: '0xresult',
         effects: { status: { success: true } },
+        executionCostClaim: '1',
         orderId: 'order-abc',
       };
 
@@ -226,6 +237,20 @@ describe('StelisClient', () => {
       });
 
       expect(result.orderId).toBe('order-abc');
+    });
+
+    it('rejects a present non-string optional orderId in the Host response', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          digest: '0xresult',
+          effects: {},
+          executionCostClaim: '1',
+          orderId: 123,
+        }),
+      );
+      await expect(
+        client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
+      ).rejects.toThrow('orderId must be a string');
     });
   });
 

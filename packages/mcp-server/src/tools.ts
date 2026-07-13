@@ -60,10 +60,12 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
     {
       title: 'Prepare Sponsored Transaction',
       description:
-        'Call POST /relay/prepare with caller-provided serialized TransactionKind bytes. Returns txBytes for wallet signing and a receiptId for sponsor.',
+        'Call POST /relay/prepare with caller-provided serialized TransactionKind bytes containing at most 11 user commands. Returns txBytes for wallet signing and a receiptId for sponsor.',
       inputSchema: {
         ...RELAY_API_FIELDS,
-        txKindBytes: BASE64_BYTES.describe('Serialized TransactionKind bytes in base64.'),
+        txKindBytes: BASE64_BYTES.describe(
+          'Serialized generic TransactionKind bytes in base64, with at most 11 commands.',
+        ),
         senderAddress: SUI_ADDRESS,
         settlementTokenType: z
           .string()
@@ -169,13 +171,15 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
     {
       title: 'Prepare Promotion-Sponsored Transaction',
       description:
-        'Call POST /studio/promotions/:id/prepare with caller-provided serialized TransactionKind bytes and a developer JWT.',
+        'Call POST /studio/promotions/:id/prepare with 1 to 16 MoveCall commands in caller-provided serialized TransactionKind bytes and a developer JWT.',
       inputSchema: {
         ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
         promotionId: PROMOTION_ID,
         senderAddress: SUI_ADDRESS,
-        txKindBytes: BASE64_BYTES.describe('Serialized TransactionKind bytes in base64.'),
+        txKindBytes: BASE64_BYTES.describe(
+          'Serialized Promotion TransactionKind bytes in base64 containing 1 to 16 MoveCall commands.',
+        ),
       },
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },

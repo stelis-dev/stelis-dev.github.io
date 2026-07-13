@@ -14,8 +14,9 @@
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
-import { SETTLE_MODULE, SETTLE_FUNCTIONS } from '@stelis/contracts';
+import { SETTLEMENT_ENTRY_FUNCTIONS, SETTLE_MODULE, SETTLE_FUNCTIONS } from '@stelis/contracts';
 import { ARG_INDEX_MAP } from './parseSettleArgs.js';
+import { decodeExactPureU64Base64 } from './decodePureU64.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -61,14 +62,7 @@ function decodePureU64Safe(arg: unknown, inputs: unknown[]): bigint | null {
     if (!input || input.$kind !== 'Pure') return null;
     const pure = input.Pure as Record<string, unknown> | undefined;
     if (!pure || typeof pure.bytes !== 'string') return null;
-    const decoded = fromBase64(pure.bytes);
-    if (decoded.length < 8) return null;
-    // BCS u64: 8-byte little-endian
-    let value = 0n;
-    for (let i = 7; i >= 0; i--) {
-      value = (value << 8n) | BigInt(decoded[i]!);
-    }
-    return value;
+    return decodeExactPureU64Base64(pure.bytes);
   } catch {
     return null;
   }
@@ -119,7 +113,24 @@ export function extractCostFromTxData(
       if (!indices) return null;
 
       const args = mc.arguments as unknown[] | undefined;
-      if (!args) return null;
+      const typeArguments = mc.typeArguments as unknown[] | undefined;
+      const entry = (
+        SETTLEMENT_ENTRY_FUNCTIONS as Readonly<
+          Record<
+            string,
+            (typeof SETTLEMENT_ENTRY_FUNCTIONS)[keyof typeof SETTLEMENT_ENTRY_FUNCTIONS] | undefined
+          >
+        >
+      )[fn];
+      if (
+        !entry ||
+        !Array.isArray(args) ||
+        !Array.isArray(typeArguments) ||
+        args.length !== entry.parameters.length ||
+        typeArguments.length !== entry.typeParameters.length
+      ) {
+        return null;
+      }
 
       const executionCostClaimMist = decodePureU64Safe(args[indices.claim], inputs);
       const quotedHostFeeMist = decodePureU64Safe(args[indices.quotedHostFee], inputs);

@@ -11,7 +11,13 @@
  *
  * TTL default is PREPARE_TTL_MS.
  */
-import type { PreparedTxEntry, PrepareStoreAdapter } from './prepareTypes.js';
+import {
+  parseCurrentPreparedTxDraft,
+  parseCurrentPreparedTxEntry,
+  type PreparedTxDraft,
+  type PreparedTxEntry,
+  type PrepareStoreAdapter,
+} from './prepareTypes.js';
 import {
   invokeEvictCallback,
   invokeReleaseCallback,
@@ -82,8 +88,8 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
   /**
    * @param onRelease       Callback when a slot must return to the pool.
    *                        Inject
-   *                        `(slotId, receiptId, txBytesHash) =>
-   *                           sponsorPool.checkin(slotId, receiptId, txBytesHash)`.
+   *                        `(sponsorAddress, receiptId, txBytesHash) =>
+   *                           sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash)`.
    *                        Entries reaching any release callback here
    *                        are always post-`store()`, meaning the lease
    *                        has already been committed to `txBytesHash`
@@ -145,10 +151,13 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     clearInterval(this._timer);
   }
 
-  async store(receiptId: string, entry: PreparedTxEntry): Promise<void> {
-    const ip = entry.clientIp;
-    const sender = entry.senderAddress;
+  async store(draft: PreparedTxDraft): Promise<PreparedTxEntry> {
+    const currentDraft = parseCurrentPreparedTxDraft(draft);
     const now = this._clock.nowMs();
+    const currentEntry = parseCurrentPreparedTxEntry({ ...currentDraft, issuedAt: now });
+    const receiptId = currentEntry.receiptId;
+    const ip = currentEntry.clientIp;
+    const sender = currentEntry.senderAddress;
 
     // Prune expired sender entries before quota check to avoid false positives.
     // The background eviction runs on EVICT_INTERVAL_MS, so entries may linger up to that interval.
@@ -170,9 +179,9 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     // enforcement. The userIndex is populated only by promotion entries;
     // it never sees generic-mode receiptIds, so cross-mode contamination
     // is structurally impossible.
-    if (entry.mode === 'promotion') {
+    if (currentEntry.mode === 'promotion') {
       // Prune expired entries from the userIndex bucket before counting.
-      const userSetForQuota = this._userIndex.get(entry.userId);
+      const userSetForQuota = this._userIndex.get(currentEntry.userId);
       if (userSetForQuota) {
         for (const pid of [...userSetForQuota]) {
           const existing = this._entries.get(pid);
@@ -180,11 +189,11 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
             userSetForQuota.delete(pid);
           }
         }
-        if (userSetForQuota.size === 0) this._userIndex.delete(entry.userId);
+        if (userSetForQuota.size === 0) this._userIndex.delete(currentEntry.userId);
       }
-      const liveCount = this._userIndex.get(entry.userId)?.size ?? 0;
+      const liveCount = this._userIndex.get(currentEntry.userId)?.size ?? 0;
       if (liveCount >= this._maxPerStudioUser) {
-        throw new PrepareStudioUserQuotaError(entry.userId, this._maxPerStudioUser);
+        throw new PrepareStudioUserQuotaError(currentEntry.userId, this._maxPerStudioUser);
       }
     }
 
@@ -207,7 +216,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
           // Slot release — best effort, independent of coordinator cleanup.
           void invokeReleaseCallback({
             onRelease: this._onRelease,
-            slotId: evicted.slotId,
+            sponsorAddress: evicted.sponsorAddress,
             receiptId: evicted.receiptId,
             txBytesHash: evicted.txBytesHash,
             adapter: 'memory-prepare',
@@ -235,7 +244,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     }
 
     // Store the entry
-    this._entries.set(receiptId, entry);
+    this._entries.set(receiptId, currentEntry);
 
     // Update IP index
     if (!this._ipIndex.has(ip)) {
@@ -250,11 +259,11 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     this._senderIndex.get(sender)!.add(receiptId);
 
     // Update userIndex for promotion entries (Studio outstanding-prepare quota).
-    if (entry.mode === 'promotion') {
-      if (!this._userIndex.has(entry.userId)) {
-        this._userIndex.set(entry.userId, new Set());
+    if (currentEntry.mode === 'promotion') {
+      if (!this._userIndex.has(currentEntry.userId)) {
+        this._userIndex.set(currentEntry.userId, new Set());
       }
-      this._userIndex.get(entry.userId)!.add(receiptId);
+      this._userIndex.get(currentEntry.userId)!.add(receiptId);
     }
 
     // Promote pending reservation → live (implicit confirm).
@@ -264,6 +273,8 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
       pendingMap.delete(receiptId);
       if (pendingMap.size === 0) this._pendingNonces.delete(sender);
     }
+
+    return parseCurrentPreparedTxEntry(currentEntry);
   }
 
   /**
@@ -291,7 +302,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
       // Slot release — best effort, independent of coordinator cleanup.
       void invokeReleaseCallback({
         onRelease: this._onRelease,
-        slotId: entry.slotId,
+        sponsorAddress: entry.sponsorAddress,
         receiptId: entry.receiptId,
         txBytesHash: entry.txBytesHash,
         adapter: 'memory-prepare',
@@ -315,7 +326,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
       // Slot release — best effort, independent of coordinator cleanup.
       void invokeReleaseCallback({
         onRelease: this._onRelease,
-        slotId: entry.slotId,
+        sponsorAddress: entry.sponsorAddress,
         receiptId: entry.receiptId,
         txBytesHash: entry.txBytesHash,
         adapter: 'memory-prepare',
@@ -336,14 +347,14 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
 
     // Success: delete entry (1-time use). Slot checkin is the caller's responsibility.
     this._removeEntry(receiptId, entry);
-    return entry;
+    return parseCurrentPreparedTxEntry(entry);
   }
 
   async peek(receiptId: string): Promise<PreparedTxEntry | null> {
     const entry = this._entries.get(receiptId);
     if (!entry) return null;
     if (this._clock.nowMs() - entry.issuedAt > this._ttlMs) return null;
-    return entry;
+    return parseCurrentPreparedTxEntry(entry);
   }
 
   /**
@@ -381,7 +392,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
     // evict_corrupt success branch).
     await invokeReleaseCallback({
       onRelease: this._onRelease,
-      slotId: entry.slotId,
+      sponsorAddress: entry.sponsorAddress,
       receiptId: entry.receiptId,
       txBytesHash: entry.txBytesHash,
       adapter: 'memory-prepare',
@@ -507,7 +518,7 @@ export class MemoryPrepareStore implements PrepareStoreAdapter {
         // Slot release — best effort, independent of coordinator cleanup.
         void invokeReleaseCallback({
           onRelease: this._onRelease,
-          slotId: entry.slotId,
+          sponsorAddress: entry.sponsorAddress,
           receiptId: entry.receiptId,
           txBytesHash: entry.txBytesHash,
           adapter: 'memory-prepare',

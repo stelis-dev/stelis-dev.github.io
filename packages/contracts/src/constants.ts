@@ -12,68 +12,8 @@ import type {
 } from './types.js';
 
 // ─────────────────────────────────────────────
-// Settle entrypoint names (discriminator literals)
-// ─────────────────────────────────────────────
-
-/** settle module identifier */
-export const SETTLE_MODULE = 'settle';
-
-// ── bfq (base_for_quote): Pool<Token, SUI> ──────────────────────────
-export const SWAP_AND_SETTLE_NEW_USER_BFQ = 'swap_and_settle_new_user_bfq';
-export const SWAP_AND_SETTLE_WITH_VAULT_BFQ = 'swap_and_settle_with_vault_bfq';
-
-// ── qfb (quote_for_base): Pool<SUI, Token> ──────────────────────────
-export const SWAP_AND_SETTLE_NEW_USER_QFB = 'swap_and_settle_new_user_qfb';
-export const SWAP_AND_SETTLE_WITH_VAULT_QFB = 'swap_and_settle_with_vault_qfb';
-
-/** credit-only settlement (no swap) */
-export const SETTLE_WITH_CREDIT_FUNCTION = 'settle_with_credit';
-
-/** All valid settle entry-point function names (L1 allowlist). */
-export const SETTLE_FUNCTIONS = new Set([
-  SWAP_AND_SETTLE_NEW_USER_BFQ,
-  SWAP_AND_SETTLE_WITH_VAULT_BFQ,
-  SWAP_AND_SETTLE_NEW_USER_QFB,
-  SWAP_AND_SETTLE_WITH_VAULT_QFB,
-  SETTLE_WITH_CREDIT_FUNCTION,
-]);
-
-// ─────────────────────────────────────────────
 // Settlement swap direction data tables and lookups
 // ─────────────────────────────────────────────
-
-/**
- * Map settlementSwapDirection → [new_user function, with_vault function].
- * Used by PTB builders and parseSettleArgs to resolve function names.
- */
-export const SETTLEMENT_SWAP_DIRECTION_FUNCTIONS: Record<
-  SettlementSwapDirection,
-  { newUser: string; withVault: string }
-> = {
-  baseForQuote: {
-    newUser: SWAP_AND_SETTLE_NEW_USER_BFQ,
-    withVault: SWAP_AND_SETTLE_WITH_VAULT_BFQ,
-  },
-  quoteForBase: {
-    newUser: SWAP_AND_SETTLE_NEW_USER_QFB,
-    withVault: SWAP_AND_SETTLE_WITH_VAULT_QFB,
-  },
-};
-
-/**
- * Derive SettlementSwapDirection from a settle function name.
- * Returns undefined for credit-only settlement or unknown functions.
- */
-export function settlementSwapDirectionFromFunctionName(
-  fnName: string,
-): SettlementSwapDirection | undefined {
-  for (const [direction, fns] of Object.entries(SETTLEMENT_SWAP_DIRECTION_FUNCTIONS)) {
-    if (fns.newUser === fnName || fns.withVault === fnName) {
-      return direction as SettlementSwapDirection;
-    }
-  }
-  return undefined;
-}
 
 /**
  * Canonical SettlementSwapDirection ↔ ordered per-hop swapDirection vector mapping.
@@ -140,31 +80,23 @@ export const SUI_TYPE =
   '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
 
 // ─────────────────────────────────────────────
-// Integrity policy version
-// ─────────────────────────────────────────────
-
-/**
- * Integrity policy version shared by SDK and server code.
- *
- * Both the SDK (client-side verification) and the server (/relay/config)
- * must reference this constant. Changing it in one place updates both.
- */
-export const INTEGRITY_POLICY_VERSION = 1;
-
-// ─────────────────────────────────────────────
 // DeepBook IDs per network
 // ─────────────────────────────────────────────
 
 /** DeepBook-related contract IDs per network. */
 export interface DeepBookIds {
-  /** DeepBook v3 package ID */
+  /** Current published storage/call-target package ID. */
   readonly packageId: string;
   /** DEEP token type (full Move type string) */
   readonly deepType: string;
 }
 
 /**
- * Canonical DeepBook IDs per network.
+ * Canonical DeepBook published IDs per network.
+ *
+ * `packageId` is the current storage/call target for PTB and read-only Move
+ * calls. Compiled ModuleIds and MoveAbort locations use DeepBook's distinct
+ * original/runtime identity, generated in `settlementContract.ts`.
  *
  * - `testnet`: deployed testnet IDs.
  * - `mainnet`: deployed DeepBook mainnet IDs.

@@ -38,7 +38,6 @@ Returns runtime capability:
 - `supportedSettlementSwapPaths`
 - `quotedHostFeeMist`
 - `protocolFlatFeeMist`
-- `integrityPolicyVersion`
 
 Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement token list and settlement swap path list.
 Each `settlementTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `settlementTokenType`; clients do not send a pool ID or path ID.
@@ -85,7 +84,7 @@ Minimal JSON body:
 The user-supplied `User TransactionKind` must satisfy these rules:
 
 - It contains zero Stelis settlement calls. The Host appends exactly one settlement call later.
-- It contains at most `MAX_COMMANDS = 16` commands.
+- It contains at most `MAX_GENERIC_USER_COMMANDS = 11` commands. The Host reserves five commands for the current generic settlement suffix so the final transaction remains within `MAX_FINAL_COMMANDS = 16`.
 - It does not reference `GasCoin` in command arguments.
 - It does not include `Publish` or `Upgrade`.
 - It does not call unauthorized Stelis package functions. `vault::withdraw` is allowed.
@@ -145,7 +144,7 @@ Minimal JSON body:
 The route validates the prepared record, checks the transaction again, adds the sponsor signature, and submits.
 
 The submitted `txBytes` must match the prepared record bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, consumes the prepared record once, and then re-parses settlement fields from the stored-hash-verified transaction bytes.
-The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
+The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call and at most `MAX_FINAL_COMMANDS = 16` commands. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
 The `executionCostClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
 ## Studio Promotion Routes
@@ -164,7 +163,7 @@ Mounted routes:
 - `POST /studio/promotions/:id/prepare`
 - `POST /studio/promotions/:id/sponsor`
 
-Promotion prepare uses `senderAddress` and `txKindBytes`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`.
+Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before consume.
 
 ## Auth Routes
 
@@ -172,7 +171,7 @@ Promotion prepare uses `senderAddress` and `txKindBytes`. Promotion sponsor uses
 
 Mounted auth routes:
 
-- `GET /auth/nonce`
+- `POST /auth/nonce`
 - `POST /auth/verify`
 - `POST /auth/renew`
 - `POST /auth/logout`
@@ -190,7 +189,7 @@ Mounted admin routes:
 - `GET /api/sponsored-logs/summary`
 - `GET /api/sponsored-logs`
 - `GET /api/sponsor-operations`
-- `GET /api/sponsor-refill-account/withdraw`
+- `POST /api/sponsor-refill-account/withdrawal-challenge`
 - `POST /api/sponsor-refill-account/withdraw`
 - `GET /api/settlement-swap-paths`
 - `GET /api/studio`

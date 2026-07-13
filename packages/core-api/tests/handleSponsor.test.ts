@@ -21,6 +21,7 @@ import { toBase64, toBase58 } from '@mysten/sui/utils';
 import { bcs } from '@mysten/sui/bcs';
 import { GAS_VARIANCE_FIXED_MIST, sha256Bytes } from '@stelis/core-relay';
 import {
+  DEEPBOOK_MIN_OUT_ABORT,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   SETTLE_WITH_CREDIT_FUNCTION,
   SLIPPAGE_CAP_BPS,
@@ -44,7 +45,12 @@ import type {
   SponsorResultCallback,
   SponsorResultMetadata,
 } from '../src/handlers/sponsorResult.js';
-import type { GenericPreparedTxEntry, PreparedTxEntry } from '../src/store/prepareTypes.js';
+import type {
+  GenericPreparedTxEntry,
+  PreparedTxEntry,
+  PromotionPreparedTxEntry,
+} from '../src/store/prepareTypes.js';
+import { parseCurrentPreparedTxEntry } from '../src/store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../src/store/abuseBlockTypes.js';
 import {
   VAULT_DRIFT_NEW_USER_VAULT_EXISTS,
@@ -54,6 +60,15 @@ import {
 import type { PrepareStoreAdapter } from '../src/store/prepareTypes.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import {
+  congestedObjectsExecutionError,
+  grpcExecutionFailure,
+  grpcExecutionSuccess,
+  grpcSimulationFailure,
+  grpcSimulationSuccess,
+  moveAbortExecutionError,
+  unknownExecutionError,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Test constants
@@ -63,7 +78,6 @@ const CLIENT_IP = '192.168.1.100';
 const senderKeypair = Ed25519Keypair.generate();
 const SENDER = senderKeypair.toSuiAddress();
 const PAYMENT_ID = '0x' + 'cc'.repeat(32);
-const SLOT_ID = 'slot-1';
 const SWAP_POOL = '0x' + 'dd'.repeat(32);
 const SWAP_PAYMENT_TYPE = `0x${'de'.repeat(32)}::deep::DEEP`;
 const SWAP_ALLOWED_ROUTE = {
@@ -390,7 +404,6 @@ function makePreparedEntry(
     senderAddress: SENDER,
     nonce: 1n,
     txBytesHash,
-    slotId: SLOT_ID,
     sponsorAddress: SPONSOR_ADDRESS,
     clientIp: CLIENT_IP,
     executionPathKey: 'credit', // credit-only path for unit tests
@@ -404,10 +417,13 @@ function makeMockPrepareStore(
   peekResult: PreparedTxEntry | null = null,
   consumeResult: PreparedTxEntry | 'not_found' | 'expired' | 'hash_mismatch' = 'not_found',
 ): PrepareStoreAdapter {
+  const currentPeekResult = peekResult === null ? null : parseCurrentPreparedTxEntry(peekResult);
+  const currentConsumeResult =
+    typeof consumeResult === 'object' ? parseCurrentPreparedTxEntry(consumeResult) : consumeResult;
   return {
     store: vi.fn(),
-    consume: vi.fn().mockResolvedValue(consumeResult),
-    peek: vi.fn().mockResolvedValue(peekResult),
+    consume: vi.fn().mockResolvedValue(currentConsumeResult),
+    peek: vi.fn().mockResolvedValue(currentPeekResult),
     evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
     reserveNonce: vi.fn().mockResolvedValue(1n),
     releaseReservation: vi.fn().mockResolvedValue(undefined),
@@ -432,7 +448,6 @@ function makeMockSponsorPool(): SponsorPoolAdapter {
     size: 1,
     primaryAddress: SPONSOR_ADDRESS,
     checkout: vi.fn().mockResolvedValue({
-      slotId: SLOT_ID,
       sponsorAddress: SPONSOR_ADDRESS,
     }),
     commit: vi.fn().mockResolvedValue(undefined),
@@ -442,22 +457,19 @@ function makeMockSponsorPool(): SponsorPoolAdapter {
   };
 }
 
-function makeSuccessSimResult(digest = '0xdigest123') {
-  return {
-    Transaction: {
-      digest,
-      status: { success: true },
-      effects: {
-        gasUsed: { computationCost: '3000000', storageCost: '2000000', storageRebate: '500000' },
-      },
-    },
-  };
-}
-
 function makeMockSui(simResult?: unknown, execResult?: unknown) {
+  const gasUsed = {
+    computationCost: '3000000',
+    storageCost: '2000000',
+    storageRebate: '500000',
+  };
   return {
-    simulateTransaction: vi.fn().mockResolvedValue(simResult ?? makeSuccessSimResult()),
-    executeTransaction: vi.fn().mockResolvedValue(execResult ?? makeSuccessSimResult()),
+    simulateTransaction: vi
+      .fn()
+      .mockResolvedValue(simResult ?? grpcSimulationSuccess('0xdigest123', gasUsed)),
+    executeTransaction: vi
+      .fn()
+      .mockResolvedValue(execResult ?? grpcExecutionSuccess('0xdigest123', gasUsed)),
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
@@ -470,6 +482,28 @@ function makeMockSui(simResult?: unknown, execResult?: unknown) {
         },
       },
     }),
+  };
+}
+
+function executionSuccessWithoutValidGas(digest: string) {
+  const result = grpcExecutionSuccess(digest);
+  return {
+    ...result,
+    Transaction: {
+      ...result.Transaction,
+      effects: { ...result.Transaction.effects, gasUsed: {} },
+    },
+  };
+}
+
+function simulationSuccessWithoutValidGas(digest: string) {
+  const result = grpcSimulationSuccess(digest);
+  return {
+    ...result,
+    Transaction: {
+      ...result.Transaction,
+      effects: { ...result.Transaction.effects, gasUsed: {} },
+    },
   };
 }
 
@@ -491,12 +525,8 @@ function makeMockContext(
     packageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
-    // Trusted DeepBook package ID for sponsor-time abort classification.
-    // Test fixtures use the same Stelis package ID for DeepBook so an
-    // abort message like `MoveAbort(0xPKG::pool::swap_exact_quantity, 12)`
-    // would classify; however the mock fixtures below do not exercise
-    // that path, so any value matching the test's abort fixtures is
-    // sufficient.
+    // Published DeepBook call-target ID retained for prepare/quote paths.
+    // Abort classification uses the generated runtime identity instead.
     deepbookPackageId: MOCK_CONFIG.packageId,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker: overrides.abuseBlocker ?? makeMockAbuseBlocker(),
@@ -609,7 +639,7 @@ describe('handleSponsor', () => {
     expect(result.effects).toBeDefined();
     // checkin must present the prepared entry's committed txBytesHash so the
     // pool CAS releases the slot.
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, txHash);
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(SPONSOR_ADDRESS, PAYMENT_ID, txHash);
     expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
     const logData = JSON.parse(consoleInfoSpy.mock.calls[0][0] as string) as Record<
       string,
@@ -646,7 +676,11 @@ describe('handleSponsor', () => {
     );
 
     expect(result.digest).toBe('0xdigest123');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 2: PREPARED_TX_NOT_FOUND ───────────────────────────────────────────
@@ -811,7 +845,8 @@ describe('handleSponsor', () => {
     });
 
     try {
-      await prepareStore.store(PAYMENT_ID, prepared);
+      const { issuedAt: _issuedAt, ...draft } = prepared;
+      await prepareStore.store(draft);
 
       const err = await handleSponsor(
         ctx,
@@ -979,7 +1014,7 @@ describe('handleSponsor', () => {
   // GAS_OWNER_MISMATCH is a post-consume internal inconsistency. The
   // submitted bytes are stored-hash-verified by consume(), so the gas owner embedded
   // in the PTB is exactly what /prepare built. If it differs from
-  // prepared.sponsorAddress it means slot identity coordination failed
+  // prepared.sponsorAddress it means sponsor lease identity coordination failed
   // server-side — not user tampering.
   //
   // Current behaviour:
@@ -1023,7 +1058,11 @@ describe('handleSponsor', () => {
     expect(driftLog!['receipt_id']).toBe(PAYMENT_ID);
 
     // Slot must still be checked in (finally block guarantees this)
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 7: Preflight fails (status.success = false) ────────────────────────
@@ -1034,12 +1073,7 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail',
-        effects: { status: { success: false, error: { message: 'InsufficientBalance' } } },
-      },
-    };
+    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('InsufficientBalance'));
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1066,7 +1100,11 @@ describe('handleSponsor', () => {
       'ONCHAIN_REVERT',
       expect.anything(),
     );
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
     expect(sponsorPool.sign).not.toHaveBeenCalled();
   });
 
@@ -1083,12 +1121,7 @@ describe('handleSponsor', () => {
       new Error('redis unreachable'),
     );
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail',
-        effects: { status: { success: false, error: { message: 'InsufficientBalance' } } },
-      },
-    };
+    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('InsufficientBalance'));
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1133,7 +1166,11 @@ describe('handleSponsor', () => {
       expect(recorderFailed!['error']).toBe('redis unreachable');
 
       // finally{} slot checkin still runs.
-      expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+      expect(sponsorPool.checkin).toHaveBeenCalledWith(
+        SPONSOR_ADDRESS,
+        PAYMENT_ID,
+        expect.any(String),
+      );
       expect(sponsorPool.sign).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
@@ -1147,10 +1184,7 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
-    const failedSim = {
-      $kind: 'FailedTransaction',
-      FailedTransaction: { status: { error: { message: 'MoveAbort', $kind: 'MoveAbort' } } },
-    };
+    const failedSim = grpcSimulationFailure('0xmove-abort', moveAbortExecutionError('MoveAbort'));
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1187,18 +1221,12 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const staleNonceSim = {
-      Transaction: {
-        digest: '0xstale',
-        status: {
-          success: false,
-          error: {
-            message:
-              'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::vault::check_and_advance_nonce, 1) in command 0',
-          },
-        },
-      },
-    };
+    const staleNonceReason =
+      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::vault::check_and_advance_nonce, 1) in command 0';
+    const staleNonceSim = grpcSimulationFailure(
+      '0xstale',
+      moveAbortExecutionError(staleNonceReason, '1'),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1220,7 +1248,11 @@ describe('handleSponsor', () => {
       { subcode: 'REPLAY_NONCE', executionPathKey: 'credit' },
     );
     expect(sponsorPool.sign).not.toHaveBeenCalled();
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 9: Onchain revert ──────────────────────────────────────────────────
@@ -1231,15 +1263,11 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const execResult = {
-      Transaction: {
-        digest: '0xrevert',
-        effects: {
-          status: { success: false, error: { message: 'MoveAbort(code: 7)' } },
-          gasUsed: { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
-        },
-      },
-    };
+    const execResult = grpcExecutionFailure(
+      '0xrevert',
+      moveAbortExecutionError('MoveAbort(code: 7)', '7'),
+      { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1260,7 +1288,11 @@ describe('handleSponsor', () => {
       storageCost: '1000000',
       storageRebate: '500000',
     });
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
     // Verify ONCHAIN_REVERT abuse was recorded with the stored-hash-verified sender and route metadata.
     expect(abuseBlocker.recordSponsorFailure).toHaveBeenCalledWith(
       CLIENT_IP,
@@ -1283,18 +1315,7 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const execResult = {
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        digest: '0xcongested',
-        status: {
-          error: {
-            $kind: 'ExecutionCancelledDueToSharedObjectCongestion',
-            message: 'ExecutionCancelledDueToSharedObjectCongestion',
-          },
-        },
-      },
-    };
+    const execResult = grpcExecutionFailure('0xcongested', congestedObjectsExecutionError());
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1308,7 +1329,11 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ),
     ).rejects.toThrow(SponsorCongestionError);
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 10b: Path A — top-level throw does NOT record ONCHAIN_REVERT ──────
@@ -1336,7 +1361,11 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ),
     ).rejects.toThrow('connection refused');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
     // ONCHAIN_REVERT must NOT be recorded — Path A is RPC/network, not on-chain revert
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalledWith(
       CLIENT_IP,
@@ -1363,7 +1392,11 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
     expect(sponsorPool.checkin).toHaveBeenCalledTimes(1);
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 12: Slot checkin on preflight error ────────────────────────────────
@@ -1373,12 +1406,7 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail',
-        effects: { status: { success: false, error: { message: 'Fail' } } },
-      },
-    };
+    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('Fail'));
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1393,7 +1421,11 @@ describe('handleSponsor', () => {
       ),
     ).rejects.toThrow();
     expect(sponsorPool.checkin).toHaveBeenCalledTimes(1);
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 13: Slot checkin on onchain error ──────────────────────────────────
@@ -1403,15 +1435,11 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const execResult = {
-      Transaction: {
-        digest: '0xrevert2',
-        effects: {
-          status: { success: false, error: { message: 'Abort' } },
-          gasUsed: { computationCost: '1', storageCost: '1', storageRebate: '0' },
-        },
-      },
-    };
+    const execResult = grpcExecutionFailure('0xrevert2', unknownExecutionError('Abort'), {
+      computationCost: '1',
+      storageCost: '1',
+      storageRebate: '0',
+    });
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1426,7 +1454,11 @@ describe('handleSponsor', () => {
       ),
     ).rejects.toThrow();
     expect(sponsorPool.checkin).toHaveBeenCalledTimes(1);
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 14: Invalid txBytes format ─────────────────────────────────────────
@@ -1566,7 +1598,11 @@ describe('handleSponsor', () => {
     );
 
     expect(result.digest).toBe('0xdigest123');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 17b: drift classification — L2 env drift → REPREPARE_REQUIRED ─
@@ -1620,7 +1656,11 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // Slot checked in despite the error
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
 
     // Structured observability: SPONSOR_DRIFT_OBSERVED must be emitted
     const driftLog = consoleInfoSpy.mock.calls
@@ -1680,7 +1720,11 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('REPREPARE_REQUIRED');
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
-      expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+      expect(sponsorPool.checkin).toHaveBeenCalledWith(
+        SPONSOR_ADDRESS,
+        PAYMENT_ID,
+        expect.any(String),
+      );
 
       const driftLog = consoleInfoSpy.mock.calls
         .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
@@ -1749,10 +1793,8 @@ describe('handleSponsor', () => {
   // ── 18: L3 nonloss failure from tx-derived values → L3_NONLOSS_VIOLATION ──
   //
   // L3 reads gasVarianceFixedMist, slippageBufferMist, and
-  // executionCostClaim from the parsed settleArgs (tx-derived). This test proves
-  // that the decision comes from the PTB itself — the store copy is set
-  // to "correct" values so the only way L3 can fail is if the tx-derived
-  // side of the check is authoritative.
+  // executionCostClaim from the parsed settleArgs (tx-derived). The current
+  // Generic prepared-entry shape carries none of those values.
 
   it('rejects with L3_NONLOSS_VIOLATION when tx-derived executionCostClaim is below required', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS, {
@@ -1760,14 +1802,7 @@ describe('handleSponsor', () => {
       // (~4_500_000n from the mock) + gasVarianceFixed (250_000n) + slippage (0n).
       settleOverrides: { executionCostClaim: 10_000n },
     });
-    // Store copy is deliberately "correct" so that the failure can only
-    // come from the tx-derived side of the check.
-    const prepared = makePreparedEntry(txHash, {
-      executionCostClaim: 5_250_000n,
-      simGas: 5_000_000n,
-      gasVarianceFixedMist: 250_000n,
-      slippageBufferMist: 0n,
-    });
+    const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const ctx = makeMockContext({
@@ -1786,33 +1821,11 @@ describe('handleSponsor', () => {
     expect(sponsorPool.sign).not.toHaveBeenCalled();
 
     // Slot must be checked in even on L3 failure
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
-  });
-
-  // ── 18b: L3 ignores forged store audit fields → decision is tx-derived ──
-  //
-  // A coherent tx-derived payload must pass even when non-authoritative
-  // store audit copies are forged. L3 must not read store copies.
-
-  it('L3 nonloss passes when tx-derived values are coherent, even if store audit copies are zero', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash, {
-      // Forge store audit fields to zero — should be ignored.
-      executionCostClaim: 0n,
-      gasVarianceFixedMist: 0n,
-      slippageBufferMist: 0n,
-    });
-    const userSig = await buildValidSignature(txBytes);
-    const ctx = makeMockContext({
-      prepareStore: makeMockPrepareStore(prepared, prepared),
-    });
-
-    const result = await handleSponsor(
-      ctx,
-      { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-      CLIENT_IP,
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
     );
-    expect(result.digest).toBe('0xdigest123');
   });
 
   // ── 19: L3 fail-closed when gasUsed is absent ─────────────────────────
@@ -1822,18 +1835,12 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
 
-    // Simulate a response where effects has no gasUsed
-    const simResult = {
-      Transaction: {
-        digest: '0xdigest_no_gas',
-        status: { success: true },
-        effects: {}, // no gasUsed
-      },
-    };
+    // Terminal status is valid, but the gas summary is not usable.
+    const simResult = simulationSuccessWithoutValidGas('0xdigest_no_gas');
     const sponsorPool = makeMockSponsorPool();
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
-      sui: makeMockSui(simResult, makeSuccessSimResult()),
+      sui: makeMockSui(simResult),
       sponsorPool,
     });
 
@@ -1846,41 +1853,33 @@ describe('handleSponsor', () => {
     ).rejects.toThrow(SponsorPreflightError);
 
     // Slot must be checked in
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 20: Negative raw simGas clamp to 0 ──────────────────────────────────
 
   it('clamps negative raw simGas to 0 and passes L3 (storageRebate > comp+storage)', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    // prepared with simGas=0, gasVariance=0 — edge case from rebate-heavy TX.
-    // executionCostClaim must match txBytes settle value (5_250_000n) for equality binding.
-    const prepared = makePreparedEntry(txHash, {
-      simGas: 0n,
-      gasVarianceFixedMist: 0n,
-      slippageBufferMist: 0n,
-    });
+    const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
 
     // Simulation returns storageRebate > comp+storage → negative raw simGas
-    const negativeGasSimResult = {
-      Transaction: {
-        digest: '0xdigest_negative_gas',
-        status: { success: true },
-        effects: {
-          gasUsed: {
-            computationCost: '1000000',
-            storageCost: '500000',
-            storageRebate: '3000000', // 3M > 1M + 0.5M = 1.5M → raw = -1.5M → clamp to 0
-          },
-        },
-      },
+    const negativeGas = {
+      computationCost: '1000000',
+      storageCost: '500000',
+      storageRebate: '3000000', // 3M > 1M + 0.5M = 1.5M → raw = -1.5M → clamp to 0
     };
+    const negativeGasSimResult = grpcSimulationSuccess('0xdigest_negative_gas', negativeGas);
+    const negativeGasExecResult = grpcExecutionSuccess('0xdigest_negative_gas', negativeGas);
     const sponsorPool = makeMockSponsorPool();
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
-      sui: makeMockSui(negativeGasSimResult, negativeGasSimResult),
+      sui: makeMockSui(negativeGasSimResult, negativeGasExecResult),
     });
 
     const result = await handleSponsor(
@@ -1890,7 +1889,11 @@ describe('handleSponsor', () => {
     );
 
     expect(result.digest).toBe('0xdigest_negative_gas');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── orderId echo ────────────────────────────────────────────────────
@@ -1976,7 +1979,11 @@ describe('handleSponsor', () => {
     expect(driftLog!['stage']).toBe('l2_settle_args');
 
     // Slot must be checked in
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
   // ─────────────────────────────────────────────
   // Step 7: SponsorLeaseExpiredError propagation
@@ -1990,7 +1997,7 @@ describe('handleSponsor', () => {
     const sponsorPool = makeMockSponsorPool();
     // pool.sign() rejects with SponsorLeaseExpiredError (typed — no string matching)
     (sponsorPool.sign as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new SponsorLeaseExpiredError(SLOT_ID),
+      new SponsorLeaseExpiredError(SPONSOR_ADDRESS),
     );
 
     const ctx = makeMockContext({
@@ -2007,14 +2014,18 @@ describe('handleSponsor', () => {
     ).rejects.toThrow(SponsorLeaseExpiredError);
 
     // Slot must still be checked in (outer finally cleanup)
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   it('SponsorLeaseExpiredError has correct code property', () => {
-    const err = new SponsorLeaseExpiredError('slot-test');
+    const err = new SponsorLeaseExpiredError('0xsponsor-test');
     expect(err.code).toBe('LEASE_EXPIRED');
     expect(err.name).toBe('SponsorLeaseExpiredError');
-    expect(err.message).toContain('slot-test');
+    expect(err.message).toContain('0xsponsor-test');
   });
 
   // ── 22b: Preflight abort 101 → subcode: CLAIM_WOULD_EXCEED_MAX ───────
@@ -2025,21 +2036,13 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail_claim',
-        status: {
-          success: false,
-          error: {
-            message:
-              'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 5',
-          },
-        },
-        effects: {
-          gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-        },
-      },
-    };
+    const reason =
+      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 0';
+    const failedSim = grpcSimulationFailure(
+      '0xfail_claim',
+      moveAbortExecutionError(reason, '101'),
+      { computationCost: '1000', storageCost: '500', storageRebate: '200' },
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -2055,7 +2058,11 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorPreflightError);
     expect((err as SponsorPreflightError).subcode).toBe('CLAIM_WOULD_EXCEED_MAX');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 22c: On-chain revert abort 101 → subcode: CLAIM_WOULD_EXCEED_MAX ──
@@ -2066,21 +2073,13 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const execResult = {
-      Transaction: {
-        digest: '0xrevert_claim',
-        effects: {
-          status: {
-            success: false,
-            error: {
-              message:
-                'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 3',
-            },
-          },
-          gasUsed: { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
-        },
-      },
-    };
+    const reason =
+      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 0';
+    const execResult = grpcExecutionFailure(
+      '0xrevert_claim',
+      moveAbortExecutionError(reason, '101'),
+      { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -2097,38 +2096,40 @@ describe('handleSponsor', () => {
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('CLAIM_WOULD_EXCEED_MAX');
     expect((err as SponsorOnchainError).digest).toBe('0xrevert_claim');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 23: Preflight abort 110 → subcode: SPREAD_EXCEEDED ────────────────
 
   it('throws SponsorPreflightError with subcode SPREAD_EXCEEDED on abort 110 in preflight', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash);
+    const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
+    const prepared = makePreparedEntry(txHash, {
+      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+    });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail_spread',
-        status: {
-          success: false,
-          error: {
-            message:
-              'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 5',
-          },
-        },
-        effects: {
-          gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-        },
-      },
-    };
+    const reason =
+      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 1';
+    const failedSim = grpcSimulationFailure(
+      '0xfail_spread',
+      moveAbortExecutionError(reason, '110'),
+      { computationCost: '1000', storageCost: '500', storageRebate: '200' },
+    );
+    const sui = makeMockSui(failedSim);
+    attachVaultLookup(sui, { kind: 'no_vault' });
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
       sponsorPool,
-      sui: makeMockSui(failedSim),
+      sui,
     });
+    ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
+    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2138,38 +2139,40 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorPreflightError);
     expect((err as SponsorPreflightError).subcode).toBe('SPREAD_EXCEEDED');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 24: On-chain revert abort 110 → subcode: SPREAD_EXCEEDED ──────────
 
   it('throws SponsorOnchainError with subcode SPREAD_EXCEEDED on abort 110 in execution', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash);
+    const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
+    const prepared = makePreparedEntry(txHash, {
+      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+    });
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const execResult = {
-      Transaction: {
-        digest: '0xrevert_spread',
-        effects: {
-          status: {
-            success: false,
-            error: {
-              message:
-                'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 3',
-            },
-          },
-          gasUsed: { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
-        },
-      },
-    };
+    const reason =
+      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 1';
+    const execResult = grpcExecutionFailure(
+      '0xrevert_spread',
+      moveAbortExecutionError(reason, '110'),
+      { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
+    );
+    const sui = makeMockSui(undefined, execResult);
+    attachVaultLookup(sui, { kind: 'no_vault' });
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
       abuseBlocker,
-      sui: makeMockSui(undefined, execResult),
+      sui,
     });
+    ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
+    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2180,38 +2183,39 @@ describe('handleSponsor', () => {
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('SPREAD_EXCEEDED');
     expect((err as SponsorOnchainError).digest).toBe('0xrevert_spread');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 25: Preflight abort 12 (DeepBook min_out) → subcode: SLIPPAGE_EXCEEDED ─
 
   it('throws SponsorPreflightError with subcode SLIPPAGE_EXCEEDED on abort 12 in preflight', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash);
+    const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
+    const prepared = makePreparedEntry(txHash, {
+      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+    });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = {
-      Transaction: {
-        digest: '0xfail_slippage',
-        status: {
-          success: false,
-          error: {
-            message:
-              "Transaction resolution failed: MoveAbort in 5th command, abort code: 12, in '0x1111111111111111111111111111111111111111111111111111111111111111::pool::swap_exact_quantity' (instruction 165)",
-          },
-        },
-        effects: {
-          gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-        },
-      },
-    };
+    const reason = `Transaction resolution failed: MoveAbort in 2nd command, abort code: ${DEEPBOOK_MIN_OUT_ABORT.code}, in '${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::${DEEPBOOK_MIN_OUT_ABORT.modulePath}' (instruction 165)`;
+    const failedSim = grpcSimulationFailure(
+      '0xfail_slippage',
+      moveAbortExecutionError(reason, String(DEEPBOOK_MIN_OUT_ABORT.code)),
+      { computationCost: '1000', storageCost: '500', storageRebate: '200' },
+    );
+    const sui = makeMockSui(failedSim);
+    attachVaultLookup(sui, { kind: 'no_vault' });
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
       sponsorPool,
-      sui: makeMockSui(failedSim),
+      sui,
     });
+    ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
+    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2221,38 +2225,39 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorPreflightError);
     expect((err as SponsorPreflightError).subcode).toBe('SLIPPAGE_EXCEEDED');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 26: On-chain revert abort 12 (DeepBook min_out) → subcode: SLIPPAGE_EXCEEDED ─
 
   it('throws SponsorOnchainError with subcode SLIPPAGE_EXCEEDED on abort 12 in execution', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash);
+    const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
+    const prepared = makePreparedEntry(txHash, {
+      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+    });
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const execResult = {
-      Transaction: {
-        digest: '0xrevert_slippage',
-        effects: {
-          status: {
-            success: false,
-            error: {
-              message:
-                "Transaction resolution failed: MoveAbort in 5th command, abort code: 12, in '0x1111111111111111111111111111111111111111111111111111111111111111::pool::swap_exact_quantity' (instruction 165)",
-            },
-          },
-          gasUsed: { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
-        },
-      },
-    };
+    const reason = `Transaction resolution failed: MoveAbort in 2nd command, abort code: ${DEEPBOOK_MIN_OUT_ABORT.code}, in '${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::${DEEPBOOK_MIN_OUT_ABORT.modulePath}' (instruction 165)`;
+    const execResult = grpcExecutionFailure(
+      '0xrevert_slippage',
+      moveAbortExecutionError(reason, String(DEEPBOOK_MIN_OUT_ABORT.code)),
+      { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
+    );
+    const sui = makeMockSui(undefined, execResult);
+    attachVaultLookup(sui, { kind: 'no_vault' });
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
       abuseBlocker,
-      sui: makeMockSui(undefined, execResult),
+      sui,
     });
+    ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
+    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2263,24 +2268,22 @@ describe('handleSponsor', () => {
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('SLIPPAGE_EXCEEDED');
     expect((err as SponsorOnchainError).digest).toBe('0xrevert_slippage');
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ── 27: MODE_MISMATCH — promotion entry rejected by generic sponsor ───
 
   it('throws MODE_MISMATCH when consume returns a promotion-mode entry', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const promoted: PreparedTxEntry = {
+    const promoted: PromotionPreparedTxEntry = {
       issuedAt: Date.now(),
       receiptId: PAYMENT_ID,
       senderAddress: SENDER,
-      executionCostClaim: 5_250_000n,
-      simGas: 5_000_000n,
-      gasVarianceFixedMist: 250_000n,
-      slippageBufferMist: 0n,
-      grossGas: 7_000_000n,
       txBytesHash: txHash,
-      slotId: SLOT_ID,
       sponsorAddress: SPONSOR_ADDRESS,
       clientIp: CLIENT_IP,
       executionPathKey: 'promotion:promo-test',
@@ -2289,6 +2292,7 @@ describe('handleSponsor', () => {
       mode: 'promotion',
       promotionId: 'promo-test',
       userId: 'user-1',
+      reservedGasMist: 7_000_000n,
     };
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
@@ -2306,7 +2310,11 @@ describe('handleSponsor', () => {
     expect(err).toBeInstanceOf(SponsorValidationError);
     expect((err as SponsorValidationError).code).toBe('MODE_MISMATCH');
     // Slot must be returned
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(
+      SPONSOR_ADDRESS,
+      PAYMENT_ID,
+      expect.any(String),
+    );
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -2497,7 +2505,11 @@ describe('handleSponsor', () => {
       // consume() happened before the block rejection.
       expect(ctx.prepareStore.consume).toHaveBeenCalled();
       // Slot was returned on the blocked path.
-      expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, expect.any(String));
+      expect(sponsorPool.checkin).toHaveBeenCalledWith(
+        SPONSOR_ADDRESS,
+        PAYMENT_ID,
+        expect.any(String),
+      );
     });
 
     it('leaked receiptId alone cannot destroy session: RECEIPT_SESSION_MISMATCH before consume()', async () => {
@@ -2567,7 +2579,7 @@ describe('handleSponsor', () => {
   //      — NOT SponsorPreflightError (would invite unsafe retries).
   //   2. Observability: `SPONSOR_EXEC_GAS_USED_MISSING` structured warn
   //      event with the locked payload (route, digest, receipt_id,
-  //      sender, client_ip, slot_id, sponsor_address, execution_path_key).
+  //      sender, client_ip, sponsor_address, execution_path_key).
   //   3. No abuse attribution: server-observed edge case on a successfully
   //      submitted TX — must not increment any abuse counter.
   //   4. Cleanup: slot is checked in via the finally block.
@@ -2577,14 +2589,8 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
 
-    // Execution succeeds but effects have no gasUsed — Sui gRPC edge case.
-    const execResultNoGas = {
-      Transaction: {
-        digest: '0xdigest_exec_no_gas',
-        status: { success: true },
-        effects: {}, // no gasUsed
-      },
-    };
+    // Terminal evidence is valid, but the gas summary is unusable.
+    const execResultNoGas = executionSuccessWithoutValidGas('0xdigest_exec_no_gas');
     const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
@@ -2620,7 +2626,6 @@ describe('handleSponsor', () => {
     expect(missingGasLog!['receipt_id']).toBe(PAYMENT_ID);
     expect(missingGasLog!['sender']).toBe(SENDER);
     expect(missingGasLog!['client_ip']).toBe(CLIENT_IP);
-    expect(missingGasLog!['slot_id']).toBe(SLOT_ID);
     expect(missingGasLog!['sponsor_address']).toBe(SPONSOR_ADDRESS);
     expect(missingGasLog!['execution_path_key']).toBe('credit');
 
@@ -2628,7 +2633,7 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // (4) Slot is checked in with the committed txBytesHash
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SLOT_ID, PAYMENT_ID, txHash);
+    expect(sponsorPool.checkin).toHaveBeenCalledWith(SPONSOR_ADDRESS, PAYMENT_ID, txHash);
 
     consoleWarnSpy.mockRestore();
   });
@@ -2691,9 +2696,9 @@ describe('handleSponsor', () => {
 
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0]).toMatchObject({
-        slotId: SLOT_ID,
         sponsorAddress: SPONSOR_ADDRESS,
         outcome: 'success',
+        executionStage: 'on_chain',
         route: 'generic',
         digest: '0xdigest123',
       });
@@ -2703,8 +2708,13 @@ describe('handleSponsor', () => {
       if (probe.calls[0].economics.economicsStatus === 'known') {
         expect(probe.calls[0].economics.grossGasMist).not.toBeNull();
         expect(probe.calls[0].economics.storageRebateMist).not.toBeNull();
-        expect(probe.calls[0].economics.recoveredGasMist).toBeDefined();
-        expect(probe.calls[0].economics.hostPaidGasMist).toBeDefined();
+        expect(probe.calls[0].economics.recoveredGasMist).toBe(
+          DEFAULT_TX_SETTLE_VALUES.executionCostClaim.toString(),
+        );
+        expect(probe.calls[0].economics.hostFeeMist).toBe(
+          DEFAULT_TX_SETTLE_VALUES.quotedHostFeeMist.toString(),
+        );
+        expect(probe.calls[0].economics.hostPaidGasMist).toBe('4500000');
       }
       // Ordering: pool.checkin fires before callback.
       expect(order).toEqual(['checkin', 'callback']);
@@ -2717,13 +2727,7 @@ describe('handleSponsor', () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      const execResultNoGas = {
-        Transaction: {
-          digest: '0xdigest_exec_no_gas',
-          status: { success: true },
-          effects: {},
-        },
-      };
+      const execResultNoGas = executionSuccessWithoutValidGas('0xdigest_exec_no_gas');
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const probe = collectingCallback();
       const ctx = makeMockContext({
@@ -2745,8 +2749,9 @@ describe('handleSponsor', () => {
       // Sponsor result callback sees success because the TX really did submit.
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0]).toMatchObject({
-        slotId: SLOT_ID,
+        sponsorAddress: SPONSOR_ADDRESS,
         outcome: 'success',
+        executionStage: 'on_chain',
         digest: '0xdigest_exec_no_gas',
       });
       // Economics block: gasUsed-missing edge path → unknown economics
@@ -2762,21 +2767,12 @@ describe('handleSponsor', () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      // `signAndSubmit` classifies an on-chain revert via
-      // `tx.effects.status.success === false` on a `Transaction` result.
-      const execRevert = {
-        Transaction: {
-          digest: '0xreverted_digest',
-          effects: {
-            status: { success: false, error: { message: 'MoveAbort(code: 7)' } },
-            gasUsed: {
-              computationCost: '1000000',
-              storageCost: '1000000',
-              storageRebate: '500000',
-            },
-          },
-        },
-      };
+      // Use the current Sui client's discriminated terminal union.
+      const execRevert = grpcExecutionFailure(
+        '0xreverted_digest',
+        moveAbortExecutionError('MoveAbort(code: 7)', '7'),
+        { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
+      );
       const probe = collectingCallback();
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -2793,6 +2789,7 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorOnchainError);
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('onchain_revert');
+      expect(probe.calls[0].executionStage).toBe('on_chain');
       expect(probe.calls[0].digest).toBe('0xreverted_digest');
     });
 
@@ -2802,18 +2799,7 @@ describe('handleSponsor', () => {
       const userSig = await buildValidSignature(txBytes);
       // `signAndSubmit` classifies shared-object congestion via the
       // `$kind: 'FailedTransaction'` wrapper + congestion error kind.
-      const execCongestion = {
-        $kind: 'FailedTransaction',
-        FailedTransaction: {
-          digest: '0xcongested',
-          status: {
-            error: {
-              $kind: 'ExecutionCancelledDueToSharedObjectCongestion',
-              message: 'ExecutionCancelledDueToSharedObjectCongestion',
-            },
-          },
-        },
-      };
+      const execCongestion = grpcExecutionFailure('0xcongested', congestedObjectsExecutionError());
       const probe = collectingCallback();
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -2830,25 +2816,28 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorCongestionError);
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('congestion');
+      expect(probe.calls[0].executionStage).toBe('after_sponsor_signature');
     });
 
-    it('submit-infra exception → outcome=internal_error with submit_infra_unknown marker on sponsor result callback (sponsor signature already issued before throw, TX may have landed)', async () => {
-      // Generic submit-infra branch parity check with the promotion
+    it('RPC exception after signing remains uncertain even when its message mentions congestion', async () => {
+      // Generic post-signature branch parity check with the promotion
       // handler. `signAndSubmit` issues the sponsor signature inside
-      // `pool.sign()` BEFORE calling `executeTransaction()`
-      // (`packages/core-api/src/session/sessionPrimitives.ts:285-293`).
+      // `pool.sign()` before calling `executeTransaction()`.
       // Any non-congestion `executeTransaction` throw therefore happens
       // post-signature, and the TX may have reached the network and
-      // burned gas. The sponsor result callback must see the
-      // `submit_infra_unknown` marker so the host recorder can opt this
-      // row into Sponsored Executions; the outer-catch fall-through
-      // must NOT overwrite the marker with the raw RPC error message.
+      // burned gas. `executionStage` is the recorder authority;
+      // Diagnostic text cannot turn a rejected RPC promise into confirmed
+      // congestion; only a validated terminal CongestedObjects result can.
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
       const probe = collectingCallback();
       const sui = makeMockSui();
-      sui.executeTransaction = vi.fn().mockRejectedValue(new Error('rpc transport error'));
+      sui.executeTransaction = vi
+        .fn()
+        .mockRejectedValue(
+          new Error('ExecutionCancelledDueToSharedObjectCongestion: rpc transport rejected'),
+        );
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
         sui,
@@ -2862,26 +2851,136 @@ describe('handleSponsor', () => {
       ).catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(Error);
-      expect((err as Error).message).toContain('rpc transport error');
+      expect((err as Error).message).toContain('rpc transport rejected');
 
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('internal_error');
+      expect(probe.calls[0].executionStage).toBe('after_sponsor_signature');
       expect(probe.calls[0].route).toBe('generic');
       expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
       if (probe.calls[0].economics.economicsStatus === 'unknown') {
-        expect(probe.calls[0].economics.failureReason).toContain('submit_infra_unknown');
-        expect(probe.calls[0].economics.failureReason).toContain('rpc transport error');
+        expect(probe.calls[0].economics.failureReason).toContain('post_signature_uncertainty');
+        expect(probe.calls[0].economics.failureReason).toContain('rpc transport rejected');
       }
     });
 
-    it('pre-sign pool.sign() rejection (SponsorLeaseExpiredError) → sponsor result callback must NOT carry submit_infra_unknown (sponsor signature was never issued)', async () => {
-      // Boundary regression: `pool.sign()` runs BEFORE
-      // `executeTransaction()` inside `signAndSubmit`
-      // (`packages/core-api/src/session/sessionPrimitives.ts:285-289`).
+    it('missing terminal result after sponsor signature is typed as post-signature uncertainty', async () => {
+      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
+      const prepared = makePreparedEntry(txHash);
+      const userSig = await buildValidSignature(txBytes);
+      const probe = collectingCallback();
+      const sui = makeMockSui();
+      sui.executeTransaction = vi.fn().mockResolvedValue({ $kind: 'Transaction' });
+      const ctx = makeMockContext({
+        prepareStore: makeMockPrepareStore(prepared, prepared),
+        sui,
+        onSponsorResult: probe.callback,
+      });
+
+      const err = await handleSponsor(
+        ctx,
+        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
+        CLIENT_IP,
+      ).catch((cause: unknown) => cause);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('malformed terminal result');
+      expect(probe.calls).toHaveLength(1);
+      expect(probe.calls[0]).toMatchObject({
+        outcome: 'internal_error',
+        executionStage: 'after_sponsor_signature',
+        route: 'generic',
+      });
+      expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
+    });
+
+    it('rejects a hybrid terminal union instead of selecting one branch', async () => {
+      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
+      const prepared = makePreparedEntry(txHash);
+      const userSig = await buildValidSignature(txBytes);
+      const success = grpcExecutionSuccess('0xhybrid');
+      const failure = grpcExecutionFailure(
+        '0xhybrid',
+        moveAbortExecutionError('MoveAbort(code: 7)', '7'),
+      );
+      const sui = makeMockSui();
+      sui.executeTransaction = vi.fn().mockResolvedValue({
+        ...success,
+        FailedTransaction: failure.FailedTransaction,
+      });
+      const probe = collectingCallback();
+      const ctx = makeMockContext({
+        prepareStore: makeMockPrepareStore(prepared, prepared),
+        sui,
+        onSponsorResult: probe.callback,
+      });
+
+      const err = await handleSponsor(
+        ctx,
+        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
+        CLIENT_IP,
+      ).catch((cause: unknown) => cause);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('malformed terminal result');
+      expect(probe.calls).toHaveLength(1);
+      expect(probe.calls[0]).toMatchObject({
+        outcome: 'internal_error',
+        executionStage: 'after_sponsor_signature',
+        route: 'generic',
+      });
+    });
+
+    it('rejects disagreement between transaction and effects status', async () => {
+      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
+      const prepared = makePreparedEntry(txHash);
+      const userSig = await buildValidSignature(txBytes);
+      const success = grpcExecutionSuccess('0xstatus-mismatch');
+      const failure = grpcExecutionFailure(
+        '0xstatus-mismatch',
+        moveAbortExecutionError('MoveAbort(code: 9)', '9'),
+      );
+      const sui = makeMockSui();
+      sui.executeTransaction = vi.fn().mockResolvedValue({
+        ...success,
+        Transaction: {
+          ...success.Transaction,
+          effects: {
+            ...success.Transaction.effects,
+            status: failure.FailedTransaction.status,
+          },
+        },
+      });
+      const probe = collectingCallback();
+      const ctx = makeMockContext({
+        prepareStore: makeMockPrepareStore(prepared, prepared),
+        sui,
+        onSponsorResult: probe.callback,
+      });
+
+      const err = await handleSponsor(
+        ctx,
+        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
+        CLIENT_IP,
+      ).catch((cause: unknown) => cause);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('malformed terminal result');
+      expect(probe.calls).toHaveLength(1);
+      expect(probe.calls[0]).toMatchObject({
+        outcome: 'internal_error',
+        executionStage: 'after_sponsor_signature',
+        route: 'generic',
+      });
+    });
+
+    it('pre-sign pool.sign() rejection does not carry post-signature uncertainty', async () => {
+      // `pool.sign()` runs before `executeTransaction()` inside
+      // `signAndSubmit`.
       // A `SponsorLeaseExpiredError` from `pool.sign()` therefore
-      // means the sponsor signature was NEVER issued, and the leak-
-      // free post-signature submit-infra policy must NOT apply. The
-      // host recorder must not see the row as `submit_infra_unknown`,
+      // means the sponsor signature was never issued, so the
+      // post-signature uncertainty policy must not apply. The
+      // host recorder must not see the row as post-signature uncertainty,
       // and the sponsor result economics must be classified as
       // `validation_failure` by the outer-catch path (existing
       // classification rule for `SponsorLeaseExpiredError`).
@@ -2890,7 +2989,7 @@ describe('handleSponsor', () => {
       const userSig = await buildValidSignature(txBytes);
       const probe = collectingCallback();
       const sponsorPool = makeMockSponsorPool();
-      sponsorPool.sign = vi.fn().mockRejectedValue(new SponsorLeaseExpiredError(SLOT_ID));
+      sponsorPool.sign = vi.fn().mockRejectedValue(new SponsorLeaseExpiredError(SPONSOR_ADDRESS));
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
         sponsorPool,
@@ -2906,13 +3005,16 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorLeaseExpiredError);
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('validation_failure');
-      // Critical: NO `submit_infra_unknown` marker. If this assertion
+      expect(probe.calls[0].executionStage).toBe('before_sponsor_signature');
+      // Critical: no post-signature uncertainty marker. If this assertion
       // ever fires, the recorder would have falsely reported a
       // post-signature gas burn for a request whose sponsor signature
       // was never issued.
       expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
       if (probe.calls[0].economics.economicsStatus === 'unknown') {
-        expect(probe.calls[0].economics.failureReason ?? '').not.toContain('submit_infra_unknown');
+        expect(probe.calls[0].economics.failureReason ?? '').not.toContain(
+          'post_signature_uncertainty',
+        );
       }
     });
 
@@ -2930,19 +3032,11 @@ describe('handleSponsor', () => {
       const probe = collectingCallback();
       // computation + storage = 800_000; storageRebate = 2_000_000 →
       // rawNet = -1_200_000 → clamp to 0.
-      const successExec = {
-        Transaction: {
-          digest: 'tx-success-rebate',
-          status: { success: true },
-          effects: {
-            gasUsed: {
-              computationCost: '500000',
-              storageCost: '300000',
-              storageRebate: '2000000',
-            },
-          },
-        },
-      };
+      const successExec = grpcExecutionSuccess('tx-success-rebate', {
+        computationCost: '500000',
+        storageCost: '300000',
+        storageRebate: '2000000',
+      });
       const sui = makeMockSui(undefined, successExec);
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -2989,19 +3083,11 @@ describe('handleSponsor', () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      const successExec = {
-        Transaction: {
-          digest: 'tx-rebate-event-log',
-          status: { success: true },
-          effects: {
-            gasUsed: {
-              computationCost: '500000',
-              storageCost: '300000',
-              storageRebate: '2000000',
-            },
-          },
-        },
-      };
+      const successExec = grpcExecutionSuccess('tx-rebate-event-log', {
+        computationCost: '500000',
+        storageCost: '300000',
+        storageRebate: '2000000',
+      });
       const sui = makeMockSui(undefined, successExec);
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -3059,20 +3145,15 @@ describe('handleSponsor', () => {
       const probe = collectingCallback();
       // computation + storage = 1_000_000; storageRebate = 1_500_000
       // → rawNet = -500_000 → clamp to 0.
-      const failedExec = {
-        $kind: 'FailedTransaction' as const,
-        FailedTransaction: {
-          digest: 'tx-revert-rebate',
-          status: { error: { message: 'rebate-positive revert' } },
-          effects: {
-            gasUsed: {
-              computationCost: '700000',
-              storageCost: '300000',
-              storageRebate: '1500000',
-            },
-          },
+      const failedExec = grpcExecutionFailure(
+        'tx-revert-rebate',
+        unknownExecutionError('rebate-positive revert'),
+        {
+          computationCost: '700000',
+          storageCost: '300000',
+          storageRebate: '1500000',
         },
-      };
+      );
       const sui = makeMockSui(undefined, failedExec);
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -3260,17 +3341,13 @@ describe('handleSponsor', () => {
       // `EVaultAlreadyRegistered` abort. The test asserts preflight is
       // never invoked, so this stub value would be observed only if the
       // ordering regressed.
-      const vaultAlreadyRegisteredSim = {
-        Transaction: {
-          digest: '0xstubbed-not-reached',
-          status: {
-            success: false,
-            error: {
-              message: `MoveAbort(${MOCK_CONFIG.packageId}::vault::register_vault, 1) in command 0`,
-            },
-          },
-        },
-      };
+      const vaultAlreadyRegisteredSim = grpcSimulationFailure(
+        '0xstubbed-not-reached',
+        moveAbortExecutionError(
+          `MoveAbort(${MOCK_CONFIG.packageId}::vault::register_vault, 1) in command 0`,
+          '1',
+        ),
+      );
       const sui = makeMockSui(vaultAlreadyRegisteredSim);
       const lookup = attachVaultLookup(sui, { kind: 'vault_exists' });
       const sponsorPool = makeMockSponsorPool();

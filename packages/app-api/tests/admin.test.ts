@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
 import { buildSponsorRefillAccountWithdrawMessage } from '@stelis/contracts';
+import { PromotionCurrentConflictError } from '@stelis/core-api/studio';
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────
 const {
@@ -14,8 +15,8 @@ const {
   mockRequireAdminSessionFromContext,
   mockCheckAndIncrementAdminOperationAttempt,
   mockVerifySignedMessage,
-  mockParseSponsorKey,
   mockReadJsonBodyWithLimit,
+  mockResolveClientIp,
 } = vi.hoisted(() => ({
   mockRedis: {
     get: vi.fn(),
@@ -30,8 +31,8 @@ const {
   mockRequireAdminSessionFromContext: vi.fn(),
   mockCheckAndIncrementAdminOperationAttempt: vi.fn(),
   mockVerifySignedMessage: vi.fn(),
-  mockParseSponsorKey: vi.fn(),
   mockReadJsonBodyWithLimit: vi.fn(),
+  mockResolveClientIp: vi.fn(),
 }));
 
 vi.mock('@stelis/core-api/admin', () => ({
@@ -43,55 +44,39 @@ vi.mock('../src/requireAdminSession.js', () => ({
   requireAdminSessionFromContext: mockRequireAdminSessionFromContext,
 }));
 
-vi.mock('../src/clientIp.js', () => ({
-  getClientIp: vi.fn().mockReturnValue('127.0.0.1'),
-}));
-
-vi.mock('../src/env.js', () => ({
-  requireEnv: vi.fn().mockImplementation((key: string) => {
-    const vals: Record<string, string> = {
-      REDIS_URL: 'redis://localhost:6379',
-      ADMIN_ADDRESS: '0x' + 'a'.repeat(64),
-      SPONSOR_REFILL_ACCOUNT_SECRET_KEY: 'test-sponsor-refill-account-secret-key',
-    };
-    if (vals[key]) return vals[key];
-    throw new Error(`Missing: ${key}`);
-  }),
-  parseOptionalBooleanEnv: vi.fn().mockReturnValue(false),
-  parseOptionalPositiveBigIntEnv: vi
-    .fn()
-    .mockImplementation((_key: string, raw: string | undefined) =>
-      raw == null || raw.trim() === '' ? undefined : BigInt(raw),
-    ),
-}));
-
 vi.mock('@stelis/core-api', async () => {
   const actual = await vi.importActual('@stelis/core-api');
   return {
     ...actual,
-    parseSponsorKey: mockParseSponsorKey,
     readJsonBodyWithLimit: mockReadJsonBodyWithLimit,
   };
 });
 
-// ── Mock @mysten/sui/transactions ─────────────────────────────────────
-vi.mock('@mysten/sui/transactions', () => {
-  const MockTransaction = vi.fn(function Transaction() {
-    return {
-      gas: 'mock-gas',
-      setSender: vi.fn(),
-      transferObjects: vi.fn(),
-      splitCoins: vi.fn().mockReturnValue(['mock-coin']),
-      pure: { u64: vi.fn().mockReturnValue('mock-u64') },
-      build: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
-    };
-  });
-  return { Transaction: MockTransaction };
-});
-
-import { createAdminRoutes } from '../src/routes/admin.js';
+import { createAdminRoutes, type AdminRoutesRuntimeInput } from '../src/routes/admin.js';
+import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../src/sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
+
+const ADMIN_ADDRESS = '0x' + 'a'.repeat(64);
+
+function createAdminRuntime(
+  overrides: Partial<AdminRoutesRuntimeInput> = {},
+): AdminRoutesRuntimeInput {
+  return {
+    resolveClientIp: mockResolveClientIp,
+    network: 'testnet',
+    adminAddress: ADMIN_ADDRESS,
+    adminJwt: {
+      jwtSecret: 'x'.repeat(32),
+      sessionExpiry: '1h',
+      issuer: 'app-api',
+    },
+    refillEnabled: false,
+    warnMist: 5_000_000_000n,
+    refillTargetMist: 10_000_000_000n,
+    ...overrides,
+  };
+}
 
 function clientIpResolutionError(): Error {
   return Object.assign(new Error('Client IP could not be resolved'), {
@@ -174,7 +159,6 @@ function createMockCtx(): AppApiContext {
         healthyEndpoints: 1,
       }),
     },
-    rpcEndpointUrls: ['https://fullnode.testnet.sui.io:443'],
     redis: mockRedis as never,
     sponsorOperations: {
       // Default returns a healthy single-slot state. Individual tests
@@ -201,6 +185,13 @@ function createMockCtx(): AppApiContext {
       }),
       probeSponsorRefillAccount: vi.fn().mockResolvedValue(undefined),
       requestRefill: vi.fn(),
+      withdraw: vi.fn().mockResolvedValue({
+        status: 'succeeded',
+        operationId: 'operation-success',
+        digest: '0xSUCCESS_DIGEST',
+        amountMist: '1000000',
+        destinationAddress: ADMIN_ADDRESS,
+      }),
       slotAddresses: ['0xslot'],
       sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
       dispose: vi.fn(),
@@ -248,10 +239,11 @@ function resetMockDefaults(): void {
     iatMs: 1000000,
   });
 
+  // Boot-snapshotted request inputs
+  mockResolveClientIp.mockReset();
+  mockResolveClientIp.mockReturnValue('127.0.0.1');
+
   // core-api
-  mockParseSponsorKey.mockReturnValue({
-    toSuiAddress: () => '0xSPONSOR_REFILL_ACCOUNT_ADDRESS',
-  });
   mockReadJsonBodyWithLimit.mockImplementation(async (req: Request) => {
     const text = await req.text();
     return JSON.parse(text);
@@ -261,13 +253,16 @@ function resetMockDefaults(): void {
 describe('admin routes', () => {
   let app: Hono;
   let mockCtx: AppApiContext;
+  let mountedContextPromise: Promise<AppApiContext>;
+  let mountedRuntime: AdminRoutesRuntimeInput;
 
   beforeEach(() => {
     vi.clearAllMocks();
     resetMockDefaults();
     mockCtx = createMockCtx();
-    const getCtx = async () => mockCtx;
-    const routes = createAdminRoutes(getCtx);
+    mountedContextPromise = Promise.resolve(mockCtx);
+    mountedRuntime = createAdminRuntime();
+    const routes = createAdminRoutes(mountedContextPromise, mountedRuntime);
     app = new Hono();
     app.route('/api', routes);
   });
@@ -277,6 +272,11 @@ describe('admin routes', () => {
       mockRequireAdminSessionFromContext.mockResolvedValueOnce(null);
       const res = await app.request('/api/blocklist');
       expect(res.status).toBe(401);
+      expect(mockRequireAdminSessionFromContext).toHaveBeenCalledWith(
+        expect.anything(),
+        mountedContextPromise,
+        mountedRuntime.adminJwt,
+      );
     });
   });
 
@@ -376,7 +376,6 @@ describe('admin routes', () => {
       };
       const entries = [
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:00Z',
           mode: 'generic',
           outcome: 'success',
@@ -439,7 +438,6 @@ describe('admin routes', () => {
       });
       (mockCtx.sponsoredLogsStore.getRecent as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:00Z',
           mode: 'generic',
           outcome: 'success',
@@ -456,7 +454,6 @@ describe('admin routes', () => {
           failureReason: 'SPONSOR_EXEC_GAS_USED_MISSING',
         },
         {
-          schemaVersion: 1,
           createdAt: '2026-04-26T16:00:01Z',
           mode: 'promotion',
           outcome: 'success',
@@ -499,23 +496,37 @@ describe('admin routes', () => {
     });
   });
 
-  describe('GET /api/sponsor-refill-account/withdraw (nonce)', () => {
-    it('returns 200 with nonce and expiresAt', async () => {
+  describe('POST /api/sponsor-refill-account/withdrawal-challenge', () => {
+    it('does not issue a challenge through the withdrawal execution URL', async () => {
       const res = await app.request('/api/sponsor-refill-account/withdraw');
+      expect(res.status).toBe(404);
+      expect(mockRedis.set).not.toHaveBeenCalled();
+    });
+
+    it('returns 200 with nonce and expiresAt', async () => {
+      const res = await app.request('/api/sponsor-refill-account/withdrawal-challenge', {
+        method: 'POST',
+      });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.nonce).toBeDefined();
       expect(typeof body.nonce).toBe('string');
       expect(body.expiresAt).toBeDefined();
+      expect(mockRedis.set).toHaveBeenCalledWith(
+        `stelis:admin:withdraw_nonce:testnet:${body.nonce}`,
+        encodeSponsorRefillAccountWithdrawalIssuedReceipt('testnet'),
+        { px: 60_000 },
+      );
     });
 
     it('returns 400 without issuing a nonce when client IP cannot be resolved', async () => {
-      const { getClientIp } = await import('../src/clientIp.js');
-      vi.mocked(getClientIp).mockImplementationOnce(() => {
+      mockResolveClientIp.mockImplementationOnce(() => {
         throw clientIpResolutionError();
       });
 
-      const res = await app.request('/api/sponsor-refill-account/withdraw');
+      const res = await app.request('/api/sponsor-refill-account/withdrawal-challenge', {
+        method: 'POST',
+      });
 
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toMatchObject({
@@ -541,7 +552,7 @@ describe('admin routes', () => {
       });
       expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.error).toContain('required');
+      expect(body.error).toContain('nonce must be a string');
     });
 
     it('returns 400 on invalid amountMist format', async () => {
@@ -565,8 +576,9 @@ describe('admin routes', () => {
     });
 
     it('returns 401 on expired/invalid nonce', async () => {
-      // DEL returns 0 → nonce not found (expired or already consumed)
-      mockRedis.del.mockResolvedValueOnce(0);
+      (mockCtx.sponsorOperations.withdraw as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: 'nonce_missing',
+      });
       const res = await app.request('/api/sponsor-refill-account/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -578,7 +590,6 @@ describe('admin routes', () => {
     });
 
     it('returns 401 on bad signature', async () => {
-      // nonce consumed by DEL (default mock returns 1)
       mockVerifySignedMessage.mockResolvedValueOnce(false);
 
       const res = await app.request('/api/sponsor-refill-account/withdraw', {
@@ -589,14 +600,17 @@ describe('admin routes', () => {
       expect(res.status).toBe(401);
       const body = await res.json();
       expect(body.error).toContain('signature');
+      expect(body.code).toBe('WITHDRAWAL_SIGNATURE_INVALID');
       expect(mockVerifySignedMessage).toHaveBeenCalledWith({
         message: buildSponsorRefillAccountWithdrawMessage(
+          'testnet',
           validWithdrawBody.amountMist,
           validWithdrawBody.nonce,
         ),
         signature: validWithdrawBody.signature,
         adminAddress: '0x' + 'a'.repeat(64),
       });
+      expect(mockCtx.sponsorOperations.withdraw).not.toHaveBeenCalled();
     });
 
     it('returns 429 when rate limited', async () => {
@@ -618,8 +632,7 @@ describe('admin routes', () => {
     });
 
     it('returns 400 before rate-limit or audit writes when client IP cannot be resolved', async () => {
-      const { getClientIp } = await import('../src/clientIp.js');
-      vi.mocked(getClientIp).mockImplementationOnce(() => {
+      mockResolveClientIp.mockImplementationOnce(() => {
         throw clientIpResolutionError();
       });
 
@@ -638,18 +651,14 @@ describe('admin routes', () => {
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
-    it('returns 422 when dry-run simulation fails', async () => {
-      // nonce consumed by DEL (default mock returns 1)
-      // simulateTransaction returns failure status
-      (mockCtx.host as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.host.sui,
-        getBalance: vi.fn().mockResolvedValue({ balance: { balance: '1000000000' } }),
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: { success: false, error: 'InsufficientGas' },
-          },
-        }),
-      };
+    it('returns 422 when the durable spend flow reports execution failure', async () => {
+      (mockCtx.sponsorOperations.withdraw as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: 'failed',
+        operationId: 'operation-failed',
+        digest: null,
+        amountMist: validWithdrawBody.amountMist,
+        error: 'InsufficientGas',
+      });
 
       const res = await app.request('/api/sponsor-refill-account/withdraw', {
         method: 'POST',
@@ -658,29 +667,56 @@ describe('admin routes', () => {
       });
       expect(res.status).toBe(422);
       const body = await res.json();
-      expect(body.error).toContain('Dry-run failed');
       expect(body.error).toContain('InsufficientGas');
     });
 
-    it('returns 200 on successful withdrawal', async () => {
-      // nonce consumed by DEL (default mock returns 1)
-      // simulateTransaction returns success, signAndExecute returns digest
-      (mockCtx.host as unknown as Record<string, unknown>).sui = {
-        ...mockCtx.host.sui,
-        getBalance: vi.fn().mockResolvedValue({ balance: { balance: '500000000' } }),
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: { success: true },
-          },
-        }),
-      };
-      mockParseSponsorKey.mockReturnValue({
-        toSuiAddress: () => '0xSPONSOR_REFILL_ACCOUNT_ADDRESS',
-        signAndExecuteTransaction: vi.fn().mockResolvedValue({
-          Transaction: { digest: '0xSUCCESS_DIGEST' },
-        }),
+    it('returns a stable pending code without hiding the durable operation identity', async () => {
+      (mockCtx.sponsorOperations.withdraw as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: 'pending',
+        operationId: 'operation-pending',
+        digest: 'digest-pending',
+        amountMist: validWithdrawBody.amountMist,
+        error: 'transaction visibility pending',
       });
 
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(503);
+      await expect(res.json()).resolves.toEqual({
+        code: 'WITHDRAWAL_PENDING',
+        error: 'Withdrawal outcome is pending recovery.',
+        operationId: 'operation-pending',
+        digest: 'digest-pending',
+      });
+    });
+
+    it('distinguishes an unaccepted withdrawal from recovery of that withdrawal', async () => {
+      (mockCtx.sponsorOperations.withdraw as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: 'busy',
+        operationId: 'blocking-operation',
+        digest: 'blocking-digest',
+        error: 'previous spend recovered',
+      });
+
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'WITHDRAWAL_NOT_ACCEPTED',
+        operationId: 'blocking-operation',
+        digest: 'blocking-digest',
+      });
+    });
+
+    it('returns 200 on successful withdrawal', async () => {
       const res = await app.request('/api/sponsor-refill-account/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -691,17 +727,76 @@ describe('admin routes', () => {
       expect(body.digest).toBe('0xSUCCESS_DIGEST');
       expect(body.amountMist).toBe('1000000');
       expect(body.recipient).toBeDefined();
-      expect(body.remainingBalanceMist).toBeDefined();
-      expect(mockCtx.sponsorOperations.probeSponsorRefillAccount).toHaveBeenCalledWith(
-        'admin_withdraw',
-      );
+      expect(body).not.toHaveProperty('remainingBalanceMist');
+      expect(mockCtx.sponsorOperations.withdraw).toHaveBeenCalledWith({
+        destinationAddress: ADMIN_ADDRESS,
+        amountMist: validWithdrawBody.amountMist,
+        nonceKey: `stelis:admin:withdraw_nonce:testnet:${validWithdrawBody.nonce}`,
+      });
     });
 
-    it('returns 400 when runway guard blocks withdrawal (refill enabled)', async () => {
-      // nonce consumed by DEL (default mock returns 1)
-      const { parseOptionalBooleanEnv } = await import('../src/env.js');
-      vi.mocked(parseOptionalBooleanEnv).mockReturnValueOnce(true); // refillEnabled = true
-      process.env.SPONSOR_BALANCE_REFILL_TARGET_MIST = '900000000'; // 0.9 SUI
+    it('keeps the durable withdrawal success response when audit storage fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockRedis.lpush.mockRejectedValueOnce(new Error('audit Redis unavailable'));
+
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        digest: '0xSUCCESS_DIGEST',
+        amountMist: '1000000',
+        recipient: ADMIN_ADDRESS,
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[sponsor-refill-account/withdraw] Success audit write failed:',
+        expect.stringContaining('audit Redis unavailable'),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it('binds signature verification and nonce reservation to the runtime network', async () => {
+      const mainnetRoutes = createAdminRoutes(
+        mountedContextPromise,
+        createAdminRuntime({ network: 'mainnet' }),
+      );
+      const mainnetApp = new Hono();
+      mainnetApp.route('/api', mainnetRoutes);
+
+      const res = await mainnetApp.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validWithdrawBody),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockVerifySignedMessage).toHaveBeenCalledWith({
+        message: buildSponsorRefillAccountWithdrawMessage(
+          'mainnet',
+          validWithdrawBody.amountMist,
+          validWithdrawBody.nonce,
+        ),
+        signature: validWithdrawBody.signature,
+        adminAddress: ADMIN_ADDRESS,
+      });
+      expect(mockCtx.sponsorOperations.withdraw).toHaveBeenCalledWith({
+        destinationAddress: ADMIN_ADDRESS,
+        amountMist: validWithdrawBody.amountMist,
+        nonceKey: `stelis:admin:withdraw_nonce:mainnet:${validWithdrawBody.nonce}`,
+      });
+    });
+
+    it('returns 400 when the shared spend runway blocks withdrawal', async () => {
+      (mockCtx.sponsorOperations.withdraw as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: 'runway_blocked',
+        operationId: 'operation-runway',
+        digest: null,
+        amountMist: '990000000',
+        error: 'post balance below runway',
+      });
 
       const res = await app.request('/api/sponsor-refill-account/withdraw', {
         method: 'POST',
@@ -714,8 +809,34 @@ describe('admin routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toContain('runway');
+    });
 
-      delete process.env.SPONSOR_BALANCE_REFILL_TARGET_MIST;
+    it('accepts the inclusive u64 maximum at the transport boundary', async () => {
+      const amountMist = '18446744073709551615';
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...validWithdrawBody, amountMist }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockCtx.sponsorOperations.withdraw).toHaveBeenCalledWith(
+        expect.objectContaining({ amountMist }),
+      );
+    });
+
+    it('rejects a value above u64 before signature verification or operation creation', async () => {
+      const res = await app.request('/api/sponsor-refill-account/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...validWithdrawBody,
+          amountMist: '18446744073709551616',
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockVerifySignedMessage).not.toHaveBeenCalled();
+      expect(mockCtx.sponsorOperations.withdraw).not.toHaveBeenCalled();
     });
   });
 
@@ -805,8 +926,7 @@ describe('admin routes', () => {
     });
 
     it('POST /api/promotions returns 400 before body parsing when client IP cannot be resolved', async () => {
-      const { getClientIp } = await import('../src/clientIp.js');
-      vi.mocked(getClientIp).mockImplementationOnce(() => {
+      mockResolveClientIp.mockImplementationOnce(() => {
         throw clientIpResolutionError();
       });
 
@@ -1510,6 +1630,77 @@ describe('admin routes', () => {
         expect(res.status).toBe(400);
       });
 
+      it('POST /api/promotions/:id/status rejects a non-string reason before the store', async () => {
+        const transition = vi.spyOn(mockCtx.promotionStore!, 'transitionStatus');
+        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
+          status: 'active',
+          reason: { nested: 'not-a-string' },
+        });
+
+        const res = await app.request('/api/promotions/any/status', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+
+        expect(res.status).toBe(400);
+        expect(transition).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        {
+          label: 'create',
+          storeMethod: 'create',
+          method: 'POST',
+          path: '/api/promotions',
+          body: {
+            type: 'gas_sponsorship',
+            displayName: 'Conflict',
+            maxParticipants: 1,
+            perUserGasAllowanceMist: '1',
+          },
+        },
+        {
+          label: 'update',
+          storeMethod: 'update',
+          method: 'PUT',
+          path: '/api/promotions/conflict',
+          body: { displayName: 'Conflict' },
+        },
+        {
+          label: 'status',
+          storeMethod: 'transitionStatus',
+          method: 'POST',
+          path: '/api/promotions/conflict/status',
+          body: { status: 'active' },
+        },
+        {
+          label: 'delete',
+          storeMethod: 'delete',
+          method: 'DELETE',
+          path: '/api/promotions/conflict',
+          body: null,
+        },
+      ])('maps a $label current-record race to stable 409 conflict', async (testCase) => {
+        const conflict = new PromotionCurrentConflictError('conflict', testCase.label);
+        (mockCtx.promotionStore as unknown as Record<string, unknown>)[testCase.storeMethod] = vi
+          .fn()
+          .mockRejectedValue(conflict);
+        if (testCase.body !== null) {
+          mockReadJsonBodyWithLimit.mockResolvedValueOnce(testCase.body);
+        }
+
+        const res = await app.request(testCase.path, {
+          method: testCase.method,
+          body: testCase.body === null ? undefined : JSON.stringify({}),
+        });
+
+        expect(res.status).toBe(409);
+        await expect(res.json()).resolves.toEqual({
+          code: 'PROMOTION_CURRENT_CONFLICT',
+          error: conflict.message,
+        });
+      });
+
       it('DELETE /api/promotions/:id deletes draft promotion', async () => {
         // Create
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
@@ -1853,9 +2044,7 @@ describe('admin routes', () => {
       // time" rather than stale-then-next-read.
       const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
-      expect(mockCtx.sponsorOperations.probeSponsorRefillAccount).toHaveBeenCalledWith(
-        'admin_sponsor_operations',
-      );
+      expect(mockCtx.sponsorOperations.probeSponsorRefillAccount).toHaveBeenCalledWith();
     });
 
     it('fails closed when the awaited sponsor-refill-account update cannot be committed', async () => {
@@ -1975,9 +2164,9 @@ describe('admin routes', () => {
       expect(body.network).toBe('testnet');
       expect(body.primaryAddress).toBe('0xSPONSOR1');
       expect(body.settlementPayoutRecipientAddress).toBe('0xRECIPIENT');
-      expect(typeof body.sponsorBalanceWarnMist).toBe('string');
-      expect(typeof body.sponsorBalanceRefillTargetMist).toBe('string');
-      expect(typeof body.refillEnabled).toBe('boolean');
+      expect(body.sponsorBalanceWarnMist).toBe('5000000000');
+      expect(body.sponsorBalanceRefillTargetMist).toBe('10000000000');
+      expect(body.refillEnabled).toBe(false);
       expect(typeof body.quotedHostFeeMist).toBe('string');
       expect(body.feeConfig).toMatchObject({
         maxHostFeeMist: '1000',

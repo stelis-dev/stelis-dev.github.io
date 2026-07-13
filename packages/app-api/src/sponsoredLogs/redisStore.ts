@@ -38,8 +38,12 @@ import type {
   SponsoredExecutionMode,
 } from './types.js';
 import {
-  SPONSORED_LOGS_RECENT_DEFAULT_CAP,
   parseSignedMistString,
+  parseSponsoredExecutionLogEntry,
+  parseUnsignedMistString,
+} from './types.js';
+import {
+  SPONSORED_LOGS_RECENT_DEFAULT_CAP,
   sponsoredLogIdempotencyKey,
   type SponsoredLogsStoreAdapter,
 } from './store.js';
@@ -172,26 +176,24 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
   }
 
   async append(entry: SponsoredExecutionLogEntry): Promise<void> {
+    const currentEntry = parseSponsoredExecutionLogEntry(entry);
     let isKnown = false;
     let netDelta = '0';
     let lossAmountDelta = '0';
     let lossDelta = '0';
-    if (entry.economicsStatus === 'known') {
-      if (entry.hostNetMist === null) {
-        throw new Error('sponsoredLogs.redisStore: known economics entry missing hostNetMist');
-      }
+    if (currentEntry.economicsStatus === 'known') {
       // Validate the signed-decimal shape so HINCRBY does not receive a
       // malformed argument; primary error preserved at the recorder's
       // try/catch boundary.
-      const hostNet = parseSignedMistString(entry.hostNetMist, 'hostNetMist');
+      const hostNet = parseSignedMistString(currentEntry.hostNetMist!, 'hostNetMist');
       isKnown = true;
       netDelta = hostNet.toString();
       lossAmountDelta = hostNet < 0n ? hostNet.toString() : '0';
       lossDelta = hostNet < 0n ? '1' : '0';
     }
-    const keys = [idemKey(entry), aggKey('all'), aggKey(entry.mode), RECENT_KEY];
+    const keys = [idemKey(currentEntry), aggKey('all'), aggKey(currentEntry.mode), RECENT_KEY];
     const args = [
-      JSON.stringify(entry),
+      JSON.stringify(currentEntry),
       '1',
       isKnown ? '1' : '0',
       netDelta,
@@ -212,10 +214,13 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     const [exec, cumulativeNet, loss, cumulativeLoss] = result as readonly unknown[];
     return {
       mode,
-      sponsoredExecutions: typeof exec === 'string' ? exec : '0',
-      lossCount: typeof loss === 'string' ? loss : '0',
-      cumulativeHostNetMist: typeof cumulativeNet === 'string' ? cumulativeNet : '0',
-      cumulativeLossMist: typeof cumulativeLoss === 'string' ? cumulativeLoss : '0',
+      sponsoredExecutions: parseUnsignedMistString(exec, 'sponsoredExecutions').toString(),
+      lossCount: parseUnsignedMistString(loss, 'lossCount').toString(),
+      cumulativeHostNetMist: parseSignedMistString(
+        cumulativeNet,
+        'cumulativeHostNetMist',
+      ).toString(),
+      cumulativeLossMist: parseSignedMistString(cumulativeLoss, 'cumulativeLossMist').toString(),
     };
   }
 
@@ -238,16 +243,13 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     const entries: SponsoredExecutionLogEntry[] = [];
     for (const raw of result as readonly unknown[]) {
       if (typeof raw !== 'string') continue;
-      let parsed: unknown;
       try {
-        parsed = JSON.parse(raw);
+        entries.push(parseSponsoredExecutionLogEntry(JSON.parse(raw)));
       } catch {
-        // Skip malformed JSON rather than throwing — Redis recent list
-        // is best-effort and a corrupt entry must not block reads.
+        // Recent rows are best-effort. Malformed JSON and non-current
+        // shapes are skipped rather than weakening the current decoder.
         continue;
       }
-      if (!isLogEntry(parsed)) continue;
-      entries.push(parsed);
     }
     entries.sort(compareCreatedAtDesc);
     if (mode === 'all') {
@@ -257,19 +259,4 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       .filter((entry) => entry.mode === (mode as SponsoredExecutionMode))
       .slice(0, limit);
   }
-}
-
-function isLogEntry(value: unknown): value is SponsoredExecutionLogEntry {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Partial<SponsoredExecutionLogEntry>;
-  return (
-    v.schemaVersion === 1 &&
-    typeof v.createdAt === 'string' &&
-    typeof v.mode === 'string' &&
-    (v.mode === 'generic' || v.mode === 'promotion') &&
-    typeof v.outcome === 'string' &&
-    typeof v.receiptId === 'string' &&
-    typeof v.economicsStatus === 'string' &&
-    (v.economicsStatus === 'known' || v.economicsStatus === 'unknown')
-  );
 }

@@ -11,7 +11,8 @@ Deployable Host API for sponsoring Sui transactions and enforcing settlement pol
 Use this package when you operate the Host itself.
 External Host operators deploy this package as shipped.
 Changing `app-api`, `core-*`, `sdk`, or contract source code is a maintainer-only workflow.
-This Host runtime does not publish or upgrade contracts. After contracts are deployed or updated, the Host only uses the package, config, and vault IDs provided by the shipped code and docs.
+This Host runtime does not deploy contracts itself. It uses only the selected
+network's current package, config, and vault IDs from the shipped code and docs.
 
 - Host Operator: start with [docs/getting-started.md](../../docs/getting-started.md), then [docs/operations.md](../../docs/operations.md).
 - Promotion operator: start with [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations).
@@ -49,6 +50,10 @@ cp packages/app-api/.env.example packages/app-api/.env
 
 `settlement-swap-paths.json` and `rpc.json` are tracked config files keyed by `testnet` and `mainnet`.
 The Host reads only the section selected by `NETWORK`.
+
+The shipped Stelis contract IDs currently support testnet only. Setting
+`NETWORK=mainnet` fails closed until a fresh mainnet Move package is deployed
+and its current package, config, and vault IDs are added.
 
 Start this package:
 

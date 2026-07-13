@@ -118,15 +118,14 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
     // `subjectCounterFamily(code)` resolves which storage tier
     // (sim_tier / revert) the increment lands in. Codes whose family is
     // `null` (most `normal` and promotion-abuse codes) get IP-only
-    // tracking. `shouldCarveOutNonIpCounter(meta)` defines
-    // for benign-retry / market-volatility carve-out and applies
-    // uniformly to address and studio-user subjects.
+    // tracking. `shouldCarveOutNonIpCounter(code, meta)` preserves the
+    // separate benign-retry and preflight-only market policies.
     const family = subjectCounterFamily(code);
     if (
       subject &&
       subjectImpact === 'count' &&
       family !== null &&
-      !shouldCarveOutNonIpCounter(meta)
+      !shouldCarveOutNonIpCounter(code, meta)
     ) {
       if (family === 'sim_tier') {
         const { dryRunFailures, blocks } = this.subjectStore(subject);

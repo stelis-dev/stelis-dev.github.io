@@ -35,7 +35,7 @@ const SETTLE_PARAMS = {
   quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 3n,
-  quoteTimestampMs: 1_761_007_200_000,
+  quoteTimestampMs: 1_761_007_200_000n,
   policyHash: new Uint8Array(32).fill(0xbb),
   orderIdHash: new Uint8Array(32).fill(0xcc),
 };

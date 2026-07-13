@@ -20,6 +20,9 @@ function view(overrides: Partial<SponsorAvailabilityView> = {}): SponsorAvailabi
         refillAttemptedAmountMist: null,
         refillObservedBalanceMist: null,
         refillReconciliationResult: null,
+        refillOperationId: null,
+        refillOperationSequence: null,
+        refillOperationState: null,
       },
     ],
     sponsorRefillAccount: {
@@ -69,6 +72,24 @@ describe('sponsor operations gate', () => {
     ).toEqual({ allowed: false, errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' });
   });
 
+  it('does not admit a slot whose durable refill operation is active even if its balance projection says healthy', () => {
+    const base = view();
+    const active = view({
+      slots: [
+        {
+          ...base.slots[0]!,
+          refillOperationId: 'refill-a',
+          refillOperationSequence: 3,
+          refillOperationState: 'ready',
+        },
+      ],
+    });
+    expect(evaluateSponsorAvailability(active)).toEqual({
+      allowed: false,
+      errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+    });
+  });
+
   it('admits prepare admission when a healthy sponsor slot is free', () => {
     expect(
       evaluateSponsorAvailability(view(), {
@@ -102,6 +123,9 @@ describe('sponsor operations gate', () => {
               refillAttemptedAmountMist: null,
               refillObservedBalanceMist: null,
               refillReconciliationResult: null,
+              refillOperationId: null,
+              refillOperationSequence: null,
+              refillOperationState: null,
             },
           ],
           sponsorRefillAccount: {

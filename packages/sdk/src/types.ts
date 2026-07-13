@@ -1,4 +1,17 @@
 import { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { RelayConfigResponse, RelayPrepareResponse } from '@stelis/contracts';
+
+export type {
+  PromotionPrepareRequest,
+  PromotionPrepareResponse,
+  PromotionSponsorRequest,
+  PromotionSponsorResponse,
+  RelayConfigResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
+} from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Client configuration
@@ -49,86 +62,9 @@ import type { SettleProfile } from '@stelis/contracts';
 // /prepare request & response
 // ─────────────────────────────────────────────
 
-export interface PrepareParams {
-  /** Serialized TransactionKind bytes (base64) */
-  txKindBytes: string;
-  /** Sender address */
-  senderAddress: string;
-  /** Settlement token type from supportedSettlementSwapPaths. Selects the host's single active settlement swap path for that token. */
-  settlementTokenType: string;
-  /** Slippage tolerance in basis points (optional) */
-  slippageBps?: number;
-  /** Gas margin in basis points (optional) */
-  gasMarginBps?: number;
-  /** Optional order ID — external reference for payment tracking. Max 128 UTF-8 bytes. */
-  orderId?: string;
-  /** SHA-256 hash of txKindBytes, encoded as hex. */
-  txKindBytesHash: string;
-  /** Timestamp included in the signed prepare authorization message. */
-  prepareAuthorizationTimestampMs: number;
-  /** Client-generated nonce included in the signed prepare authorization message. */
-  prepareAuthorizationRequestNonce: string;
-  /** Wallet personal-message signature over the canonical prepare authorization message. */
-  prepareAuthorizationSignature: string;
-}
-
-export interface PrepareResponse {
-  /** Full transaction bytes (base64) — ready for user signing */
-  txBytes: string;
-  /** Receipt ID — pass to /sponsor */
-  receiptId: string;
-  /** S-14: monotonic nonce assigned for this prepare (string for SDK-safe u64) */
-  nonce: string;
-  /** Cost breakdown */
-  cost: {
-    /** Simulated gas: computation + storage - rebate (MIST) */
-    simGas: string;
-    /** Fixed gas variance margin embedded on-chain (MIST) */
-    gasVarianceFixedMist: string;
-    /** Slippage buffer: 0 for credit-only settle (MIST) */
-    slippageBufferMist: string;
-    /** Host-quoted fee per TX (MIST) */
-    quotedHostFee: string;
-    /** Protocol flat fee (MIST) */
-    protocolFee: string;
-    /** Gas-recovery claim in settlement arguments: simGas + gasVarianceFixedMist + slippageBufferMist (MIST). */
-    executionCostClaim: string;
-    /** grossGas = computation + storage before rebate (MIST) */
-    grossGas: string;
-  };
-  /** Effective settle path: 'credit_general' | 'with_vault' | 'new_user' */
-  profile: SettleProfile;
-  /** Quote timestamp (epoch ms) */
-  quoteTimestampMs: number;
-  /** Policy hash (hex) */
-  policyHash: string;
-  /** Echoed orderId if provided in the request. */
-  orderId?: string;
-}
-
 // ─────────────────────────────────────────────
 // /sponsor request & response
 // ─────────────────────────────────────────────
-
-export interface SponsorParams {
-  /** Full transaction bytes (base64) — from /prepare response */
-  txBytes: string;
-  /** User signature (base64) */
-  userSignature: string;
-  /** Receipt ID from /prepare */
-  receiptId: string;
-}
-
-export interface SponsorResponse {
-  /** Transaction digest (hash) */
-  digest: string;
-  /** Transaction effects (raw) */
-  effects: unknown;
-  /** Transaction-derived gas-recovery claim in MIST. */
-  executionCostClaim: string;
-  /** Echoed orderId if provided during /prepare. */
-  orderId?: string;
-}
 
 // ─────────────────────────────────────────────
 // API error
@@ -146,26 +82,11 @@ export interface StelisApiError {
 export type { DeepBookPoolHop, SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 
-/** Static Relay config response served via GET /relay/config */
-export interface RelayConfigResponse {
-  network: 'testnet' | 'mainnet';
-  /**
-   * Host-advertised packageId (from /relay/config response).
-   * SDK verifies this matches the expected package ID from @stelis/contracts.
-   * Not used for construction; SDK reads contract IDs from @stelis/contracts.
-   */
-  packageId: string;
-  /** Settlement payout recipient address for executionCostClaim plus quotedHostFeeMist. */
-  settlementPayoutRecipient: string;
+/** Parsed Relay config used internally after JSON-safe integers become bigint. */
+export type RelayConfig = Omit<RelayConfigResponse, 'supportedSettlementSwapPaths'> & {
   /** One active settlement swap path per settlementTokenType. */
   supportedSettlementSwapPaths: SingleHopSettlementSwapPath[];
-  /** Host-quoted fee per TX in MIST (from HOST_FEE_MIST env). */
-  quotedHostFeeMist: string;
-  /** Protocol flat fee in MIST (from on-chain Config). */
-  protocolFlatFeeMist: string;
-  /** S-16: Integrity policy version for client-side PTB verification handshake. Integer >= 1. */
-  integrityPolicyVersion: number;
-}
+};
 
 // ─────────────────────────────────────────────
 // SDK connect options
@@ -256,7 +177,7 @@ export interface ExecuteSponsoredResult {
   /** Transaction effects */
   effects: unknown;
   /** Cost breakdown from /prepare */
-  cost: PrepareResponse['cost'];
+  cost: RelayPrepareResponse['cost'];
   /** Vault object ID if user has one, null if new user */
   vaultId: string | null;
   /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
@@ -284,7 +205,7 @@ export interface PrepareSponsoredResult {
   /** Receipt ID — pass to /sponsor */
   receiptId: string;
   /** Cost breakdown from /prepare */
-  cost: PrepareResponse['cost'];
+  cost: RelayPrepareResponse['cost'];
   /** Effective settle path for prepared tx — 'credit_general' | 'with_vault' | 'new_user' */
   profile: SettleProfile;
   /** Vault object ID if user has one (null = new user, vault will be created on-chain) */
@@ -345,43 +266,6 @@ export interface ExecuteSuiFirstResult {
 // ─────────────────────────────────────────────
 
 /** POST /studio/promotions/:id/prepare request body. */
-export interface PromotionPrepareParams {
-  /** Sender address. */
-  senderAddress: string;
-  /** Serialized TransactionKind bytes (base64). */
-  txKindBytes: string;
-}
-
-/** POST /studio/promotions/:id/prepare response. */
-export interface PromotionPrepareResponse {
-  /** Full transaction bytes — user-signable (base64). */
-  txBytes: string;
-  /** Unique receipt ID — pass to promotion sponsor. */
-  receiptId: string;
-  /** Estimated gas cost (MIST) — the amount reserved from budget+allowance. */
-  estimatedGasMist: string;
-}
-
-/** POST /studio/promotions/:id/sponsor request body. */
-export interface PromotionSponsorParams {
-  /** Receipt ID from promotion prepare. */
-  receiptId: string;
-  /** Full transaction bytes (base64). */
-  txBytes: string;
-  /** User signature (base64). */
-  userSignature: string;
-}
-
-/** POST /studio/promotions/:id/sponsor response. */
-export interface PromotionSponsorResponse {
-  /** Transaction digest. */
-  digest: string;
-  /** Transaction effects. */
-  effects: unknown;
-  /** Actual gas consumed (MIST). */
-  actualGasMist: string;
-}
-
 // ─────────────────────────────────────────────
 // executePromotionSponsored
 // ─────────────────────────────────────────────

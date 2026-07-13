@@ -63,8 +63,8 @@ Required:
 
 - `VITE_STELIS_API_URL` (app-api base URL)
 
-Network (`testnet` / `mainnet`) is auto-detected from `GET /relay/config`.
-The dashboard selects the matching public Sui RPC endpoint internally.
+Network is auto-detected from `GET /relay/config`. The dashboard selects the
+matching public Sui RPC endpoint internally.
 
 ## Related Documents
 

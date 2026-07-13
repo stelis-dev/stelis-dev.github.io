@@ -46,7 +46,7 @@ These values are written by `packages/contracts/move/sources/config.move` at pac
 | `PREPARE_AUTHORIZATION_CLOCK_SKEW_MS` | `30000` | `packages/core-api/src/prepare/prepareAuthorization.ts` |
 | `MAX_PREPARE_REQUEST_NONCE_BYTES` | `128` | `packages/core-api/src/prepare/prepareAuthorization.ts` |
 | Sponsor balance warning default | `5000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
-| Sponsor refill target default | `10000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
+| Sponsor refill target and disabled-worker withdrawal-runway default | `10000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
 
 <a id="ttl-constants"></a>
 
@@ -99,6 +99,11 @@ Prepare authorization request nonces are temporary replay guards for signed prep
 - `packages/app-api/settlement-swap-paths.json`, with a non-empty section for the selected `NETWORK`
 - `packages/app-api/rpc.json`, with a non-empty endpoint section for the selected `NETWORK`
 
+The shipped Stelis contract ID table currently supports testnet only. Although
+the network-shaped configuration and wire type also represent `mainnet`, a Host
+with `NETWORK=mainnet` fails closed until a fresh mainnet Move package is
+deployed and its current package, config, and vault IDs are added.
+
 `SPONSOR_SECRET_KEY` configures sponsor slots. Each sponsor slot key signs sponsored transactions as `gasOwner`. The value accepts 1..256 comma-separated sponsor keys.
 
 `SPONSOR_REFILL_ACCOUNT_SECRET_KEY` configures the Sponsor Refill Account. That key signs sponsor slot refill transactions and Sponsor Refill Account admin withdrawal transactions. It is separate from sponsor slot keys.
@@ -123,6 +128,10 @@ Optional Host configuration:
 - `SPONSOR_BALANCE_WARN_MIST`
 - `SPONSOR_OPERATIONS_REFILL_ENABLED`
 - `SPONSOR_BALANCE_REFILL_TARGET_MIST`
+
+When `SPONSOR_OPERATIONS_REFILL_ENABLED=true`,
+`SPONSOR_BALANCE_REFILL_TARGET_MIST` is required and must be greater than
+`SPONSOR_BALANCE_WARN_MIST`.
 
 Admin dashboard routes require these when the dashboard is used:
 

@@ -9,14 +9,15 @@ import { describe, it, expect } from 'vitest';
 import {
   checkCreditOnlyEligibility,
   calculateRequiredSwapOutput,
-  calculateMinOutputGuardsFromQuotedOutputs,
+  calculateSwapOutputGuards,
   assembleSwapSettlementPlan,
   assembleCreditSettlementPlan,
 } from '../src/prepare/settlementPlanner.js';
-import type { FundingResolution } from '../src/prepare/settlementPlanner.js';
+import type { SwapFundingResolution } from '../src/prepare/settlePlanTypes.js';
 import {
   BASE_CONFIG,
   BASE_AUDIT,
+  ADDR_DEEP_COIN,
   ADDR_USABLE_COIN,
   makeInput,
 } from './fixtures/prepareTestFixtures.js';
@@ -73,15 +74,13 @@ describe('calculateRequiredSwapOutput', () => {
   it('returns positive output target for swap path', () => {
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, creditMist: 0n });
     const outputTarget = calculateRequiredSwapOutput(BASE_CONFIG, input, 5_000_000n);
-    expect(outputTarget).toBeGreaterThan(0n);
+    expect(outputTarget).toBe(5_120_000n);
   });
 
   it('subtracts existing credit for with_vault', () => {
-    const noCredit = makeInput({ creditMist: 0n });
     const withCredit = makeInput({ creditMist: 3_000_000n });
-    const outputNoCredit = calculateRequiredSwapOutput(BASE_CONFIG, noCredit, 5_000_000n);
     const outputWithCredit = calculateRequiredSwapOutput(BASE_CONFIG, withCredit, 5_000_000n);
-    expect(outputWithCredit).toBeLessThan(outputNoCredit);
+    expect(outputWithCredit).toBe(2_120_000n);
   });
 
   it('uses minSettleMist as floor when totalNeeded is smaller', () => {
@@ -92,25 +91,42 @@ describe('calculateRequiredSwapOutput', () => {
   });
 });
 
-describe('calculateMinOutputGuardsFromQuotedOutputs', () => {
-  it('applies slippage to quoted final output', () => {
-    const swap = calculateMinOutputGuardsFromQuotedOutputs(1_000_000n, [27_000_000n], 200);
+describe('calculateSwapOutputGuards', () => {
+  it('uses the slippage floor when it remains above settlement sufficiency', () => {
+    const swap = calculateSwapOutputGuards(1_000_000n, 25_000_000n, 27_000_000n, 200);
     expect(swap.swapAmountSmallest).toBe(1_000_000n);
+    expect(swap.requiredSwapOutputMist).toBe(25_000_000n);
     expect(swap.minSuiOut).toBe(26_460_000n); // 27_000_000 * 0.98
   });
 
-  it('returns zero minSuiOut when no hop outputs', () => {
-    const swap = calculateMinOutputGuardsFromQuotedOutputs(1_000_000n, [], 200);
-    expect(swap.minSuiOut).toBe(0n);
+  it('keeps the required output across bigint rounding', () => {
+    const swap = calculateSwapOutputGuards(1_000_000n, 10_000n, 10_001n, 1);
+    expect(swap.minSuiOut).toBe(10_000n); // floor(10_001 * 9_999 / 10_000) = 9_999
+  });
+
+  it('keeps settlement sufficiency at 100% slippage', () => {
+    const swap = calculateSwapOutputGuards(1_000_000n, 10_000n, 12_000n, 10_000);
+    expect(swap.minSuiOut).toBe(10_000n);
+  });
+
+  it('never raises the final minimum above the verified quote', () => {
+    const swap = calculateSwapOutputGuards(1_000_000n, 10_000n, 10_000n, 0);
+    expect(swap.minSuiOut).toBe(10_000n);
+  });
+
+  it('rejects an inconsistent quote below the required output', () => {
+    expect(() => calculateSwapOutputGuards(1_000_000n, 10_001n, 10_000n, 100)).toThrow(
+      /must cover requiredSwapOutputMist/,
+    );
   });
 
   it('rejects invalid slippage values', () => {
-    expect(() => calculateMinOutputGuardsFromQuotedOutputs(1_000_000n, [27_000_000n], 1.5)).toThrow(
+    expect(() => calculateSwapOutputGuards(1_000_000n, 25_000_000n, 27_000_000n, 1.5)).toThrow(
       'slippageBps',
     );
-    expect(() =>
-      calculateMinOutputGuardsFromQuotedOutputs(1_000_000n, [27_000_000n], 10_001),
-    ).toThrow('slippageBps');
+    expect(() => calculateSwapOutputGuards(1_000_000n, 25_000_000n, 27_000_000n, 10_001)).toThrow(
+      'slippageBps',
+    );
   });
 });
 
@@ -125,8 +141,14 @@ describe('assembleCreditSettlementPlan', () => {
     const plan = assembleCreditSettlementPlan(input, creditAudit, 5_120_000n);
     expect(plan.profile).toBe('credit_general');
     expect(plan.swap.swapAmountSmallest).toBe(0n);
-    expect(plan.funding.source).toBe('none_credit_only');
-    expect(plan.funding.useCreditAmount).toBe(5_120_000n);
+    expect(plan.funding).toEqual({ source: 'none_credit_only' });
+    expect(plan.useCreditAmount).toBe(5_120_000n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
+    expect(plan.swap).toEqual({
+      swapAmountSmallest: 0n,
+      requiredSwapOutputMist: 0n,
+      minSuiOut: 0n,
+    });
     expect(plan.audit.slippageBufferMist).toBe(0n);
   });
 
@@ -139,20 +161,30 @@ describe('assembleCreditSettlementPlan', () => {
 });
 
 describe('assembleSwapSettlementPlan', () => {
-  const funding: FundingResolution = {
+  const funding: SwapFundingResolution = {
     source: 'coin_object',
-    usableCoins: [{ objectId: ADDR_USABLE_COIN, balance: '10000000' }],
-    usableCoinTotal: 10_000_000n,
-    addressBalance: 0n,
-    redeemDelta: 0n,
+    baseCoinId: ADDR_USABLE_COIN,
+    mergeCoinIds: [],
+    remainingBalance: 10_000_000n,
   };
-  const swap = { swapAmountSmallest: 1_916_668n, minSuiOut: 26_730_000n };
+  const swap = {
+    swapAmountSmallest: 1_916_668n,
+    requiredSwapOutputMist: 26_500_000n,
+    minSuiOut: 26_730_000n,
+  };
 
   it('assembles swap plan from pre-computed inputs', () => {
     const input = makeInput({ profile: 'with_vault', creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.swap.swapAmountSmallest).toBe(1_916_668n);
-    expect(plan.funding.source).toBe('coin_object');
+    expect(plan.swap.requiredSwapOutputMist).toBe(26_500_000n);
+    expect(plan.funding).toBe(funding);
+    expect(plan.funding).toEqual({
+      source: 'coin_object',
+      baseCoinId: ADDR_USABLE_COIN,
+      mergeCoinIds: [],
+      remainingBalance: 10_000_000n,
+    });
     expect(plan.audit.executionCostClaim).toBe(BASE_AUDIT.executionCostClaim);
     expect(plan.variant).toBe('with_vault');
   });
@@ -161,7 +193,8 @@ describe('assembleSwapSettlementPlan', () => {
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.profile).toBe('new_user');
-    expect(plan.funding.useCreditAmount).toBe(0n);
+    expect(plan.useCreditAmount).toBe(0n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
   });
 
   it('normalizes credit_general swap path to with_vault', () => {
@@ -172,24 +205,45 @@ describe('assembleSwapSettlementPlan', () => {
     });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
     expect(plan.profile).toBe('with_vault');
-    expect(plan.funding.useCreditAmount).toBe(2_000_000n);
+    expect(plan.useCreditAmount).toBe(2_000_000n);
+    expect(plan.funding).toBe(funding);
   });
 
   it('with_vault variant carries creditMist as useCreditAmount', () => {
     const input = makeInput({ profile: 'with_vault', creditMist: 2_000_000n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, funding, swap);
-    expect(plan.funding.useCreditAmount).toBe(2_000_000n);
+    expect(plan.useCreditAmount).toBe(2_000_000n);
+    expect('useCreditAmount' in plan.funding).toBe(false);
   });
 
-  it('preserves funding.redeemDelta for mixed_topup', () => {
-    const mixedFunding: FundingResolution = {
-      ...funding,
+  it('preserves the exact mixed funding object identity and amounts', () => {
+    const mixedFunding: SwapFundingResolution = {
       source: 'mixed_topup',
-      redeemDelta: 500_000n,
+      baseCoinId: ADDR_USABLE_COIN,
+      mergeCoinIds: [ADDR_DEEP_COIN],
+      remainingBalance: 1_416_668n,
+      redeemAmount: 500_000n,
     };
     const input = makeInput({ profile: 'with_vault', creditMist: 0n });
     const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, mixedFunding, swap);
-    expect(plan.funding.source).toBe('mixed_topup');
-    expect(plan.funding.redeemDelta).toBe(500_000n);
+    expect(plan.funding).toBe(mixedFunding);
+    expect(plan.funding).toEqual(mixedFunding);
+    expect(plan.useCreditAmount).toBe(0n);
+  });
+
+  it('preserves address-balance funding without adding coin-selection fields', () => {
+    const addressFunding: SwapFundingResolution = {
+      source: 'address_balance',
+      redeemAmount: swap.swapAmountSmallest,
+    };
+    const input = makeInput({ profile: 'with_vault', creditMist: 750_000n });
+    const plan = assembleSwapSettlementPlan(input, BASE_AUDIT, addressFunding, swap);
+
+    expect(plan.funding).toBe(addressFunding);
+    expect(plan.funding).toEqual({
+      source: 'address_balance',
+      redeemAmount: swap.swapAmountSmallest,
+    });
+    expect(plan.useCreditAmount).toBe(750_000n);
   });
 });

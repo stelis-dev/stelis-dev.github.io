@@ -3,20 +3,19 @@ import {
   logStructuredEvent,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
 } from '@stelis/core-api/observability';
-import type { SponsorRefillAccountWriteFields, RedisSponsorOperationsState } from './redisState.js';
+import type { SponsorRefillAccountWriteFields } from './redisState.js';
+import type { SponsorRefillAccountSpendStateStore } from './accountSpendState.js';
 import { normalizeSponsorOperationsLastError } from './lastError.js';
 import { withTimeout } from './timeout.js';
 import { parseChainBalanceMist } from './balanceParsing.js';
 
 export type SponsorRefillAccountProbeWriteFailureSource =
   | 'sponsor_result_state_update_sponsor_refill_account_update'
-  | 'refill_worker_sponsor_refill_account_update'
-  | 'admin_sponsor_operations_sponsor_refill_account_update'
-  | 'admin_withdraw_sponsor_refill_account_update';
+  | 'admin_sponsor_operations_sponsor_refill_account_update';
 
 export interface SponsorRefillAccountProbeDeps {
   readonly sui: SuiGrpcClient;
-  readonly state: RedisSponsorOperationsState;
+  readonly spendState: SponsorRefillAccountSpendStateStore;
   readonly sponsorRefillAccountAddress: string;
   readonly refillTargetMist: bigint | null;
   readonly sponsorRefillAccountBalanceTimeoutMs: number;
@@ -47,17 +46,18 @@ function logSponsorRefillAccountWriteFailure(payload: {
     logStructuredEvent(SPONSOR_OPERATIONS_STATE_WRITE_FAILED, payload, 'warn');
   } catch {
     // Observability sink failure must not rewrite the helper's own
-    // throw/swallow contract. Callers rely on `swallow` for best-effort
-    // Sponsor refill account refresh after success paths (for example withdraw success).
+    // throw/swallow contract. Explicit best-effort callers still rely on `swallow`.
   }
 }
 
 export async function probeAndWriteSponsorRefillAccountState(
   deps: SponsorRefillAccountProbeDeps,
   options: ProbeAndWriteSponsorRefillAccountStateOptions,
-): Promise<void> {
+): Promise<bigint | null> {
+  const observationCursor = await deps.spendState.readAccountObservationCursor();
   let fields: SponsorRefillAccountWriteFields;
   let probeError: string | undefined;
+  let observedBalance: bigint | null = null;
 
   try {
     const balance = await withTimeout(
@@ -68,6 +68,7 @@ export async function probeAndWriteSponsorRefillAccountState(
         return parseChainBalanceMist(res.balance.balance, 'Sponsor refill account balance');
       },
     );
+    observedBalance = balance;
     fields = {
       balanceMist: balance.toString(),
       healthy: '1',
@@ -85,7 +86,11 @@ export async function probeAndWriteSponsorRefillAccountState(
   }
 
   try {
-    await deps.state.updateSponsorRefillAccount(fields);
+    const updated = await deps.spendState.updateAccountObservation(observationCursor, fields);
+    if (!updated && options.writeFailureMode === 'throw') {
+      throw new Error('Sponsor Refill Account changed during the balance probe');
+    }
+    return updated ? observedBalance : null;
   } catch (writeErr) {
     logSponsorRefillAccountWriteFailure({
       source: options.source,
@@ -96,5 +101,6 @@ export async function probeAndWriteSponsorRefillAccountState(
     if (options.writeFailureMode === 'throw') {
       throw writeErr instanceof Error ? writeErr : new Error(String(writeErr));
     }
+    return null;
   }
 }

@@ -125,6 +125,7 @@ describe('AuthGuard integration', () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    sessionStorage.clear();
   });
 
   it('redirects to /login when session returns 401', async () => {
@@ -238,6 +239,7 @@ describe('DashboardPage integration', () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    sessionStorage.clear();
   });
 
   async function renderDashboardPage() {
@@ -267,7 +269,7 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           calls.withdrawNonce += 1;
           return Promise.resolve({
             ok: true,
@@ -284,7 +286,12 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ digest: '0xDIGEST' }),
+            json: () =>
+              Promise.resolve({
+                digest: '0xDIGEST',
+                amountMist: '1000000000',
+                recipient: VALID_SESSION.address,
+              }),
           });
         }
         return Promise.resolve({
@@ -468,7 +475,7 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -480,7 +487,12 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ digest: '0xDIGEST' }),
+            json: () =>
+              Promise.resolve({
+                digest: '0xDIGEST',
+                amountMist: '1000000000',
+                recipient: VALID_SESSION.address,
+              }),
           });
         }
         return Promise.resolve({
@@ -511,7 +523,7 @@ describe('DashboardPage integration', () => {
       message: Uint8Array;
       account: { address: string };
     };
-    const expectedMessage = buildSponsorRefillAccountWithdrawMessage(amountMist, nonce);
+    const expectedMessage = buildSponsorRefillAccountWithdrawMessage('testnet', amountMist, nonce);
     expect(Array.from(params.message)).toEqual(
       Array.from(new TextEncoder().encode(expectedMessage)),
     );
@@ -525,6 +537,262 @@ describe('DashboardPage integration', () => {
       signature,
       amountMist,
     });
+  });
+
+  it('retries a pending withdrawal with the exact same nonce, signature, and amount', async () => {
+    const nonce = 'stelis-withdraw:pending:123';
+    const signature = '0xPENDING_SIG';
+    const signPersonalMessage = vi.fn().mockResolvedValue({ signature, bytes: '0xBYTES' });
+    mockGetWallets.mockReturnValue({
+      get: () => [
+        {
+          features: { 'sui:signPersonalMessage': { signPersonalMessage } },
+          accounts: [{ address: VALID_SESSION.address }],
+        },
+      ],
+    });
+
+    let nonceRequests = 0;
+    const postedBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (url === '/api/sponsor-operations' && method === 'GET') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
+          });
+        }
+        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+          nonceRequests += 1;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ nonce, expiresAt: '2026-07-12T12:00:00.000Z' }),
+          });
+        }
+        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+          postedBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          if (postedBodies.length === 1) {
+            return Promise.resolve({
+              ok: false,
+              status: 503,
+              json: () =>
+                Promise.resolve({
+                  code: 'WITHDRAWAL_PENDING',
+                  error: 'Withdrawal outcome is pending recovery.',
+                }),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                digest: '0xRECOVERED',
+                amountMist: '1500000000',
+                recipient: VALID_SESSION.address,
+              }),
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
+        });
+      }),
+    );
+
+    const { DashboardPage } = await import('../src/pages/DashboardPage');
+    render(<DirectOutletProvider element={<DashboardPage />} />);
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toBeDefined());
+
+    fireEvent.change(screen.getByPlaceholderText('0.5'), { target: { value: '1.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Retry pending withdrawal' })).toBeDefined(),
+    );
+
+    cleanup();
+    render(<DirectOutletProvider element={<DashboardPage />} />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Retry pending withdrawal' })).toBeDefined(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Retry pending withdrawal' }));
+    await waitFor(() => expect(screen.getByText('Success: 0xRECOVERED')).toBeDefined());
+
+    expect(nonceRequests).toBe(1);
+    expect(signPersonalMessage).toHaveBeenCalledTimes(1);
+    expect(postedBodies).toHaveLength(2);
+    expect(postedBodies[1]).toEqual(postedBodies[0]);
+    expect(sessionStorage.getItem('stelis:admin:pending-withdrawal')).toBeNull();
+  });
+
+  it.each([
+    {
+      name: 'wrong-network',
+      request: {
+        adminAddress: VALID_SESSION.address,
+        network: 'mainnet',
+        nonce: 'stelis-withdraw:mainnet:123',
+        signature: '0xMAINNET_SIG',
+        amountMist: '1500000000',
+      },
+    },
+    {
+      name: 'legacy-without-network',
+      request: {
+        adminAddress: VALID_SESSION.address,
+        nonce: 'stelis-withdraw:legacy:123',
+        signature: '0xLEGACY_SIG',
+        amountMist: '1500000000',
+      },
+    },
+  ])('discards a $name stored withdrawal without retrying it', async ({ request }) => {
+    sessionStorage.setItem('stelis:admin:pending-withdrawal', JSON.stringify(request));
+    const calls = stubDashboardFetch();
+
+    await renderDashboardPage();
+
+    expect(screen.getByRole('button', { name: 'Withdraw' })).toBeDefined();
+    expect(sessionStorage.getItem('stelis:admin:pending-withdrawal')).toBeNull();
+    expect(calls.withdrawNonce).toBe(0);
+    expect(calls.withdrawPost).toBe(0);
+  });
+
+  it('discards an in-memory pending withdrawal when the Host network changes', async () => {
+    const nonce = 'stelis-withdraw:testnet-pending:123';
+    const signature = '0xTESTNET_PENDING_SIG';
+    const signPersonalMessage = vi.fn().mockResolvedValue({ signature, bytes: '0xBYTES' });
+    mockGetWallets.mockReturnValue({
+      get: () => [
+        {
+          features: { 'sui:signPersonalMessage': { signPersonalMessage } },
+          accounts: [{ address: VALID_SESSION.address }],
+        },
+      ],
+    });
+
+    let sponsorOperationsReads = 0;
+    let withdrawPosts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (url === '/api/sponsor-operations' && method === 'GET') {
+          sponsorOperationsReads += 1;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                ...SPONSOR_OPERATIONS_DATA,
+                network: sponsorOperationsReads === 1 ? 'testnet' : 'mainnet',
+              }),
+          });
+        }
+        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ nonce, expiresAt: '2026-07-12T12:00:00.000Z' }),
+          });
+        }
+        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+          withdrawPosts += 1;
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            json: () =>
+              Promise.resolve({
+                code: 'WITHDRAWAL_PENDING',
+                error: 'Withdrawal outcome is pending recovery.',
+              }),
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
+        });
+      }),
+    );
+
+    await renderDashboardPage();
+    fireEvent.change(screen.getByPlaceholderText('0.5'), { target: { value: '1.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Retry pending withdrawal' })).toBeDefined(),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByText('mainnet')).toBeDefined());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw' })).toBeDefined());
+
+    expect(sessionStorage.getItem('stelis:admin:pending-withdrawal')).toBeNull();
+    expect(withdrawPosts).toBe(1);
+  });
+
+  it.each([
+    {
+      status: 409,
+      code: 'WITHDRAWAL_NOT_ACCEPTED',
+      error: 'This withdrawal was not accepted.',
+    },
+    {
+      status: 401,
+      code: 'WITHDRAWAL_SIGNATURE_INVALID',
+      error: 'Invalid signature',
+    },
+  ])('clears a stored request after terminal response $code', async (response) => {
+    sessionStorage.setItem(
+      'stelis:admin:pending-withdrawal',
+      JSON.stringify({
+        adminAddress: VALID_SESSION.address,
+        network: 'testnet',
+        nonce: 'stelis-withdraw:unaccepted:123',
+        signature: '0xUNACCEPTED',
+        amountMist: '1500000000',
+      }),
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (url === '/api/sponsor-operations' && method === 'GET') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
+          });
+        }
+        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+          return Promise.resolve({
+            ok: false,
+            status: response.status,
+            json: () => Promise.resolve({ code: response.code, error: response.error }),
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
+        });
+      }),
+    );
+
+    const { DashboardPage } = await import('../src/pages/DashboardPage');
+    render(<DirectOutletProvider element={<DashboardPage />} />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Retry pending withdrawal' })).toBeDefined(),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry pending withdrawal' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw' })).toBeDefined());
+
+    expect(sessionStorage.getItem('stelis:admin:pending-withdrawal')).toBeNull();
   });
 
   it('blocks zero withdraw input before nonce fetch and signing', async () => {
@@ -669,6 +937,30 @@ describe('DashboardPage integration', () => {
     expect(calls.withdrawPost).toBe(0);
   });
 
+  it('blocks an amount above u64 MIST before nonce fetch and signing', async () => {
+    const signPersonalMessage = vi.fn();
+    const calls = stubDashboardFetch();
+    mockGetWallets.mockReturnValue({
+      get: () => [
+        {
+          features: { 'sui:signPersonalMessage': { signPersonalMessage } },
+          accounts: [{ address: VALID_SESSION.address }],
+        },
+      ],
+    });
+    await renderDashboardPage();
+
+    fireEvent.change(screen.getByPlaceholderText('0.5'), {
+      target: { value: '18446744073.709551616' },
+    });
+    const withdrawButton = screen.getByRole('button', { name: 'Withdraw' });
+    expect((withdrawButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Withdrawal amount must fit a positive u64 MIST value')).toBeDefined();
+    expect(calls.withdrawNonce).toBe(0);
+    expect(signPersonalMessage).not.toHaveBeenCalled();
+    expect(calls.withdrawPost).toBe(0);
+  });
+
   it('blocks missing wallet before nonce fetch and signing', async () => {
     const calls = stubDashboardFetch();
 
@@ -768,6 +1060,24 @@ describe('SecurityPage integration', () => {
 });
 
 describe('PromotionsPage integration', () => {
+  const promotionRecord = {
+    promotionId: 'promo-current',
+    type: 'gas_sponsorship',
+    displayName: 'Current Promotion',
+    description: 'Current description',
+    status: 'draft',
+    maxParticipants: 10,
+    perUserGasAllowanceMist: '1000000',
+    totalRequiredBudgetMist: '10000000',
+    claimDeadlineAt: null,
+    postClaimUseWindowMs: 0,
+    startAt: null,
+    pauseReason: null,
+    archiveReason: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
@@ -795,6 +1105,199 @@ describe('PromotionsPage integration', () => {
       /Max Participants \(required, must be > 0\)/i,
     ) as HTMLInputElement;
     expect(maxParticipantsInput.min).toBe('1');
+  });
+
+  it('reloads the current promotion and closes stale edits after current conflicts', async () => {
+    const original = {
+      ...promotionRecord,
+      promotionId: 'promo-conflict',
+      displayName: 'Original Promotion',
+      description: 'Before concurrent update',
+    };
+    let listReads = 0;
+    let updateWrites = 0;
+    let statusWrites = 0;
+    let releaseUpdateConflict!: () => void;
+    const updateConflictGate = new Promise<void>((resolve) => {
+      releaseUpdateConflict = resolve;
+    });
+    let releaseStatusConflict!: () => void;
+    const statusConflictGate = new Promise<void>((resolve) => {
+      releaseStatusConflict = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (url === '/api/promotions' && method === 'GET') {
+          listReads += 1;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                promotions: [
+                  listReads === 1
+                    ? original
+                    : {
+                        ...original,
+                        displayName: 'Concurrent Promotion',
+                        description: 'Committed by another request',
+                        updatedAt: '2026-01-01T00:00:01.000Z',
+                      },
+                ],
+              }),
+          });
+        }
+        if (url === '/api/promotions/promo-conflict' && method === 'PUT') {
+          updateWrites += 1;
+          return updateConflictGate.then(() => ({
+            ok: false,
+            status: 409,
+            json: () =>
+              Promise.resolve({
+                code: 'PROMOTION_CURRENT_CONFLICT',
+                error: 'Promotion promo-conflict changed while attempting update',
+              }),
+          }));
+        }
+        if (url === '/api/promotions/promo-conflict/status' && method === 'POST') {
+          statusWrites += 1;
+          return statusConflictGate.then(() => ({
+            ok: false,
+            status: 409,
+            json: () =>
+              Promise.resolve({
+                code: 'PROMOTION_CURRENT_CONFLICT',
+                error: 'Promotion promo-conflict changed while attempting status',
+              }),
+          }));
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
+        });
+      }),
+    );
+
+    const { PromotionsPage } = await import('../src/pages/PromotionsPage');
+    render(<DirectOutletProvider element={<PromotionsPage />} />);
+    await waitFor(() => expect(screen.getByText('Original Promotion')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Display Name'), {
+      target: { value: 'Stale Operator Edit' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => expect(updateWrites).toBe(1));
+    for (const name of ['+ New Promotion', 'Cancel', 'Edit']) {
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    releaseUpdateConflict();
+    await waitFor(() => expect(screen.getByText('Concurrent Promotion')).toBeDefined());
+    expect(screen.queryByRole('heading', { name: 'Edit Promotion' })).toBeNull();
+    expect(
+      screen.getByText('Promotion promo-conflict changed while attempting update'),
+    ).toBeDefined();
+    expect(listReads).toBe(2);
+    expect(updateWrites).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Activate' }));
+    await waitFor(() => expect(statusWrites).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Display Name'), {
+      target: { value: 'Stale After Status Conflict' },
+    });
+    releaseStatusConflict();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('Promotion promo-conflict changed while attempting status'),
+      ).toBeDefined(),
+    );
+    expect(screen.queryByRole('heading', { name: 'Edit Promotion' })).toBeNull();
+    expect(listReads).toBe(3);
+  });
+
+  it.each([
+    {
+      label: 'activation',
+      action: 'Activate',
+      method: 'POST',
+      path: '/api/promotions/promo-current/status',
+    },
+    {
+      label: 'deletion',
+      action: 'Delete',
+      method: 'DELETE',
+      path: '/api/promotions/promo-current',
+    },
+  ])('closes the same-record editor after successful $label', async (testCase) => {
+    let listReads = 0;
+    let mutationWrites = 0;
+    let releaseMutation!: () => void;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        if (url === '/api/promotions' && method === 'GET') {
+          listReads += 1;
+          const promotions =
+            listReads === 1
+              ? [promotionRecord]
+              : testCase.label === 'deletion'
+                ? []
+                : [{ ...promotionRecord, status: 'active' }];
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ promotions }),
+          });
+        }
+        if (url === testCase.path && method === testCase.method) {
+          mutationWrites += 1;
+          return mutationGate.then(() => ({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve(
+                testCase.label === 'deletion'
+                  ? { ok: true }
+                  : { promotion: { ...promotionRecord, status: 'active' } },
+              ),
+          }));
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
+        });
+      }),
+    );
+
+    const { PromotionsPage } = await import('../src/pages/PromotionsPage');
+    render(<DirectOutletProvider element={<PromotionsPage />} />);
+    await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: testCase.action }));
+    await waitFor(() => expect(mutationWrites).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Display Name'), {
+      target: { value: 'Stale After Mutation' },
+    });
+    expect(screen.getByRole('heading', { name: 'Edit Promotion' })).toBeDefined();
+
+    releaseMutation();
+    await waitFor(() => expect(listReads).toBe(2));
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Edit Promotion' })).toBeNull(),
+    );
   });
 });
 

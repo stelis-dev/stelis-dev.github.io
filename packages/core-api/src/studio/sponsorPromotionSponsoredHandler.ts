@@ -39,7 +39,7 @@ export interface PromotionSponsorContext {
    * misclassified as Stelis benign subcodes.
    */
   packageId: string;
-  /** Trusted DeepBook package ID for sponsor-time abort classification. */
+  /** Current DeepBook published call target used only for abort-command provenance. */
   deepbookPackageId: string;
   /** Promotion store — validate promotion status at sponsor time. */
   promotionStore: PromotionStoreAdapter;

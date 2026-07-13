@@ -124,15 +124,14 @@ export class RedisAbuseBlocker implements AbuseBlockerAdapter {
     // Non-IP counter family routing: `abuseImpact.subject === 'count'`
     // permits a subject-level increment, and `subjectCounterFamily`
     // resolves which storage tier (sim_tier / revert) the increment
-    // lands in. `shouldCarveOutNonIpCounter` defines
-    // benign-retry / market-volatility carve-out and applies uniformly
-    // to address and studio-user subjects.
+    // lands in. `shouldCarveOutNonIpCounter(code, meta)` preserves the
+    // separate benign-retry and preflight-only market policies.
     const family = subjectCounterFamily(code);
     if (
       subject &&
       subjectImpact === 'count' &&
       family !== null &&
-      !shouldCarveOutNonIpCounter(meta)
+      !shouldCarveOutNonIpCounter(code, meta)
     ) {
       if (family === 'sim_tier') {
         const subjectFailureCount = await this.incrementWindowCounter(

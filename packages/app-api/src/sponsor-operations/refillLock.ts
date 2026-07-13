@@ -1,23 +1,22 @@
 /**
- * [app-api] Cross-instance slot-scoped refill dispatch lock.
+ * [app-api] Cross-instance Sponsor Refill Account dispatch lock.
  *
- * Prevents two app-api instances from dispatching a refill to the same
- * sponsor slot concurrently. Acquired via `SET key value NX PX` with an
+ * Serializes new spend work and request-path recovery for every refill and
+ * withdrawal that uses the same Sponsor Refill Account. Boot recovery may
+ * bypass a dead process's remaining efficiency-lock TTL. Acquired via
+ * `SET key value NX PX` with an
  * instance-unique token; released via Lua CAS that deletes only when the
  * stored token matches (mirrors `RedisSponsorPool.LEASE_CHECKIN_CAS_SCRIPT`).
  *
- * The TTL is supplied by the caller (refill worker): it must cover the
- * refill TX dispatch, the post-refill sponsor refill account probe, and the
- * `awaiting_confirmation` phase.
- * Orphaned locks after process death recover at TTL expiry.
+ * The TTL is an orphan cleanup and efficiency bound, not transaction safety.
+ * Durable operation identity and expected-sequence CAS remain authoritative
+ * when the TTL expires while an RPC request is still in flight.
  */
 
 import { randomUUID } from 'node:crypto';
 import type { RedisClientLike } from '@stelis/core-api';
 import { SPONSOR_OPERATIONS_KEY_PREFIX } from './redisState.js';
 
-export const refillLockKey = (slotAddress: string): string =>
-  `${SPONSOR_OPERATIONS_KEY_PREFIX}refill-lock:${slotAddress}`;
 export const sponsorRefillAccountDispatchLockKey = (sponsorRefillAccountAddress: string): string =>
   `${SPONSOR_OPERATIONS_KEY_PREFIX}sponsor-refill-account-dispatch-lock:${sponsorRefillAccountAddress}`;
 
@@ -36,13 +35,6 @@ const RELEASE_LUA = [
   "return 'MISMATCH'",
 ].join('\n');
 
-export interface RefillLockHandle {
-  /** Opaque token identifying the owner; required for release CAS. */
-  readonly token: string;
-  /** Slot address the lock is held for. */
-  readonly slotAddress: string;
-}
-
 export interface SponsorRefillAccountDispatchLockHandle {
   /** Opaque token identifying the owner; required for release CAS. */
   readonly token: string;
@@ -50,13 +42,11 @@ export interface SponsorRefillAccountDispatchLockHandle {
   readonly sponsorRefillAccountAddress: string;
 }
 
-export interface RefillLockDeps {
+export interface SponsorRefillAccountDispatchLockDeps {
   readonly client: RedisClientLike;
   /**
-   * Lock TTL in ms. Should equal the sum of all bounded phases executed
-   * inside the locked window plus a small safety margin. The refill
-   * worker derives this from the sponsor operations phase timers plus
-   * `SPONSOR_OPERATIONS_REFILL_LOCK_SAFETY_MARGIN_MS`.
+   * Lock TTL in ms. It bounds abandoned mutex ownership only; correctness
+   * does not depend on it outliving network submission.
    */
   readonly ttlMs: number;
   /**
@@ -67,11 +57,6 @@ export interface RefillLockDeps {
   readonly instanceId?: string;
 }
 
-export interface RefillLock {
-  acquire(slotAddress: string): Promise<RefillLockHandle | null>;
-  release(handle: RefillLockHandle): Promise<void>;
-}
-
 export interface SponsorRefillAccountDispatchLock {
   acquire(
     sponsorRefillAccountAddress: string,
@@ -79,36 +64,8 @@ export interface SponsorRefillAccountDispatchLock {
   release(handle: SponsorRefillAccountDispatchLockHandle): Promise<void>;
 }
 
-export function createRefillLock(deps: RefillLockDeps): RefillLock {
-  if (!Number.isSafeInteger(deps.ttlMs) || deps.ttlMs <= 0) {
-    throw new Error(
-      `createRefillLock: ttlMs must be a positive safe integer, got ${String(deps.ttlMs)}`,
-    );
-  }
-  const instanceId = deps.instanceId ?? 'app-api';
-
-  async function acquire(slotAddress: string): Promise<RefillLockHandle | null> {
-    const token = `${instanceId}:${randomUUID()}`;
-    const key = refillLockKey(slotAddress);
-    const result = await deps.client.set(key, token, { nx: true, px: deps.ttlMs });
-    if (result !== 'OK') return null;
-    return { token, slotAddress };
-  }
-
-  async function release(handle: RefillLockHandle): Promise<void> {
-    const key = refillLockKey(handle.slotAddress);
-    try {
-      await deps.client.eval(RELEASE_LUA, [key], [handle.token]);
-    } catch {
-      // TTL safety net covers residual state; swallowing is intentional.
-    }
-  }
-
-  return { acquire, release };
-}
-
 export function createSponsorRefillAccountDispatchLock(
-  deps: RefillLockDeps,
+  deps: SponsorRefillAccountDispatchLockDeps,
 ): SponsorRefillAccountDispatchLock {
   if (!Number.isSafeInteger(deps.ttlMs) || deps.ttlMs <= 0) {
     throw new Error(

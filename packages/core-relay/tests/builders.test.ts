@@ -26,7 +26,6 @@ import { Transaction } from '@mysten/sui/transactions';
 import { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from '../src/ptb/builders.js';
 import { parseSettleArgs } from '../src/parseSettleArgs.js';
 import { convertSdkCommands } from '../src/convert.js';
-import { SETTLE_FIELD_SCHEMA } from '../src/settlePayloadContract.js';
 import { validatePtbStructure, validateSettleArgs } from '../src/validate/static.js';
 import {
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
@@ -99,7 +98,7 @@ const SHARED_PARAMS = {
   quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 1n,
-  quoteTimestampMs: 1741680000000,
+  quoteTimestampMs: 1_741_680_000_000n,
   policyHash: new Uint8Array(32).fill(0xbb),
   orderIdHash: new Uint8Array(0),
 };
@@ -237,7 +236,7 @@ const ROUNDTRIP_VALUES = {
   quotedHostFeeMist: 100_003n,
   expectedProtocolFeeMist: 20_004n,
   expectedConfigVersion: 5n,
-  quoteTimestampMs: 1741680099000,
+  quoteTimestampMs: 1_741_680_099_000n,
   policyHash: new Uint8Array(32).fill(0xee),
   orderIdHash: new Uint8Array(32).fill(0xff),
 };
@@ -249,7 +248,7 @@ const CREDIT_ROUNDTRIP_VALUES = {
 
 describe('builder → parser settle field roundtrip', () => {
   /**
-   * Assert that every field in SETTLE_FIELD_SCHEMA (13 total) round-trips
+   * Assert that every field in SETTLE_FIELD_SCHEMA round-trips
    * through builder → BCS → parser with its original value, including the
    * sponsor-side tx-derived fields `receiptId`, `simGasReported`,
    * `gasVarianceFixedMist`, `slippageBufferMist`, and `quoteTimestampMs`.
@@ -268,7 +267,7 @@ describe('builder → parser settle field roundtrip', () => {
     expect(parsed.quotedHostFeeMist).toBe(expected.quotedHostFeeMist);
     expect(parsed.expectedProtocolFeeMist).toBe(expected.expectedProtocolFeeMist);
     expect(parsed.expectedConfigVersion).toBe(expected.expectedConfigVersion);
-    expect(parsed.quoteTimestampMs).toBe(BigInt(expected.quoteTimestampMs));
+    expect(parsed.quoteTimestampMs).toBe(expected.quoteTimestampMs);
     expect(parsed.policyHash).toEqual(expected.policyHash);
     expect(parsed.orderIdHash).toEqual(expected.orderIdHash);
   }
@@ -325,8 +324,97 @@ describe('builder → parser settle field roundtrip', () => {
     ).toThrow(/slippageBufferMist=0/);
   });
 
-  it('SETTLE_FIELD_SCHEMA has exactly 13 fields', () => {
-    expect(SETTLE_FIELD_SCHEMA).toHaveLength(13);
+  it('rejects a JavaScript number before serializing a compiled Move u64 field', () => {
+    const tx = new Transaction();
+    expect(() =>
+      buildSettleWithCreditPtb(tx, {
+        packageId: PKG,
+        configId: CONFIG,
+        vaultRegistryId: REGISTRY,
+        vaultId: VAULT,
+        useCreditAmount: 500_000n,
+        ...CREDIT_ROUNDTRIP_VALUES,
+        quoteTimestampMs: (Number.MAX_SAFE_INTEGER + 1) as unknown as bigint,
+      }),
+    ).toThrow(/quoteTimestampMs must be a bigint/);
+    expect(tx.getData().inputs).toEqual([]);
+  });
+
+  it('rejects a JavaScript number for swapAmount before serializing the swap call', () => {
+    const tx = new Transaction();
+    expect(() =>
+      buildSwapAndSettlePtb(tx, {
+        variant: 'new_user',
+        settlementSwapDirection: 'baseForQuote',
+        settlementTokenType: PAYMENT_TYPE,
+        poolId: POOL,
+        packageId: PKG,
+        configId: CONFIG,
+        vaultRegistryId: REGISTRY,
+        paymentCoinId: PAYMENT_COIN,
+        swapAmount: 1_000_000 as unknown as bigint,
+        minSuiOut: 0n,
+        ...ROUNDTRIP_VALUES,
+      }),
+    ).toThrow(/swapAmount must be a bigint/);
+    expect(tx.getData().inputs).toEqual([]);
+  });
+
+  it('rejects a JavaScript number for minSuiOut before serializing the swap call', () => {
+    const tx = new Transaction();
+    expect(() =>
+      buildSwapAndSettlePtb(tx, {
+        variant: 'new_user',
+        settlementSwapDirection: 'baseForQuote',
+        settlementTokenType: PAYMENT_TYPE,
+        poolId: POOL,
+        packageId: PKG,
+        configId: CONFIG,
+        vaultRegistryId: REGISTRY,
+        paymentCoinId: PAYMENT_COIN,
+        swapAmount: 1_000_000n,
+        minSuiOut: 900_000 as unknown as bigint,
+        ...ROUNDTRIP_VALUES,
+      }),
+    ).toThrow(/minSuiOut must be a bigint/);
+    expect(tx.getData().inputs).toEqual([]);
+  });
+
+  it('rejects a JavaScript number for swap useCreditAmount before serializing the call', () => {
+    const tx = new Transaction();
+    expect(() =>
+      buildSwapAndSettlePtb(tx, {
+        variant: 'with_vault',
+        settlementSwapDirection: 'baseForQuote',
+        settlementTokenType: PAYMENT_TYPE,
+        poolId: POOL,
+        packageId: PKG,
+        configId: CONFIG,
+        vaultRegistryId: REGISTRY,
+        vaultId: VAULT,
+        paymentCoinId: PAYMENT_COIN,
+        swapAmount: 1_000_000n,
+        minSuiOut: 900_000n,
+        useCreditAmount: 500_000 as unknown as bigint,
+        ...ROUNDTRIP_VALUES,
+      }),
+    ).toThrow(/useCreditAmount must be a bigint/);
+    expect(tx.getData().inputs).toEqual([]);
+  });
+
+  it('rejects a JavaScript number for credit useCreditAmount before serializing the call', () => {
+    const tx = new Transaction();
+    expect(() =>
+      buildSettleWithCreditPtb(tx, {
+        packageId: PKG,
+        configId: CONFIG,
+        vaultRegistryId: REGISTRY,
+        vaultId: VAULT,
+        useCreditAmount: 500_000 as unknown as bigint,
+        ...CREDIT_ROUNDTRIP_VALUES,
+      }),
+    ).toThrow(/useCreditAmount must be a bigint/);
+    expect(tx.getData().inputs).toEqual([]);
   });
 });
 

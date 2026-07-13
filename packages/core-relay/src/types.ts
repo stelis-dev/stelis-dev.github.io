@@ -120,7 +120,7 @@ export const fail = (code: string, message: string): ValidationResult => ({
 /** Layer 2: extracted settle() call arguments.
  *
  * All 13 fields from the canonical `SETTLE_FIELD_SCHEMA`
- * (see `settlePayloadContract.ts`) are exposed here so that sponsor-side
+ * (see the generated `@stelis/contracts` settlement contract) are exposed here so that sponsor-side
  * execution logic can read every on-chain-committed audit field directly
  * from `txBytes` without relying on any off-chain store cache. The parser
  * in `parseSettleArgs.ts` is the canonical source — do not introduce a
@@ -128,10 +128,8 @@ export const fail = (code: string, message: string): ValidationResult => ({
  */
 export interface SettleArgs {
   configObjectId: string;
-  /**
-   * VaultRegistry object ID — present for vault-backed settlement variants.
-   */
-  registryObjectId?: string;
+  /** VaultRegistry object ID required by every current settlement function. */
+  registryObjectId: string;
   settlementPayoutRecipient: string;
   executionCostClaim: bigint;
   /**

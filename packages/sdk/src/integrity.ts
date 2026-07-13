@@ -8,8 +8,7 @@
  *
  * Uses shared policy logic from:
  *   - @stelis/core-relay: convertSdkCommands, containsGasCoinReference
- *   - @stelis/contracts: SETTLE_MODULE, SETTLE_FUNCTIONS, SUI_TYPE,
- *     INTEGRITY_POLICY_VERSION
+ *   - @stelis/contracts: SETTLE_MODULE, SETTLE_FUNCTIONS, SUI_TYPE
  */
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
@@ -20,20 +19,8 @@ import {
   isMoveCall,
   integrityCompare,
 } from '@stelis/core-relay/browser';
-import {
-  SETTLE_MODULE,
-  SETTLE_FUNCTIONS,
-  SUI_TYPE,
-  INTEGRITY_POLICY_VERSION,
-} from '@stelis/contracts';
+import { SETTLE_MODULE, SETTLE_FUNCTIONS, SUI_TYPE } from '@stelis/contracts';
 import type { PtbCommand } from '@stelis/contracts';
-
-// ─────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────
-
-/** The integrity policy version supported by this SDK build (from @stelis/contracts). */
-export const SUPPORTED_INTEGRITY_POLICY_VERSION = INTEGRITY_POLICY_VERSION;
 
 /** SUI framework address derived from the shared SUI_TYPE constant. */
 const SUI_FRAMEWORK_ADDRESS = normalizeSuiAddress(SUI_TYPE.split('::')[0]);

@@ -11,7 +11,7 @@
  *   - commit CAS: reserved → committed transition, fail-closed on mismatch
  *   - sign gate: rejects before commit, succeeds only for committed txBytes
  *   - checkin: reserved-stage cleanup, committed-stage cleanup, idempotency
- *   - Receipt/slot pinning: substitution rejection
+ *   - Receipt/sponsor pinning: substitution rejection
  *   - leaseStatus: admin-only occupancy snapshot
  *
  * Backend-specific details (Redis key layout, cursor rotation, observability
@@ -64,14 +64,15 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
 
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
-      const { slotId } = lease!;
+      expect(lease).toEqual({ sponsorAddress: expect.any(String) });
+      const { sponsorAddress } = lease!;
 
-      await h.pool.commit(slotId, receipt, sha256Hex(h.sampleTxBytes));
-      const { signature } = await h.pool.sign(slotId, receipt, h.sampleTxBytes);
+      await h.pool.commit(sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
+      const { signature } = await h.pool.sign(sponsorAddress, receipt, h.sampleTxBytes);
       expect(typeof signature).toBe('string');
       expect(signature.length).toBeGreaterThan(0);
 
-      await h.pool.checkin(slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
     });
 
     it('slot is available again after committed checkin', async () => {
@@ -80,13 +81,13 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease1 = await h.pool.checkout(r1);
       expect(lease1).not.toBeNull();
 
-      await h.pool.commit(lease1!.slotId, r1, sha256Hex(h.sampleTxBytes));
-      await h.pool.checkin(lease1!.slotId, r1, sha256Hex(h.sampleTxBytes));
+      await h.pool.commit(lease1!.sponsorAddress, r1, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(lease1!.sponsorAddress, r1, sha256Hex(h.sampleTxBytes));
 
       const r2 = 'receipt-reuse-2';
       const lease2 = await h.pool.checkout(r2);
       expect(lease2).not.toBeNull();
-      expect(lease2!.slotId).toBe(lease1!.slotId);
+      expect(lease2!.sponsorAddress).toBe(lease1!.sponsorAddress);
     });
   });
 
@@ -130,13 +131,13 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await h.pool.commit(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.commit(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
 
       await expect(
-        h.pool.commit(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes)),
+        h.pool.commit(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes)),
       ).rejects.toThrow(SponsorLeaseCommitError);
 
-      await h.pool.checkin(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
     });
 
     it('throws SponsorLeaseCommitError when receiptId does not match reservation', async () => {
@@ -146,10 +147,10 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       expect(lease).not.toBeNull();
 
       await expect(
-        h.pool.commit(lease!.slotId, 'wrong-receipt', sha256Hex(h.sampleTxBytes)),
+        h.pool.commit(lease!.sponsorAddress, 'wrong-receipt', sha256Hex(h.sampleTxBytes)),
       ).rejects.toThrow(SponsorLeaseCommitError);
 
-      await h.pool.checkin(lease!.slotId, receipt, null);
+      await h.pool.checkin(lease!.sponsorAddress, receipt, null);
     });
   });
 
@@ -162,11 +163,11 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await expect(h.pool.sign(lease!.slotId, receipt, h.sampleTxBytes)).rejects.toThrow(
+      await expect(h.pool.sign(lease!.sponsorAddress, receipt, h.sampleTxBytes)).rejects.toThrow(
         SponsorLeaseExpiredError,
       );
 
-      await h.pool.checkin(lease!.slotId, receipt, null);
+      await h.pool.checkin(lease!.sponsorAddress, receipt, null);
     });
 
     it('rejects sign with wrong txBytes (different hash)', async () => {
@@ -175,14 +176,14 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await h.pool.commit(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.commit(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
 
       const wrongTx = new Uint8Array([0xff, 0xfe, 0xfd]);
-      await expect(h.pool.sign(lease!.slotId, receipt, wrongTx)).rejects.toThrow(
+      await expect(h.pool.sign(lease!.sponsorAddress, receipt, wrongTx)).rejects.toThrow(
         SponsorLeaseExpiredError,
       );
 
-      await h.pool.checkin(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
     });
 
     it('rejects sign with wrong receiptId', async () => {
@@ -191,13 +192,13 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await h.pool.commit(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.commit(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
 
-      await expect(h.pool.sign(lease!.slotId, 'wrong-receipt', h.sampleTxBytes)).rejects.toThrow(
-        SponsorLeaseExpiredError,
-      );
+      await expect(
+        h.pool.sign(lease!.sponsorAddress, 'wrong-receipt', h.sampleTxBytes),
+      ).rejects.toThrow(SponsorLeaseExpiredError);
 
-      await h.pool.checkin(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
     });
   });
 
@@ -210,11 +211,11 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await h.pool.checkin(lease!.slotId, receipt, null);
+      await h.pool.checkin(lease!.sponsorAddress, receipt, null);
 
       const lease2 = await h.pool.checkout('receipt-after-reserved-checkin');
       expect(lease2).not.toBeNull();
-      expect(lease2!.slotId).toBe(lease!.slotId);
+      expect(lease2!.sponsorAddress).toBe(lease!.sponsorAddress);
     });
 
     it('checkin is idempotent — second call is silent no-op', async () => {
@@ -223,11 +224,11 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await h.pool.commit(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
-      await h.pool.checkin(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.commit(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
+      await h.pool.checkin(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes));
 
       await expect(
-        h.pool.checkin(lease!.slotId, receipt, sha256Hex(h.sampleTxBytes)),
+        h.pool.checkin(lease!.sponsorAddress, receipt, sha256Hex(h.sampleTxBytes)),
       ).resolves.toBeUndefined();
     });
 
@@ -237,12 +238,14 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const lease = await h.pool.checkout(receipt);
       expect(lease).not.toBeNull();
 
-      await expect(h.pool.checkin(lease!.slotId, 'wrong-receipt', null)).resolves.toBeUndefined();
+      await expect(
+        h.pool.checkin(lease!.sponsorAddress, 'wrong-receipt', null),
+      ).resolves.toBeUndefined();
 
       const lease2 = await h.pool.checkout('receipt-should-fail-busy');
       expect(lease2).toBeNull();
 
-      await h.pool.checkin(lease!.slotId, receipt, null);
+      await h.pool.checkin(lease!.sponsorAddress, receipt, null);
     });
   });
 
@@ -281,9 +284,11 @@ export function runSponsorPoolConformanceTests(factory: SponsorPoolFactory): voi
       const during = await h.pool.leaseStatus();
       expect(during.leasedSlots).toBe(1);
       expect(during.freeSlots).toBe(h.pool.size - 1);
-      expect(during.slots.find((slot) => slot.address === lease!.slotId)?.leased).toBe(true);
+      expect(during.slots.find((slot) => slot.address === lease!.sponsorAddress)?.leased).toBe(
+        true,
+      );
 
-      await h.pool.checkin(lease!.slotId, receipt, null);
+      await h.pool.checkin(lease!.sponsorAddress, receipt, null);
       const after = await h.pool.leaseStatus();
       expect(after.leasedSlots).toBe(0);
       expect(after.freeSlots).toBe(h.pool.size);

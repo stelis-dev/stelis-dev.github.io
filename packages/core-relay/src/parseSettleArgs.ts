@@ -20,17 +20,15 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { SettleArgs } from './types.js';
 import type { PtbCommand } from '@stelis/contracts';
 import {
+  SETTLEMENT_ENTRY_FUNCTIONS,
+  SETTLE_FIELD_SCHEMA,
   SETTLE_FUNCTIONS,
   SETTLE_WITH_CREDIT_FUNCTION,
+  settlementParameterIndex,
   settlementSwapDirectionFromFunctionName,
 } from '@stelis/contracts';
-import {
-  FIELD_OFFSET,
-  VARIANT_LAYOUTS,
-  variantClassFromFnName,
-  type SettleVariantClass,
-} from './settlePayloadContract.js';
 import { findSettleCommand } from './settleCommand.js';
+import { decodeExactPureU64Base64 } from './decodePureU64.js';
 
 // ─────────────────────────────────────────────
 // Error type
@@ -48,21 +46,20 @@ export class ParseSettleArgsError extends Error {
 }
 
 // ─────────────────────────────────────────────
-// Argument index mapping — derived from settlePayloadContract
+// Argument index mapping — derived from the generated compiled contract
 // ─────────────────────────────────────────────
 
 /**
  * Index positions for config, registry, claim, recipient, pool(s), and fee fields
  * within the MoveCall arguments for each settle function variant.
  *
- * Layouts are derived from the canonical variant prefix structure
- * (settlePayloadContract.ts VARIANT_LAYOUTS) and settle field offsets
- * (FIELD_OFFSET). bfq/qfb share the same layout within each class.
+ * Every index is resolved from the compiled parameter descriptors generated in
+ * `@stelis/contracts`; no prefix positions are duplicated here.
  */
 export interface ArgIndexMap {
   config: number;
   /** registry ObjectId index */
-  registry?: number;
+  registry: number;
   claim: number;
   recipient: number;
   pools: number[]; // pool ObjectId argument indices
@@ -86,44 +83,60 @@ export interface ArgIndexMap {
 }
 
 /**
- * Derive ArgIndexMap from a SettleVariantClass.
- *
- * Uses VARIANT_LAYOUTS for prefix structure (settle start index, pool indices)
- * and FIELD_OFFSET for named settle field offsets within the settle block.
- *
- * Covers every field in SETTLE_FIELD_SCHEMA (all 13 settle-block fields) so
+ * Derive ArgIndexMap from one compiled production settlement function.
+ * Covers every field in SETTLE_FIELD_SCHEMA so
  * that sponsor-side logic can derive all execution-critical values from the
  * submitted `txBytes` instead of the off-chain prepare store.
  */
-function deriveArgIndexMap(vc: SettleVariantClass): ArgIndexMap {
-  const { settleStartIndex: s, poolIndices } = VARIANT_LAYOUTS[vc];
+function deriveArgIndexMap(functionName: string): ArgIndexMap {
+  const entry = (
+    SETTLEMENT_ENTRY_FUNCTIONS as Readonly<
+      Record<string, (typeof SETTLEMENT_ENTRY_FUNCTIONS)[keyof typeof SETTLEMENT_ENTRY_FUNCTIONS]>
+    >
+  )[functionName];
+  if (!entry) throw new Error(`Missing compiled settlement function ${functionName}`);
+
+  const requiredParameterIndex = (parameterName: string): number => {
+    const index = settlementParameterIndex(functionName, parameterName);
+    if (index === undefined) {
+      throw new Error(`Compiled settlement function ${functionName} has no ${parameterName}`);
+    }
+    return index;
+  };
+  const settleFieldIndex = (fieldName: (typeof SETTLE_FIELD_SCHEMA)[number]['name']): number => {
+    const field = SETTLE_FIELD_SCHEMA.find((candidate) => candidate.name === fieldName);
+    if (!field) throw new Error(`Compiled settlement schema has no ${fieldName}`);
+    return requiredParameterIndex(field.moveName);
+  };
+
   return {
-    config: 0,
-    registry: 1,
-    claim: s + FIELD_OFFSET.executionCostClaim,
-    recipient: s + FIELD_OFFSET.settlementPayoutRecipient,
-    pools: [...poolIndices],
-    receiptId: s + FIELD_OFFSET.receiptId,
-    nonce: s + FIELD_OFFSET.nonce,
-    simGasReported: s + FIELD_OFFSET.simGasReported,
-    gasVarianceFixedMist: s + FIELD_OFFSET.gasVarianceFixedMist,
-    slippageBufferMist: s + FIELD_OFFSET.slippageBufferMist,
-    quotedHostFee: s + FIELD_OFFSET.quotedHostFeeMist,
-    expectedProtocolFee: s + FIELD_OFFSET.expectedProtocolFeeMist,
-    expectedConfigVersion: s + FIELD_OFFSET.expectedConfigVersion,
-    quoteTimestampMs: s + FIELD_OFFSET.quoteTimestampMs,
-    policyHash: s + FIELD_OFFSET.policyHash,
-    orderIdHash: s + FIELD_OFFSET.orderIdHash,
+    config: requiredParameterIndex('config'),
+    registry: requiredParameterIndex('registry'),
+    claim: settleFieldIndex('executionCostClaim'),
+    recipient: settleFieldIndex('settlementPayoutRecipient'),
+    pools: entry.parameters.flatMap((parameter, index) =>
+      parameter.name === 'pool' ? [index] : [],
+    ),
+    receiptId: settleFieldIndex('receiptId'),
+    nonce: settleFieldIndex('nonce'),
+    simGasReported: settleFieldIndex('simGasReported'),
+    gasVarianceFixedMist: settleFieldIndex('gasVarianceFixedMist'),
+    slippageBufferMist: settleFieldIndex('slippageBufferMist'),
+    quotedHostFee: settleFieldIndex('quotedHostFeeMist'),
+    expectedProtocolFee: settleFieldIndex('expectedProtocolFeeMist'),
+    expectedConfigVersion: settleFieldIndex('expectedConfigVersion'),
+    quoteTimestampMs: settleFieldIndex('quoteTimestampMs'),
+    policyHash: settleFieldIndex('policyHash'),
+    orderIdHash: settleFieldIndex('orderIdHash'),
   };
 }
 
 // ─── Derived ARG_INDEX_MAP ────────────────────────────────────────
-// Built from shared contract data: each function name → variant class → layout.
+// Built from the compiled parameter list for each supported function.
 
 const _derivedMap: Record<string, ArgIndexMap> = {};
 for (const fn of SETTLE_FUNCTIONS) {
-  const vc = variantClassFromFnName(fn);
-  if (vc) _derivedMap[fn] = deriveArgIndexMap(vc);
+  _derivedMap[fn] = deriveArgIndexMap(fn);
 }
 
 export const ARG_INDEX_MAP: Record<string, ArgIndexMap> = _derivedMap;
@@ -203,16 +216,11 @@ function decodePureU64(arg: unknown, inputs: unknown[]): bigint {
   if (typeof pure.bytes !== 'string') {
     throw new ParseSettleArgsError(`Input[${arg.Input}] Pure has no bytes`);
   }
-  const decoded = fromBase64(pure.bytes);
-  if (decoded.length !== 8) {
-    throw new ParseSettleArgsError(`Pure u64 must be exactly 8 bytes, got ${decoded.length}`);
+  try {
+    return decodeExactPureU64Base64(pure.bytes);
+  } catch (error) {
+    throw new ParseSettleArgsError(error instanceof Error ? error.message : String(error));
   }
-  // BCS u64: 8-byte little-endian
-  let value = 0n;
-  for (let idx = 7; idx >= 0; idx--) {
-    value = (value << 8n) | BigInt(decoded[idx]!);
-  }
-  return value;
 }
 
 function encodeUleb128Length(value: number): Uint8Array {
@@ -344,15 +352,34 @@ export function parseSettleArgs(
     throw new ParseSettleArgsError(`Unknown settle function: ${fnName}`);
   }
 
+  const entry = (
+    SETTLEMENT_ENTRY_FUNCTIONS as Readonly<
+      Record<
+        string,
+        (typeof SETTLEMENT_ENTRY_FUNCTIONS)[keyof typeof SETTLEMENT_ENTRY_FUNCTIONS] | undefined
+      >
+    >
+  )[fnName];
+  if (!entry) {
+    throw new ParseSettleArgsError(`Missing compiled settlement function: ${fnName}`);
+  }
+  if (settleCmd.arguments.length !== entry.parameters.length) {
+    throw new ParseSettleArgsError(
+      `Settle function ${fnName} requires ${entry.parameters.length} arguments, got ${settleCmd.arguments.length}`,
+    );
+  }
+  if (settleCmd.typeArguments.length !== entry.typeParameters.length) {
+    throw new ParseSettleArgsError(
+      `Settle function ${fnName} requires ${entry.typeParameters.length} type arguments, got ${settleCmd.typeArguments.length}`,
+    );
+  }
+
   const args = settleCmd.arguments;
 
   const configObjectId = resolveObjectId(args[indexMap.config], inputs);
 
-  // Resolve registry (vault-backed variants)
-  let registryObjectId: string | undefined;
-  if (indexMap.registry !== undefined) {
-    registryObjectId = resolveObjectId(args[indexMap.registry], inputs);
-  }
+  // Resolve the registry required by every current compiled settlement entry.
+  const registryObjectId = resolveObjectId(args[indexMap.registry], inputs);
 
   const executionCostClaim = decodePureU64(args[indexMap.claim], inputs);
   const settlementPayoutRecipient = decodePureAddress(args[indexMap.recipient], inputs);

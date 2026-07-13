@@ -9,7 +9,7 @@ import { describe, test, expect, vi } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase58, toBase64 } from '@mysten/sui/utils';
 import {
-  buildStudioPreparedCommitInputs,
+  buildStudioPreparedDraftFields,
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
   createStudioSponsorConsumeAdapter,
@@ -26,18 +26,28 @@ import type {
   PreConsumeSponsorContext,
 } from '../src/session/sponsoredExecution/index.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
-import { SenderSignatureError, SponsorSubmitInfraError } from '../src/session/sessionPrimitives.js';
+import {
+  SenderSignatureError,
+  SponsorPostSignatureUncertaintyError,
+} from '../src/session/sessionPrimitives.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../src/store/prepareTypes.js';
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
 import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import type { OnchainConfig } from '@stelis/core-relay';
+import { hashTargets } from '../src/studio/promotionTargetPolicy.js';
+import {
+  grpcSimulationFailure,
+  grpcSimulationSuccess,
+  unknownExecutionError,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const PROMOTION_ID = 'promo-1';
 const USER_ID = 'user-1';
 const SENDER = `0x${'11'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'77'.repeat(32)}`;
 const OTHER_SENDER = `0x${'33'.repeat(32)}`;
 const SPONSOR = `0x${'22'.repeat(32)}`;
 const TX_HASH = 'a'.repeat(64);
@@ -47,6 +57,7 @@ const GAS_USED = {
   storageCost: '500',
   storageRebate: '200',
 };
+const ALLOWED_TARGET = `0x${'88'.repeat(32)}::example::act`;
 
 class TestStudioError extends Error {
   constructor(
@@ -82,7 +93,6 @@ function makePromotionEntry(
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: TX_HASH,
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: `promotion:${PROMOTION_ID}`,
     orderId: null,
@@ -102,7 +112,6 @@ function makeGenericEntry(): PreparedTxEntry {
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: TX_HASH,
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'credit',
     orderId: null,
@@ -166,7 +175,7 @@ function makeContext(
   return {
     sui: {} as StudioPolicyContext['sui'],
     packageId: `0x${'66'.repeat(32)}`,
-    deepbookPackageId: `0x${'77'.repeat(32)}`,
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     promotionStore: {
       get: vi.fn(async () => makePromotion()),
     } as unknown as StudioPolicyContext['promotionStore'],
@@ -190,7 +199,7 @@ function makeContext(
       getByUser: vi.fn(),
       getByPromotion: vi.fn(),
     },
-    globalTargetHashes: new Set<string>(),
+    globalTargetHashes: new Set(hashTargets([ALLOWED_TARGET])),
     getConfig: vi.fn(),
     onSponsorResult: undefined,
     ...overrides,
@@ -255,11 +264,10 @@ function makePostCtx(): PostConsumeSponsorContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
+    executionStage: 'on_chain',
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
-      hmacCommitVerified: true,
     }),
     ledgerReservation: reconstructReservationHandles.ledgerReservation({
       receiptId: RECEIPT_ID,
@@ -279,7 +287,7 @@ function seedSponsorState(
     txSender: SENDER,
     peeked: makePromotionEntry(),
     peekedPromotion: makePromotionEntry(),
-    builtTxForValidation: {} as Transaction,
+    builtTxForValidation: new Transaction(),
     prepared: makePromotionEntry(),
     sponsorResultOutcome: 'internal_error',
     sponsorResultEconomics: { economicsStatus: 'unknown', failureReason: null },
@@ -307,11 +315,13 @@ async function buildTxBytes(sender: string, gasBudget = RESERVED_GAS): Promise<U
 
 async function buildTxKindBytes(): Promise<string> {
   const tx = new Transaction();
+  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
   return toBase64(await tx.build({ onlyTransactionKind: true }));
 }
 
 function makeBuildReadyTransaction(): Transaction {
   const tx = new Transaction();
+  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
   tx.setGasPrice(1);
   const digestBytes = new Uint8Array(32);
   digestBytes.fill(2);
@@ -330,13 +340,11 @@ describe('createStudioExecutionPolicy', () => {
     const { policy } = createStudioExecutionPolicy(makeSponsorOptions());
 
     expect(policy.discriminator).toBe('promotion');
-    expect(policy.handleRequirements.gasBoundBuild).toEqual({ sponsorSlot: true });
+    expect(policy.handleRequirements.gasBoundBuild).toEqual({});
     expect(policy.handleRequirements.preparedCommit).toEqual({
-      sponsorSlot: true,
       ledgerReservation: true,
     });
     expect(policy.handleRequirements.sponsorResult).toEqual({
-      sponsorSlot: true,
       ledgerReservation: true,
     });
   });
@@ -366,7 +374,7 @@ describe('studio prepare hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(makePrepareOptions({ ctx, txKindBytes }));
 
     await policy.hooks.RequestValidation({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
@@ -375,17 +383,12 @@ describe('studio prepare hooks', () => {
     expect(checkUserQuota).toHaveBeenCalledWith(USER_ID);
   });
 
-  test('GasBoundBuild returns measured gas and commit inputs preserve ledger reservation handle', async () => {
+  test('GasBoundBuild returns measured gas and policy exposes only route-owned draft fields', async () => {
     const txKindBytes = await buildTxKindBytes();
     const kindTx = makeBuildReadyTransaction();
     const ctx = makeContext({
       sui: {
-        simulateTransaction: vi.fn(async () => ({
-          Transaction: {
-            status: { success: true },
-            effects: { gasUsed: GAS_USED },
-          },
-        })),
+        simulateTransaction: vi.fn(async () => grpcSimulationSuccess('mock-digest', GAS_USED)),
       } as unknown as StudioPolicyContext['sui'],
       getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
     });
@@ -399,28 +402,26 @@ describe('studio prepare hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(options);
 
     await policy.hooks.RequestValidation({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
     await policy.hooks.ChainSnapshot({
-      receiptId: 'placeholder',
+      receiptId: RECEIPT_ID,
       senderAddress: SENDER,
       clientIp: '127.0.0.1',
     });
     const gasInput: GasBoundBuildInput = {
       reservationHandles: {
         sponsorSlot: reconstructReservationHandles.sponsorSlot({
-          slotId: 'slot-1',
           sponsorAddress: SPONSOR,
           receiptId: RECEIPT_ID,
-          hmacCommitVerified: true,
         }),
       },
     };
     const buildResult = await policy.hooks.GasBoundBuild(
       {
-        receiptId: 'placeholder',
+        receiptId: RECEIPT_ID,
         senderAddress: SENDER,
         clientIp: '127.0.0.1',
       },
@@ -429,28 +430,100 @@ describe('studio prepare hooks', () => {
 
     expect(kindTx.getData().gasData.owner).toBe(SPONSOR);
     expect(buildResult.measuredGasMist).toBe(101_300n);
-    const commitInput = buildStudioPreparedCommitInputs(options, state, {
-      receiptId: RECEIPT_ID,
-      txBytesHash: buildResult.txBytesHash,
-      sponsorSlot: gasInput.reservationHandles.sponsorSlot,
-      ledgerReservation: reconstructReservationHandles.ledgerReservation({
-        receiptId: RECEIPT_ID,
-        promotionId: PROMOTION_ID,
-        userId: USER_ID,
-        reservedGasMist: buildResult.measuredGasMist,
-        ledgerLookupVerified: true,
-      }),
-      buildResult,
-    });
-    expect(commitInput).toMatchObject({
-      mode: 'promotion',
-      promotionId: PROMOTION_ID,
-      userId: USER_ID,
-      reservedGasMist: 101_300n,
+    const draftFields = buildStudioPreparedDraftFields(options, state);
+    expect(draftFields).toEqual({
       executionPathKey: `promotion:${PROMOTION_ID}`,
-      nonce: 0n,
+      orderId: null,
     });
   });
+
+  test.each([
+    {
+      name: 'legacy partial result',
+      simulationResult: {
+        Transaction: {
+          status: { success: true },
+          effects: { gasUsed: GAS_USED },
+        },
+      },
+      expected: {
+        code: 'DRY_RUN_FAILED',
+        message: 'Dry-run returned a malformed terminal result',
+      },
+    },
+    {
+      name: 'typed failed transaction',
+      simulationResult: grpcSimulationFailure(
+        'mock-failure',
+        unknownExecutionError('unit-8 typed dry-run failure'),
+        GAS_USED,
+      ),
+      expected: {
+        code: 'DRY_RUN_FAILED',
+        message: 'Dry-run failed: unit-8 typed dry-run failure',
+      },
+    },
+    {
+      name: 'current-union success without gas',
+      simulationResult: (() => {
+        const success = grpcSimulationSuccess('mock-no-gas', GAS_USED);
+        return {
+          ...success,
+          Transaction: {
+            ...success.Transaction,
+            effects: {
+              ...success.Transaction.effects,
+              gasUsed: undefined,
+            },
+          },
+        };
+      })(),
+      expected: {
+        code: 'DRY_RUN_NO_GAS',
+        message: 'Dry-run returned no gas usage',
+      },
+    },
+  ])(
+    'GasBoundBuild rejects $name with the specific boundary error',
+    async ({ simulationResult, expected }) => {
+      const txKindBytes = await buildTxKindBytes();
+      const kindTx = makeBuildReadyTransaction();
+      const ctx = makeContext({
+        sui: {
+          simulateTransaction: vi.fn(async () => simulationResult),
+        } as unknown as StudioPolicyContext['sui'],
+        getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
+      });
+      const { policy } = createStudioExecutionPolicy(
+        makePrepareOptions({
+          ctx,
+          txKindBytes,
+          deps: {
+            deserializeUserTxKind: vi.fn(async () => kindTx),
+          },
+        }),
+      );
+      const hookContext = {
+        receiptId: RECEIPT_ID,
+        senderAddress: SENDER,
+        clientIp: '127.0.0.1',
+      } as const;
+
+      await policy.hooks.RequestValidation(hookContext);
+      await policy.hooks.ChainSnapshot(hookContext);
+
+      await expect(
+        policy.hooks.GasBoundBuild(hookContext, {
+          reservationHandles: {
+            sponsorSlot: reconstructReservationHandles.sponsorSlot({
+              sponsorAddress: SPONSOR,
+              receiptId: RECEIPT_ID,
+            }),
+          },
+        }),
+      ).rejects.toMatchObject(expected);
+    },
+  );
 });
 
 describe('studio sponsor preconsume', () => {
@@ -622,7 +695,7 @@ describe('createStudioSponsorConsumeAdapter', () => {
     await expect(adapter.validateConsumedEntry?.(makeGenericEntry())).rejects.toMatchObject({
       code: 'MODE_MISMATCH',
     });
-    expect(checkin).toHaveBeenCalledWith('slot-1', RECEIPT_ID, TX_HASH);
+    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, TX_HASH);
   });
 });
 
@@ -723,6 +796,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
+      executionStage: 'on_chain',
       digest: '0xok',
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
@@ -746,6 +820,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     expect(onSponsorResult).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: 'success',
+        executionStage: 'on_chain',
         route: 'promotion',
         digest: '0xok',
         promotionId: PROMOTION_ID,
@@ -753,6 +828,13 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
         economics: expect.objectContaining({ economicsStatus: 'known' }),
       }),
     );
+    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
+      economicsStatus: 'known',
+      recoveredGasMist: '0',
+      hostPaidGasMist: '1300',
+      hostFeeMist: '0',
+      hostNetMist: '-1300',
+    });
   });
 
   test('Release callback failure preserves existing sponsor_handler source', async () => {
@@ -769,6 +851,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       seedSponsorState(state);
       const success: Extract<ExecResult, { success: true }> = {
         success: true,
+        executionStage: 'on_chain',
         digest: '0xok',
         effects: { status: 'ok' },
         gasUsed: GAS_USED,
@@ -809,6 +892,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const failed: ExecResult = {
       success: false,
+      executionStage: 'on_chain',
       digest: '0xrevert',
       reason: 'MoveAbort(101)',
       isCongestion: false,
@@ -854,8 +938,9 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const failed: ExecResult = {
       success: false,
+      executionStage: 'after_sponsor_signature',
       digest: '',
-      reason: 'ExecutionCancelledDueToSharedObjectCongestion',
+      reason: 'confirmed shared-object congestion',
       isCongestion: true,
       gasUsed: null,
     };
@@ -886,6 +971,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
+      executionStage: 'on_chain',
       digest: '0xmissing-gas',
       effects: { status: 'ok' },
       gasUsed: null,
@@ -912,6 +998,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
 
   test('ClassifySponsorResult maps post-success ledger consume failure to CONSUME_FAILED known loss', async () => {
     const consume = vi.fn(async () => ({ ok: false, reason: 'reservation_not_found' as const }));
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
         ctx: makeContext({
@@ -925,6 +1012,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
+      executionStage: 'on_chain',
       digest: '0xconsume-failed',
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
@@ -937,11 +1025,76 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     expect(state.sponsor?.sponsorResultOutcome).toBe('success');
     expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
       economicsStatus: 'known',
+      recoveredGasMist: '0',
+      hostPaidGasMist: '1300',
+      hostNetMist: '-1300',
       failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED: reservation_not_found',
     });
+    const events = consoleErrorSpy.mock.calls.flatMap((args: unknown[]) => {
+      try {
+        return [JSON.parse(args[0] as string) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    });
+    expect(
+      events.filter((entry) => entry.event === 'LEDGER_CONSUME_FAILED_IN_HANDLER'),
+    ).toHaveLength(1);
+    expect(events.some((entry) => entry.event === 'PROMOTION_LEDGER_CONSUME_FAILED')).toBe(false);
+    consoleErrorSpy.mockRestore();
   });
 
-  test('signAndSubmit port handles submit-infra before runner Release observes final state', async () => {
+  test('post-success ledger consume throw keeps known gas loss and maps to CONSUME_FAILED', async () => {
+    const consume = vi.fn(async () => {
+      throw new Error('redis transport down');
+    });
+    const { policy, state } = createStudioExecutionPolicy(
+      makeSponsorOptions({
+        ctx: makeContext({
+          executionLedger: {
+            ...makeContext().executionLedger,
+            consume,
+          } as unknown as PromotionExecutionLedger,
+        }),
+      }),
+    );
+    seedSponsorState(state);
+    const success: Extract<ExecResult, { success: true }> = {
+      success: true,
+      executionStage: 'on_chain',
+      digest: '0xconsume-threw',
+      effects: { status: 'ok' },
+      gasUsed: GAS_USED,
+    };
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), success)).rejects.toMatchObject({
+      code: 'CONSUME_FAILED',
+    });
+    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
+      economicsStatus: 'known',
+      recoveredGasMist: '0',
+      hostPaidGasMist: '1300',
+      hostNetMist: '-1300',
+      failureReason: 'PROMOTION_LEDGER_CONSUME_THREW: redis transport down',
+    });
+
+    const events = consoleErrorSpy.mock.calls.flatMap((args: unknown[]) => {
+      try {
+        return [JSON.parse(args[0] as string) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    });
+    expect(
+      events.filter((entry) => entry.event === 'LEDGER_CONSUME_THREW_IN_HANDLER'),
+    ).toHaveLength(1);
+    expect(events.some((entry) => entry.event === 'PROMOTION_LEDGER_CONSUME_FAILED')).toBe(false);
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  test('signAndSubmit port handles post-signature cleanup and preserves typed stage for runner', async () => {
     const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
     const usageRows: CreateUsageEventInput[] = [];
     const rawCause = new Error('rpc transport error');
@@ -949,7 +1102,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       ctx: makeContext({}, usageRows),
       deps: {
         signAndSubmit: vi.fn(async () => {
-          throw new SponsorSubmitInfraError(rawCause);
+          throw new SponsorPostSignatureUncertaintyError(rawCause);
         }) as unknown as StudioExecutionPolicyDependencies['signAndSubmit'],
         consumeLedgerReservationWithLog:
           consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
@@ -959,26 +1112,28 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    await expect(port('slot-1', RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
-      rawCause,
+    const thrown = await port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig').catch(
+      (err: unknown) => err,
     );
+    expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
+    expect((thrown as SponsorPostSignatureUncertaintyError).cause).toBe(rawCause);
 
     expect(consumeLedgerReservationWithLog).toHaveBeenCalledWith(
       expect.anything(),
       RECEIPT_ID,
       RESERVED_GAS,
-      'submit_infra_unknown',
+      'post_signature_uncertainty',
       expect.objectContaining({ txDigest: null }),
     );
     expect(usageRows[0]).toMatchObject({
       result: 'failed',
-      failureReason: 'submit_infra_unknown',
+      failureReason: 'post_signature_uncertainty',
       consumedGasMist: RESERVED_GAS.toString(),
     });
     expect(state.sponsor?.sponsorResultOutcome).toBe('internal_error');
     expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
       economicsStatus: 'unknown',
-      failureReason: expect.stringContaining('submit_infra_unknown'),
+      failureReason: expect.stringContaining('post_signature_uncertainty'),
     });
   });
 
@@ -998,7 +1153,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    await expect(port('slot-1', RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
+    await expect(port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
       leaseErr,
     );
 

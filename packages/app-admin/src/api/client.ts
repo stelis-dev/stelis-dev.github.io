@@ -6,16 +6,20 @@
  * In prod, VITE_STELIS_API_URL provides the base URL (same pattern as
  * app-web's RELAY_API_BASE in relayApiEndpoint.ts).
  *
- * Cross-package contract types used by this file (sponsor operations admin
- * payload family + settlement swap path response data) come from
- * `@stelis/contracts` as `import type` only. `DashboardPage.tsx` imports one runtime
- * withdraw-message helper from `@stelis/contracts`, while this client
- * keeps its request helpers local and intentionally type-only with
- * respect to `@stelis/contracts`.
+ * Current auth and Sponsor Refill Account withdrawal wire types and response
+ * parsers come from `@stelis/contracts`. Other admin-only routes remain local
+ * because this boundary does not broaden their public contract surface.
  */
 
-import type {
+import {
+  parseAdminAuthChallengeResponse,
+  parseAdminAuthSuccessResponse,
+  parseSponsorRefillAccountWithdrawalChallengeResponse,
+  parseSponsorRefillAccountWithdrawalResponse,
+  type AdminAuthVerifyRequest,
   SingleHopSettlementSwapPathResponse,
+  type SponsorRefillAccountWithdrawalRequest,
+  SuiNetwork,
   SponsorOperationsStatus as SponsorOperationsState,
 } from '@stelis/contracts';
 
@@ -45,7 +49,11 @@ export class ApiError extends Error {
   }
 }
 
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(
+  url: string,
+  init?: RequestInit,
+  parse?: (value: unknown) => T,
+): Promise<T> {
   const res = await fetch(buildApiUrl(url), {
     ...init,
     credentials: 'include',
@@ -59,12 +67,15 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     throw new ApiError(
       res.status,
-      (body.error as string) ?? `HTTP_${res.status}`,
+      (typeof body.code === 'string' ? body.code : undefined) ??
+        (body.error as string) ??
+        `HTTP_${res.status}`,
       (body.message as string) ?? (body.error as string) ?? `Request failed: ${res.status}`,
     );
   }
 
-  return res.json() as Promise<T>;
+  const data: unknown = await res.json();
+  return parse ? parse(data) : (data as T);
 }
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -79,34 +90,34 @@ export function getSession(): Promise<Session> {
   return apiFetch<Session>('/auth/session');
 }
 
-export function getNonce(): Promise<{ nonce: string }> {
-  return apiFetch<{ nonce: string }>('/auth/nonce');
+export function issueAdminAuthChallenge() {
+  return apiFetch('/auth/nonce', { method: 'POST' }, parseAdminAuthChallengeResponse);
 }
 
-export function verifySignature(data: {
-  nonce: string;
-  signature: string;
-  address: string;
-}): Promise<void> {
-  return apiFetch('/auth/verify', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
+export async function verifyAdminAuth(data: AdminAuthVerifyRequest): Promise<void> {
+  await apiFetch(
+    '/auth/verify',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+    parseAdminAuthSuccessResponse,
+  );
 }
 
-export function renewSession(data: {
-  nonce: string;
-  signature: string;
-  address: string;
-}): Promise<void> {
-  return apiFetch('/auth/renew', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
+export async function renewAdminSession(data: AdminAuthVerifyRequest): Promise<void> {
+  await apiFetch(
+    '/auth/renew',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+    parseAdminAuthSuccessResponse,
+  );
 }
 
-export function logout(): Promise<void> {
-  return apiFetch('/auth/logout', { method: 'POST' });
+export async function logoutAdminSession(): Promise<void> {
+  await apiFetch('/auth/logout', { method: 'POST' }, parseAdminAuthSuccessResponse);
 }
 
 // ── Sponsor Operations / Dashboard ─────────────────────────────────────────
@@ -126,7 +137,7 @@ export interface SponsorOperationsStatus {
   sponsorOperations: SponsorOperationsState;
   primaryAddress: string | null;
   settlementPayoutRecipientAddress: string;
-  network: string;
+  network: SuiNetwork;
   sponsorBalanceWarnMist?: string;
   sponsorBalanceRefillTargetMist?: string;
   feeConfig: FeeConfig | null;
@@ -199,22 +210,23 @@ export function removeBlocklistEntry(key: string): Promise<void> {
 
 // ── Withdraw ───────────────────────────────────────────────────────────────
 
-export function getSponsorRefillAccountWithdrawNonce(): Promise<{
-  nonce: string;
-  expiresAt: string;
-}> {
-  return apiFetch<{ nonce: string; expiresAt: string }>('/api/sponsor-refill-account/withdraw');
+export function issueSponsorRefillAccountWithdrawalChallenge() {
+  return apiFetch(
+    '/api/sponsor-refill-account/withdrawal-challenge',
+    { method: 'POST' },
+    parseSponsorRefillAccountWithdrawalChallengeResponse,
+  );
 }
 
-export function executeSponsorRefillAccountWithdraw(data: {
-  nonce: string;
-  signature: string;
-  amountMist: string;
-}): Promise<{ digest: string }> {
-  return apiFetch<{ digest: string }>('/api/sponsor-refill-account/withdraw', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
+export function executeSponsorRefillAccountWithdrawal(data: SponsorRefillAccountWithdrawalRequest) {
+  return apiFetch(
+    '/api/sponsor-refill-account/withdraw',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+    parseSponsorRefillAccountWithdrawalResponse,
+  );
 }
 
 // ── Studio ─────────────────────────────────────────────────────────────
@@ -319,18 +331,17 @@ export interface SponsoredExecutionAggregate {
 
 export type SponsoredLogsRowMode = 'generic' | 'promotion';
 export type SponsoredLogsEconomicsStatus = 'known' | 'unknown';
+export type SponsoredLogsOutcome = 'success' | 'onchain_revert' | 'internal_error';
 
 export interface SponsoredExecutionLogEntry {
-  schemaVersion: 1;
   createdAt: string;
   mode: SponsoredLogsRowMode;
-  outcome: string;
+  outcome: SponsoredLogsOutcome;
   receiptId: string;
   digest: string | null;
-  senderAddress: string | null;
-  sponsorAddress: string | null;
-  slotId: string | null;
-  executionPathKey: string | null;
+  senderAddress: string;
+  sponsorAddress: string;
+  executionPathKey: string;
   orderIdHash: string | null;
   promotionId: string | null;
   userId: string | null;

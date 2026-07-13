@@ -4,9 +4,10 @@
  * Lists, creates, updates, transitions status, and deletes promotions.
  * Uses the admin API client for all operations.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   getPromotions,
+  ApiError,
   createPromotion,
   updatePromotion,
   transitionPromotionStatus,
@@ -229,6 +230,7 @@ export function PromotionsPage() {
   const [form, setForm] = useState<CreateFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const editingIdRef = useRef<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const loadPromotions = useCallback(async () => {
@@ -265,6 +267,9 @@ export function PromotionsPage() {
       setForm(EMPTY_FORM);
       await loadPromotions();
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PROMOTION_CURRENT_CONFLICT') {
+        await loadPromotions();
+      }
       setActionError(err instanceof Error ? err.message : 'Create failed');
     } finally {
       setSaving(false);
@@ -281,10 +286,21 @@ export function PromotionsPage() {
     setActionError(null);
     try {
       await updatePromotion(id, validation.payload);
-      setEditingId(null);
-      setForm(EMPTY_FORM);
+      if (editingIdRef.current === id) {
+        editingIdRef.current = null;
+        setEditingId(null);
+        setForm(EMPTY_FORM);
+      }
       await loadPromotions();
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PROMOTION_CURRENT_CONFLICT') {
+        if (editingIdRef.current === id) {
+          editingIdRef.current = null;
+          setEditingId(null);
+          setForm(EMPTY_FORM);
+        }
+        await loadPromotions();
+      }
       setActionError(err instanceof Error ? err.message : 'Update failed');
     } finally {
       setSaving(false);
@@ -295,8 +311,21 @@ export function PromotionsPage() {
     setActionError(null);
     try {
       await transitionPromotionStatus(id, status, reason);
+      if (editingIdRef.current === id) {
+        editingIdRef.current = null;
+        setEditingId(null);
+        setForm(EMPTY_FORM);
+      }
       await loadPromotions();
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PROMOTION_CURRENT_CONFLICT') {
+        if (editingIdRef.current === id) {
+          editingIdRef.current = null;
+          setEditingId(null);
+          setForm(EMPTY_FORM);
+        }
+        await loadPromotions();
+      }
       setActionError(err instanceof Error ? err.message : 'Status transition failed');
     }
   };
@@ -306,13 +335,27 @@ export function PromotionsPage() {
     setActionError(null);
     try {
       await deletePromotion(id);
+      if (editingIdRef.current === id) {
+        editingIdRef.current = null;
+        setEditingId(null);
+        setForm(EMPTY_FORM);
+      }
       await loadPromotions();
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PROMOTION_CURRENT_CONFLICT') {
+        if (editingIdRef.current === id) {
+          editingIdRef.current = null;
+          setEditingId(null);
+          setForm(EMPTY_FORM);
+        }
+        await loadPromotions();
+      }
       setActionError(err instanceof Error ? err.message : 'Delete failed');
     }
   };
 
   const startEdit = (p: PromotionRecord) => {
+    editingIdRef.current = p.promotionId;
     setEditingId(p.promotionId);
     setShowCreate(false);
     setForm({
@@ -341,8 +384,10 @@ export function PromotionsPage() {
         <button
           type="button"
           className="admin-btn admin-btn-primary"
+          disabled={saving}
           onClick={() => {
             setShowCreate(true);
+            editingIdRef.current = null;
             setEditingId(null);
             setForm(EMPTY_FORM);
           }}
@@ -508,8 +553,10 @@ export function PromotionsPage() {
             <button
               type="button"
               className="admin-btn"
+              disabled={saving}
               onClick={() => {
                 setShowCreate(false);
+                editingIdRef.current = null;
                 setEditingId(null);
                 setForm(EMPTY_FORM);
               }}
@@ -576,6 +623,7 @@ export function PromotionsPage() {
                           <button
                             type="button"
                             className="admin-btn admin-btn-sm"
+                            disabled={saving}
                             onClick={() => startEdit(p)}
                           >
                             Edit

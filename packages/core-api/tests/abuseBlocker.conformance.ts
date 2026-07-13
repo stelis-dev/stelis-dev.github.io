@@ -3,14 +3,9 @@
  *
  * Both MemoryAbuseBlocker and RedisAbuseBlocker must pass this suite.
  * The factory parameter lets each implementation provide its own
- * setup. Tests verify the adapter's storage + windowed-counter +
- * block-duration contract only, not classification semantics.
- *
- * Classification semantics (which codes are "manipulation" vs
- * "ignored" vs counter-bucketed) live in `abuseBlocking.ts` and
- * `docs/security.md`. This suite treats them as inputs, not as
- * contract points, because any change there is an explicit policy
- * decision that must be escalated rather than silently normalized.
+ * setup. Tests verify storage, windowed counters, block duration, and the
+ * shared subject-family/carve-out decisions that both adapters must enact.
+ * Failure-table vocabulary remains covered separately in `failures.test.ts`.
  *
  * Memory-only cases (MAX_BLOCK_KEYS bounded eviction white-box,
  * MAX_COUNTER_KEYS saturation) live in `abuseBlocking.test.ts`
@@ -405,12 +400,7 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
   });
 
-  it('ONCHAIN_REVERT — SPREAD_EXCEEDED (market-volatility) carves out address counter, IP counter still increments', async () => {
-    // Market-volatility carve-out: settle::ESpreadTooWide. Volatility
-    // between prepare-time pricing and execution can move the spread past
-    // the configured threshold for legitimate retries; the address-level
-    // counter would otherwise false-block normal flow. IP counter still
-    // applies so raw IP churn remains observable.
+  it('ONCHAIN_REVERT — SPREAD_EXCEEDED increments the separate address revert counter and IP counter', async () => {
     const { blocker } = await setup({
       addressOnchainRevertThreshold: 1,
       addressOnchainRevertWindowMs: 300_000,
@@ -434,15 +424,11 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     );
     await expect(
       blocker.checkSubject({ kind: 'address', address: ADDRESS }),
-    ).resolves.toMatchObject({ blocked: false });
+    ).resolves.toMatchObject({ blocked: true, scope: 'address' });
     await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
   });
 
-  it('ONCHAIN_REVERT — SLIPPAGE_EXCEEDED (market-volatility) carves out address counter, IP counter still increments', async () => {
-    // Market-volatility carve-out: DeepBook
-    // pool::swap_exact_quantity::EMinimumQuantityOutNotMet. Pool depth can
-    // move enough between prepare and submit that min-out is no longer
-    // met. Same carve-out rationale as SPREAD_EXCEEDED.
+  it('ONCHAIN_REVERT — SLIPPAGE_EXCEEDED increments the separate address revert counter and IP counter', async () => {
     const { blocker } = await setup({
       addressOnchainRevertThreshold: 1,
       addressOnchainRevertWindowMs: 300_000,
@@ -466,7 +452,7 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     );
     await expect(
       blocker.checkSubject({ kind: 'address', address: ADDRESS }),
-    ).resolves.toMatchObject({ blocked: false });
+    ).resolves.toMatchObject({ blocked: true, scope: 'address' });
     await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
   });
 
@@ -526,7 +512,7 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
   });
 
-  it('studio_user — ONCHAIN_REVERT SLIPPAGE_EXCEEDED (market-volatility) carves out non-IP counter, IP counter still increments', async () => {
+  it('studio_user — ONCHAIN_REVERT SLIPPAGE_EXCEEDED increments revert and IP counters', async () => {
     const { blocker } = await setup({
       addressOnchainRevertThreshold: 1,
       addressOnchainRevertWindowMs: 300_000,
@@ -541,6 +527,30 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
       subcode: 'SLIPPAGE_EXCEEDED',
     });
     await blocker.recordSponsorFailure(IP, { kind: 'studio_user', userId }, 'ONCHAIN_REVERT', {
+      subcode: 'SLIPPAGE_EXCEEDED',
+    });
+    await expect(blocker.checkSubject({ kind: 'studio_user', userId })).resolves.toMatchObject({
+      blocked: true,
+      scope: 'studio_user',
+    });
+    await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
+  });
+
+  it('studio_user — PREFLIGHT_FAILED SLIPPAGE_EXCEEDED carves out sim-tier but not IP', async () => {
+    const { blocker } = await setup({
+      addressDryRunThreshold: 1,
+      addressDryRunWindowMs: 60_000,
+      addressBlockDurationMs: 500,
+      ipFailureThreshold: 1,
+      ipFailureWindowMs: 300_000,
+      ipBlockDurationMs: 500,
+    });
+
+    const userId = 'studio:promo:user-preflight-volatility';
+    await blocker.recordSponsorFailure(IP, { kind: 'studio_user', userId }, 'PREFLIGHT_FAILED', {
+      subcode: 'SLIPPAGE_EXCEEDED',
+    });
+    await blocker.recordSponsorFailure(IP, { kind: 'studio_user', userId }, 'PREFLIGHT_FAILED', {
       subcode: 'SLIPPAGE_EXCEEDED',
     });
     await expect(blocker.checkSubject({ kind: 'studio_user', userId })).resolves.toMatchObject({
@@ -697,12 +707,7 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     ).resolves.toMatchObject({ blocked: false });
   });
 
-  it('DRY_RUN_FAILED — SLIPPAGE_EXCEEDED (market-volatility) carves out address dry-run counter (defensive coverage)', async () => {
-    // Same defensive coverage as the REPLAY_NONCE case above, but locks the
-    // market-volatility policy into the simulation-tier branch as well.
-    // Production callers do not currently route `DRY_RUN_FAILED` through
-    // the abuse recorder; this locks that the predicate skips volatility
-    // subcodes for that code.
+  it('DRY_RUN_FAILED — market subcodes do not inherit the sponsor-preflight carve-out', async () => {
     const { blocker } = await setup({
       addressDryRunThreshold: 1,
       addressDryRunWindowMs: 60_000,
@@ -723,7 +728,7 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     );
     await expect(
       blocker.checkSubject({ kind: 'address', address: ADDRESS }),
-    ).resolves.toMatchObject({ blocked: false });
+    ).resolves.toMatchObject({ blocked: true, scope: 'address' });
   });
 
   // ────────────────────────────────────────────────────────────────

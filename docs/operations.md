@@ -20,6 +20,11 @@ RPC endpoints are configured in `packages/app-api/rpc.json`, not in environment 
 
 The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the Host reads only the section selected by `NETWORK`, validates those endpoints against the selected network, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If the selected section is empty or no usable endpoint remains, boot fails.
 
+The shipped Stelis contract ID table currently supports testnet only. The
+mainnet RPC and settlement swap path sections do not by themselves make a
+mainnet Host deployable: `NETWORK=mainnet` fails closed until a fresh Stelis
+Move package and its current mainnet object IDs are shipped.
+
 ## Reverse Proxy and CORS
 
 `TRUSTED_PROXY_HOPS` controls how the Host reads `X-Forwarded-For` for rate limiting and abuse checks.
@@ -159,14 +164,20 @@ Optional refill variables:
 - `SPONSOR_OPERATIONS_REFILL_ENABLED`
 - `SPONSOR_BALANCE_REFILL_TARGET_MIST`
 
+When `SPONSOR_OPERATIONS_REFILL_ENABLED=true`,
+`SPONSOR_BALANCE_REFILL_TARGET_MIST` is required and must be greater than
+`SPONSOR_BALANCE_WARN_MIST`.
+
 `HOST_FEE_MIST` is optional. When unset, the quoted host fee defaults to zero.
 `PREPARE_INFLIGHT_CAPACITY` is optional. When set, it must be a positive integer and becomes the shared prepare in-flight capacity for one Redis write authority.
 
 Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
 
-Refill workers use Redis locks for cross-instance coordination. `stelis:app-api:sponsor-operations:refill-lock:<slotAddress>` protects one sponsor slot refill lifecycle. `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` protects refill transaction dispatch for one Sponsor Refill Account, so multiple API instances do not use the same Sponsor Refill Account signer concurrently.
+Refill and withdrawal share `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` while preparing one Sponsor Refill Account spend. The account HASH stores the current operation intent and, before submission, its exact signed transaction bytes, signature, gas budget, and digest. The spend flow uses a primary-pinned Sui client; a terminal digest must be visible there before the following balance is accepted or another spend is reserved. Once that transaction result is confirmed, the mutable slot balance classifies current health but does not keep the global spend active until a target is observed. Boot recovery does not wait for a dead process's remaining efficiency-lock TTL; durable operation identity and CAS keep every recovery driver on the same signed transaction. The lock TTL only releases abandoned mutex ownership and is not a transaction-safety boundary.
 
-State writers use Redis server time for `lastObservedAtMs` and a per-entity `writeSeq`. This keeps cross-instance ordering independent of local host clock skew.
+An admin withdrawal `503` with code `WITHDRAWAL_PENDING` is an uncertain outcome, not permission to create another withdrawal intent. The signed message, nonce key, durable spend, and browser retry record are bound to the boot-selected network. app-admin stores the exact signed request in session storage before submission and retries those same fields after a pending response or page reload. Redis retains the accepted request's terminal outcome for the configured admin-session duration after acceptance, so an exact retry remains stable after a later account spend replaces the active account record. A request that encounters a different active spend only recovers that spend; it never chains the incoming withdrawal or refill into the same call. Such an incoming withdrawal receives `409 WITHDRAWAL_NOT_ACCEPTED`, and app-admin discards that unaccepted signed request instead of treating it as recovery work.
+
+State writers use Redis server time for `lastObservedAtMs`. Sponsor Refill Account observations compare the sampled operation ID, spend sequence, and account write sequence. General slot observations compare the sampled slot write sequence and cannot write while a refill operation is active. Spend transitions compare operation ID and spend sequence; their account-balance projection is applied only when its sampled account write sequence is still current, so ordinary observations cannot starve the transaction state machine or be overwritten by an older sample. Terminal refill slot projection also compares the owning operation and slot write sequence. Each accepted observation advances its sequence, so a late RPC or submit result cannot overwrite a newer operation or observation.
 
 ## Studio Mode Operations
 
@@ -241,8 +252,8 @@ Current structured event families:
 | Sponsor runtime | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `SETTLEMENT_ECONOMICS_EXECUTION` |
 | Sponsor pool and sponsor operations | `SPONSOR_POOL_LEASE_CHECKOUT`, `SPONSOR_POOL_LEASE_COMMITTED`, `SPONSOR_POOL_LEASE_RELEASE_FAILED`, `SPONSOR_RESULT_CALLBACK_FAILED`, `SPONSOR_OPERATIONS_STATE_WRITE_FAILED` |
 | Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
-| Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_LEDGER_CONSUME_FAILED`, `PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION` |
-| Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `LEDGER_CONSUME_FAILED_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
+| Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY` |
+| Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `LEDGER_CONSUME_FAILED_IN_HANDLER`, `LEDGER_CONSUME_THREW_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
 | Redis and RPC infrastructure | `REDIS_SCAN_UNAVAILABLE`, `SUI_RPC_FAILOVER`, `SUI_RPC_ENDPOINT_COOLDOWN`, `SUI_RPC_ALL_EXHAUSTED` |
 
 Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.

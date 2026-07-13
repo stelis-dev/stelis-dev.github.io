@@ -13,10 +13,6 @@ function countMatches(source: string, pattern: RegExp): number {
   return source.match(pattern)?.length ?? 0;
 }
 
-function collapseWhitespace(source: string): string {
-  return source.replace(/\s+/g, ' ');
-}
-
 describe('PTB admissibility wiring lock', () => {
   it('keeps SDK and generic prepare on the same user TransactionKind validator', () => {
     const sdk = readWorkspaceFile('packages/sdk/src/sdk.ts');
@@ -39,18 +35,6 @@ describe('PTB admissibility wiring lock', () => {
 
     expect(finalValidationCalls).toHaveLength(2);
     expect(genericPolicy).not.toContain('validatePtbStructure');
-  });
-
-  it('keeps address-balance accounting evidence in the prepare build boundary', () => {
-    const genericPolicy = readWorkspaceFile(
-      'packages/core-api/src/session/sponsoredExecution/genericExecutionPolicy.ts',
-    );
-    const prepareBuild = readWorkspaceFile('packages/core-api/src/prepare/build.ts');
-
-    expect(genericPolicy).not.toContain('extractPrefixWithdrawals');
-    expect(collapseWhitespace(prepareBuild)).toContain(
-      'extractPrefixWithdrawals( tx, settlementTokenType, )',
-    );
   });
 
   it('keeps GasCoin detection in the shared primitive and reuses it from integrity and promotion layers', () => {

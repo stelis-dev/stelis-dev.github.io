@@ -44,20 +44,18 @@ describe('sponsoredExecution — derive known economics', () => {
     expect(econ.failureReason).toBe('onchain_revert: MoveAbort');
   });
 
-  it('promotion success: recovered === paid and no host fee → host net is exactly 0', () => {
-    // Promotion ledger.consume reimburses the Host for `actualGasMist`,
-    // so consumedGasMist === actualGasMist on every successful promotion path.
+  it('promotion success: entitlement consumption is not recovery → paid gas is a host loss', () => {
     const econ = deriveSponsoredExecutionEconomics({
-      recoveredGasMist: 4_321n,
+      recoveredGasMist: 0n,
       hostPaidGasMist: 4_321n,
       hostFeeMist: 0n,
     });
-    expect(econ.hostNetMist).toBe(0n);
+    expect(econ.hostNetMist).toBe(-4_321n);
   });
 
   it('promotion ledger consume failure post-submit: recovered=0, paid=actual → loss', () => {
-    // Only known-economics promotion failure path that produces a real loss
-    // — Host paid gas onchain but the budget did not reimburse.
+    // Ledger failure changes entitlement reconciliation, not the fact that
+    // promotion sponsorship has no settlement recovery.
     const econ = deriveSponsoredExecutionEconomics({
       recoveredGasMist: 0n,
       hostPaidGasMist: 12_345n,

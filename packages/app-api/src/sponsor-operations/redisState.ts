@@ -2,11 +2,9 @@
  * [app-api] Redis-shared sponsor operations state store.
  *
  * Shared cross-instance state for per-slot and per-sponsor refill account operational
- * state. All writes go through one Lua script that authors `lastObservedAtMs`
- * (via `redis.call('TIME')`) and `writeSeq` (via `HINCRBY`) on the Redis
- * server. Callers supply only their caller-owned fields; the module never
- * accepts instance-local wall-clock stamps because clock skew between
- * multi-instance deployments could otherwise invert observation ordering.
+ * state. Slot observations compare the sampled `writeSeq` before Redis
+ * authors `lastObservedAtMs` and the next sequence. Sponsor Refill Account
+ * observations and spend transitions are owned by `accountSpendState.ts`.
  *
  * This matches the Redis server-time pattern used by
  * `packages/core-api/src/store/redisPrepareStore.ts`.
@@ -15,24 +13,24 @@
  *   - `stelis:app-api:sponsor-operations:slot:<address>` → HASH per slot.
  *   - `stelis:app-api:sponsor-operations:sponsor-refill-account` → HASH for sponsor refill account.
  *
- * Ordering semantics are last-arrival-at-Redis. Redis is single-threaded; two
- * writes can never execute concurrently, so `writeSeq` is strictly monotonic
- * per entity. A narrow race exists where an older sample arrives at Redis
- * after a newer sample (due to instance-side jitter); it is corrected by the
- * next successful observation and is a documented trade of the design.
+ * Instance-local wall clocks and unconditional observation writes are not
+ * accepted, so an older RPC sample cannot overwrite a newer operation.
  */
 
 import type { RedisClientLike } from '@stelis/core-api';
-import type { SponsorSlotState } from '@stelis/contracts';
+import {
+  isPositiveU64DecimalString,
+  SPONSOR_SLOT_STATES,
+  type SponsorSlotState,
+} from '@stelis/contracts';
 
 export const REFILL_RECONCILIATION_RESULTS = [
   'not_needed',
   'dispatch_started',
+  'dispatch_ready',
   'dispatch_submitted',
+  'dispatch_succeeded',
   'dispatch_failed',
-  'dispatch_timeout',
-  'confirmed',
-  'still_pending',
 ] as const;
 
 export type RefillReconciliationResult = (typeof REFILL_RECONCILIATION_RESULTS)[number];
@@ -72,6 +70,14 @@ export interface SlotWriteFields {
   refillObservedBalanceMist?: string;
   /** Current refill reconciliation status. Empty string clears stale status. */
   refillReconciliationResult?: RefillReconciliationResult | '';
+  /** Durable Sponsor Refill Account spend that owns the refill projection. */
+  refillOperationId?: string;
+  /** Spend-local CAS sequence for the owning refill operation. */
+  refillOperationSequence?: string;
+  /** Current durable state of the owning refill spend. */
+  refillOperationState?: string;
+  /** Source balance required before a runway-blocked refill may be attempted again. */
+  refillRequiredSourceBalanceMist?: string;
 }
 
 /** Fields a caller may update on the sponsor refill account HASH. */
@@ -101,6 +107,10 @@ export interface SlotRead {
   readonly refillAttemptedAmountMist: string | null;
   readonly refillObservedBalanceMist: string | null;
   readonly refillReconciliationResult: RefillReconciliationResult | null;
+  readonly refillOperationId: string | null;
+  readonly refillOperationSequence: number | null;
+  readonly refillOperationState: string | null;
+  readonly refillRequiredSourceBalanceMist: string | null;
 }
 
 export interface SponsorRefillAccountRead {
@@ -113,32 +123,25 @@ export interface SponsorRefillAccountRead {
 }
 
 // ─────────────────────────────────────────────
-// Lua script — single writer for both slot and sponsor refill account HASHes
+// Lua script — shared observation writer for slot and Sponsor Refill Account HASHes
 // ─────────────────────────────────────────────
 
-/**
- * Writes caller-supplied field/value pairs to the entity HASH, stamping
- * `lastObservedAtMs` from `redis.call('TIME')` and incrementing `writeSeq`
- * via `HINCRBY`. Returns `{lastObservedAtMs, writeSeq}` as strings.
- *
- * KEYS[1]     entity key (slot or sponsor refill account HASH).
- * ARGV[1..N]  alternating field/value pairs. Empty ARGV is allowed — the
- *             script still stamps ordering fields so callers can refresh
- *             `lastObservedAtMs` alone if needed.
- */
-export const UPDATE_ENTITY_LUA = [
+/** Apply an observation only when the sampled entity write sequence is still current. */
+export const UPDATE_ENTITY_IF_SEQUENCE_LUA = [
+  "local current = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
+  "if current ~= ARGV[1] then return { 'STALE' } end",
+  "local refillState = redis.call('HGET', KEYS[1], 'refillOperationState') or ''",
+  "if refillState == 'reserved' or refillState == 'ready' or refillState == 'reconciling' then return { 'ACTIVE_REFILL' } end",
   "local time = redis.call('TIME')",
   'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
   "local seq = redis.call('HINCRBY', KEYS[1], 'writeSeq', 1)",
   "redis.call('HSET', KEYS[1], 'lastObservedAtMs', nowMs)",
-  'if #ARGV > 0 then',
-  '  local args = { KEYS[1] }',
-  '  for i = 1, #ARGV do',
-  '    table.insert(args, ARGV[i])',
-  '  end',
-  "  redis.call('HSET', unpack(args))",
+  'local i = 2',
+  'while i <= #ARGV do',
+  "  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])",
+  '  i = i + 2',
   'end',
-  'return { nowMs, tostring(seq) }',
+  "return { 'UPDATED', tostring(seq) }",
 ].join('\n');
 
 /**
@@ -163,7 +166,11 @@ export const READ_ALL_LUA = [
   "    redis.call('HGET', key, 'pendingRefillDigest') or '',",
   "    redis.call('HGET', key, 'refillAttemptedAmountMist') or '',",
   "    redis.call('HGET', key, 'refillObservedBalanceMist') or '',",
-  "    redis.call('HGET', key, 'refillReconciliationResult') or ''",
+  "    redis.call('HGET', key, 'refillReconciliationResult') or '',",
+  "    redis.call('HGET', key, 'refillOperationId') or '',",
+  "    redis.call('HGET', key, 'refillOperationSequence') or '',",
+  "    redis.call('HGET', key, 'refillOperationState') or '',",
+  "    redis.call('HGET', key, 'refillRequiredSourceBalanceMist') or ''",
   '  })',
   'end',
   'local sponsorKey = KEYS[#KEYS]',
@@ -189,10 +196,12 @@ export interface RedisSponsorOperationsStateDeps {
 }
 
 export interface RedisSponsorOperationsState {
-  /** Update a slot HASH. Server authors ordering fields. */
-  updateSlot(address: string, fields: SlotWriteFields): Promise<void>;
-  /** Update the sponsor refill account HASH. Server authors ordering fields. */
-  updateSponsorRefillAccount(fields: SponsorRefillAccountWriteFields): Promise<void>;
+  /** Apply a sampled slot observation only if no intervening writer changed it. */
+  updateSlotIfWriteSeq(
+    address: string,
+    expectedWriteSeq: number,
+    fields: SlotWriteFields,
+  ): Promise<boolean>;
   /** Read a slot HASH. Returns `null` if the key is missing. */
   readSlot(address: string): Promise<SlotRead | null>;
   /** Read the sponsor refill account HASH. Returns `null` if the key is missing. */
@@ -210,18 +219,9 @@ export interface RedisSponsorOperationsState {
   }>;
 }
 
-const ALLOWED_SLOT_STATES: readonly SponsorSlotState[] = [
-  'healthy',
-  'low_balance',
-  'refilling',
-  'awaiting_confirmation',
-  'rpc_unreachable',
-  'refill_failed',
-];
-
 function parseSlotState(raw: string | undefined): SponsorSlotState | null {
   if (raw === undefined) return null;
-  return (ALLOWED_SLOT_STATES as readonly string[]).includes(raw)
+  return (SPONSOR_SLOT_STATES as readonly string[]).includes(raw)
     ? (raw as SponsorSlotState)
     : null;
 }
@@ -252,6 +252,14 @@ function parseMistStringOrNull(raw: string | undefined): string | null {
   return /^(?:0|[1-9]\d*)$/.test(raw) ? raw : null;
 }
 
+function parseRefillRequiredSourceBalanceMist(raw: string | undefined): string | null {
+  if (raw === undefined || raw === '') return null;
+  if (!isPositiveU64DecimalString(raw)) {
+    throw new Error('Sponsor slot refill source balance threshold is malformed');
+  }
+  return raw;
+}
+
 function parseHealthyOrNull(raw: string | undefined): boolean | null {
   if (raw === undefined) return null;
   if (raw === '1') return true;
@@ -273,25 +281,17 @@ function flattenWriteFields(fields: Record<string, string | undefined>): string[
   return argv;
 }
 
+function validateSlotRead(slot: SlotRead): SlotRead {
+  if (slot.state === 'healthy' && slot.refillRequiredSourceBalanceMist !== null) {
+    throw new Error('Healthy sponsor slot cannot retain a refill source balance threshold');
+  }
+  return slot;
+}
+
 export function createRedisSponsorOperationsState(
   deps: RedisSponsorOperationsStateDeps,
 ): RedisSponsorOperationsState {
   const slotSet = new Set(deps.slotAddresses);
-
-  async function updateSlot(address: string, fields: SlotWriteFields): Promise<void> {
-    if (!slotSet.has(address)) {
-      throw new Error(`RedisSponsorOperationsState.updateSlot: unknown slot address ${address}`);
-    }
-    const argv = flattenWriteFields(fields as Record<string, string | undefined>);
-    await deps.client.eval(UPDATE_ENTITY_LUA, [slotKey(address)], argv);
-  }
-
-  async function updateSponsorRefillAccount(
-    fields: SponsorRefillAccountWriteFields,
-  ): Promise<void> {
-    const argv = flattenWriteFields(fields as Record<string, string | undefined>);
-    await deps.client.eval(UPDATE_ENTITY_LUA, [SPONSOR_REFILL_ACCOUNT_KEY], argv);
-  }
 
   async function readSlot(address: string): Promise<SlotRead | null> {
     if (!slotSet.has(address)) {
@@ -299,7 +299,7 @@ export function createRedisSponsorOperationsState(
     }
     const hash = await deps.client.hgetall(slotKey(address));
     if (!hash || Object.keys(hash).length === 0) return null;
-    return {
+    return validateSlotRead({
       address,
       state: parseSlotState(hash.state),
       balanceMist: parseMistStringOrNull(hash.balanceMist),
@@ -312,7 +312,13 @@ export function createRedisSponsorOperationsState(
       refillReconciliationResult: parseRefillReconciliationResultOrNull(
         hash.refillReconciliationResult,
       ),
-    };
+      refillOperationId: parseStringOrNull(hash.refillOperationId),
+      refillOperationSequence: parseIntOrNull(hash.refillOperationSequence),
+      refillOperationState: parseStringOrNull(hash.refillOperationState),
+      refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(
+        hash.refillRequiredSourceBalanceMist,
+      ),
+    });
   }
 
   async function readSponsorRefillAccount(): Promise<SponsorRefillAccountRead | null> {
@@ -326,6 +332,51 @@ export function createRedisSponsorOperationsState(
       lastObservedAtMs: parseIntOrNull(hash.lastObservedAtMs),
       writeSeq: parseIntOrNull(hash.writeSeq),
     };
+  }
+
+  async function updateSlotIfWriteSeq(
+    address: string,
+    expectedWriteSeq: number,
+    fields: SlotWriteFields,
+  ): Promise<boolean> {
+    if (!slotSet.has(address)) {
+      throw new Error(
+        `RedisSponsorOperationsState.updateSlotIfWriteSeq: unknown slot address ${address}`,
+      );
+    }
+    if (!Number.isSafeInteger(expectedWriteSeq) || expectedWriteSeq < 0) {
+      throw new Error(
+        'RedisSponsorOperationsState.updateSlotIfWriteSeq: expectedWriteSeq must be a non-negative safe integer',
+      );
+    }
+    const normalizedFields: SlotWriteFields =
+      fields.state === 'healthy' ? { ...fields, refillRequiredSourceBalanceMist: '' } : fields;
+    const requiredSourceBalanceMist = normalizedFields.refillRequiredSourceBalanceMist;
+    if (
+      requiredSourceBalanceMist !== undefined &&
+      requiredSourceBalanceMist !== '' &&
+      !isPositiveU64DecimalString(requiredSourceBalanceMist)
+    ) {
+      throw new Error(
+        'RedisSponsorOperationsState.updateSlotIfWriteSeq: refill source balance threshold must be a positive u64 decimal string',
+      );
+    }
+    const argv = flattenWriteFields(normalizedFields as Record<string, string | undefined>);
+    const raw = await deps.client.eval(
+      UPDATE_ENTITY_IF_SEQUENCE_LUA,
+      [slotKey(address)],
+      [String(expectedWriteSeq), ...argv],
+    );
+    if (!Array.isArray(raw) || typeof raw[0] !== 'string') {
+      throw new Error(
+        'RedisSponsorOperationsState.updateSlotIfWriteSeq: unexpected Redis response',
+      );
+    }
+    if (raw[0] === 'STALE' || raw[0] === 'ACTIVE_REFILL') return false;
+    if (raw[0] !== 'UPDATED') {
+      throw new Error('RedisSponsorOperationsState.updateSlotIfWriteSeq: invalid Redis result');
+    }
+    return true;
   }
 
   async function readAll(): Promise<{
@@ -360,7 +411,7 @@ export function createRedisSponsorOperationsState(
         throw new Error('RedisSponsorOperationsState.readAll: unexpected slot row address');
       }
 
-      return {
+      return validateSlotRead({
         address,
         state: parseSlotState(stringAt(row, 1)),
         balanceMist: parseMistStringOrNull(stringAt(row, 2)),
@@ -371,7 +422,11 @@ export function createRedisSponsorOperationsState(
         refillAttemptedAmountMist: parseMistStringOrNull(stringAt(row, 7)),
         refillObservedBalanceMist: parseMistStringOrNull(stringAt(row, 8)),
         refillReconciliationResult: parseRefillReconciliationResultOrNull(stringAt(row, 9)),
-      };
+        refillOperationId: parseStringOrNull(stringAt(row, 10)),
+        refillOperationSequence: parseIntOrNull(stringAt(row, 11)),
+        refillOperationState: parseStringOrNull(stringAt(row, 12)),
+        refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(stringAt(row, 13)),
+      });
     });
 
     const sponsorRefillAccount: SponsorRefillAccountRead = {
@@ -387,8 +442,7 @@ export function createRedisSponsorOperationsState(
   }
 
   return {
-    updateSlot,
-    updateSponsorRefillAccount,
+    updateSlotIfWriteSeq,
     readSlot,
     readSponsorRefillAccount,
     readAll,

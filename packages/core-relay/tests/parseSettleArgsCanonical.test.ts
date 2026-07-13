@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
 import { SETTLE_WITH_CREDIT_FUNCTION } from '@stelis/contracts';
+import type { MoveCallCommand } from '@stelis/contracts';
 import { convertSdkCommands } from '../src/convert.js';
 import { ARG_INDEX_MAP, parseSettleArgs, ParseSettleArgsError } from '../src/parseSettleArgs.js';
 import { buildSettleWithCreditPtb } from '../src/ptb/builders.js';
@@ -28,7 +29,7 @@ const SETTLE_PARAMS = {
   quotedHostFeeMist: 100_000n,
   expectedProtocolFeeMist: 20_000n,
   expectedConfigVersion: 3n,
-  quoteTimestampMs: 1_761_007_200_000,
+  quoteTimestampMs: 1_761_007_200_000n,
   policyHash: new Uint8Array(32).fill(0xbb),
   orderIdHash: new Uint8Array(32).fill(0xcc),
 };
@@ -75,6 +76,54 @@ function patchPureInputBytes(
 
 describe('parseSettleArgs canonical BCS input checks', () => {
   const indexMap = ARG_INDEX_MAP[SETTLE_WITH_CREDIT_FUNCTION]!;
+
+  it('requires the exact compiled value-argument count', () => {
+    const { normalizedCommands, inputs } = buildCreditData();
+    const settleIndex = normalizedCommands.findIndex((command) => command.kind === 'MoveCall');
+    if (settleIndex < 0) throw new Error('test setup failed: MoveCall command not found');
+    const settleCommand = normalizedCommands[settleIndex] as MoveCallCommand;
+
+    for (const arguments_ of [
+      settleCommand.arguments.slice(0, -1),
+      [...settleCommand.arguments, settleCommand.arguments[0]],
+    ]) {
+      const malformedCommands = [...normalizedCommands];
+      malformedCommands[settleIndex] = { ...settleCommand, arguments: arguments_ };
+      expect(() => parseSettleArgs(malformedCommands, inputs, PKG)).toThrow(
+        /requires \d+ arguments, got \d+/,
+      );
+    }
+  });
+
+  it('requires the exact compiled type-argument count', () => {
+    const { normalizedCommands, inputs } = buildCreditData();
+    const settleIndex = normalizedCommands.findIndex((command) => command.kind === 'MoveCall');
+    if (settleIndex < 0) throw new Error('test setup failed: MoveCall command not found');
+    const settleCommand = normalizedCommands[settleIndex] as MoveCallCommand;
+    const malformedCommands = [...normalizedCommands];
+    malformedCommands[settleIndex] = {
+      ...settleCommand,
+      typeArguments: ['0x2::sui::SUI'],
+    };
+
+    expect(() => parseSettleArgs(malformedCommands, inputs, PKG)).toThrow(
+      /requires \d+ type arguments, got \d+/,
+    );
+  });
+
+  it('rejects underlong Pure u64 bytes', () => {
+    const { commands, normalizedCommands, inputs } = buildCreditData();
+    const patchedInputs = patchPureInputBytes(
+      commands,
+      inputs,
+      indexMap.quotedHostFee,
+      new Uint8Array([1, 0, 0, 0, 0, 0, 0]),
+    );
+
+    expect(() => parseSettleArgs(normalizedCommands, patchedInputs, PKG)).toThrow(
+      ParseSettleArgsError,
+    );
+  });
 
   it('rejects overlong Pure u64 bytes', () => {
     const { commands, normalizedCommands, inputs } = buildCreditData();

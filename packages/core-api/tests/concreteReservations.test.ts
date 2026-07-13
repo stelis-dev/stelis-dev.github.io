@@ -9,7 +9,7 @@
  *     on release error.
  *   - `SponsorSlotReservationImpl` delegates release to
  *     `safeSlotCheckin`, which emits `SPONSOR_POOL_CHECKIN_FAILED`
- *     internally (covered by `sessionPrimitives.ts:417-426`).
+ *     internally.
  *   - `NonceReservationImpl` swallows release errors silently.
  *   - `LedgerBudgetReservationImpl` emits
  *     `LEDGER_RELEASE_FAILED_IN_HANDLER` on `result.ok === false` and
@@ -92,13 +92,12 @@ describe('InflightReservationImpl', () => {
     };
   }
 
-  test('acquire(route) acquires a handle and marks the reservation as acquired', async () => {
+  test('acquire(route) acquires a limiter handle', async () => {
     const releaseFn = vi.fn().mockResolvedValue(undefined);
     const limiter = makeLimiter({ release: releaseFn });
     const r = new InflightReservationImpl(limiter);
 
     await r.acquire('generic');
-    expect(r.isAcquired()).toBe(true);
     expect(limiter.tryAcquire).toHaveBeenCalledWith('generic');
   });
 
@@ -106,7 +105,6 @@ describe('InflightReservationImpl', () => {
     const limiter = makeLimiter(null);
     const r = new InflightReservationImpl(limiter);
     await expect(r.acquire('generic')).rejects.toBeInstanceOf(PrepareOverloadError);
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() invokes the handle release exactly once and is idempotent', async () => {
@@ -120,7 +118,6 @@ describe('InflightReservationImpl', () => {
     await r.release();
 
     expect(releaseFn).toHaveBeenCalledTimes(1);
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() emits PREPARE_INFLIGHT_RELEASE_FAILED with route + error message on throw', async () => {
@@ -170,7 +167,7 @@ describe('InflightReservationImpl', () => {
 // ─────────────────────────────────────────────
 
 describe('SponsorSlotReservationImpl', () => {
-  function makePool(slot: { slotId: string; sponsorAddress: string } | null): SponsorPoolAdapter {
+  function makePool(slot: { sponsorAddress: string } | null): SponsorPoolAdapter {
     return {
       size: 1,
       primaryAddress: '0xPRIMARY',
@@ -182,19 +179,17 @@ describe('SponsorSlotReservationImpl', () => {
     };
   }
 
-  test('acquire issues SponsorSlotReservationHandle with the pool-returned slotId + sponsorAddress', async () => {
-    const pool = makePool({ slotId: 'slot-X', sponsorAddress: '0xSPONSOR_X' });
+  test('acquire issues SponsorSlotReservationHandle with the pool-returned sponsorAddress', async () => {
+    const pool = makePool({ sponsorAddress: '0xSPONSOR_X' });
     const r = new SponsorSlotReservationImpl(pool);
 
     const ev = await r.acquire('0xRECEIPT');
 
     expect(ev).not.toBeNull();
-    expect(ev!.slotId).toBe('slot-X');
     expect(ev!.sponsorAddress).toBe('0xSPONSOR_X');
     expect(ev!.receiptId).toBe('0xRECEIPT');
     expect(ev!.reservationKind).toBe('SponsorSlot');
     expect(ev!.isLive()).toBe(true);
-    expect(r.isAcquired()).toBe(true);
   });
 
   test('acquire returns null when the pool is exhausted and stays in pending state', async () => {
@@ -202,49 +197,47 @@ describe('SponsorSlotReservationImpl', () => {
     const r = new SponsorSlotReservationImpl(pool);
     const ev = await r.acquire('0xRECEIPT');
     expect(ev).toBeNull();
-    expect(r.isAcquired()).toBe(false);
   });
 
-  test('commitToTxBytesHash forwards to pool.commit(slotId, receiptId, hash)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+  test('commitToTxBytesHash forwards to pool.commit(sponsorAddress, receiptId, hash)', async () => {
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     await r.commitToTxBytesHash('a'.repeat(64));
 
-    expect(pool.commit).toHaveBeenCalledWith('slot-A', '0xRECEIPT', 'a'.repeat(64));
+    expect(pool.commit).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'a'.repeat(64));
   });
 
   test('commitToTxBytesHash throws if called before acquire', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await expect(r.commitToTxBytesHash('h')).rejects.toThrow(/before acquire/);
   });
 
   test('release() delegates to safeSlotCheckin (pool.checkin called with slot/receipt/committed-hash)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
     await r.commitToTxBytesHash('h'.repeat(64));
 
     await r.release();
 
-    expect(pool.checkin).toHaveBeenCalledWith('slot-A', '0xRECEIPT', 'h'.repeat(64));
-    expect(r.isAcquired()).toBe(false);
+    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'h'.repeat(64));
   });
 
   test('release() before commitToTxBytesHash passes null to pool.checkin (reserved-stage hand-off)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     await r.release();
 
-    expect(pool.checkin).toHaveBeenCalledWith('slot-A', '0xRECEIPT', null);
+    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', null);
   });
 
   test('release() never throws even when pool.checkin throws (safeSlotCheckin internal swallow)', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     (pool.checkin as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('redis down'));
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
@@ -255,7 +248,7 @@ describe('SponsorSlotReservationImpl', () => {
   });
 
   test('transferOwnership() then release() does not call pool.checkin', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
+    const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
@@ -263,16 +256,6 @@ describe('SponsorSlotReservationImpl', () => {
     await r.release();
 
     expect(pool.checkin).not.toHaveBeenCalled();
-  });
-
-  test('reservationHandle returns the live token after acquire', async () => {
-    const pool = makePool({ slotId: 'slot-A', sponsorAddress: '0xSP' });
-    const r = new SponsorSlotReservationImpl(pool);
-    await r.acquire('0xRECEIPT');
-
-    const handle = r.reservationHandle();
-    expect(handle.slotId).toBe('slot-A');
-    expect(handle.isLive()).toBe(true);
   });
 });
 
@@ -315,7 +298,6 @@ describe('NonceReservationImpl', () => {
     await r.release();
 
     expect(store.releaseReservation).toHaveBeenCalledWith('0xRECEIPT', '0xSENDER');
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() silently swallows store.releaseReservation throws', async () => {
@@ -429,7 +411,6 @@ describe('LedgerBudgetReservationImpl', () => {
     const r = new LedgerBudgetReservationImpl(ledger);
     const ev = await r.acquire(ACQUIRE_PARAMS);
     expect(ev).toBeNull();
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('consume(actualGasMist) forwards to ledger.consume and marks handle consumed', async () => {
@@ -458,7 +439,6 @@ describe('LedgerBudgetReservationImpl', () => {
     await r.release();
 
     expect(ledger.release).toHaveBeenCalledWith('0xR');
-    expect(r.isAcquired()).toBe(false);
   });
 
   test('release() emits LEDGER_RELEASE_FAILED_IN_HANDLER on result.ok=false', async () => {
@@ -494,21 +474,6 @@ describe('LedgerBudgetReservationImpl', () => {
     expect(event!['triggerReason']).toBe('prepare_store_failed');
   });
 
-  test('setTriggerReason updates the structured-log payload before release', async () => {
-    const ledger = makeLedger({ releaseOk: false, releaseReason: 'reservation_not_found' });
-    const r = new LedgerBudgetReservationImpl(ledger);
-    await r.acquire(ACQUIRE_PARAMS);
-
-    r.setTriggerReason('sponsor_failed');
-    await r.release();
-
-    const event = findStructuredEvent(
-      { error: consoleErrorSpy, warn: consoleWarnSpy, info: consoleInfoSpy },
-      'LEDGER_RELEASE_FAILED_IN_HANDLER',
-    );
-    expect(event!['triggerReason']).toBe('sponsor_failed');
-  });
-
   test('transferOwnership() then release() does not call ledger.release', async () => {
     const ledger = makeLedger();
     const r = new LedgerBudgetReservationImpl(ledger);
@@ -518,34 +483,5 @@ describe('LedgerBudgetReservationImpl', () => {
     await r.release();
 
     expect(ledger.release).not.toHaveBeenCalled();
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 5 — module API
-// ─────────────────────────────────────────────
-
-describe('Concrete reservations — module API', () => {
-  test('directory internal barrel exposes the four concrete classes', async () => {
-    const barrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
-      string,
-      unknown
-    >;
-    expect(barrel.InflightReservationImpl).toBeDefined();
-    expect(barrel.SponsorSlotReservationImpl).toBeDefined();
-    expect(barrel.NonceReservationImpl).toBeDefined();
-    expect(barrel.LedgerBudgetReservationImpl).toBeDefined();
-  });
-
-  test('package main barrel does NOT re-export the concrete classes', async () => {
-    const mainBarrel = await import('@stelis/core-api');
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'InflightReservationImpl')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'SponsorSlotReservationImpl')).toBe(
-      false,
-    );
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'NonceReservationImpl')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'LedgerBudgetReservationImpl')).toBe(
-      false,
-    );
   });
 });

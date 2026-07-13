@@ -99,31 +99,53 @@ describe('isManipulationAttemptCode', () => {
 });
 
 describe('shouldCarveOutNonIpCounter', () => {
-  it('carves out PAUSED, VAULT_ALREADY_REGISTERED, and REPLAY_NONCE subcodes', () => {
-    expect(shouldCarveOutNonIpCounter({ subcode: 'PAUSED' })).toBe(true);
-    expect(shouldCarveOutNonIpCounter({ subcode: 'VAULT_ALREADY_REGISTERED' })).toBe(true);
-    expect(shouldCarveOutNonIpCounter({ subcode: 'REPLAY_NONCE' })).toBe(true);
+  it('keeps benign retry/concurrency carve-outs across preflight and revert families', () => {
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'PAUSED' })).toBe(true);
+    expect(
+      shouldCarveOutNonIpCounter('ONCHAIN_REVERT', { subcode: 'VAULT_ALREADY_REGISTERED' }),
+    ).toBe(true);
+    expect(shouldCarveOutNonIpCounter('ONCHAIN_REVERT', { subcode: 'REPLAY_NONCE' })).toBe(true);
   });
 
-  it('also carves out market-volatility SPREAD_EXCEEDED and SLIPPAGE_EXCEEDED subcodes', () => {
-    expect(shouldCarveOutNonIpCounter({ subcode: 'SPREAD_EXCEEDED' })).toBe(true);
-    expect(shouldCarveOutNonIpCounter({ subcode: 'SLIPPAGE_EXCEEDED' })).toBe(true);
+  it('carves out market volatility only from the exact sponsor preflight counter', () => {
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'SPREAD_EXCEEDED' })).toBe(
+      true,
+    );
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'SLIPPAGE_EXCEEDED' })).toBe(
+      true,
+    );
+    expect(shouldCarveOutNonIpCounter('ONCHAIN_REVERT', { subcode: 'SPREAD_EXCEEDED' })).toBe(
+      false,
+    );
+    expect(shouldCarveOutNonIpCounter('DRY_RUN_FAILED', { subcode: 'SLIPPAGE_EXCEEDED' })).toBe(
+      false,
+    );
   });
 
   it('does not carve out SLIPPAGE_QUERY_FAILED (prepare-time only)', () => {
-    expect(shouldCarveOutNonIpCounter({ subcode: 'SLIPPAGE_QUERY_FAILED' })).toBe(false);
+    expect(
+      shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'SLIPPAGE_QUERY_FAILED' }),
+    ).toBe(false);
   });
 
   it('does not carve out other subcodes', () => {
-    expect(shouldCarveOutNonIpCounter({ subcode: 'CLAIM_WOULD_EXCEED_MAX' })).toBe(false);
-    expect(shouldCarveOutNonIpCounter({ subcode: 'CONFIG_VERSION_MISMATCH' })).toBe(false);
-    expect(shouldCarveOutNonIpCounter({ subcode: '' })).toBe(false);
+    expect(
+      shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'CLAIM_WOULD_EXCEED_MAX' }),
+    ).toBe(false);
+    expect(
+      shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'CONFIG_VERSION_MISMATCH' }),
+    ).toBe(false);
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: '' })).toBe(false);
   });
 
   it('does not carve out when meta is undefined or subcode is missing', () => {
-    expect(shouldCarveOutNonIpCounter(undefined)).toBe(false);
-    expect(shouldCarveOutNonIpCounter({})).toBe(false);
-    expect(shouldCarveOutNonIpCounter({ executionPathKey: 'promotion:foo' })).toBe(false);
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED')).toBe(false);
+    expect(shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', {})).toBe(false);
+    expect(
+      shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', {
+        executionPathKey: 'promotion:foo',
+      }),
+    ).toBe(false);
   });
 });
 
@@ -408,13 +430,7 @@ describe('FAILURE_TABLE — coverage lock', () => {
     // Otherwise the family entry is unreachable (manipulation /
     // ignored / drift / infra short-circuit before the family lookup).
     // Read the family map indirectly through subjectCounterFamily.
-    const familyCodes = [
-      'DRY_RUN_FAILED',
-      'PREFLIGHT_FAILED',
-      'SPONSOR_PREFLIGHT_FAILED',
-      'ONCHAIN_REVERT',
-      'SPONSOR_ONCHAIN_FAILED',
-    ];
+    const familyCodes = ['DRY_RUN_FAILED', 'PREFLIGHT_FAILED', 'ONCHAIN_REVERT'];
     for (const code of familyCodes) {
       const family = subjectCounterFamily(code);
       expect(family).not.toBe(null);
@@ -454,12 +470,23 @@ describe('subjectCounterFamily — storage-tier mapping', () => {
   it('maps simulation-tier sponsor codes to sim_tier', () => {
     expect(subjectCounterFamily('DRY_RUN_FAILED')).toBe('sim_tier');
     expect(subjectCounterFamily('PREFLIGHT_FAILED')).toBe('sim_tier');
-    expect(subjectCounterFamily('SPONSOR_PREFLIGHT_FAILED')).toBe('sim_tier');
   });
 
   it('maps revert codes to revert', () => {
     expect(subjectCounterFamily('ONCHAIN_REVERT')).toBe('revert');
-    expect(subjectCounterFamily('SPONSOR_ONCHAIN_FAILED')).toBe('revert');
+  });
+
+  it('keeps generic public result codes transport-only', () => {
+    expect(subjectCounterFamily('SPONSOR_PREFLIGHT_FAILED')).toBe(null);
+    expect(subjectCounterFamily('SPONSOR_ONCHAIN_FAILED')).toBe(null);
+    expect(FAILURE_TABLE.SPONSOR_PREFLIGHT_FAILED.abuseImpact).toEqual({
+      ip: 'skip',
+      subject: 'skip',
+    });
+    expect(FAILURE_TABLE.SPONSOR_ONCHAIN_FAILED.abuseImpact).toEqual({
+      ip: 'skip',
+      subject: 'skip',
+    });
   });
 
   it('returns null for codes without a non-IP counter family', () => {
@@ -471,10 +498,14 @@ describe('subjectCounterFamily — storage-tier mapping', () => {
 });
 
 describe('getFailurePolicy — runtime policy consumption', () => {
-  it('returns the policy for known public codes (family-mapped normal row → COUNT_BOTH)', () => {
+  it('keeps generic public result codes as transport projections only', () => {
     expect(getFailurePolicy('SPONSOR_PREFLIGHT_FAILED')).toMatchObject({
       classification: 'normal',
-      abuseImpact: { ip: 'count', subject: 'count' },
+      abuseImpact: { ip: 'skip', subject: 'skip' },
+    });
+    expect(getFailurePolicy('SPONSOR_ONCHAIN_FAILED')).toMatchObject({
+      classification: 'normal',
+      abuseImpact: { ip: 'skip', subject: 'skip' },
     });
   });
 

@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
@@ -24,7 +24,7 @@ vi.mock('../src/credit.js', async (importOriginal) => {
 });
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
-const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<PrepareResponse>>();
+const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<RelayPrepareResponse>>();
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function () {
     return {
@@ -92,7 +92,6 @@ const BASE_CONFIG: RelayConfigResponse = {
   ],
   quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
-  integrityPolicyVersion: 1,
 };
 
 function makeSuiClient(): SuiGrpcClient {

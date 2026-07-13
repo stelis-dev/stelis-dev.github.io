@@ -17,10 +17,8 @@ describe('AppConfigContext bootstrap contract', () => {
     expect(ctxSrc).toContain('`${RELAY_API_BASE}/config`');
   });
 
-  it('validates network against testnet and mainnet only', () => {
-    expect(ctxSrc).toContain("'testnet'");
-    expect(ctxSrc).toContain("'mainnet'");
-    expect(ctxSrc).toContain('isValidNetwork');
+  it('parses the complete current Relay config through the SDK wire boundary', () => {
+    expect(ctxSrc).toContain('parseRelayConfigResponse(data)');
   });
 
   it('does NOT reference VITE_NETWORK', () => {

@@ -15,11 +15,7 @@
  * `lastObservedAtMs` remains informational only.
  */
 
-import type {
-  SponsorAvailabilityErrorCode,
-  SponsorSlotLeaseSummary,
-  SponsorSlotState,
-} from '@stelis/contracts';
+import type { SponsorAvailabilityErrorCode, SponsorSlotLeaseSummary } from '@stelis/contracts';
 import type { SponsorRefillAccountRead, SlotRead } from './redisState.js';
 
 export type SponsorAvailabilityDecision =
@@ -42,8 +38,12 @@ export interface SponsorAvailabilityOptions {
   readonly slotLeases?: SponsorSlotLeaseSummary;
 }
 
-function isHealthySlot(state: SponsorSlotState | null): boolean {
-  return state === 'healthy';
+function isHealthySlot(slot: SlotRead): boolean {
+  const activeRefill =
+    slot.refillOperationState === 'reserved' ||
+    slot.refillOperationState === 'ready' ||
+    slot.refillOperationState === 'reconciling';
+  return slot.state === 'healthy' && !activeRefill;
 }
 
 /**
@@ -66,7 +66,7 @@ export function deriveSponsorAvailabilitySummary(
   let availableSlots = 0;
   let degradedSlots = 0;
   for (const slot of view.slots) {
-    if (isHealthySlot(slot.state)) {
+    if (isHealthySlot(slot)) {
       availableSlots += 1;
     } else {
       degradedSlots += 1;
@@ -89,7 +89,7 @@ function hasFreeHealthySponsorSlot(
   if (!slotLeases) return false;
   const leaseByAddress = new Map(slotLeases.slots.map((slot) => [slot.address, slot.leased]));
   return view.slots.some(
-    (slot) => isHealthySlot(slot.state) && leaseByAddress.get(slot.address) === false,
+    (slot) => isHealthySlot(slot) && leaseByAddress.get(slot.address) === false,
   );
 }
 

@@ -10,7 +10,8 @@
         "build": "tsc",
         "start": "node dist/index.js",
         "dev": "tsx watch src/index.ts",
-        "test": "vitest run",
+        "test": "vitest run --exclude 'tests/**/*.redis.test.ts'",
+        "test:redis": "vitest run tests/sponsor-operations/accountSpend.redis.test.ts tests/admin/adminLogout.redis.test.ts",
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit"
     },

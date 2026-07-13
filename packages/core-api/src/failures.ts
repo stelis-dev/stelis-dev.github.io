@@ -67,10 +67,15 @@ export function isManipulationAttemptCode(code: string): boolean {
  * `MemoryAbuseBlocker` / `RedisAbuseBlocker` because they carry
  * different windows and thresholds:
  *
- *   - `'sim_tier'`: DRY_RUN_FAILED + PREFLIGHT_FAILED + SPONSOR_PREFLIGHT_FAILED
+ *   - `'sim_tier'`: DRY_RUN_FAILED + PREFLIGHT_FAILED
  *     (`addressDryRunWindowMs` / `addressDryRunThreshold`).
- *   - `'revert'`: ONCHAIN_REVERT + SPONSOR_ONCHAIN_FAILED
+ *   - `'revert'`: ONCHAIN_REVERT
  *     (`addressOnchainRevertWindowMs` / `addressOnchainRevertThreshold`).
+ *
+ * `SPONSOR_PREFLIGHT_FAILED` and `SPONSOR_ONCHAIN_FAILED` are generic
+ * Relay API transport projections. Generic and Promotion sponsor paths both
+ * record the underlying event through `PREFLIGHT_FAILED` / `ONCHAIN_REVERT`,
+ * so the public generic codes do not own a second counter family.
  *
  * Codes whose family is `null` increment only the IP counter (the
  * subject counter has nowhere to go in the current adapter shape).
@@ -82,9 +87,7 @@ export type SubjectCounterFamily = 'sim_tier' | 'revert' | null;
 const SUBJECT_COUNTER_FAMILY: Readonly<Record<string, SubjectCounterFamily>> = {
   DRY_RUN_FAILED: 'sim_tier',
   PREFLIGHT_FAILED: 'sim_tier',
-  SPONSOR_PREFLIGHT_FAILED: 'sim_tier',
   ONCHAIN_REVERT: 'revert',
-  SPONSOR_ONCHAIN_FAILED: 'revert',
 };
 
 export function subjectCounterFamily(code: string): SubjectCounterFamily {
@@ -110,8 +113,6 @@ export function subjectCounterFamily(code: string): SubjectCounterFamily {
  *   - `REPLAY_NONCE` — `vault::EReplayNonce`. S-14 monotonic gap from
  *     out-of-order land; benign retry.
  *
- * The lint registry (`scripts/check-carve-out-enumerations.mjs`) reads
- * the export name as the runtime policy symbol.
  */
 export const ADDRESS_CARVE_OUT_SUBCODES = [
   'PAUSED',
@@ -122,10 +123,9 @@ export const ADDRESS_CARVE_OUT_SUBCODES = [
 export type AddressCarveOutSubcode = (typeof ADDRESS_CARVE_OUT_SUBCODES)[number];
 
 /**
- * Market-volatility Move-abort subcodes that skip every non-IP
- * temporary-block counter. Vocabulary rationale differs from
- * `ADDRESS_CARVE_OUT_SUBCODES` (market movement vs benign retry) but
- * both feed `shouldCarveOutNonIpCounter` uniformly.
+ * Market-volatility Move-abort subcodes that skip the non-IP
+ * `PREFLIGHT_FAILED` simulation-tier counter. Once the same condition
+ * reaches an on-chain revert it counts in the separate revert family.
  *
  * Members:
  *   - `SPREAD_EXCEEDED` — `settle::ESpreadTooWide`. Spread widened past
@@ -142,16 +142,20 @@ export const MARKET_VOLATILITY_CARVE_OUT_SUBCODES = [
 export type MarketVolatilityCarveOutSubcode = (typeof MARKET_VOLATILITY_CARVE_OUT_SUBCODES)[number];
 
 /**
- * Subcode-level carve-out predicate. The IP counter is unaffected; only
- * the non-IP (address / studio_user) sim-tier and on-chain-revert
- * counters consult this.
+ * Failure-code + subcode carve-out predicate. The IP counter is unaffected.
+ * Benign retry/concurrency subcodes keep their existing cross-family policy;
+ * market-volatility subcodes carve out only the exact sponsor preflight code.
+ * Accepting the failure code here avoids reconstructing execution stage from
+ * a free-form string in `SponsorFailureMeta`.
  */
-export function shouldCarveOutNonIpCounter(meta?: SponsorFailureMeta): boolean {
+export function shouldCarveOutNonIpCounter(code: string, meta?: SponsorFailureMeta): boolean {
   const subcode = meta?.subcode;
   if (typeof subcode !== 'string') return false;
   if ((ADDRESS_CARVE_OUT_SUBCODES as readonly string[]).includes(subcode)) return true;
-  if ((MARKET_VOLATILITY_CARVE_OUT_SUBCODES as readonly string[]).includes(subcode)) return true;
-  return false;
+  return (
+    code === 'PREFLIGHT_FAILED' &&
+    (MARKET_VOLATILITY_CARVE_OUT_SUBCODES as readonly string[]).includes(subcode)
+  );
 }
 
 // ─────────────────────────────────────────────

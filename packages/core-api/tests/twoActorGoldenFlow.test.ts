@@ -93,6 +93,7 @@ import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import { withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import { grpcExecutionSuccess, grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Shared identities + secrets
@@ -210,26 +211,15 @@ async function makeEmptyUserTxKindBytes(): Promise<string> {
   return toBase64(kindBytes);
 }
 
-function genericMockSimResult(digest = '0xdigest123') {
-  return {
-    Transaction: {
-      digest,
-      status: { success: true },
-      effects: {
-        gasUsed: {
-          computationCost: '3000000',
-          storageCost: '2000000',
-          storageRebate: '500000',
-        },
-      },
-    },
-  };
-}
-
 function genericMockSui() {
+  const gasUsed = {
+    computationCost: '3000000',
+    storageCost: '2000000',
+    storageRebate: '500000',
+  };
   return {
-    simulateTransaction: vi.fn().mockResolvedValue(genericMockSimResult()),
-    executeTransaction: vi.fn().mockResolvedValue(genericMockSimResult()),
+    simulateTransaction: vi.fn().mockResolvedValue(grpcSimulationSuccess('0xdigest123', gasUsed)),
+    executeTransaction: vi.fn().mockResolvedValue(grpcExecutionSuccess('0xdigest123', gasUsed)),
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
@@ -256,8 +246,8 @@ interface GenericHarness {
 
 function makeGenericHarness(): GenericHarness {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);
@@ -559,38 +549,19 @@ const STUDIO_GLOBAL_TARGET_HASHES = new Set(hashTargets([STUDIO_ALLOWED_TARGET])
  * simulate/execute also live here so the same client serves both
  * requests in the harness.
  */
-function studioMockSui(opts?: { execFail?: boolean }) {
+function studioMockSui() {
   const gasUsed = {
     computationCost: '1000000',
     storageCost: '500000',
     storageRebate: '200000',
   };
   return {
-    simulateTransaction: vi.fn().mockResolvedValue({
-      Transaction: {
-        digest: 'studio-mock-digest',
-        status: { success: true },
-        effects: { gasUsed },
-      },
-    }),
-    executeTransaction: vi.fn().mockImplementation(async () => {
-      if (opts?.execFail) {
-        return {
-          $kind: 'FailedTransaction',
-          FailedTransaction: {
-            digest: 'studio-fail',
-            status: { error: { message: 'forced-fail' } },
-          },
-        };
-      }
-      return {
-        Transaction: {
-          digest: 'studio-tx-digest',
-          status: { success: true },
-          effects: { gasUsed },
-        },
-      };
-    }),
+    simulateTransaction: vi
+      .fn()
+      .mockResolvedValue(grpcSimulationSuccess('studio-mock-digest', gasUsed)),
+    executeTransaction: vi
+      .fn()
+      .mockResolvedValue(grpcExecutionSuccess('studio-tx-digest', gasUsed)),
     core: {
       resolveTransactionPlugin: () => undefined,
       getCurrentSystemState: async () => ({
@@ -620,8 +591,8 @@ async function makeStudioHarness(): Promise<StudioHarness> {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);

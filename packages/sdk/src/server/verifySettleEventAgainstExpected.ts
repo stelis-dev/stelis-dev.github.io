@@ -9,28 +9,19 @@
 import { createHash } from 'node:crypto';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { ExpectedSettleEventFields } from '@stelis/contracts';
-import { toHex } from '@mysten/sui/utils';
-import { SettleEventBcs } from './settleEventDecoder.js';
+import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
+import {
+  decodeSettleEvent,
+  SETTLE_EVENT_TYPE,
+  type DecodedSettleEvent,
+} from './settleEventDecoder.js';
 
 // ─────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────
 
-/** Verified on-chain SettleEvent data returned after expected-field comparison. */
-export interface VerifiedSettleEvent {
-  receiptId: string;
-  /** Monotonic nonce used for this settlement. */
-  nonce: string;
-  orderIdHash: string;
-  user: string;
-  executionCostClaim: string;
-  quotedHostFeeMist: string;
-  protocolFee: string;
-  payout: string;
-  totalIn: string;
-  configVersion: string;
-  execTimestampMs: string;
-}
+/** Decoded on-chain SettleEvent returned only after expected-field comparison. */
+export type VerifiedSettleEvent = DecodedSettleEvent;
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -45,16 +36,33 @@ function normalizeHex(value: string): string {
   return value.toLowerCase().replace(/^0x/, '');
 }
 
+function normalizeExactHex32Field(value: unknown, name: string): string {
+  assertStringField(value, name);
+  const normalized = normalizeHex(value);
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`[Stelis] expected.${name} must be a 32-byte hex string`);
+  }
+  return normalized;
+}
+
 function assertStringField(value: unknown, name: string): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`[Stelis] expected.${name} is required`);
   }
 }
 
-function validateExpectedFields(expected: ExpectedSettleEventFields): void {
+function validateExpectedFields(expected: ExpectedSettleEventFields): {
+  receiptId: string;
+  orderIdHash: string;
+  user: string;
+} {
   const candidate = expected as Record<string, unknown>;
-  assertStringField(candidate['receiptId'], 'receiptId');
+  const receiptId = normalizeExactHex32Field(candidate['receiptId'], 'receiptId');
   assertStringField(candidate['user'], 'user');
+  const normalizedUser = normalizeSuiAddress(candidate['user']);
+  if (!isValidSuiAddress(normalizedUser)) {
+    throw new Error('[Stelis] expected.user must be a valid Sui address');
+  }
 
   const hasOrderId = typeof candidate['orderId'] === 'string' && candidate['orderId'].length > 0;
   const hasOrderIdHash =
@@ -62,6 +70,9 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
   if (hasOrderId === hasOrderIdHash) {
     throw new Error('[Stelis] expected must include exactly one of orderId or orderIdHash');
   }
+  const orderIdHash = hasOrderId
+    ? sha256Hex(candidate['orderId'] as string)
+    : normalizeExactHex32Field(candidate['orderIdHash'], 'orderIdHash');
 
   for (const field of ['executionCostClaimMist', 'quotedHostFeeMist', 'protocolFeeMist']) {
     const value = candidate[field];
@@ -69,6 +80,8 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
       throw new Error(`[Stelis] expected.${field} must be a non-empty MIST string`);
     }
   }
+
+  return { receiptId, orderIdHash, user: normalizedUser };
 }
 
 // ─────────────────────────────────────────────
@@ -90,7 +103,6 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
  *
  * @param client - SuiGrpcClient instance from `@mysten/sui/grpc`
  * @param digest - Transaction digest to verify
- * @param packageId - Stelis package ID used to filter SettleEvent by eventType
  * @param expected - Application-owned fields to compare with the on-chain event
  * @returns Decoded SettleEvent after every expected field matches
  * @throws Error if expected fields are missing, transaction data is missing, no
@@ -99,98 +111,83 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): void {
 export async function verifySettleEventAgainstExpected(
   client: SuiGrpcClient,
   digest: string,
-  packageId: string,
   expected: ExpectedSettleEventFields,
 ): Promise<VerifiedSettleEvent> {
-  validateExpectedFields(expected);
+  const validatedExpected = validateExpectedFields(expected);
 
   const result = await client.getTransaction({
     digest,
     include: { events: true },
   });
 
-  const tx = result.Transaction ?? result.FailedTransaction;
-  if (!tx) {
-    throw new Error(`[Stelis] Transaction ${digest} not found or empty result`);
+  if (result.$kind === 'FailedTransaction') {
+    const reason = result.FailedTransaction.status.error?.message ?? 'unknown execution failure';
+    throw new Error(`[Stelis] Transaction ${digest} failed: ${reason}`);
   }
 
-  const events = tx.events ?? [];
+  const events = result.Transaction.events;
+  if (!Array.isArray(events)) {
+    throw new Error(`[Stelis] Transaction ${digest} did not include requested events`);
+  }
   if (events.length === 0) {
     throw new Error(`[Stelis] No events found in transaction ${digest}`);
   }
 
-  const settleEventType = `${packageId}::events::SettleEvent`;
-  const settleEvent = events.find((e) => e.eventType === settleEventType);
-  if (!settleEvent) {
+  const settleEvents = events.filter((event) => event.eventType === SETTLE_EVENT_TYPE);
+  if (settleEvents.length === 0) {
     throw new Error(
       `[Stelis] SettleEvent not found in transaction ${digest}. ` +
-        `Expected eventType: ${settleEventType}`,
+        `Expected eventType: ${SETTLE_EVENT_TYPE}`,
+    );
+  }
+  if (settleEvents.length !== 1) {
+    throw new Error(
+      `[Stelis] Expected exactly one SettleEvent in transaction ${digest}, found ${settleEvents.length}`,
     );
   }
 
-  const decoded = SettleEventBcs.parse(settleEvent.bcs);
-  const onChainReceiptId = normalizeHex(toHex(decoded.receipt_id));
-  const onChainOrderIdHash = normalizeHex(toHex(decoded.order_id_hash));
-
-  const verified: VerifiedSettleEvent = {
-    receiptId: onChainReceiptId,
-    nonce: String(decoded.nonce),
-    orderIdHash: onChainOrderIdHash,
-    user: decoded.user,
-    executionCostClaim: String(decoded.execution_cost_claim_mist),
-    quotedHostFeeMist: String(decoded.quoted_host_fee_mist),
-    protocolFee: String(decoded.protocol_fee),
-    payout: String(decoded.payout),
-    totalIn: String(decoded.total_in),
-    configVersion: String(decoded.config_version),
-    execTimestampMs: String(decoded.exec_timestamp_ms),
-  };
+  const verified = decodeSettleEvent(settleEvents[0]!.bcs);
+  const onChainReceiptId = normalizeHex(verified.receiptId);
+  const onChainOrderIdHash = normalizeHex(verified.orderIdHash);
+  const normalizedOnChainUser = verified.user;
 
   const mismatches: string[] = [];
-  const expectedReceiptId = normalizeHex(expected.receiptId);
+  const expectedReceiptId = validatedExpected.receiptId;
   if (expectedReceiptId !== onChainReceiptId) {
     mismatches.push(`receiptId: expected ${expectedReceiptId}, on-chain ${onChainReceiptId}`);
   }
 
-  const expectedOrder = expected as { orderId?: unknown; orderIdHash?: unknown };
-  const expectedOrderIdHash =
-    typeof expectedOrder.orderId === 'string'
-      ? sha256Hex(expectedOrder.orderId)
-      : normalizeHex(expectedOrder.orderIdHash as string);
+  const expectedOrderIdHash = validatedExpected.orderIdHash;
   if (expectedOrderIdHash !== onChainOrderIdHash) {
     mismatches.push(`orderIdHash: expected ${expectedOrderIdHash}, on-chain ${onChainOrderIdHash}`);
   }
 
-  const normalizedExpectedUser = expected.user.toLowerCase();
-  const normalizedOnChainUser = decoded.user.toLowerCase();
+  const normalizedExpectedUser = validatedExpected.user;
   if (normalizedExpectedUser !== normalizedOnChainUser) {
     mismatches.push(`user: expected ${normalizedExpectedUser}, on-chain ${normalizedOnChainUser}`);
   }
 
   if (
     expected.executionCostClaimMist !== undefined &&
-    expected.executionCostClaimMist !== String(decoded.execution_cost_claim_mist)
+    expected.executionCostClaimMist !== verified.executionCostClaim
   ) {
     mismatches.push(
-      `executionCostClaimMist: expected ${expected.executionCostClaimMist}, on-chain ${decoded.execution_cost_claim_mist}`,
+      `executionCostClaimMist: expected ${expected.executionCostClaimMist}, on-chain ${verified.executionCostClaim}`,
     );
   }
 
   if (
     expected.quotedHostFeeMist !== undefined &&
-    expected.quotedHostFeeMist !== String(decoded.quoted_host_fee_mist)
+    expected.quotedHostFeeMist !== verified.quotedHostFeeMist
   ) {
     mismatches.push(
-      `quotedHostFeeMist: expected ${expected.quotedHostFeeMist}, on-chain ${decoded.quoted_host_fee_mist}`,
+      `quotedHostFeeMist: expected ${expected.quotedHostFeeMist}, on-chain ${verified.quotedHostFeeMist}`,
     );
   }
 
-  if (
-    expected.protocolFeeMist !== undefined &&
-    expected.protocolFeeMist !== String(decoded.protocol_fee)
-  ) {
+  if (expected.protocolFeeMist !== undefined && expected.protocolFeeMist !== verified.protocolFee) {
     mismatches.push(
-      `protocolFeeMist: expected ${expected.protocolFeeMist}, on-chain ${decoded.protocol_fee}`,
+      `protocolFeeMist: expected ${expected.protocolFeeMist}, on-chain ${verified.protocolFee}`,
     );
   }
 

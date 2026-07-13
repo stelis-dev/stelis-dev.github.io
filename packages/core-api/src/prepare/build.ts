@@ -13,24 +13,30 @@
  * so each pass creates a fresh Transaction.
  */
 import { Transaction } from '@mysten/sui/transactions';
+import { fromBase64 } from '@mysten/sui/utils';
 import type { ExecutionCostClaimEstimate, SimulationGasUsed } from '@stelis/core-relay';
-import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
+import type { PtbCommand, SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
 import type {
   ExecutableSwapQuote,
+  PaymentInputIntegrityExpectation,
   PaymentInputSource,
   StaticSettlementSwapPathDescriptor,
 } from '@stelis/core-relay/server';
 import {
   batchGetHopMidPrices,
-  classifyUserTxCoins,
-  extractPrefixWithdrawals,
+  convertSdkCommands,
   computeExecutionCostClaim,
   CONVERGENCE_TOLERANCE_BPS,
+  PrefixValueTraceError,
   SlippageQueryError,
+  traceUserPrefixValue,
+  type PrefixValueTrace,
 } from '@stelis/core-relay';
 import {
   createDeepbookQuotePort,
+  extractSettlePaymentInputContract,
   solveExecutableSwap,
+  validatePaymentInputIntegrity,
   wrapQuotePortWithStats,
   wrapQuotePortWithCacheAndStats,
   createRequestQuoteCache,
@@ -49,13 +55,13 @@ import {
 import {
   checkCreditOnlyEligibility,
   calculateRequiredSwapOutput,
-  calculateMinOutputGuardsFromQuotedOutputs,
+  calculateSwapOutputGuards,
   assembleSwapSettlementPlan,
   assembleCreditSettlementPlan,
 } from './settlementPlanner.js';
-import type { PlannerConfig, PlannerInput, FundingResolution } from './settlementPlanner.js';
+import type { PlannerConfig, PlannerInput } from './settlementPlanner.js';
 import { compileCreditSettlement, compileSwapSettlement } from './ptbCompiler.js';
-import type { PrefixUsage, SettlePlanAuditFields } from './settlePlanTypes.js';
+import type { SettlePlanAuditFields } from './settlePlanTypes.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_BUILD_STAGE } from '../observability/events.js';
 import { createHash } from 'crypto';
@@ -182,7 +188,7 @@ type CreditProbeMeasurement =
 function extractSuccessfulDryRunGas(
   simResult: unknown,
   stelisPackageId: string,
-  deepbookPackageId: string,
+  commands: readonly PtbCommand[],
   meta: Record<string, string>,
 ): SimulationGasUsed {
   const simTx = (
@@ -200,14 +206,14 @@ function extractSuccessfulDryRunGas(
     };
     if (simFailed.$kind === 'FailedTransaction') {
       const reason = simFailed.FailedTransaction?.status?.error?.message ?? 'unknown';
-      throw classifyDryRunFailure(reason, stelisPackageId, deepbookPackageId, meta);
+      throw classifyDryRunFailure(reason, stelisPackageId, commands, meta);
     }
     throw new PrepareValidationError('DRY_RUN_FAILED', 'Dry-run returned no transaction result');
   }
 
   if (!simTx.status?.success) {
     const reason = (simTx.status as { error?: { message?: string } })?.error?.message ?? 'unknown';
-    throw classifyDryRunFailure(reason, stelisPackageId, deepbookPackageId, meta);
+    throw classifyDryRunFailure(reason, stelisPackageId, commands, meta);
   }
 
   const gasUsed = simTx.effects?.gasUsed;
@@ -243,10 +249,11 @@ async function dryRunForGas(
   // `...identifier` spreads).
   const poolId = failureContext.poolId;
   const settlementTokenSymbol = failureContext.settlementTokenSymbol;
+  const commands = convertSdkCommands(tx.getData().commands as unknown[]);
 
   let dryRunBytes: Uint8Array;
   try {
-    dryRunBytes = await safeBuild(tx, ctx.sui, ctx.packageId, ctx.deepbookPackageId, meta);
+    dryRunBytes = await safeBuild(tx, ctx.sui, ctx.packageId, meta);
   } catch (err) {
     logPrepareBuildStage('dryrun_safebuild_failed', {
       pass,
@@ -301,7 +308,7 @@ async function dryRunForGas(
   });
 
   try {
-    return extractSuccessfulDryRunGas(simResult, ctx.packageId, ctx.deepbookPackageId, meta);
+    return extractSuccessfulDryRunGas(simResult, ctx.packageId, commands, meta);
   } catch (err) {
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
@@ -335,27 +342,56 @@ function assertSingleHopOnly(settlementSwapPath: SingleHopSettlementSwapPath): v
   }
 }
 
-function materializePrefixUsage(tx: Transaction, settlementTokenType: string): PrefixUsage {
-  const classification = classifyUserTxCoins(tx);
-  const { total: prefixAbConsumed, unaccountable } = extractPrefixWithdrawals(
-    tx,
-    settlementTokenType,
-  );
-  if (unaccountable) {
+function materializePrefixValueTrace(
+  tx: Transaction,
+  settlementTokenType: string,
+): PrefixValueTrace {
+  let trace: PrefixValueTrace;
+  try {
+    trace = traceUserPrefixValue(tx, settlementTokenType);
+  } catch (error) {
+    if (error instanceof PrefixValueTraceError) {
+      throw new PrepareValidationError('PAYMENT_COIN_CONFLICT', error.message);
+    }
+    throw error;
+  }
+  if (trace.unaccountableSenderWithdrawal) {
     throw new PrepareValidationError(
       'UNACCOUNTABLE_WITHDRAWAL',
       'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
     );
   }
-  return {
-    survivors: classification.survivors,
-    consumed: classification.consumed,
-    opaqueInUse: classification.opaqueInUse,
-    mutated: classification.mutated,
-    reusableSplitSources: classification.reusableSplitSources,
-    mergeDestToSources: classification.mergeDestToSources,
-    prefixAbConsumed,
-  };
+  return trace;
+}
+
+/** Verify the resolver/compiler contract against the final command list once. */
+function assertFinalPaymentInputIntegrity(
+  tx: Transaction,
+  packageId: string,
+  expected: PaymentInputIntegrityExpectation,
+): void {
+  try {
+    const data = tx.getData();
+    const contract = extractSettlePaymentInputContract(
+      convertSdkCommands(data.commands as unknown[]),
+      data.inputs,
+      packageId,
+    );
+    const result = validatePaymentInputIntegrity(contract.paymentInputTrace, expected);
+    if (!result.ok) {
+      throw new PrepareValidationError(
+        'L2_EXTRACT_FAILED',
+        `Final payment-input integrity failed: ${result.message}`,
+        { subcode: result.subcode },
+      );
+    }
+  } catch (error) {
+    if (error instanceof PrepareValidationError) throw error;
+    throw new PrepareValidationError(
+      'L2_EXTRACT_FAILED',
+      `Final payment-input extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 async function loadRawMidPrices(
@@ -533,6 +569,7 @@ function shouldAttemptPreSwapCreditProbe(input: GenericPrepareBuildRequest): boo
 async function dryRunPreSwapCreditPathCosts(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
+  runContext: GenericPrepareBuildRunContext,
 ): Promise<CreditProbeMeasurement> {
   const seedClaim = findCreditSafeSeedClaim(ctx, input);
   if (seedClaim === null) {
@@ -552,6 +589,7 @@ async function dryRunPreSwapCreditPathCosts(
   const { tx, effectiveProfile, swapAmountSmallest, paymentInputSource } = await runPreparePass(
     ctx,
     input,
+    runContext.prefixTrace,
     {
       executionCostClaim: seedClaim,
       simGasReported: seedClaim,
@@ -662,9 +700,9 @@ async function buildFinalGenericPrepareResult(
   finalSettlePath: FinalSettlePath,
   prefetchedMidPrices: bigint[] | undefined,
   probeQuote: ExecutableSwapQuote | null,
-  rpcAcc: BuildRpcAccumulator,
-  quoteCache?: QuoteCache,
+  runContext: GenericPrepareBuildRunContext,
 ): Promise<GenericPrepareBuildOutput> {
+  const { prefixTrace, quoteCache, rpcAcc } = runContext;
   const settlementSwapPath = input.settlementSwapPath;
   const { grossGas, gasVarianceFixedMist, slippageBufferMist } = finalCosts;
   // Tag the two fields consumed by downstream sponsor / store code.
@@ -682,7 +720,7 @@ async function buildFinalGenericPrepareResult(
   });
 
   // Fail-closed before pass2 build: on-chain settle enforces execution_cost_claim_mist <= max_claim_mist
-  // (settle.move EClaimTooHigh = 101). Reject here with an explicit typed error so
+  // (`settle::EClaimTooHigh`). Reject here with an explicit typed error so
   // we do not rely on downstream MoveAbort parsing for this deterministic boundary.
   if (executionCostClaim > ctx.maxClaimMist) {
     throwClaimWouldExceedMax(ctx, finalCosts);
@@ -695,11 +733,13 @@ async function buildFinalGenericPrepareResult(
     effectiveProfile,
     swapAmountSmallest: swapFinal,
     paymentInputSource,
+    paymentInputIntegrityExpectation,
     executionQuote: pass2ExecutionQuote,
     rpcStats: pass2RpcStats,
   } = await runPreparePass(
     ctx,
     input,
+    prefixTrace,
     {
       executionCostClaim,
       simGasReported: simGas,
@@ -787,7 +827,7 @@ async function buildFinalGenericPrepareResult(
   const settleMeta = buildSettleMeta(ctx, executionCostClaim, false);
   let txBytes: Uint8Array;
   try {
-    txBytes = await safeBuild(pass2Tx, ctx.sui, ctx.packageId, ctx.deepbookPackageId, settleMeta);
+    txBytes = await safeBuild(pass2Tx, ctx.sui, ctx.packageId, settleMeta);
   } catch (err) {
     // Final-build failure is the last gap before `two_pass_complete`. Without
     // this emit the request loses phase-local context for the failure (the
@@ -817,6 +857,11 @@ async function buildFinalGenericPrepareResult(
   }
 
   // ── Tamper-proof hash ───────────────────────────────────────────────────
+
+  // `safeBuild` has accepted the final PTB. Before hashing it, confirm that
+  // the suffix still contains the exact objects and amounts selected by the
+  // funding resolver.
+  assertFinalPaymentInputIntegrity(pass2Tx, ctx.packageId, paymentInputIntegrityExpectation);
 
   const txBytesHash = sha256Hex(txBytes);
   const rpcSummary = summarizeRpcStats(rpcAcc);
@@ -885,6 +930,7 @@ async function buildFinalGenericPrepareResult(
 interface GenericPrepareBuildRunContext {
   readonly rpcAcc: BuildRpcAccumulator;
   readonly quoteCache: QuoteCache;
+  readonly prefixTrace: PrefixValueTrace;
 }
 
 interface MaxClaimGasProbeResult {
@@ -899,7 +945,9 @@ interface SwapExecutionGapMeasurement {
   readonly probeQuote: ExecutableSwapQuote;
 }
 
-function createGenericPrepareBuildRunContext(): GenericPrepareBuildRunContext {
+function createGenericPrepareBuildRunContext(
+  input: GenericPrepareBuildRequest,
+): GenericPrepareBuildRunContext {
   // Request-local quote cache shared across pass1 / pass1.5 / pass2 so that
   // floor-bound paths collapse to a single underlying RPC. The cache is not
   // passed to the credit pre-swap probe because that path returns before the
@@ -907,6 +955,10 @@ function createGenericPrepareBuildRunContext(): GenericPrepareBuildRunContext {
   return {
     rpcAcc: emptyBuildRpcAccumulator(),
     quoteCache: createRequestQuoteCache(),
+    prefixTrace: materializePrefixValueTrace(
+      Transaction.fromKind(fromBase64(input.userTxKindBytes)),
+      input.settlementSwapPath.settlementTokenType,
+    ),
   };
 }
 
@@ -944,6 +996,7 @@ async function runMaxClaimGasProbe(
   } = await runPreparePass(
     ctx,
     input,
+    runContext.prefixTrace,
     {
       executionCostClaim: pass1Claim,
       simGasReported: pass1Claim,
@@ -1081,13 +1134,13 @@ export async function runGenericPrepareBuildPipeline(
   input: GenericPrepareBuildRequest,
 ): Promise<GenericPrepareBuildOutput> {
   logGenericPrepareBuildStart(input);
-  const runContext = createGenericPrepareBuildRunContext();
+  const runContext = createGenericPrepareBuildRunContext(input);
 
   // A credit_general request can be credit-coverable after measurement even
   // when it cannot cover maxClaimMist. Measure that candidate without first
   // requiring a settlement-token source for a max-claim swap probe.
   const preSwapCreditProbe = shouldAttemptPreSwapCreditProbe(input)
-    ? await dryRunPreSwapCreditPathCosts(ctx, input)
+    ? await dryRunPreSwapCreditPathCosts(ctx, input, runContext)
     : ({ outcome: 'skipped' } as const);
   if (preSwapCreditProbe.outcome === 'selected') {
     return buildFinalGenericPrepareResult(
@@ -1097,7 +1150,7 @@ export async function runGenericPrepareBuildPipeline(
       'credit',
       undefined,
       null,
-      runContext.rpcAcc,
+      runContext,
     );
   }
 
@@ -1111,8 +1164,7 @@ export async function runGenericPrepareBuildPipeline(
     'swap',
     maxClaimProbe.pass1MidPrices,
     swapMeasurement.probeQuote,
-    runContext.rpcAcc,
-    runContext.quoteCache,
+    runContext,
   );
 }
 
@@ -1163,6 +1215,8 @@ interface PreparePassResult {
   rawMidPrices: bigint[];
   /** How settlement token was sourced. */
   paymentInputSource: PaymentInputSource;
+  /** Exact funding facts that the final PTB self-check must confirm. */
+  paymentInputIntegrityExpectation: PaymentInputIntegrityExpectation;
   /** Canonical market-policy result for swap paths. */
   executionQuote: ExecutableSwapQuote | null;
   /** RPC accounting for this pass — mid-price + quote primitives. */
@@ -1176,7 +1230,7 @@ interface PreparePassResult {
  *   1. Deserialize user TX
  *   2. Local prefix accounting validation
  *   3. Check credit-only eligibility (planner)
- *   4. R-9 coin classification + market snapshot (orchestration)
+ *   4. Trace the user-prefix value and load the market snapshot
  *   5. Solve minimal executable swap via server-side market policy
  *   6. Resolve funding + assemble swap plan
  *   7. Compile plan onto TX (compiler)
@@ -1184,6 +1238,7 @@ interface PreparePassResult {
 async function runPreparePass(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
+  prefixTrace: PrefixValueTrace,
   audit: SettleAuditFields,
   prefetchedMidPrices?: bigint[],
   passLabel: PreparePassLabel = 'pass2',
@@ -1199,14 +1254,9 @@ async function runPreparePass(
     execution_cost_claim_mist: audit.executionCostClaim.toString(),
   });
 
-  const tx = Transaction.fromKind(
-    (await import('@mysten/sui/utils')).fromBase64(input.userTxKindBytes),
-  );
+  const tx = Transaction.fromKind(fromBase64(input.userTxKindBytes));
 
   const settlementSwapPath = input.settlementSwapPath;
-  // API contract: unaccountable Sender withdrawals are rejected before
-  // payment-source selection, including credit-only paths.
-  const prefixUsage = materializePrefixUsage(tx, settlementSwapPath.settlementTokenType);
 
   // ── Build planner config + input from orchestrator context ─────────────
   const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
@@ -1239,7 +1289,7 @@ async function runPreparePass(
       auditFields,
       creditCheck.useCreditAmount,
     );
-    compileCreditSettlement(
+    const paymentInputIntegrityExpectation = compileCreditSettlement(
       tx,
       plan,
       { packageId: ctx.packageId, configId: ctx.configId, vaultRegistryId: ctx.vaultRegistryId },
@@ -1255,6 +1305,7 @@ async function runPreparePass(
       swapAmountSmallest: 0n,
       rawMidPrices: [],
       paymentInputSource: 'none_credit_only',
+      paymentInputIntegrityExpectation,
       executionQuote: null,
       rpcStats,
     };
@@ -1271,15 +1322,18 @@ async function runPreparePass(
     );
   }
 
-  // ── Step 4: Swap-only R-9 coin classification ─────────────────────────
+  // ── Swap-only prefix value evidence ─────────────────────────────────────────
   assertSingleHopOnly(settlementSwapPath);
-  logPrepareBuildStage('run_prepare_pass_coin_classified', {
+  const prefixStateCounts = { surviving: 0, consumed: 0, opaque: 0 };
+  for (const state of prefixTrace.directCoins.values()) {
+    prefixStateCounts[state.status] += 1;
+  }
+  logPrepareBuildStage('run_prepare_pass_prefix_value_traced', {
     pass: passLabel,
-    survivor_count: prefixUsage.survivors.size,
-    consumed_count: prefixUsage.consumed.size,
-    opaque_in_use_count: prefixUsage.opaqueInUse.size,
-    mutated_count: prefixUsage.mutated.size,
-    prefix_ab_consumed_smallest: prefixUsage.prefixAbConsumed.toString(),
+    survivor_count: prefixStateCounts.surviving,
+    consumed_count: prefixStateCounts.consumed,
+    opaque_in_use_count: prefixStateCounts.opaque,
+    prefix_ab_consumed_smallest: prefixTrace.senderWithdrawalDebit.toString(),
   });
 
   // ── Step 3: Mid-price snapshot ────────────────────────────────────────
@@ -1345,57 +1399,50 @@ async function runPreparePass(
   // before the throw propagates.
   try {
     // ── Step 5: Funding resolution (chain query) ──────────────────────────
-    const sourceResolution = await resolvePaymentSource(
+    const funding = await resolvePaymentSource(
       ctx.sui,
       input.senderAddress,
       settlementSwapPath.settlementTokenType,
       swapAmountSmallest,
       settlementSwapPath.settlementTokenSymbol,
-      prefixUsage,
+      prefixTrace,
     );
-    const funding: FundingResolution = {
-      source: sourceResolution.source,
-      usableCoins: sourceResolution.usableCoins,
-      usableCoinTotal: sourceResolution.usableCoinTotal,
-      addressBalance: sourceResolution.addressBalance,
-      redeemDelta: sourceResolution.redeemDelta,
-    };
     logPrepareBuildStage('run_prepare_pass_funding_resolved', {
       pass: passLabel,
       funding_source: funding.source,
-      usable_coin_total_smallest: funding.usableCoinTotal.toString(),
-      address_balance_smallest: funding.addressBalance.toString(),
-      redeem_delta_smallest: funding.redeemDelta.toString(),
+      usable_coin_total_smallest:
+        funding.source === 'address_balance' ? '0' : funding.remainingBalance.toString(),
+      redeem_delta_smallest:
+        funding.source === 'coin_object' ? '0' : funding.redeemAmount.toString(),
     });
 
     // ── Step 6: Assemble swap settlement plan ───────────────────────────
     const quotedHopOutputs = [...executionQuote.quotedHopOutputs];
-    const swap = calculateMinOutputGuardsFromQuotedOutputs(
+    const swap = calculateSwapOutputGuards(
       swapAmountSmallest,
-      quotedHopOutputs,
+      executionQuote.targetOutputMist,
+      executionQuote.actualOutputMist,
       input.slippageBps,
     );
     const plan = assembleSwapSettlementPlan(plannerInput, auditFields, funding, swap);
     logPrepareBuildStage('run_prepare_pass_minout_quoted', {
       pass: passLabel,
       quoted_hop_outputs: quotedHopOutputs.map((p) => p.toString()),
+      required_swap_output_mist: swap.requiredSwapOutputMist.toString(),
       min_sui_out: swap.minSuiOut.toString(),
       slippage_bps: input.slippageBps,
     });
 
     // ── Step 7: Compile plan onto TX (compiler) ─────────────────────────
-    await compileSwapSettlement(
+    const paymentInputIntegrityExpectation = compileSwapSettlement(
       tx,
       plan,
       {
-        sui: ctx.sui,
         packageId: ctx.packageId,
         configId: ctx.configId,
         vaultRegistryId: ctx.vaultRegistryId,
       },
-      input.senderAddress,
       input.vaultObjectId,
-      prefixUsage,
     );
     logPrepareBuildStage('run_prepare_pass_compiled', {
       pass: passLabel,
@@ -1409,6 +1456,7 @@ async function runPreparePass(
       swapAmountSmallest: plan.swap.swapAmountSmallest,
       rawMidPrices,
       paymentInputSource: plan.funding.source,
+      paymentInputIntegrityExpectation,
       executionQuote,
       rpcStats,
     };

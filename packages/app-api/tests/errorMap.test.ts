@@ -96,8 +96,8 @@ describe('errorMap — PrepareValidationError', () => {
     const m = mapError(
       new PrepareValidationError(
         'SPONSOR_LEASE_COMMIT_FAILED',
-        'lease commit failed for slot-1 redis key sponsor:lease:secret',
-        { slotId: 'slot-1', redisKey: 'sponsor:lease:secret' },
+        'lease commit failed for sponsor 0x1 redis key sponsor:lease:secret',
+        { sponsorAddress: '0x1', redisKey: 'sponsor:lease:secret' },
         500,
       ),
     );

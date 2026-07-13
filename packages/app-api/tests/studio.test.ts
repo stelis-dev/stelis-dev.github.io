@@ -109,8 +109,8 @@ const {
   }
   class _SponsorLeaseExpiredError extends Error {
     readonly code = 'LEASE_EXPIRED' as const;
-    constructor(slotId: string) {
-      super(`Sponsor lease expired for slot ${slotId} — retry /prepare`);
+    constructor(sponsorAddress: string) {
+      super(`Sponsor lease expired for address ${sponsorAddress} — retry /prepare`);
       this.name = 'SponsorLeaseExpiredError';
     }
   }
@@ -187,10 +187,6 @@ vi.mock('@stelis/core-api', async () => {
   };
 });
 
-vi.mock('../src/clientIp.js', () => ({
-  getClientIp: vi.fn().mockReturnValue('127.0.0.1'),
-}));
-
 vi.mock('../src/sponsor-operations/gateResponse.js', () => ({
   buildSponsorUnavailableResponse: mockBuildSponsorOperationsBlockedResponse,
 }));
@@ -200,7 +196,10 @@ vi.mock('../src/developerJwtVerifyCallback.js', () => ({
 }));
 
 import { createStudioRoutes } from '../src/routes/studio.js';
+import type { ResolveClientIp } from '../src/clientIp.js';
 import type { AppApiContext } from '../src/context.js';
+
+const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
 
 // Fixed test trust config for developer JWT
 const TEST_TRUST_CONFIG = {
@@ -279,7 +278,7 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function makeApp(ctx: AppApiContext) {
-  const routes = createStudioRoutes(async () => ctx);
+  const routes = createStudioRoutes(Promise.resolve(ctx), resolveClientIp);
   const app = new Hono();
   app.route('/studio', routes);
   return app;

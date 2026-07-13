@@ -6,6 +6,8 @@
 //   browser/server boundary
 // - no host wiring or framework-specific behavior
 
+import type { SuiNetwork } from './types.js';
+
 /**
  * Build the exact signed message for sponsor refill account withdrawal approval.
  *
@@ -14,10 +16,22 @@
  * signature verification.
  */
 export function buildSponsorRefillAccountWithdrawMessage(
+  network: SuiNetwork,
   amountMist: string,
   nonce: string,
 ): string {
-  return `sponsor_refill_account_withdraw:${amountMist}:${nonce}`;
+  return `sponsor_refill_account_withdraw:${network}:${amountMist}:${nonce}`;
+}
+
+const U64_MAX_DECIMAL = '18446744073709551615';
+
+/** Exact positive-u64 decimal contract shared by Sponsor Refill Account spend boundaries. */
+export function isPositiveU64DecimalString(value: string): boolean {
+  if (!/^(?:0|[1-9]\d*)$/.test(value) || value === '0') return false;
+  return (
+    value.length < U64_MAX_DECIMAL.length ||
+    (value.length === U64_MAX_DECIMAL.length && value <= U64_MAX_DECIMAL)
+  );
 }
 
 // ─────────────────────────────────────────────
@@ -34,18 +48,19 @@ export function buildSponsorRefillAccountWithdrawMessage(
  * slot HASH.
  *
  * Gate-available state: `healthy`.
- * Gate-degraded states (counted as unavailable by the request gate,
- * including `awaiting_confirmation`):
- * `low_balance`, `refilling`, `awaiting_confirmation`, `rpc_unreachable`,
+ * Gate-degraded states (counted as unavailable by the request gate):
+ * `low_balance`, `refilling`, `rpc_unreachable`,
  * `refill_failed`.
  */
-export type SponsorSlotState =
-  | 'healthy'
-  | 'low_balance'
-  | 'refilling'
-  | 'awaiting_confirmation'
-  | 'rpc_unreachable'
-  | 'refill_failed';
+export const SPONSOR_SLOT_STATES = [
+  'healthy',
+  'low_balance',
+  'refilling',
+  'rpc_unreachable',
+  'refill_failed',
+] as const;
+
+export type SponsorSlotState = (typeof SPONSOR_SLOT_STATES)[number];
 
 /**
  * Sponsor operations availability gate error code. Emitted by the request gate.

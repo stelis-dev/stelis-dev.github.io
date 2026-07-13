@@ -27,17 +27,17 @@
  *                  `senderAddress`; promotion uses
  *                  `{ kind: 'studio_user', userId }` keyed by the
  *                  verified developer JWT principal. Two carve-out
- *                  vocabularies in `failures.ts` skip the
- *                  non-IP temporary-block counters (on-chain revert and
- *                  simulation-tier preflight/dry-run, applied uniformly
- *                  to address and studio-user kinds) while the IP
- *                  counter still increments —
+ *                  vocabularies in `failures.ts` keep distinct policies
+ *                  while the IP counter always increments —
  *                  `ADDRESS_CARVE_OUT_SUBCODES` for benign
  *                  retry/concurrency (`PAUSED`,
- *                  `VAULT_ALREADY_REGISTERED`, `REPLAY_NONCE`) and
+ *                  `VAULT_ALREADY_REGISTERED`, `REPLAY_NONCE`) across
+ *                  preflight and revert families, and
  *                  `MARKET_VOLATILITY_CARVE_OUT_SUBCODES` for
  *                  market-driven movement (`SPREAD_EXCEEDED`,
- *                  `SLIPPAGE_EXCEEDED`); both feed
+ *                  `SLIPPAGE_EXCEEDED`) only at `PREFLIGHT_FAILED`;
+ *                  the same market subcodes count once they become
+ *                  `ONCHAIN_REVERT`. Both feed
  *                  `shouldCarveOutNonIpCounter`. Failures split into
  *                  three classes:
  *                    - server-side drift (generic L1 / L2 / extraction

@@ -6,7 +6,7 @@
  * Exported functions:
  *   - checkCreditOnlyEligibility:               credit-only path decision
  *   - calculateRequiredSwapOutput:              target SUI output needed from swap
- *   - calculateMinOutputGuardsFromQuotedOutputs: canonical runtime min-out guards (quoted path)
+ *   - calculateSwapOutputGuards:                canonical runtime min-out guards (quoted path)
  *   - assembleSwapSettlementPlan:               assemble SettlementPlan for swap path
  *   - assembleCreditSettlementPlan:             assemble SettlementPlan for credit path
  *
@@ -15,8 +15,12 @@
  */
 
 import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
-import type { PaymentInputSource } from '@stelis/core-relay/server';
-import type { SwapPlan, SettlementPlan, SettlePlanAuditFields } from './settlePlanTypes.js';
+import type {
+  SwapFundingResolution,
+  SwapPlan,
+  SettlementPlan,
+  SettlePlanAuditFields,
+} from './settlePlanTypes.js';
 
 // ─────────────────────────────────────────────
 // Planner config input
@@ -35,15 +39,6 @@ export interface PlannerInput {
   readonly profile: SettleProfile;
   readonly vaultObjectId: string | null;
   readonly creditMist: bigint;
-}
-
-/** Result of funding-source resolution (from resolvePaymentSource). */
-export interface FundingResolution {
-  readonly source: PaymentInputSource;
-  readonly usableCoins: ReadonlyArray<{ objectId: string; balance: string }>;
-  readonly usableCoinTotal: bigint;
-  readonly addressBalance: bigint;
-  readonly redeemDelta: bigint;
 }
 
 // ─────────────────────────────────────────────
@@ -99,26 +94,35 @@ export function calculateRequiredSwapOutput(
 }
 
 /**
- * Calculate min output guards from per-hop quoted outputs.
+ * Calculate the final on-chain minimum output from one verified quote.
  *
- * Used when runtime quoting is available and should drive
- * for min-out guards. The hop outputs come from the server-side executable
- * market-policy solve, where each candidate input is verified against the
- * input-fee quantity-out path before being used for guard derivation.
+ * `requiredSwapOutputMist` is the economic target already carried by the
+ * executable quote. `verifiedOutputMist` is that quote's verified SUI output.
+ * Rejecting required > verified keeps the final guard at or below the quote
+ * instead of manufacturing an unreachable minimum.
  */
-export function calculateMinOutputGuardsFromQuotedOutputs(
+export function calculateSwapOutputGuards(
   swapAmountSmallest: bigint,
-  hopOutputs: readonly bigint[],
+  requiredSwapOutputMist: bigint,
+  verifiedOutputMist: bigint,
   slippageBps: number,
 ): SwapPlan {
   if (!Number.isSafeInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000) {
     throw new Error('slippageBps must be a safe integer in [0, 10000]');
   }
-  const applySlippage = (amount: bigint): bigint =>
-    amount > 0n ? (amount * BigInt(10_000 - slippageBps)) / 10_000n : 0n;
+  if (requiredSwapOutputMist < 0n) {
+    throw new Error('requiredSwapOutputMist must be non-negative');
+  }
+  if (verifiedOutputMist < requiredSwapOutputMist) {
+    throw new Error('verifiedOutputMist must cover requiredSwapOutputMist');
+  }
+
+  const slippageFloor =
+    verifiedOutputMist > 0n ? (verifiedOutputMist * BigInt(10_000 - slippageBps)) / 10_000n : 0n;
   return {
     swapAmountSmallest,
-    minSuiOut: hopOutputs.length > 0 ? applySlippage(hopOutputs[0]) : 0n,
+    requiredSwapOutputMist,
+    minSuiOut: requiredSwapOutputMist > slippageFloor ? requiredSwapOutputMist : slippageFloor,
   };
 }
 
@@ -135,13 +139,13 @@ export function calculateMinOutputGuardsFromQuotedOutputs(
  * Call sequence in build.ts:
  *   1. solveExecutableSwap(...)       → swapAmountSmallest + quotedHopOutputs
  *   2. resolvePaymentSource(...)      → funding
- *   3. calculateMinOutputGuardsFromQuotedOutputs(...) → swap
+ *   3. calculateSwapOutputGuards(...) → swap
  *   4. assembleSwapSettlementPlan(input, audit, funding, swap)
  */
 export function assembleSwapSettlementPlan(
   input: PlannerInput,
   audit: SettlePlanAuditFields,
-  funding: FundingResolution,
+  funding: SwapFundingResolution,
   swap: SwapPlan,
 ): SettlementPlan {
   const variant: 'new_user' | 'with_vault' =
@@ -161,14 +165,8 @@ export function assembleSwapSettlementPlan(
     variant,
     settlementSwapPath: input.settlementSwapPath,
     settlementSwapDirection: input.settlementSwapPath.settlementSwapDirection,
-    funding: {
-      source: funding.source,
-      usableCoins: [...funding.usableCoins],
-      usableCoinTotal: funding.usableCoinTotal,
-      addressBalance: funding.addressBalance,
-      redeemDelta: funding.redeemDelta,
-      useCreditAmount,
-    },
+    funding,
+    useCreditAmount,
     swap,
     audit,
   };
@@ -194,15 +192,9 @@ export function assembleCreditSettlementPlan(
     profile: 'credit_general',
     settlementSwapPath: input.settlementSwapPath,
     settlementSwapDirection: input.settlementSwapPath.settlementSwapDirection,
-    funding: {
-      source: 'none_credit_only',
-      usableCoins: [],
-      usableCoinTotal: 0n,
-      addressBalance: 0n,
-      redeemDelta: 0n,
-      useCreditAmount,
-    },
-    swap: { swapAmountSmallest: 0n, minSuiOut: 0n },
+    funding: { source: 'none_credit_only' },
+    useCreditAmount,
+    swap: { swapAmountSmallest: 0n, requiredSwapOutputMist: 0n, minSuiOut: 0n },
     audit,
   };
 }

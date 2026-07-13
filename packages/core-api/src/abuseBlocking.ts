@@ -11,7 +11,20 @@ import {
   SPONSOR_FAILURE_RECORDED,
   SPONSOR_FAILURE_RECORDER_FAILED,
 } from './observability/events.js';
-import { shouldIgnoreSponsorFailureForAbuse } from './failures.js';
+import { shouldIgnoreSponsorFailureForAbuse, type FailureCode } from './failures.js';
+
+/**
+ * Codes accepted by the shared sponsor-failure recorder.
+ *
+ * Generic Relay API transport projections are deliberately excluded: both
+ * sponsor routes record the underlying event using `PREFLIGHT_FAILED` or
+ * `ONCHAIN_REVERT` before the generic route maps its typed error to the public
+ * `SPONSOR_*` response code.
+ */
+type SponsorFailureRecordCode = Exclude<
+  FailureCode,
+  'SPONSOR_PREFLIGHT_FAILED' | 'SPONSOR_ONCHAIN_FAILED'
+>;
 
 export const ABUSE_BLOCKED_CODE = 'ABUSE_BLOCKED';
 
@@ -98,12 +111,10 @@ export async function checkBlockedRequest(
  *     inside the blocker adapter (`TAMPERING_DETECTED`,
  *     `P1_GASCOIN_FORBIDDEN`, `L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH`,
  *     `PROMO_DISALLOWED_TARGET`, …).
- *   - Carve-out subcodes recognised by
- *     `shouldCarveOutNonIpCounter` (the predicate gates both
- *     `{ kind: 'address' }` and `{ kind: 'studio_user' }` non-IP
- *     counters uniformly) skip every
- *     non-IP temporary-block counter (on-chain revert +
- *     simulation-tier preflight/dry-run); IP counter still increments.
+ *   - `shouldCarveOutNonIpCounter(code, meta)` applies the same typed-
+ *     subject rule to address and studio-user counters: benign retry
+ *     subcodes skip both families, while market-volatility subcodes skip
+ *     only `PREFLIGHT_FAILED`. IP always increments.
  *
  * All other non-ignored codes are recorded against the normal windowed counters.
  *
@@ -126,7 +137,7 @@ export async function recordSponsorFailureForAbuse(
   blocker: AbuseBlockerAdapter,
   ip: string,
   subject: AbuseSubject | undefined,
-  code: string,
+  code: SponsorFailureRecordCode,
   meta?: SponsorFailureMeta,
 ): Promise<void> {
   if (shouldIgnoreSponsorFailureForAbuse(code)) return;

@@ -47,8 +47,8 @@ console.log(sdk.settlementPayoutRecipient);     // '0x...'`,
 const tx = new Transaction();
 
 // Pick a coin, merge others into it, split the transfer amount.
-// The Host handles R-9 collision avoidance and address-balance
-// accounting server-side — no need to reserve an untouched coin.
+// The Host traces command-ordered prefix value and address-balance
+// withdrawals, so there is no need to reserve an untouched coin.
 const primaryCoin = tx.object(coinId);
 if (otherCoinIds.length > 0) {
   tx.mergeCoins(primaryCoin, otherCoinIds.map(id => tx.object(id)));

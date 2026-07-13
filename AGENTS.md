@@ -26,12 +26,27 @@ If a rule below mentions an unfamiliar package, first decide whether the package
 - For non-trivial work, keep the accepted task name stable. Do not rename, split, or reframe work to make incomplete work look complete.
 - Every changed line should trace to the user request, an accepted plan, or an affected shared invariant. Avoid drive-by cleanup.
 
+## Completion Reporting Rule
+
+- When reporting the result of an accepted user request, the outcome is binary: success or failure. Do not report an intermediate completion state for the task itself.
+- Judge success against the accepted user request, including reasonably expected verification, not against effort, partial progress, or honest disclosure.
+- If any required part is blocked, partial, missing, or unverified, report failure to complete unless the user explicitly narrowed the request to that smaller result.
+- State the outcome first, then the cause. For example: `Failed to complete: blocked by X` or `Failed to complete: implemented but not verified`.
+- Use `blocked` only as a cause of failure, not as a neutral final state.
+- Do not soften failure with phrases such as `mostly done`, `should be fine`, `completed except tests`, or `partial complete`.
+- Caveats are supporting details, not substitutes for a clear success/failure statement.
+
 ## Stelis-Specific Safety Rules
 
 - Treat MIST, SUI, gas, token amounts, balances, quotes, fees, nonces, object IDs, transaction bytes, and settlement values as safety-critical data.
 - Keep raw amounts as integer strings or `BigInt` values when precision matters. Do not use floating point arithmetic for settlement, fee, gas, quote, or signable quantities.
 - Keep display values presentation-only. Do not feed formatted UI strings back into transaction building, settlement, signing, validation, or persistence without an explicit raw conversion step.
 - Do not infer token decimals, token identity, network identity, settlement eligibility, path support, or liquidity readiness from symbols, labels, memory, or convenience defaults.
+- Apply Move deployment policy by network: testnet contract changes use a fresh
+  package deployment under the anti-legacy policy; after a mainnet package is
+  deployed, mainnet contract evolution uses Sui package upgrades. In both cases,
+  code and docs expose only the current interface and IDs—do not retain legacy
+  aliases, compatibility readers, or parallel old-package paths.
 - Preserve current boundary terms: `Host`, `Relay API`, `settlement token`, `settlement swap path`, `SponsorOperations`, `SponsorAvailability`, and `User Vault`.
 - Keep `@stelis/sdk`, `@stelis/mcp-server`, and `@stelis/app-api` responsibilities separate. The MCP server does not hold keys, sign for users, build arbitrary transaction content, or run Host server logic.
 - Public docs, examples, schemas, package exports, tests, and user-facing strings describe current behavior only. Put future work, unsupported behavior, and discovered gaps in planning or debt notes, not public current-state docs.

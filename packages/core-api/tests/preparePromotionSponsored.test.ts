@@ -30,6 +30,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64 } from '@mysten/sui/utils';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
+import { grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -47,6 +48,11 @@ const ALLOWED_TARGET =
 const GLOBAL_TARGET_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
 
 const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
+const SIMULATION_GAS_USED = {
+  computationCost: '1000000',
+  storageCost: '500000',
+  storageRebate: '200000',
+};
 
 const BASE_PROMO: CreatePromotionInput = {
   type: 'gas_sponsorship',
@@ -72,27 +78,21 @@ function buildIdentity(overrides?: Partial<VerifiedDeveloperIdentity>): Verified
 }
 
 async function buildTestTxKindBytes(): Promise<string> {
+  return buildCommandCountTxKindBytes(1);
+}
+
+async function buildCommandCountTxKindBytes(commandCount: number): Promise<string> {
   const tx = new Transaction();
-  tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+  for (let index = 0; index < commandCount; index++) {
+    tx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+  }
   const kindBytes = await tx.build({ onlyTransactionKind: true });
   return toBase64(kindBytes);
 }
 
 function createMockSui() {
   return {
-    simulateTransaction: async () => ({
-      Transaction: {
-        digest: 'mock-digest',
-        status: { success: true },
-        effects: {
-          gasUsed: {
-            computationCost: '1000000',
-            storageCost: '500000',
-            storageRebate: '200000',
-          },
-        },
-      },
-    }),
+    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
   } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 }
 
@@ -103,24 +103,12 @@ function createMockSui() {
  * client.core.resolveTransactionPlugin() returns undefined. That fallback calls
  * client.core.{getCurrentSystemState, getBalance, listCoins, getChainIdentifier}.
  *
- * Required only for tests that exercise the full success path (all 13 handler steps).
+ * Required only for tests that exercise the full prepare success path.
  * Tests that fail before step 6 (first build) can continue to use createMockSui().
  */
 function createMockSuiWithCore() {
   return {
-    simulateTransaction: async () => ({
-      Transaction: {
-        digest: 'mock-digest',
-        status: { success: true },
-        effects: {
-          gasUsed: {
-            computationCost: '1000000',
-            storageCost: '500000',
-            storageRebate: '200000',
-          },
-        },
-      },
-    }),
+    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
     core: {
       // Returns undefined → Transaction.build() falls back to coreClientResolveTransactionPlugin,
       // which then calls the other core methods below for gas-price / gas-payment / expiration resolution.
@@ -145,8 +133,8 @@ async function setup() {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
 
   // Create and activate a promotion
@@ -437,6 +425,76 @@ describe('handlePromotionPrepare', () => {
     expect(storeSpy).not.toHaveBeenCalled();
   });
 
+  test.each([0, 17])(
+    'rejects a Promotion command count of %i before inflight, config, checkout, reserve, or store',
+    async (commandCount) => {
+      const { ctx, promoId } = await setup();
+      const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
+      const getConfigSpy = vi.spyOn(ctx, 'getConfig');
+      const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
+      const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
+      const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+      const txKindBytes = await buildCommandCountTxKindBytes(commandCount);
+
+      await expect(
+        handlePromotionPrepare(ctx, {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        }),
+      ).rejects.toMatchObject({
+        code: 'BAD_REQUEST',
+        statusHint: 400,
+        message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
+      });
+      expect(inflightSpy).not.toHaveBeenCalled();
+      expect(getConfigSpy).not.toHaveBeenCalled();
+      expect(checkoutSpy).not.toHaveBeenCalled();
+      expect(reserveSpy).not.toHaveBeenCalled();
+      expect(storeSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  test('does not let an over-cap Promotion hide a disallowed target', async () => {
+    const { ctx, promoId } = await setup();
+    ctx.globalTargetHashes = new Set<string>();
+    const txKindBytes = await buildCommandCountTxKindBytes(17);
+
+    await expect(
+      handlePromotionPrepare(ctx, {
+        promotionId: promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes,
+        verifiedIdentity: buildIdentity(),
+        clientIp: '127.0.0.1',
+      }),
+    ).rejects.toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+  });
+
+  test('allows 16 Promotion commands through request validation to inflight admission', async () => {
+    const { ctx, promoId } = await setup();
+    const exhaustedLimiter = new MemoryPrepareInflight(1);
+    await exhaustedLimiter.tryAcquire('occupy');
+    const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
+    const txKindBytes = await buildCommandCountTxKindBytes(16);
+
+    await expect(
+      handlePromotionPrepare(
+        { ...ctx, prepareInflightLimiter: exhaustedLimiter },
+        {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        },
+      ),
+    ).rejects.toBeInstanceOf(PrepareOverloadError);
+    expect(checkoutSpy).not.toHaveBeenCalled();
+  });
+
   test('rejects FundsWithdrawal(Sponsor) input before inflight, checkout, reserve, or store (S-15 companion)', async () => {
     const { ctx, promoId } = await setup();
     const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
@@ -447,6 +505,7 @@ describe('handlePromotionPrepare', () => {
 
     // Build a Sender withdrawal, patch to Sponsor via BCS
     const seed = new Transaction();
+    seed.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
     seed.withdrawal({ amount: 999_999_999n, type: '0x2::sui::SUI' });
     const kindBytes = await seed.build({ onlyTransactionKind: true });
     const decoded = bcs.TransactionKind.parse(kindBytes);

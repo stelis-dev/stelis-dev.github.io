@@ -16,7 +16,8 @@ The prepare→sponsor pipeline passes data through four owned boundaries.
 ```text
 Request (handlePrepare — handlers/prepare.ts)
   ├─ verify:   verifyPrepareAuthorization()
-  ├─ validate: validateUserCommands(), containsSponsorWithdrawal()
+  ├─ validate: validateGenericUserTransactionKind()
+  │             (command policy + Sponsor/Sender withdrawal policy)
   └─ query:    queryUserCredit(), getConfig()
         │
         ▼
@@ -32,13 +33,20 @@ GenericPrepareBuildOutput              prepare/build.ts
    gasVarianceFixedMist, slippageBufferMist,
    grossGas, profile, paymentInputSource)
         │
-        │  composePreparedCommit()           session/sponsoredExecution/preparedCommit.ts
-        │  (shared prepare-store commit boundary used by generic + Studio)
+        │  runPrepareStateMachine()          session/sponsoredExecution/runner.ts
+        │  (runner combines request identity, acquired resources, build hash,
+        │   and route-owned path/order fields into the exact store draft)
+        ▼
+PreparedTxDraft                        store/prepareTypes.ts
+  (exact coordination-only shape; no caller-supplied issuedAt)
+        │
+        │  PrepareStoreAdapter.store(draft)
+        │  (Memory clock or Redis TIME stamps issuedAt exactly once)
         ▼
 PreparedTxEntry                        store/prepareTypes.ts
-  stored in PrepareStoreAdapter — coordination-only shape
+  committed by PrepareStoreAdapter — coordination-only shape
   ├─ txBytesHash           SHA-256 of txBytes; verified in consume() before /sponsor proceeds
-  ├─ slotId, sponsorAddress  sponsor slot identity + gasOwner coordination
+  ├─ sponsorAddress       sponsor lease identity + gasOwner coordination
   ├─ receiptId, senderAddress, nonce  lease + nonce-reservation keys (generic outstanding-prepare quota is keyed by verified sender; promotion quota is keyed by verified `userId`)
   └─ orderId, executionPathKey, clientIp, issuedAt  echo + observability
   (no settle-value copies; sponsor reads every settle field from txBytes)
@@ -46,7 +54,7 @@ PreparedTxEntry                        store/prepareTypes.ts
 /sponsor receives: txBytes + userSignature + receiptId
   │
   ├─ Transaction.from(txBytes) → extractTxSender      [pre-consume, unbound]
-  ├─ peek(receiptId)  → slot + echo metadata           [read-only, coordination]
+  ├─ peek(receiptId)  → sponsor address + echo metadata [read-only, coordination]
   ├─ verifySenderSignature(txBytes, sig, txSender)     [explicit sender binding]
   ├─ checkBlockedRequest(ip)                           [pre-consume IP-only]
   ├─ consume(receiptId, txBytesHash)                   [atomic single-use delete]
@@ -90,7 +98,7 @@ are authoritative.
 | Field                                      | Role                                                                                                                                                                       |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `txBytesHash`                              | single-use hash binding — `consume()` verifies it                                                                                                                          |
-| `slotId`, `sponsorAddress`                 | sponsor slot identity + gasOwner coordination                                                                                                                              |
+| `sponsorAddress`                           | sponsor lease identity + gasOwner coordination                                                                                                                             |
 | `receiptId`                                | HMAC-protected receipt identity (paired with committed `txBytesHash` in the pool)                                                                                          |
 | `senderAddress`                            | Verified prepare sender, nonce reservation key, generic outstanding-prepare quota key, and observability echo. Promotion outstanding-prepare quota uses verified `userId`. |
 | `nonce`                                    | sender-local live/pending reservation compaction key                                                                                                                       |
@@ -113,10 +121,10 @@ generic SponsoredExecutionPolicy additionally re-queries on-chain User Vault sta
 after preflight), so an on-chain `EVaultAlreadyRegistered` abort never reaches preflight
 as `SPONSOR_PREFLIGHT_FAILED` + IP-counter pressure. A vault-now-exists drift returns
 `REPREPARE_REQUIRED`; a transient or inconsistent vault-state response returns
-`SPONSOR_FAILED 500` (fail-closed before preflight + signing). All four shapes
-(structure, settlement-argument, extraction, payment-integrity, and gas-owner drift,
-plus the three new-user User Vault
-stages) emit a structured `SPONSOR_DRIFT_OBSERVED` log for operator triage. The payload
+`SPONSOR_FAILED 500` (fail-closed before preflight + signing). Structure,
+settlement-argument, extraction, payment-integrity, gas-owner, and the three
+new-user User Vault drift stages emit a structured `SPONSOR_DRIFT_OBSERVED` log
+for operator triage. The payload
 contract (`stage`, `subcode`, `route`, `receipt_id`, `sender`, `client_ip`, and — on
 `route: 'promotion'` — `promotion_id`) is owned by
 [`pricing-and-validation.md → Sponsor Failure Classification`](./pricing-and-validation.md#sponsor-failure-classification);
@@ -146,21 +154,23 @@ after consumed (always):
 
 State transitions:
 
-| Transition                             | Trigger                                                                 | Source location                                                          |
-| -------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| entry → `reserved`                     | `runPrepareStateMachine()` acquires sponsor slot + nonce reservation    | `session/sponsoredExecution/runner.ts`                                   |
-| `reserved` → `stored`                  | `composePreparedCommit()` + `prepareStore.store()` + ownership transfer | `session/sponsoredExecution/runner.ts`                                   |
-| `stored` → `consumed`                  | `prepareStore.consume(receiptId, txBytesHash)` — atomic delete          | `session/sessionPrimitives.ts` (`consumeEntry`)                          |
-| `consumed` → `submitted`               | `signAndSubmit()` call                                                  | `session/sessionPrimitives.ts`                                           |
-| `submitted` → `executed` \| `reverted` | `execResult.success` branch                                             | `session/sponsoredExecution/sponsorRunner.ts` + SponsoredExecutionPolicy |
-| any → `expired`                        | background `_evictExpired()` or TTL check inside `consume()`            | `store/memoryPrepareStore.ts`, `store/redisPrepareStore.ts`              |
-| `consumed` → `released`                | `safeSlotCheckin()` in `finally` — runs on every post-consume path      | `session/sponsoredExecution/sponsorRunner.ts`                            |
+| Transition                             | Trigger                                                                                      | Source location                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| entry → `reserved`                     | `runPrepareStateMachine()` acquires sponsor slot + nonce reservation                         | `session/sponsoredExecution/runner.ts`                                   |
+| `reserved` → `stored`                  | compose draft + response, commit lease, `prepareStore.store(draft)`, then ownership transfer | `session/sponsoredExecution/runner.ts`                                   |
+| `stored` → `consumed`                  | `prepareStore.consume(receiptId, txBytesHash)` — atomic delete                               | `session/sessionPrimitives.ts` (`consumeEntry`)                          |
+| `consumed` → `submitted`               | `signAndSubmit()` call                                                                       | `session/sessionPrimitives.ts`                                           |
+| `submitted` → `executed` \| `reverted` | `execResult.success` branch                                                                  | `session/sponsoredExecution/sponsorRunner.ts` + SponsoredExecutionPolicy |
+| any → `expired`                        | background `_evictExpired()` or TTL check inside `consume()`                                 | `store/memoryPrepareStore.ts`, `store/redisPrepareStore.ts`              |
+| `consumed` → `released`                | `safeSlotCheckin()` in `finally` — runs on every post-consume path                           | `session/sponsoredExecution/sponsorRunner.ts`                            |
 
 The lifecycle states above are enforced by the shared sponsor execution
 runners. Prepare-side cleanup is owned by
-`session/sponsoredExecution/runner.ts`: acquired reservations release in
-reverse order on failure, and transferable resources move to the durable
-prepared commit immediately after `prepareStore.store()`. Sponsor-side slot
+`session/sponsoredExecution/runner.ts`: the final client response is projected
+before the lease/store boundary, acquired reservations release in reverse order
+on failure, and transferable resources move to the durable prepared entry
+immediately after `prepareStore.store(draft)` returns. Nothing fallible remains
+after that ownership transfer. Sponsor-side slot
 checkin is owned by `session/sponsoredExecution/sponsorRunner.ts` and runs in
 `finally` only after consume succeeds.
 
@@ -194,8 +204,9 @@ the `vaultObjectId` guard is authoritative — `profile` alone is not sufficient
 `profile` is not part of `PreparedTxEntry`. The store carries only
 the coordination fields the sponsor lifecycle needs; settle-execution
 values (including `profile`) are read at sponsor time from
-`parseSettleArgs(txBytes)` exclusively. `composePreparedCommit`
-projects only coordination fields into the store entry; the
+`parseSettleArgs(txBytes)` exclusively. The prepare runner constructs the exact
+coordination-only store draft, and the selected store adds the authoritative
+`issuedAt`; the
 effective profile the Host used is returned in the `/prepare` response
 and is the source of the "profile" value the client UX shows.
 
@@ -300,7 +311,7 @@ Stored fields still read at `/sponsor` (coordination-only, never execution autho
 | -------------------------- | --------------------------------------------------------------------------------- |
 | `txBytesHash`              | Single-use stored hash verified in `consume()`                                    |
 | `orderId`                  | Echo target for `expectedOrderIdHash` reconstruction during settlement validation |
-| `slotId`, `sponsorAddress` | Sponsor pool slot identity + gasOwner coordination                                |
+| `sponsorAddress`           | Sponsor lease identity + gasOwner coordination                                   |
 | `receiptId`                | HMAC-protected receipt identity (paired with committed `txBytesHash` in the pool) |
 | `executionPathKey`         | `ONCHAIN_REVERT` log key                                                          |
 

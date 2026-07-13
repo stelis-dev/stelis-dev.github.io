@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { verifySettleEventAgainstExpected } from '../../src/server/verifySettleEventAgainstExpected.js';
-import { SettleEventBcs } from '../../src/server/settleEventDecoder.js';
+import { decodeSettleEvent, SettleEventBcs } from '../../src/server/settleEventDecoder.js';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
-const PACKAGE_ID = '0xPACKAGE';
+const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 
 function hex2bytes(hex: string): number[] {
   const clean = hex.replace(/^0x/, '');
@@ -57,13 +58,14 @@ function makeSettleEventBcs(overrides?: Record<string, unknown>) {
   return SettleEventBcs.serialize(data).toBytes();
 }
 
-function makeEvent(bcsBytes: Uint8Array) {
+function makeEvent(bcsBytes: Uint8Array, eventType = `${PACKAGE_ID}::events::SettleEvent`) {
   return {
     packageId: PACKAGE_ID,
     module: 'events',
     sender: USER_ADDR,
-    eventType: `${PACKAGE_ID}::events::SettleEvent`,
+    eventType,
     bcs: bcsBytes,
+    json: null,
   };
 }
 
@@ -76,7 +78,7 @@ function mockClient(events: unknown[]): SuiGrpcClient {
         digest: '0xDIGEST',
         signatures: [],
         epoch: '1',
-        status: { success: true },
+        status: { success: true, error: null },
       },
     }),
   } as unknown as SuiGrpcClient;
@@ -91,21 +93,75 @@ function mockEmptyClient(): SuiGrpcClient {
         digest: '0xDIGEST',
         signatures: [],
         epoch: '1',
-        status: { success: true },
+        status: { success: true, error: null },
       },
     }),
   } as unknown as SuiGrpcClient;
 }
 
+function mockFailedClient(events: unknown[]): SuiGrpcClient {
+  return {
+    getTransaction: vi.fn().mockResolvedValue({
+      $kind: 'FailedTransaction',
+      FailedTransaction: {
+        events,
+        digest: '0xDIGEST',
+        signatures: [],
+        epoch: '1',
+        status: {
+          success: false,
+          error: {
+            $kind: 'Unknown',
+            Unknown: null,
+            message: 'MoveAbort in settlement',
+          },
+        },
+      },
+    }),
+  } as unknown as SuiGrpcClient;
+}
+
+function mockMissingEventsClient(): SuiGrpcClient {
+  return {
+    getTransaction: vi.fn().mockResolvedValue({
+      $kind: 'Transaction',
+      Transaction: {
+        events: undefined,
+        digest: '0xDIGEST',
+        signatures: [],
+        epoch: '1',
+        status: { success: true, error: null },
+      },
+    }),
+  } as unknown as SuiGrpcClient;
+}
+
+describe('decodeSettleEvent canonical BCS boundary', () => {
+  it('rejects trailing bytes after the generated event schema', () => {
+    const canonical = makeSettleEventBcs();
+    const withTrailingByte = new Uint8Array(canonical.length + 1);
+    withTrailingByte.set(canonical);
+
+    expect(() => decodeSettleEvent(withTrailingByte)).toThrow(
+      'SettleEvent BCS is not canonical for the generated schema',
+    );
+  });
+
+  it('rejects a non-canonical ULEB length for the first vector field', () => {
+    const canonical = makeSettleEventBcs();
+    expect(canonical[0]).toBe(32);
+
+    const nonCanonicalLength = Uint8Array.from([0xa0, 0x00, ...canonical.slice(1)]);
+    expect(() => decodeSettleEvent(nonCanonicalLength)).toThrow(
+      'SettleEvent BCS is not canonical for the generated schema',
+    );
+  });
+});
+
 describe('verifySettleEventAgainstExpected', () => {
   it('returns verified fields on match', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
-    const result = await verifySettleEventAgainstExpected(
-      client,
-      '0xDIGEST',
-      PACKAGE_ID,
-      EXPECTED_BASE,
-    );
+    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE);
 
     expect(result.receiptId).toBe(RECEIPT_ID_HEX);
     expect(result.user).toBe(USER_ADDR);
@@ -115,7 +171,7 @@ describe('verifySettleEventAgainstExpected', () => {
 
   it('verifies orderId hash correctly', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
-    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
       receiptId: RECEIPT_ID_HEX,
       orderIdHash: createHash('sha256').update(ORDER_ID).digest('hex'),
       user: USER_ADDR,
@@ -124,14 +180,28 @@ describe('verifySettleEventAgainstExpected', () => {
     expect(result.orderIdHash).toBe(createHash('sha256').update(ORDER_ID).digest('hex'));
   });
 
+  it('accepts an optional 0x prefix on exact 32-byte receipt and order hashes', async () => {
+    const orderIdHash = createHash('sha256').update(ORDER_ID).digest('hex');
+    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+
+    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
+      receiptId: `0x${RECEIPT_ID_HEX}`,
+      orderIdHash: `0x${orderIdHash}`,
+      user: USER_ADDR,
+    });
+
+    expect(result.receiptId).toBe(RECEIPT_ID_HEX);
+    expect(result.orderIdHash).toBe(orderIdHash);
+  });
+
   it('treats undefined orderId as absent when orderIdHash is provided', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
-    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
       receiptId: RECEIPT_ID_HEX,
       orderId: undefined,
       orderIdHash: createHash('sha256').update(ORDER_ID).digest('hex'),
       user: USER_ADDR,
-    } as Parameters<typeof verifySettleEventAgainstExpected>[3]);
+    } as Parameters<typeof verifySettleEventAgainstExpected>[2]);
 
     expect(result.orderIdHash).toBe(createHash('sha256').update(ORDER_ID).digest('hex'));
   });
@@ -139,8 +209,24 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws when no events found', async () => {
     const client = mockEmptyClient();
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, EXPECTED_BASE),
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
     ).rejects.toThrow('No events found');
+  });
+
+  it('rejects a FailedTransaction before consuming a matching event', async () => {
+    const client = mockFailedClient([makeEvent(makeSettleEventBcs())]);
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow(/Transaction 0xDIGEST failed: MoveAbort in settlement/);
+  });
+
+  it('rejects a successful response that omitted requested events', async () => {
+    const client = mockMissingEventsClient();
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('did not include requested events');
   });
 
   it('throws when SettleEvent eventType not found', async () => {
@@ -154,14 +240,14 @@ describe('verifySettleEventAgainstExpected', () => {
       },
     ]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, EXPECTED_BASE),
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
     ).rejects.toThrow('SettleEvent not found');
   });
 
   it('throws on receiptId mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         receiptId: 'ff'.repeat(32),
       }),
@@ -171,7 +257,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws on orderId hash mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
         orderId: 'wrong_order',
         user: USER_ADDR,
@@ -182,7 +268,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws on user mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         user: '0x' + 'ab'.repeat(32),
       }),
@@ -192,7 +278,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws on executionCostClaim mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         executionCostClaimMist: '99999',
       }),
@@ -202,7 +288,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws on quotedHostFeeMist mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         quotedHostFeeMist: '99999',
       }),
@@ -212,7 +298,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('throws on protocolFee mismatch', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         protocolFeeMist: '99999',
       }),
@@ -222,7 +308,7 @@ describe('verifySettleEventAgainstExpected', () => {
   it('reports multiple mismatches', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         orderId: ORDER_ID,
         receiptId: 'ff'.repeat(32),
         user: '0x' + 'ab'.repeat(32),
@@ -236,20 +322,40 @@ describe('verifySettleEventAgainstExpected', () => {
       verifySettleEventAgainstExpected(
         client,
         '0xDIGEST',
-        PACKAGE_ID,
-        {} as Parameters<typeof verifySettleEventAgainstExpected>[3],
+        {} as Parameters<typeof verifySettleEventAgainstExpected>[2],
       ),
     ).rejects.toThrow('expected.receiptId is required');
+    expect(client.getTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects receipt and direct order hashes that are empty after removing 0x', async () => {
+    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
+        ...EXPECTED_BASE,
+        receiptId: '0x',
+      }),
+    ).rejects.toThrow('expected.receiptId must be a 32-byte hex string');
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
+        receiptId: RECEIPT_ID_HEX,
+        orderIdHash: '0x',
+        user: USER_ADDR,
+      }),
+    ).rejects.toThrow('expected.orderIdHash must be a 32-byte hex string');
+
     expect(client.getTransaction).not.toHaveBeenCalled();
   });
 
   it('rejects when neither orderId nor orderIdHash is provided', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
         user: USER_ADDR,
-      } as Parameters<typeof verifySettleEventAgainstExpected>[3]),
+      } as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
     expect(client.getTransaction).not.toHaveBeenCalled();
   });
@@ -257,13 +363,42 @@ describe('verifySettleEventAgainstExpected', () => {
   it('rejects when both orderId and orderIdHash are provided', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
     await expect(
-      verifySettleEventAgainstExpected(client, '0xDIGEST', PACKAGE_ID, {
+      verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
         orderId: ORDER_ID,
         orderIdHash: createHash('sha256').update(ORDER_ID).digest('hex'),
         user: USER_ADDR,
-      } as Parameters<typeof verifySettleEventAgainstExpected>[3]),
+      } as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
     expect(client.getTransaction).not.toHaveBeenCalled();
+  });
+
+  it('matches canonical Sui addresses across padding and case', async () => {
+    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
+      ...EXPECTED_BASE,
+      user: '0x1234ABCD',
+    });
+
+    expect(result.user).toBe(USER_ADDR);
+  });
+
+  it('rejects duplicate canonical SettleEvents', async () => {
+    const event = makeEvent(makeSettleEventBcs());
+    const client = mockClient([event, event]);
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('Expected exactly one SettleEvent');
+  });
+
+  it('rejects a SettleEvent emitted under the wrong package', async () => {
+    const client = mockClient([
+      makeEvent(makeSettleEventBcs(), `0x${'9'.repeat(64)}::events::SettleEvent`),
+    ]);
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('SettleEvent not found');
   });
 });

@@ -15,12 +15,7 @@ import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { buildWithdrawPtb } from './ptb.js';
 import { StelisClient, StelisApiException } from './client.js';
 import { queryUserCredit, CreditQueryInconsistentStateError } from './credit.js';
-import {
-  verifyPtbIntegrity,
-  verifyPromotionPtbIntegrity,
-  SUPPORTED_INTEGRITY_POLICY_VERSION,
-  StelisIntegrityError,
-} from './integrity.js';
+import { verifyPtbIntegrity, verifyPromotionPtbIntegrity } from './integrity.js';
 import { assertNoGasPreset } from '@stelis/core-relay/browser';
 import {
   computeExecutionCostClaim,
@@ -32,7 +27,7 @@ import {
   validateGenericUserTransactionKind,
 } from '@stelis/core-relay/browser';
 import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
-import { fetchRelayConfig, parseRelayConfigResponse } from './connection.js';
+import { fetchRelayConfig, parseRelayConfig } from './connection.js';
 import { isInfraError, normalizeApiError } from './errors.js';
 import {
   bigintToSafeNumberOrNull,
@@ -41,7 +36,7 @@ import {
   parseDecimalBigInt,
 } from './numberFormat.js';
 import type {
-  RelayConfigResponse,
+  RelayConfig,
   SingleHopSettlementSwapPath,
   StelisConnectOptions,
   PrepareSponsoredOptions,
@@ -114,7 +109,7 @@ interface WithdrawParams {
 export class StelisSDK {
   private _client: StelisClient;
   private _endpoint: string;
-  private _relayConfig: RelayConfigResponse;
+  private _relayConfig: RelayConfig;
   private _options: StelisConnectOptions;
   /**
    * True when studioEndpoint was explicitly true at connect time.
@@ -129,7 +124,7 @@ export class StelisSDK {
   private _deepType: string;
 
   /** Deployment network */
-  get network(): RelayConfigResponse['network'] {
+  get network(): RelayConfig['network'] {
     return this._relayConfig.network;
   }
   /** Network config (contract addresses from @stelis/contracts constants) */
@@ -140,7 +135,6 @@ export class StelisSDK {
       vaultRegistryId: this._vaultRegistryId,
       deepbookPackageId: this._deepbookPackageId,
       deepType: this._deepType,
-      integrityPolicyVersion: this._relayConfig.integrityPolicyVersion,
     };
   }
   /** DeepBook package ID (from @stelis/contracts constants) */
@@ -162,7 +156,7 @@ export class StelisSDK {
   private constructor(
     client: StelisClient,
     endpoint: string,
-    relayConfig: RelayConfigResponse,
+    relayConfig: RelayConfig,
     options: StelisConnectOptions = {},
   ) {
     this._client = client;
@@ -203,9 +197,7 @@ export class StelisSDK {
     await client.getStatus();
 
     // Fetch dynamic config from /relay/config.
-    const relayConfig = parseRelayConfigResponse(
-      await fetchRelayConfig(endpoint, opts.requestTimeouts),
-    );
+    const relayConfig = parseRelayConfig(await fetchRelayConfig(endpoint, opts.requestTimeouts));
 
     // S-16: 2-step packageId verification
     const expectedPackageId = STELIS_CONTRACT_IDS[relayConfig.network]?.packageId;
@@ -962,24 +954,12 @@ export class StelisSDK {
   // S-16: Integrity verification
   // ─────────────────────────────────────────────
 
-  /**
-   * S-16 integrity check with policy version handshake.
-   * Strict fail-closed: unknown/unsupported policy versions are rejected.
-   */
+  /** Verify that the Host preserved the user-authored PTB prefix. */
   private _verifyIntegrity(
     kindBytes: Uint8Array,
     txBytesBase64: string,
     _opts: PrepareSponsoredOptions,
   ): void {
-    const policyVersion = this._relayConfig.integrityPolicyVersion;
-    // Check if version is supported
-    if (policyVersion !== SUPPORTED_INTEGRITY_POLICY_VERSION) {
-      throw new StelisIntegrityError(
-        `server version ${policyVersion} > supported ${SUPPORTED_INTEGRITY_POLICY_VERSION}`,
-      );
-    }
-
-    // Version matches — run verification
     verifyPtbIntegrity(kindBytes, txBytesBase64, this._packageId);
   }
 }

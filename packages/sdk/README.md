@@ -210,6 +210,7 @@ Use this shortcut before you connect product-specific flows:
 ### `executeSponsored()` — One-liner (Recommended)
 
 SDK handles everything: coin query → `swap_and_settle` (single MoveCall) → prepare → sign → sponsor.
+The user transaction may contain at most 11 commands; the Host reserves up to five commands for settlement inside the 16-command final policy.
 
 ```typescript
 import { Transaction } from '@mysten/sui/transactions';
@@ -363,8 +364,9 @@ const result = await sdk.sponsorPromotionSponsored({
 
 > [!IMPORTANT]
 > `executePromotionSponsored()` requires `studioEndpoint: true` at connect time.
-> The promotion TX must contain only `MoveCall` commands. Non-MoveCall commands
-> (`SplitCoins`, `TransferObjects`, etc.) are rejected by the promotion handler.
+> The promotion TX must contain 1 to 16 commands, all of them `MoveCall`.
+> Non-MoveCall commands (`SplitCoins`, `TransferObjects`, etc.) are rejected by
+> the promotion handler. The Host adds gas metadata but no commands.
 
 ### Server-to-Server Promotion Discovery
 
@@ -394,27 +396,34 @@ const detail = await getPromotionUserState(
 
 For backend fulfillment, verify the final digest against the application values you expected when preparing the transaction. The helper requires expected fields; a `SettleEvent` by itself is not treated as application payment completion. The example assumes your backend retained the `receiptId` and prepare cost from a two-step prepare/sponsor flow.
 
+`receiptId` and a directly supplied `orderIdHash` are exact 32-byte hex strings; either form may include a `0x` prefix. A failed transaction is rejected even if its response contains event-shaped data.
+
 ```typescript
 import { verifySettleEventAgainstExpected } from '@stelis/sdk/server';
 
-const settlement = await verifySettleEventAgainstExpected(
-  suiClient,
-  sponsorDigest,
-  sdk.config.packageId,
-  {
-    receiptId,
-    user: userAddress,
-    orderId: 'invoice-2026-001',
-    executionCostClaimMist: prepared.cost.executionCostClaim,
-    quotedHostFeeMist: prepared.cost.quotedHostFee,
-    protocolFeeMist: prepared.cost.protocolFee,
-  },
-);
+const settlement = await verifySettleEventAgainstExpected(suiClient, sponsorDigest, {
+  receiptId,
+  user: userAddress,
+  orderId: 'invoice-2026-001',
+  executionCostClaimMist: prepared.cost.executionCostClaim,
+  quotedHostFeeMist: prepared.cost.quotedHostFee,
+  protocolFeeMist: prepared.cost.protocolFee,
+});
 
 console.log(settlement.orderIdHash);
 ```
 
-Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans only. It extracts event summaries and does not compare them with application-owned expected values.
+Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans only. Its warning logger is required because the returned array contains successful summaries only:
+
+```typescript
+import { extractSettleEvents } from '@stelis/sdk/server';
+
+const summaries = await extractSettleEvents(suiClient, digests, (message) => {
+  console.warn(message);
+});
+```
+
+A successful transaction with no canonical `SettleEvent` is skipped normally. Fetch failures, failed transactions, missing requested event data, duplicate canonical events, and invalid event BCS are reported to the logger and skipped. This helper does not compare events with application-owned expected values; use `verifySettleEventAgainstExpected()` for fulfillment decisions.
 
 ---
 
@@ -593,18 +602,22 @@ import type {
   ExecuteSponsoredResult,
   GasEstimateResult,
   ExecuteSuiFirstResult,
-  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist, integrityPolicyVersion
+  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist
   SingleHopSettlementSwapPath, // settlement swap path config (1-hop only)
   DeepBookPoolHop, // config for a single pool hop
-  PrepareResponse,
-  SponsorResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
   SettleProfile,
   PrepareSponsoredOptions, // options for 2-step prepareSponsored()
   PrepareSponsoredResult, // result of prepareSponsored() — includes policyHash, profile
   // Promotion types
   ExecutePromotionSponsoredOptions,
   ExecutePromotionSponsoredResult,
+  PromotionPrepareRequest,
   PromotionPrepareResponse,
+  PromotionSponsorRequest,
   PromotionSponsorResponse,
 } from '@stelis/sdk';
 

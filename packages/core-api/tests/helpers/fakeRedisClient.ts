@@ -213,54 +213,66 @@ export class FakeRedisClient implements RedisClientLike {
     }
 
     // ── RedisPrepareStore STORE_SCRIPT emulation ──
-    if (script.includes('cjson.encode(evicted)')) {
+    if (script.includes('RedisPrepareStore STORE_SCRIPT')) {
       const entryKey = keys[0];
       const ipKey = keys[1];
       const senderKey = keys[2];
       const userKey = keys[3] ?? '';
-      const entryJson = args[0];
+      const draftJson = args[0] ?? '';
       const entryPx = Number(args[1]);
-      const pid = args[2];
-      const slotId = args[3];
-      const issuedAt = Number(args[4]);
-      const maxPerIp = Number(args[5]);
-      const ipPx = Number(args[6]);
-      const prefix = args[7];
-      const maxPerStudioUser = Number(args[8]);
-      const senderPx = Number(args[9]);
-      const nonce = args[10] ?? '0';
-      const entryMode = args[11] ?? 'generic';
-      const ttlMs = Number(args[12] ?? '60000');
-      const userPx = Number(args[13] ?? '120000');
+      const maxPerIp = Number(args[2]);
+      const ipPx = Number(args[3]);
+      const prefix = args[4] ?? '';
+      const maxPerStudioUser = Number(args[5]);
+      const senderPx = Number(args[6]);
+      const ttlMs = Number(args[7] ?? '60000');
+      const userPx = Number(args[8] ?? '120000');
       const nowMs = Date.now();
+      const issuedAt = nowMs;
+
+      const draft = JSON.parse(draftJson) as Record<string, unknown>;
+      const pid = draft.receiptId;
+      const nonce = draft.nonce;
+      const entryMode = draft.mode;
+      if (
+        typeof pid !== 'string' ||
+        typeof nonce !== 'string' ||
+        (entryMode !== 'generic' && entryMode !== 'promotion')
+      ) {
+        throw new Error('invalid prepared draft');
+      }
 
       // ── Sender index — live-compact regardless of mode (S-14 nonce coordination) ──
       const senderRaw = senderKey ? await this.get(senderKey) : null;
-      let senderList: Array<{
-        pid: string;
-        slotId: string;
-        t: number;
-        nonce: string;
-      }> = [];
+      let senderList: Array<Record<string, unknown>> = [];
       if (senderRaw) {
         senderList = JSON.parse(senderRaw) as typeof senderList;
       }
       const liveSender: Array<Record<string, unknown>> = [];
       for (const item of senderList) {
-        if ((item as Record<string, unknown>).pending) {
-          const t = (item as Record<string, unknown>).t;
-          if (typeof t === 'number' && t + ttlMs >= nowMs) {
-            liveSender.push(item);
-          }
-        } else if (
-          typeof (item as Record<string, unknown>).t === 'number' &&
-          ((item as Record<string, unknown>).t as number) + ttlMs < nowMs
+        if (
+          typeof item.pid === 'string' &&
+          typeof item.t === 'number' &&
+          typeof item.nonce === 'string'
         ) {
-          // Logical TTL expired — drop even if physical key still exists
-        } else {
-          const exists = await this.get(prefix + (item as Record<string, unknown>).pid);
-          if (exists !== null) {
-            liveSender.push(item);
+          if (item.pending === true) {
+            if (item.t + ttlMs >= nowMs) {
+              liveSender.push({
+                pid: item.pid,
+                nonce: item.nonce,
+                pending: true,
+                t: item.t,
+              });
+            }
+          } else if (item.pending === undefined) {
+            if (item.t + ttlMs < nowMs) {
+              // Logical TTL expired — drop even if physical key still exists
+            } else {
+              const exists = await this.get(prefix + item.pid);
+              if (exists !== null) {
+                liveSender.push({ pid: item.pid, nonce: item.nonce, t: item.t });
+              }
+            }
           }
         }
       }
@@ -273,9 +285,11 @@ export class FakeRedisClient implements RedisClientLike {
           const userList = JSON.parse(userRaw) as Array<Record<string, unknown>>;
           for (const item of userList) {
             const t = item['t'];
-            if (typeof t === 'number' && t + ttlMs < nowMs) continue;
-            const exists = await this.get(prefix + (item['pid'] as string));
-            if (exists !== null) liveUser.push(item);
+            const itemPid = item['pid'];
+            if (typeof t !== 'number' || typeof itemPid !== 'string') continue;
+            if (t + ttlMs < nowMs) continue;
+            const exists = await this.get(prefix + itemPid);
+            if (exists !== null) liveUser.push({ pid: itemPid, t });
           }
         }
         if (liveUser.length >= maxPerStudioUser) {
@@ -283,12 +297,10 @@ export class FakeRedisClient implements RedisClientLike {
         }
       }
 
-      // SET entry with PX
-      await this.set(entryKey, entryJson, { px: entryPx });
-
-      // Read IP index
+      // Read and decode the IP index before any mutation. This ordering is
+      // the branch-parity evidence for the real Lua no-partial-commit guard.
       const ipRaw = await this.get(ipKey);
-      let list: Array<{ pid: string; slotId: string; t: number }> = [];
+      let list: Array<{ pid: string; t: number }> = [];
       if (ipRaw) {
         list = JSON.parse(ipRaw) as typeof list;
       }
@@ -296,51 +308,78 @@ export class FakeRedisClient implements RedisClientLike {
       // Prune stale entries
       const live: typeof list = [];
       for (const item of list) {
+        if (typeof item.pid !== 'string' || typeof item.t !== 'number') continue;
         const exists = await this.get(prefix + item.pid);
         if (exists !== null) {
-          live.push(item);
+          live.push({ pid: item.pid, t: item.t });
         }
       }
 
       // Evict oldest if over limit
-      const evicted: Array<{ pid: string; slotId: string; entryJson: string }> = [];
+      const evicted: Array<{ pid: string; entryJson: string }> = [];
       while (live.length >= maxPerIp) {
         const oldest = live.shift()!;
         const evictedEntryJson = (await this.get(prefix + oldest.pid)) ?? '';
-        await this.del(prefix + oldest.pid);
-        evicted.push({
-          pid: oldest.pid,
-          slotId: oldest.slotId,
-          entryJson: evictedEntryJson,
-        });
+        evicted.push({ pid: oldest.pid, entryJson: evictedEntryJson });
       }
 
-      // Add new entry to IP index
-      live.push({ pid, slotId, t: issuedAt });
-      await this.set(ipKey, JSON.stringify(live), { px: ipPx });
+      // Construct every stored/result projection before the first mutation.
+      live.push({ pid, t: issuedAt });
 
-      // Update sender index: remove pending for this pid + evicted pids, add live entry
       const evictedPids = new Set(evicted.map((e) => e.pid));
       const updatedSender = liveSender.filter((item) => {
         const itemPid = (item as Record<string, unknown>).pid;
         return itemPid !== pid && !evictedPids.has(itemPid as string);
       });
-      updatedSender.push({ pid, slotId, t: issuedAt, nonce });
-      if (senderKey) {
-        await this.set(senderKey, JSON.stringify(updatedSender), { px: senderPx });
-      }
+      updatedSender.push({ pid, t: issuedAt, nonce });
 
-      // Update user index for promotion entries (Studio outstanding-prepare quota).
+      let updatedUser: Array<Record<string, unknown>> | null = null;
       if (entryMode === 'promotion' && userKey !== '') {
-        const updatedUser = liveUser.filter((item) => {
+        updatedUser = liveUser.filter((item) => {
           const itemPid = item['pid'];
           return itemPid !== pid && !evictedPids.has(itemPid as string);
         });
         updatedUser.push({ pid, t: issuedAt });
-        await this.set(userKey, JSON.stringify(updatedUser), { px: userPx });
       }
 
-      return JSON.stringify(evicted);
+      const committedJson = JSON.stringify({ ...draft, issuedAt });
+      const encodedIp = JSON.stringify(live);
+      const encodedSender = JSON.stringify(updatedSender);
+      const encodedUser = updatedUser ? JSON.stringify(updatedUser) : null;
+      const encodedEvicted = JSON.stringify(evicted);
+
+      // Mutation section mirrors the production Lua after all fallible
+      // data-derived work has completed.
+      for (const item of evicted) {
+        await this.del(prefix + item.pid);
+      }
+      await this.set(entryKey, committedJson, { px: entryPx });
+      await this.set(ipKey, encodedIp, { px: ipPx });
+      if (senderKey) {
+        await this.set(senderKey, encodedSender, { px: senderPx });
+      }
+      if (encodedUser !== null) {
+        await this.set(userKey, encodedUser, { px: userPx });
+      }
+
+      return [String(issuedAt), encodedEvicted];
+    }
+
+    // ── RedisPrepareStore PEEK_SCRIPT emulation ──
+    if (script.includes('RedisPrepareStore PEEK_SCRIPT')) {
+      const raw = await this.get(keys[0]);
+      if (!raw) return null;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(raw) as unknown;
+      } catch {
+        return raw;
+      }
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return raw;
+      const issuedAt = (entry as Record<string, unknown>).issuedAt;
+      if (typeof issuedAt !== 'number') return raw;
+      const ttlMs = Number(args[0] ?? '60000');
+      return issuedAt + ttlMs < Date.now() ? null : raw;
     }
 
     // ── RedisPrepareStore reserveNonce emulation (sender-local, no HWM key) ──
@@ -360,30 +399,33 @@ export class FakeRedisClient implements RedisClientLike {
       const rawList: Array<Record<string, unknown>> = senderRaw ? JSON.parse(senderRaw) : [];
       const senderList: Array<Record<string, unknown>> = [];
       for (const item of rawList) {
-        if (item.pending) {
-          if (typeof item.t === 'number' && item.t + reserveTtlMs >= reserveNowMs) {
-            senderList.push(item);
-            if (item.nonce != null) {
-              const nonce = BigInt(item.nonce as string);
+        if (
+          typeof item.pid === 'string' &&
+          typeof item.t === 'number' &&
+          typeof item.nonce === 'string'
+        ) {
+          const nonce = BigInt(item.nonce);
+          if (item.pending === true) {
+            if (item.t + reserveTtlMs >= reserveNowMs) {
+              senderList.push({
+                pid: item.pid,
+                nonce: nonce.toString(),
+                pending: true,
+                t: item.t,
+              });
               if (nonce > senderMax) senderMax = nonce;
             }
-          }
-        } else if (typeof item.t === 'number' && (item.t as number) + reserveTtlMs < reserveNowMs) {
-          // Logical TTL expired — drop
-        } else if (item.pid && prefix) {
-          const exists = await this.get(prefix + String(item.pid));
-          if (exists !== null) {
-            senderList.push(item);
-            if (item.nonce != null) {
-              const nonce = BigInt(item.nonce as string);
-              if (nonce > senderMax) senderMax = nonce;
+          } else if (item.pending === undefined) {
+            if (item.t + reserveTtlMs < reserveNowMs) {
+              // Logical TTL expired — drop
+            } else {
+              const exists = await this.get(prefix + item.pid);
+              if (exists !== null) {
+                senderList.push({ pid: item.pid, nonce: nonce.toString(), t: item.t });
+                if (nonce > senderMax) senderMax = nonce;
+              }
             }
           }
-        } else if (item.nonce != null) {
-          // No prefix provided — keep item
-          senderList.push(item);
-          const nonce = BigInt(item.nonce as string);
-          if (nonce > senderMax) senderMax = nonce;
         }
       }
 
@@ -412,32 +454,49 @@ export class FakeRedisClient implements RedisClientLike {
 
       let entry: Record<string, unknown>;
       try {
-        entry = JSON.parse(raw) as Record<string, unknown>;
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed !== 'object' || parsed === null) return raw;
+        entry = parsed as Record<string, unknown>;
       } catch {
         return raw;
       }
 
       const nowMs = Date.now();
-      const rewriteList = async (key: string) => {
+      const rewriteList = async (key: string, indexKind: 'ip' | 'sender' | 'user') => {
         const listRaw = await this.get(key);
         if (!listRaw) return;
-        let list: Array<Record<string, unknown>>;
+        let parsed: unknown;
         try {
-          list = JSON.parse(listRaw) as Array<Record<string, unknown>>;
+          parsed = JSON.parse(listRaw) as unknown;
         } catch {
           return;
         }
+        if (typeof parsed !== 'object' || parsed === null) return;
+        const list = Array.isArray(parsed) ? parsed : [];
         const updated: Array<Record<string, unknown>> = [];
-        for (const item of list) {
+        for (const candidate of list) {
+          if (typeof candidate !== 'object' || candidate === null) continue;
+          const item = candidate as Record<string, unknown>;
+          if (typeof item.pid !== 'string' || typeof item.t !== 'number') continue;
           if (item.pid === pid) continue;
-          if (item.pending) {
-            if (typeof item.t === 'number' && item.t + ttlMs >= nowMs) {
-              updated.push(item);
+          if (indexKind === 'sender') {
+            if (item.pending === true && typeof item.nonce === 'string') {
+              if (item.t + ttlMs >= nowMs) {
+                updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
+              }
+            } else if (item.pending === undefined && typeof item.nonce === 'string') {
+              if (item.t + ttlMs < nowMs) {
+                // Logical TTL expired — drop
+              } else if ((await this.get(prefix + item.pid)) !== null) {
+                updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
+              }
             }
-          } else if (typeof item.t === 'number' && item.t + ttlMs < nowMs) {
-            // Logical TTL expired — drop
-          } else if (item.pid && (await this.get(prefix + String(item.pid))) !== null) {
-            updated.push(item);
+          } else {
+            if (item.t + ttlMs < nowMs) {
+              // Logical TTL expired — drop
+            } else if ((await this.get(prefix + item.pid)) !== null) {
+              updated.push({ pid: item.pid, t: item.t });
+            }
           }
         }
         if (updated.length === 0) {
@@ -453,13 +512,13 @@ export class FakeRedisClient implements RedisClientLike {
       };
 
       if (typeof entry.clientIp === 'string') {
-        await rewriteList(prefix + 'ip:' + entry.clientIp);
+        await rewriteList(prefix + 'ip:' + entry.clientIp, 'ip').catch(() => {});
       }
       if (typeof entry.senderAddress === 'string') {
-        await rewriteList(prefix + 'sender:' + entry.senderAddress);
+        await rewriteList(prefix + 'sender:' + entry.senderAddress, 'sender').catch(() => {});
       }
       if (entry.mode === 'promotion' && typeof entry.userId === 'string') {
-        await rewriteList(prefix + 'user:' + entry.userId);
+        await rewriteList(prefix + 'user:' + entry.userId, 'user').catch(() => {});
       }
 
       return raw;
@@ -484,7 +543,23 @@ export class FakeRedisClient implements RedisClientLike {
       // `pending` flag) are preserved even when their `pid` matches, so
       // a post-store call cannot damage the promoted live entry's
       // metadata. Mirrors the real Lua script in redisPrepareStore.ts.
-      const updated = senderList.filter((item) => !(item.pending && item.pid === resId));
+      const updated: Array<Record<string, unknown>> = [];
+      for (const item of senderList) {
+        if (
+          typeof item.pid !== 'string' ||
+          typeof item.t !== 'number' ||
+          typeof item.nonce !== 'string'
+        ) {
+          continue;
+        }
+        if (item.pending === true) {
+          if (item.pid !== resId) {
+            updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
+          }
+        } else if (item.pending === undefined) {
+          updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
+        }
+      }
 
       if (updated.length === 0) {
         await this.del(senderKey);
@@ -505,87 +580,94 @@ export class FakeRedisClient implements RedisClientLike {
       const raw = await this.get(entryKey);
       if (raw === null) return null;
 
-      const entry = JSON.parse(raw) as {
-        issuedAt: number;
-        txBytesHash: string;
-        slotId: string;
-        clientIp: string;
-        senderAddress: string;
-        receiptId: string;
-      };
-      const ipKey = prefix + 'ip:' + entry.clientIp;
+      let entry: Record<string, unknown> | null = null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed === 'object' && parsed !== null) {
+          entry = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Real Lua deletes malformed JSON and returns the raw value so the
+        // TypeScript layer can run its best-effort lease recovery.
+      }
 
       const nowMs = Date.now();
 
-      const removeFromIp = async () => {
-        const ipRaw = await this.get(ipKey);
-        if (!ipRaw) return;
-        const list = JSON.parse(ipRaw) as Array<{
-          pid: string;
-          slotId: string;
-          t: number;
-        }>;
-        const updated = list.filter((item) => item.pid !== pid);
+      const removeFromIndex = async (key: string, indexKind: 'ip' | 'sender') => {
+        const indexRaw = await this.get(key);
+        if (!indexRaw) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(indexRaw) as unknown;
+        } catch {
+          return;
+        }
+        if (typeof parsed !== 'object' || parsed === null) return;
+        const list = Array.isArray(parsed) ? parsed : [];
+        const updated: Array<Record<string, unknown>> = [];
+        for (const candidate of list) {
+          if (typeof candidate !== 'object' || candidate === null) continue;
+          const item = candidate as Record<string, unknown>;
+          if (typeof item.pid !== 'string' || item.pid === pid || typeof item.t !== 'number') {
+            continue;
+          }
+          if (indexKind === 'sender') {
+            if (item.pending === true && typeof item.nonce === 'string') {
+              updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
+            } else if (item.pending === undefined && typeof item.nonce === 'string') {
+              updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
+            }
+          } else {
+            updated.push({ pid: item.pid, t: item.t });
+          }
+        }
         if (updated.length > 0) {
-          const currentTtl = this.pttl(ipKey);
+          const currentTtl = this.pttl(key);
           await this.set(
-            ipKey,
+            key,
             JSON.stringify(updated),
             currentTtl > 0 ? { px: currentTtl } : undefined,
           );
         } else {
-          await this.del(ipKey);
+          await this.del(key);
         }
       };
 
-      const removeFromSender = async () => {
-        const senderKey = prefix + 'sender:' + entry.senderAddress;
-        const senderRaw = await this.get(senderKey);
-        if (!senderRaw) return;
-        const list = JSON.parse(senderRaw) as Array<Record<string, unknown>>;
-        const updated = list.filter((item) => item.pid !== pid);
-        if (updated.length > 0) {
-          const currentTtl = this.pttl(senderKey);
-          await this.set(
-            senderKey,
-            JSON.stringify(updated),
-            currentTtl > 0 ? { px: currentTtl } : undefined,
-          );
-        } else {
-          await this.del(senderKey);
-        }
-      };
-
-      if (entry.issuedAt + ttlMs < nowMs) {
-        await this.del(entryKey);
-        await removeFromIp();
-        await removeFromSender();
-        return '__expired_entry__:' + raw;
-      }
-
-      if (entry.txBytesHash !== expectedHash) {
-        await this.del(entryKey);
-        await removeFromIp();
-        await removeFromSender();
-        return '__hash_mismatch_entry__:' + raw;
+      let resultKind: 'success' | 'expired' | 'hash_mismatch' = 'success';
+      if (entry && typeof entry.issuedAt === 'number' && entry.issuedAt + ttlMs < nowMs) {
+        resultKind = 'expired';
+      } else if (
+        entry &&
+        typeof entry.txBytesHash === 'string' &&
+        entry.txBytesHash !== expectedHash
+      ) {
+        resultKind = 'hash_mismatch';
       }
 
       await this.del(entryKey);
-      await removeFromIp();
-      await removeFromSender();
+      if (entry && typeof entry.clientIp === 'string') {
+        await removeFromIndex(prefix + 'ip:' + entry.clientIp, 'ip').catch(() => {});
+      }
+      if (entry && typeof entry.senderAddress === 'string') {
+        await removeFromIndex(prefix + 'sender:' + entry.senderAddress, 'sender').catch(() => {});
+      }
+
+      if (resultKind === 'expired') return '__expired_entry__:' + raw;
+      if (resultKind === 'hash_mismatch') return '__hash_mismatch_entry__:' + raw;
       return raw;
     }
 
     // ── PromotionStore CREATE_LUA emulation ──
     if (
-      script.includes("redis.call('SET', KEYS[1], ARGV[1])") &&
+      script.includes("redis.call('EXISTS', KEYS[1])") &&
       script.includes("redis.call('SADD', KEYS[2], ARGV[2])") &&
       script.includes("redis.call('SADD', KEYS[3], ARGV[2])")
     ) {
+      if ((await this.get(keys[0])) !== null) return 'CURRENT_CONFLICT';
       await this.set(keys[0], args[0]);
       this._sadd(keys[1], args[1]);
       this._sadd(keys[2], args[1]);
-      return 1;
+      return 'OK';
     }
 
     // ── PromotionStore LIST_LUA emulation ──
@@ -602,36 +684,49 @@ export class FakeRedisClient implements RedisClientLike {
       return results;
     }
 
-    // ── PromotionStore TRANSITION_LUA (CAS-guarded) emulation ──
-    if (script.includes("'CAS_FAIL:'") && script.includes('cjson.decode(currentRaw)')) {
+    // ── PromotionStore UPDATE_LUA (exact-record CAS) emulation ──
+    if (
+      script.includes('currentRaw ~= ARGV[1]') &&
+      script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
+      !script.includes("redis.call('SREM', KEYS[2], ARGV[3])")
+    ) {
       const raw = await this.get(keys[0]);
-      if (raw === null) return 'NOT_FOUND';
-      let current: { status?: string };
-      try {
-        current = JSON.parse(raw) as { status?: string };
-      } catch {
-        return 'NOT_FOUND';
-      }
-      const expected = args[2];
-      if (current.status !== expected) {
-        return `CAS_FAIL:${current.status ?? ''}`;
-      }
-      await this.set(keys[0], args[0]);
-      this._srem(keys[1], args[1]);
-      this._sadd(keys[2], args[1]);
+      if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
+      await this.set(keys[0], args[1]);
+      return 'OK';
+    }
+
+    // ── PromotionStore STATUS_LUA (record CAS + index move) emulation ──
+    if (
+      script.includes('currentRaw ~= ARGV[1]') &&
+      script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
+      script.includes("redis.call('SREM', KEYS[2], ARGV[3])") &&
+      script.includes("redis.call('SADD', KEYS[3], ARGV[3])")
+    ) {
+      const raw = await this.get(keys[0]);
+      if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
+      await this.set(keys[0], args[1]);
+      this._srem(keys[1], args[2]);
+      this._sadd(keys[2], args[2]);
       return 'OK';
     }
 
     // ── PromotionStore DELETE_LUA emulation ──
     if (
+      script.includes("current.status ~= 'draft'") &&
       script.includes("redis.call('DEL', KEYS[1])") &&
-      script.includes("redis.call('SREM', KEYS[2], ARGV[1])") &&
-      script.includes("redis.call('SREM', KEYS[3], ARGV[1])")
+      script.includes("redis.call('SREM', KEYS[2], ARGV[2])") &&
+      script.includes("redis.call('SREM', KEYS[3], ARGV[2])")
     ) {
+      const raw = await this.get(keys[0]);
+      if (raw === null) return args[0] === '' ? 'NOT_FOUND' : 'CURRENT_CONFLICT';
+      if (args[0] === '' || raw !== args[0]) return 'CURRENT_CONFLICT';
+      const current = JSON.parse(raw) as { status?: string };
+      if (current.status !== 'draft') return 'NOT_DELETABLE';
       await this.del(keys[0]);
-      this._srem(keys[1], args[0]);
-      this._srem(keys[2], args[0]);
-      return 1;
+      this._srem(keys[1], args[1]);
+      this._srem(keys[2], args[1]);
+      return 'OK';
     }
 
     throw new Error(`FakeRedisClient: unsupported eval script\n${script}`);

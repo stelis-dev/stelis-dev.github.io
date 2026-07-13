@@ -78,12 +78,14 @@ The IDs are used in code comments, tests, and package README files. They are sho
 | R-9 | Settlement-token funding must combine coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. It must not double-count the same funds inside one transaction. | Relay validation |
 | R-10 | Promotion-sponsored Move calls must match `STUDIO_ALLOWED_TARGETS`. | Promotion validation |
 | R-11 | A user-supplied generic `User TransactionKind` must contain zero settlement calls. | Relay validation |
-| R-12 | A user-supplied generic `User TransactionKind` must contain at most `MAX_COMMANDS = 16` commands. | Relay validation |
+| R-12 | A user-supplied generic `User TransactionKind` must contain at most `MAX_GENERIC_USER_COMMANDS = 11` commands. | Relay validation |
 | R-13 | A user-supplied generic `User TransactionKind` must not reference `GasCoin` in command arguments. | Relay validation |
 | R-14 | A user-supplied generic `User TransactionKind` must not include `FundsWithdrawal(Sponsor)`. | Relay validation |
 | R-15 | A malformed same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is rejected with `UNACCOUNTABLE_WITHDRAWAL`. | Relay validation |
 | R-16 | A bounded same-token `FundsWithdrawal(Sender)` in a user-supplied generic `User TransactionKind` is allowed and subtracted from address-balance funding. | Relay validation |
 | R-17 | Each supported `settlementTokenType` maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. | Relay configuration and validation |
+| R-18 | A final Host-built generic transaction must contain at most `MAX_FINAL_COMMANDS = 16` commands. | Relay validation |
+| R-19 | A Promotion-sponsored transaction must contain 1 to 16 `MoveCall` commands; the Host adds no commands. | Promotion validation |
 
 ## Code References
 

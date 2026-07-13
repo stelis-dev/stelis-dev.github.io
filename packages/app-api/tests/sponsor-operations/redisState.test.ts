@@ -5,7 +5,7 @@ import {
   slotKey,
   SPONSOR_REFILL_ACCOUNT_KEY,
   READ_ALL_LUA,
-  UPDATE_ENTITY_LUA,
+  UPDATE_ENTITY_IF_SEQUENCE_LUA,
 } from '../../src/sponsor-operations/redisState.js';
 
 // ─────────────────────────────────────────────
@@ -33,6 +33,11 @@ class StubRedis implements RedisClientLike {
       this.hashes.set(key, h);
     }
     return h;
+  }
+
+  seedHash(key: string, fields: Record<string, string>): void {
+    const hash = this.getHash(key);
+    for (const [field, value] of Object.entries(fields)) hash.set(field, value);
   }
 
   async get(_key: string): Promise<string | null> {
@@ -78,6 +83,10 @@ class StubRedis implements RedisClientLike {
           get('refillAttemptedAmountMist'),
           get('refillObservedBalanceMist'),
           get('refillReconciliationResult'),
+          get('refillOperationId'),
+          get('refillOperationSequence'),
+          get('refillOperationState'),
+          get('refillRequiredSourceBalanceMist'),
         ];
       });
       const sponsorRefillAccountHash = this.hashes.get(keys[keys.length - 1] ?? '');
@@ -95,24 +104,26 @@ class StubRedis implements RedisClientLike {
       ];
     }
 
-    if (
-      script.includes("redis.call('TIME')") &&
-      script.includes('HINCRBY') &&
-      script.includes('writeSeq')
-    ) {
-      const key = keys[0];
+    if (script === UPDATE_ENTITY_IF_SEQUENCE_LUA) {
+      const key = keys[0]!;
       const h = this.getHash(key);
+      if ((h.get('writeSeq') ?? '0') !== args[0]) return ['STALE'];
+      const refillState = h.get('refillOperationState') ?? '';
+      if (refillState === 'reserved' || refillState === 'ready' || refillState === 'reconciling') {
+        return ['ACTIVE_REFILL'];
+      }
       const nowMs = this.nextClock();
       const nextSeq = (Number(h.get('writeSeq') ?? '0') + 1).toString();
       h.set('writeSeq', nextSeq);
       h.set('lastObservedAtMs', nowMs);
-      for (let i = 0; i < args.length; i += 2) {
-        const f = args[i];
-        const v = args[i + 1];
-        if (f !== undefined && v !== undefined) h.set(f, v);
+      for (let i = 1; i < args.length; i += 2) {
+        const field = args[i];
+        const value = args[i + 1];
+        if (field !== undefined && value !== undefined) h.set(field, value);
       }
-      return [nowMs, nextSeq];
+      return ['UPDATED', nextSeq];
     }
+
     throw new Error('StubRedis: unsupported eval script');
   }
 }
@@ -130,19 +141,6 @@ describe('redisState keyspace helpers', () => {
       'stelis:app-api:sponsor-operations:sponsor-refill-account',
     );
   });
-
-  it('UPDATE_ENTITY_LUA uses Redis TIME + HINCRBY writeSeq', () => {
-    expect(UPDATE_ENTITY_LUA).toContain("redis.call('TIME')");
-    expect(UPDATE_ENTITY_LUA).toContain("redis.call('HINCRBY', KEYS[1], 'writeSeq', 1)");
-    expect(UPDATE_ENTITY_LUA).toContain("redis.call('HSET', KEYS[1], 'lastObservedAtMs'");
-  });
-
-  it('READ_ALL_LUA reads slot and sponsor refill account fields without HGETALL', () => {
-    expect(READ_ALL_LUA).toContain("redis.call('HGET', key, 'state')");
-    expect(READ_ALL_LUA).toContain("redis.call('HGET', key, 'pendingRefillDigest')");
-    expect(READ_ALL_LUA).toContain("redis.call('HGET', sponsorKey, 'healthy')");
-    expect(READ_ALL_LUA).toContain('return { slotRows, sponsorRefillAccount }');
-  });
 });
 
 describe('createRedisSponsorOperationsState — writes', () => {
@@ -152,12 +150,12 @@ describe('createRedisSponsorOperationsState — writes', () => {
     redis = new StubRedis();
   });
 
-  it('updateSlot writes caller-owned fields and server-stamps ordering fields', async () => {
+  it('updateSlotIfWriteSeq writes only when the sampled sequence is current', async () => {
     const state = createRedisSponsorOperationsState({
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSlot(SLOT_A, {
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, {
       state: 'healthy',
       balanceMist: '5000000000',
       lastError: '',
@@ -171,14 +169,65 @@ describe('createRedisSponsorOperationsState — writes', () => {
     expect(h!.get('lastObservedAtMs')).toBeDefined();
   });
 
-  it('updateSlot rejects unknown slot addresses', async () => {
+  it('preserves a refill threshold while degraded and clears it when the slot becomes healthy', async () => {
     const state = createRedisSponsorOperationsState({
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await expect(state.updateSlot(SLOT_B, { state: 'healthy' })).rejects.toThrow(
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'refill_failed',
+      writeSeq: '4',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 4, { state: 'low_balance', balanceMist: '10' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'low_balance',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 5, { state: 'rpc_unreachable', balanceMist: '' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'rpc_unreachable',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 6, { state: 'healthy', balanceMist: '500' }),
+    ).resolves.toBe(true);
+    await expect(state.readSlot(SLOT_A)).resolves.toMatchObject({
+      state: 'healthy',
+      refillRequiredSourceBalanceMist: null,
+    });
+  });
+
+  it('updateSlotIfWriteSeq rejects unknown slot addresses', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    await expect(state.updateSlotIfWriteSeq(SLOT_B, 0, { state: 'healthy' })).rejects.toThrow(
       /unknown slot address/,
     );
+  });
+
+  it('rejects a malformed refill source balance threshold before writing the slot', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 0, {
+        state: 'refill_failed',
+        refillRequiredSourceBalanceMist: 'not-a-balance',
+      }),
+    ).rejects.toThrow('refill source balance threshold must be a positive u64 decimal string');
+    expect(redis.hashes.has(slotKey(SLOT_A))).toBe(false);
   });
 
   it('writeSeq is strictly monotonic per entity across updates', async () => {
@@ -186,25 +235,48 @@ describe('createRedisSponsorOperationsState — writes', () => {
       client: redis,
       slotAddresses: [SLOT_A, SLOT_B],
     });
-    await state.updateSlot(SLOT_A, { state: 'healthy' });
-    await state.updateSlot(SLOT_A, { state: 'low_balance' });
-    await state.updateSlot(SLOT_A, { state: 'healthy' });
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, { state: 'healthy' });
+    await state.updateSlotIfWriteSeq(SLOT_A, 1, { state: 'low_balance' });
+    await state.updateSlotIfWriteSeq(SLOT_A, 2, { state: 'healthy' });
     expect(redis.hashes.get(slotKey(SLOT_A))!.get('writeSeq')).toBe('3');
     // Cross-entity: SLOT_B's writeSeq is independent.
-    await state.updateSlot(SLOT_B, { state: 'healthy' });
+    await state.updateSlotIfWriteSeq(SLOT_B, 0, { state: 'healthy' });
     expect(redis.hashes.get(slotKey(SLOT_B))!.get('writeSeq')).toBe('1');
   });
 
-  it('updateSponsorRefillAccount writes sponsor-refill-account HASH with caller-owned fields only', async () => {
+  it('rejects a general slot observation while an active refill owns the projection', async () => {
     const state = createRedisSponsorOperationsState({
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSponsorRefillAccount({
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'refilling',
+      balanceMist: '1000',
+      writeSeq: '4',
+      refillOperationId: 'operation-a',
+      refillOperationSequence: '2',
+      refillOperationState: 'ready',
+    });
+
+    await expect(
+      state.updateSlotIfWriteSeq(SLOT_A, 4, {
+        state: 'healthy',
+        balanceMist: '9000',
+      }),
+    ).resolves.toBe(false);
+    expect(redis.hashes.get(slotKey(SLOT_A))!.get('state')).toBe('refilling');
+    expect(redis.hashes.get(slotKey(SLOT_A))!.get('balanceMist')).toBe('1000');
+    expect(redis.hashes.get(slotKey(SLOT_A))!.get('writeSeq')).toBe('4');
+  });
+
+  it('readSponsorRefillAccount parses the account observation fields owned by spend state', async () => {
+    redis.seedHash(SPONSOR_REFILL_ACCOUNT_KEY, {
       balanceMist: '10000000000',
       healthy: '1',
       refillsRemaining: '2',
       lastError: '',
+      writeSeq: '1',
+      lastObservedAtMs: '1700000000001',
     });
     const h = redis.hashes.get(SPONSOR_REFILL_ACCOUNT_KEY);
     expect(h).toBeDefined();
@@ -220,9 +292,9 @@ describe('createRedisSponsorOperationsState — writes', () => {
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSlot(SLOT_A, { state: 'healthy' });
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, { state: 'healthy' });
     const first = redis.hashes.get(slotKey(SLOT_A))!.get('lastObservedAtMs')!;
-    await state.updateSlot(SLOT_A, { state: 'low_balance' });
+    await state.updateSlotIfWriteSeq(SLOT_A, 1, { state: 'low_balance' });
     const second = redis.hashes.get(slotKey(SLOT_A))!.get('lastObservedAtMs')!;
     expect(Number(second)).toBeGreaterThan(Number(first));
   });
@@ -243,19 +315,51 @@ describe('createRedisSponsorOperationsState — reads', () => {
     expect(await state.readSlot(SLOT_A)).toBeNull();
   });
 
+  it('rejects a healthy slot that retains a refill source balance threshold', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'healthy',
+      writeSeq: '1',
+      refillRequiredSourceBalanceMist: '237',
+    });
+
+    await expect(state.readSlot(SLOT_A)).rejects.toThrow(
+      'Healthy sponsor slot cannot retain a refill source balance threshold',
+    );
+  });
+
+  it('does not interpret a malformed refill source balance threshold as absent', async () => {
+    const state = createRedisSponsorOperationsState({
+      client: redis,
+      slotAddresses: [SLOT_A],
+    });
+    redis.seedHash(slotKey(SLOT_A), {
+      state: 'refill_failed',
+      writeSeq: '1',
+      refillRequiredSourceBalanceMist: 'not-a-balance',
+    });
+
+    await expect(state.readSlot(SLOT_A)).rejects.toThrow(
+      'Sponsor slot refill source balance threshold is malformed',
+    );
+  });
+
   it('readSlot parses fields after write', async () => {
     const state = createRedisSponsorOperationsState({
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSlot(SLOT_A, {
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, {
       state: 'low_balance',
       balanceMist: '1000',
       lastError: 'timeout',
       pendingRefillDigest: '0xabc',
       refillAttemptedAmountMist: '9000',
       refillObservedBalanceMist: '1000',
-      refillReconciliationResult: 'dispatch_timeout',
+      refillReconciliationResult: 'dispatch_ready',
     });
     const read = await state.readSlot(SLOT_A);
     expect(read).not.toBeNull();
@@ -265,7 +369,7 @@ describe('createRedisSponsorOperationsState — reads', () => {
     expect(read!.pendingRefillDigest).toBe('0xabc');
     expect(read!.refillAttemptedAmountMist).toBe('9000');
     expect(read!.refillObservedBalanceMist).toBe('1000');
-    expect(read!.refillReconciliationResult).toBe('dispatch_timeout');
+    expect(read!.refillReconciliationResult).toBe('dispatch_ready');
     expect(read!.writeSeq).toBe(1);
     expect(read!.lastObservedAtMs).not.toBeNull();
   });
@@ -283,7 +387,7 @@ describe('createRedisSponsorOperationsState — reads', () => {
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSlot(SLOT_A, {
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, {
       state: 'rpc_unreachable',
       balanceMist: '',
       lastError: '',
@@ -307,15 +411,17 @@ describe('createRedisSponsorOperationsState — reads', () => {
       client: redis,
       slotAddresses: [SLOT_A],
     });
-    await state.updateSponsorRefillAccount({
+    redis.seedHash(SPONSOR_REFILL_ACCOUNT_KEY, {
       balanceMist: '5000',
       healthy: '1',
       refillsRemaining: '3',
+      writeSeq: '1',
+      lastObservedAtMs: '1700000000001',
     });
     const read = await state.readSponsorRefillAccount();
     expect(read!.healthy).toBe(true);
     expect(read!.refillsRemaining).toBe(3);
-    await state.updateSponsorRefillAccount({ healthy: '0' });
+    redis.seedHash(SPONSOR_REFILL_ACCOUNT_KEY, { healthy: '0' });
     const next = await state.readSponsorRefillAccount();
     expect(next!.healthy).toBe(false);
   });
@@ -325,21 +431,23 @@ describe('createRedisSponsorOperationsState — reads', () => {
       client: redis,
       slotAddresses: [SLOT_A, SLOT_B],
     });
-    await state.updateSlot(SLOT_A, {
+    await state.updateSlotIfWriteSeq(SLOT_A, 0, {
       state: 'healthy',
       balanceMist: '5000000000',
       lastError: '',
     });
-    await state.updateSlot(SLOT_B, {
+    await state.updateSlotIfWriteSeq(SLOT_B, 0, {
       state: 'low_balance',
       balanceMist: '10',
       lastError: 'below threshold',
     });
-    await state.updateSponsorRefillAccount({
+    redis.seedHash(SPONSOR_REFILL_ACCOUNT_KEY, {
       balanceMist: '9000000000',
       healthy: '1',
       refillsRemaining: '4',
       lastError: '',
+      writeSeq: '1',
+      lastObservedAtMs: '1700000000001',
     });
 
     redis.hgetallCalls = 0;
@@ -360,6 +468,10 @@ describe('createRedisSponsorOperationsState — reads', () => {
         refillAttemptedAmountMist: null,
         refillObservedBalanceMist: null,
         refillReconciliationResult: null,
+        refillOperationId: null,
+        refillOperationSequence: null,
+        refillOperationState: null,
+        refillRequiredSourceBalanceMist: null,
       },
       {
         address: SLOT_B,
@@ -372,6 +484,10 @@ describe('createRedisSponsorOperationsState — reads', () => {
         refillAttemptedAmountMist: null,
         refillObservedBalanceMist: null,
         refillReconciliationResult: null,
+        refillOperationId: null,
+        refillOperationSequence: null,
+        refillOperationState: null,
+        refillRequiredSourceBalanceMist: null,
       },
     ]);
     expect(read.sponsorRefillAccount).toEqual({

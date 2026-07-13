@@ -9,9 +9,11 @@ import {
   MemoryPromotionStore,
   InvalidStatusTransitionError,
   PromotionActivationError,
+  PromotionCurrentConflictError,
   PromotionFieldImmutableError,
   isValidTransition,
   type CreatePromotionInput,
+  type UpdatePromotionInput,
 } from '../src/studio/promotionStore.js';
 import { computeTotalRequiredBudgetMist } from '../src/studio/domain.js';
 import type { PromotionStatus } from '../src/studio/domain.js';
@@ -64,6 +66,37 @@ describe('MemoryPromotionStore', () => {
       const r2 = await store.create(makeInput());
       expect(r1.promotionId).not.toBe(r2.promotionId);
     });
+
+    it('rejects a generated-ID collision without overwriting the current record', async () => {
+      class FixedIdMemoryPromotionStore extends MemoryPromotionStore {
+        protected override generateId(): string {
+          return 'promo-fixed-id';
+        }
+      }
+
+      const collisionStore = new FixedIdMemoryPromotionStore();
+      const first = await collisionStore.create(makeInput({ displayName: 'First' }));
+
+      await expect(collisionStore.create(makeInput({ displayName: 'Second' }))).rejects.toThrow(
+        PromotionCurrentConflictError,
+      );
+      await expect(collisionStore.get(first.promotionId)).resolves.toEqual(first);
+    });
+
+    it('does not expose the stored record through the created result', async () => {
+      const created = await store.create(makeInput());
+      const promotionId = created.promotionId;
+
+      Reflect.set(created, 'promotionId', 'tampered-id');
+      Reflect.set(created, 'status', 'archived');
+      Reflect.set(created, 'displayName', 'Tampered');
+
+      await expect(store.get(promotionId)).resolves.toMatchObject({
+        promotionId,
+        status: 'draft',
+        displayName: 'Test Promo',
+      });
+    });
   });
 
   // ── get ────────────────────────────────────────────────────────
@@ -78,6 +111,20 @@ describe('MemoryPromotionStore', () => {
       const created = await store.create(makeInput());
       const result = await store.get(created.promotionId);
       expect(result).toEqual(created);
+    });
+
+    it('does not expose the stored record through get', async () => {
+      const created = await store.create(makeInput());
+      const fetched = await store.get(created.promotionId);
+      expect(fetched).not.toBeNull();
+
+      Reflect.set(fetched!, 'status', 'archived');
+      Reflect.set(fetched!, 'displayName', 'Tampered');
+
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({
+        status: 'draft',
+        displayName: 'Test Promo',
+      });
     });
   });
 
@@ -108,6 +155,21 @@ describe('MemoryPromotionStore', () => {
       const actives = await store.list({ status: 'active' });
       expect(actives).toHaveLength(1);
       expect(actives[0].displayName).toBe('Draft');
+    });
+
+    it('does not expose stored records through list', async () => {
+      const created = await store.create(makeInput());
+      const listed = await store.list();
+      expect(listed).toHaveLength(1);
+
+      Reflect.set(listed[0], 'status', 'active');
+      Reflect.set(listed[0], 'displayName', 'Tampered');
+
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({
+        status: 'draft',
+        displayName: 'Test Promo',
+      });
+      await expect(store.list({ status: 'active' })).resolves.toEqual([]);
     });
   });
 
@@ -140,6 +202,43 @@ describe('MemoryPromotionStore', () => {
       const created = await store.create(makeInput({ claimDeadlineAt: '2025-12-31T00:00:00Z' }));
       const updated = await store.update(created.promotionId, { claimDeadlineAt: null });
       expect(updated!.claimDeadlineAt).toBeNull();
+    });
+
+    it('does not expose the stored record through the update result', async () => {
+      const created = await store.create(makeInput());
+      const updated = await store.update(created.promotionId, { displayName: 'Updated' });
+      expect(updated).not.toBeNull();
+
+      Reflect.set(updated!, 'status', 'archived');
+      Reflect.set(updated!, 'displayName', 'Tampered');
+
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({
+        status: 'draft',
+        displayName: 'Updated',
+      });
+    });
+
+    it('ignores undeclared runtime fields instead of replacing record identity or status', async () => {
+      const created = await store.create(makeInput());
+      const unsafeInput = {
+        displayName: 'Allowed update',
+        promotionId: 'attacker-controlled-id',
+        status: 'archived',
+      } as unknown as UpdatePromotionInput;
+
+      const updated = await store.update(created.promotionId, unsafeInput);
+
+      expect(updated).toMatchObject({
+        promotionId: created.promotionId,
+        status: 'draft',
+        displayName: 'Allowed update',
+      });
+      await expect(store.get('attacker-controlled-id')).resolves.toBeNull();
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({
+        promotionId: created.promotionId,
+        status: 'draft',
+        displayName: 'Allowed update',
+      });
     });
 
     // ── Immutable-after-draft fields ──────────────────────────────
@@ -257,6 +356,20 @@ describe('MemoryPromotionStore', () => {
       await store.transitionStatus(created.promotionId, 'paused');
       const result = await store.transitionStatus(created.promotionId, 'archived');
       expect(result!.status).toBe('archived');
+    });
+
+    it('does not expose the stored record through the transition result', async () => {
+      const created = await store.create(makeInput());
+      const transitioned = await store.transitionStatus(created.promotionId, 'active');
+      expect(transitioned).not.toBeNull();
+
+      Reflect.set(transitioned!, 'status', 'archived');
+      Reflect.set(transitioned!, 'displayName', 'Tampered');
+
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({
+        status: 'active',
+        displayName: 'Test Promo',
+      });
     });
 
     it('throws on invalid transitions', async () => {

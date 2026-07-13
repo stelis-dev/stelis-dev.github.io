@@ -60,24 +60,6 @@ export interface SponsoredLogsStoreAdapter {
 export const SPONSORED_LOGS_RECENT_DEFAULT_CAP = 200;
 
 /**
- * Signed-decimal MIST string regex. Allows leading `-` for negatives;
- * `-0` is rejected. Adapters use this to validate `hostNetMist`
- * before BigInt accumulation — store-side
- * defence against a malformed HTTP string entering aggregate math.
- */
-const SIGNED_MIST_RE = /^(?:0|-?[1-9]\d*)$/;
-
-/** Validate and parse a signed MIST decimal string into a bigint. */
-export function parseSignedMistString(value: string, field: string): bigint {
-  if (typeof value !== 'string' || !SIGNED_MIST_RE.test(value)) {
-    throw new Error(
-      `${field} must be a signed decimal integer string (no leading zero), got: ${String(value)}`,
-    );
-  }
-  return BigInt(value);
-}
-
-/**
  * Build the canonical idempotency key for an entry: `mode|receiptId|outcome`.
  * `receiptId` is non-null by the `SponsoredExecutionLogEntry` contract.
  */

@@ -5,7 +5,7 @@
  * Pure functions — no Sui SDK dependency.
  * The app layer parses the PTB and passes PtbCommand[] and SettleArgs.
  */
-import { MAX_COMMANDS } from '../constants.js';
+import { MAX_FINAL_COMMANDS, MAX_GENERIC_USER_COMMANDS } from '../constants.js';
 import { SETTLE_MODULE, SETTLE_FUNCTIONS, SETTLE_WITH_CREDIT_FUNCTION } from '@stelis/contracts';
 import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
 import type { OnchainConfig, HostValidationEnv, SettleArgs, ValidationResult } from '../types.js';
@@ -78,16 +78,16 @@ export function containsGasCoinReference(args: unknown[]): boolean {
  *   - External packages: any MoveCall allowed
  *   - GasCoin reference: always rejected (S-15)
  *   - Publish/Upgrade: always rejected
- *   - Command count: <= MAX_COMMANDS
+ *   - Final command count: <= MAX_FINAL_COMMANDS
  */
 export function validatePtbStructure(
   commands: PtbCommand[],
   env: HostValidationEnv,
 ): ValidationResult {
-  if (commands.length > MAX_COMMANDS) {
+  if (commands.length > MAX_FINAL_COMMANDS) {
     return fail(
       'L1_TOO_MANY_COMMANDS',
-      `PTB command count ${commands.length} exceeds max ${MAX_COMMANDS}`,
+      `Final PTB command count ${commands.length} exceeds max ${MAX_FINAL_COMMANDS}`,
     );
   }
 
@@ -150,7 +150,7 @@ export function validatePtbStructure(
  *   - Settle calls are actively rejected (user must not include them)
  *
  * Security checks inherited from L1:
- *   - MAX_COMMANDS cap
+ *   - MAX_GENERIC_USER_COMMANDS cap (reserves the current five-command Host suffix)
  *   - GasCoin reference rejection (S-15, recursive)
  *   - Non-MoveCall allowlist (S-14: SplitCoins, MergeCoins, TransferObjects, MakeMoveVec)
  *   - Stelis package guard (only vault::withdraw allowed)
@@ -160,13 +160,6 @@ export function validateUserCommands(
   commands: PtbCommand[],
   env: HostValidationEnv,
 ): ValidationResult {
-  if (commands.length > MAX_COMMANDS) {
-    return fail(
-      'P1_TOO_MANY_COMMANDS',
-      `PTB command count ${commands.length} exceeds max ${MAX_COMMANDS}`,
-    );
-  }
-
   for (const cmd of commands) {
     // S-15: GasCoin reference forbidden in ALL commands (recursive)
     const cmdArgs = cmd.arguments;
@@ -203,6 +196,15 @@ export function validateUserCommands(
     } else if (!ALLOWED_NON_MOVECALL_KINDS.has(cmd.kind)) {
       return fail('P1_FORBIDDEN_COMMAND', `PTB contains forbidden command: ${cmd.kind}`);
     }
+  }
+
+  // A normal size-policy failure must not mask a stronger manipulation
+  // violation found in the same user-supplied command list.
+  if (commands.length > MAX_GENERIC_USER_COMMANDS) {
+    return fail(
+      'P1_TOO_MANY_COMMANDS',
+      `User TransactionKind command count ${commands.length} exceeds max ${MAX_GENERIC_USER_COMMANDS}`,
+    );
   }
 
   return ok();
@@ -250,14 +252,12 @@ export function validateSettleArgs(
     );
   }
 
-  // (2) VaultRegistry object ID check — vault-backed variants only.
-  if (args.registryObjectId !== undefined) {
-    if (args.registryObjectId !== env.vaultRegistryId) {
-      return fail(
-        'L2_WRONG_REGISTRY',
-        `VaultRegistry object ID mismatch: got ${args.registryObjectId}, expected ${env.vaultRegistryId}`,
-      );
-    }
+  // (2) VaultRegistry object ID check — required by every compiled settlement function.
+  if (args.registryObjectId !== env.vaultRegistryId) {
+    return fail(
+      'L2_WRONG_REGISTRY',
+      `VaultRegistry object ID mismatch: got ${args.registryObjectId}, expected ${env.vaultRegistryId}`,
+    );
   }
 
   // (3) Settlement payout recipient check

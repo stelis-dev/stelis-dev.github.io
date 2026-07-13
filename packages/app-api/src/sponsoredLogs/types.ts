@@ -6,8 +6,8 @@
  * that metadata into one of these entries before calling the store.
  *
  * Store-shape contract:
- *   - `schemaVersion` identifies the log shape; bump together with reader
- *     updates.
+ *   - Only the current exact shape is accepted. There is no versioned or
+ *     compatibility reader.
  *   - Idempotency key is `(mode, receiptId, outcome)`. Persistent stores
  *     must enforce this as a unique constraint so retries do not
  *     double-count.
@@ -22,6 +22,13 @@
  */
 
 export type SponsoredExecutionMode = 'generic' | 'promotion';
+export type SponsoredExecutionLogOutcome = 'success' | 'onchain_revert' | 'internal_error';
+
+export function isSponsoredExecutionLogOutcome(
+  value: unknown,
+): value is SponsoredExecutionLogOutcome {
+  return value === 'success' || value === 'onchain_revert' || value === 'internal_error';
+}
 
 /** Filter scope for aggregate / list queries. */
 export type SponsoredExecutionAggregateMode = 'all' | SponsoredExecutionMode;
@@ -29,13 +36,11 @@ export type SponsoredExecutionAggregateMode = 'all' | SponsoredExecutionMode;
 export type SponsoredExecutionEconomicsStatus = 'known' | 'unknown';
 
 export interface SponsoredExecutionLogEntry {
-  /** Schema version for reader coordination. Bump on shape change. */
-  readonly schemaVersion: 1;
   /** ISO-8601 timestamp at recorder write time. */
   readonly createdAt: string;
   readonly mode: SponsoredExecutionMode;
-  /** Terminal outcome string carried from `SponsorResultMetadata.outcome`. */
-  readonly outcome: string;
+  /** On-chain or post-signature terminal outcome persisted by the recorder. */
+  readonly outcome: SponsoredExecutionLogOutcome;
   /**
    * Receipt id consumed during sponsor processing. Always present — the
    * sponsored-execution recorder is invoked from the SponsoredExecutionPolicy `Release`
@@ -45,10 +50,9 @@ export interface SponsoredExecutionLogEntry {
    */
   readonly receiptId: string;
   readonly digest: string | null;
-  readonly senderAddress: string | null;
-  readonly sponsorAddress: string | null;
-  readonly slotId: string | null;
-  readonly executionPathKey: string | null;
+  readonly senderAddress: string;
+  readonly sponsorAddress: string;
+  readonly executionPathKey: string;
   /** Generic settlement orderId hash (sha256 hex) or null. */
   readonly orderIdHash: string | null;
   /** Promotion id — set only for `mode === 'promotion'`. */
@@ -57,9 +61,9 @@ export interface SponsoredExecutionLogEntry {
   readonly userId: string | null;
 
   // ── Economics fields ─────────────────────────────────────────────────
-  /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
+  /** Unsigned decimal MIST string. `null` when economicsStatus = unknown. */
   readonly recoveredGasMist: string | null;
-  /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
+  /** Unsigned decimal MIST string. `null` when economicsStatus = unknown. */
   readonly hostPaidGasMist: string | null;
   /** Signed decimal MIST string. `null` when economicsStatus = unknown. */
   readonly hostNetMist: string | null;
@@ -79,6 +83,182 @@ export interface SponsoredExecutionLogEntry {
   readonly storageRebateMist: string | null;
   readonly economicsStatus: SponsoredExecutionEconomicsStatus;
   readonly failureReason: string | null;
+}
+
+const SPONSORED_EXECUTION_LOG_KEYS = [
+  'createdAt',
+  'mode',
+  'outcome',
+  'receiptId',
+  'digest',
+  'senderAddress',
+  'sponsorAddress',
+  'executionPathKey',
+  'orderIdHash',
+  'promotionId',
+  'userId',
+  'recoveredGasMist',
+  'hostPaidGasMist',
+  'hostNetMist',
+  'hostFeeMist',
+  'protocolFeeMist',
+  'grossGasMist',
+  'storageRebateMist',
+  'economicsStatus',
+  'failureReason',
+] as const;
+
+const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
+const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`sponsoredLogs: ${field} must be a string`);
+  }
+  return value;
+}
+
+function requireNullableString(value: unknown, field: string): string | null {
+  if (value !== null && typeof value !== 'string') {
+    throw new Error(`sponsoredLogs: ${field} must be a string or null`);
+  }
+  return value;
+}
+
+function requireDecimal(value: unknown, field: string, signed: boolean): string {
+  const pattern = signed ? SIGNED_DECIMAL_RE : UNSIGNED_DECIMAL_RE;
+  if (typeof value !== 'string' || !pattern.test(value)) {
+    throw new Error(
+      `sponsoredLogs: ${field} must be a canonical ${signed ? 'signed' : 'unsigned'} decimal string`,
+    );
+  }
+  return value;
+}
+
+function requireNullableDecimal(value: unknown, field: string, signed: boolean): string | null {
+  if (value === null) return null;
+  return requireDecimal(value, field, signed);
+}
+
+/** Validate and parse a signed MIST decimal string into a bigint. */
+export function parseSignedMistString(value: unknown, field: string): bigint {
+  return BigInt(requireDecimal(value, field, true));
+}
+
+/** Validate and parse an unsigned MIST decimal string into a bigint. */
+export function parseUnsignedMistString(value: unknown, field: string): bigint {
+  return BigInt(requireDecimal(value, field, false));
+}
+
+/**
+ * Parse the one current sponsored-log shape.
+ *
+ * The returned object is an explicit projection rather than the caller's
+ * object, so adapters cannot persist undeclared runtime keys or mutable
+ * aliases. Generic and Promotion identity fields are checked as distinct
+ * current shapes, and unknown economics may not carry invented numbers.
+ */
+export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecutionLogEntry {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('sponsoredLogs: entry must be an object');
+  }
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  if (
+    keys.length !== SPONSORED_EXECUTION_LOG_KEYS.length ||
+    !SPONSORED_EXECUTION_LOG_KEYS.every((key) => Object.hasOwn(source, key))
+  ) {
+    throw new Error('sponsoredLogs: entry must match the exact current shape');
+  }
+
+  const mode = source.mode;
+  if (mode !== 'generic' && mode !== 'promotion') {
+    throw new Error('sponsoredLogs: mode must be generic or promotion');
+  }
+  const outcome = source.outcome;
+  if (!isSponsoredExecutionLogOutcome(outcome)) {
+    throw new Error('sponsoredLogs: outcome must be a persisted terminal outcome');
+  }
+  const economicsStatus = source.economicsStatus;
+  if (economicsStatus !== 'known' && economicsStatus !== 'unknown') {
+    throw new Error('sponsoredLogs: economicsStatus must be known or unknown');
+  }
+
+  const orderIdHash = requireNullableString(source.orderIdHash, 'orderIdHash');
+  const promotionId = requireNullableString(source.promotionId, 'promotionId');
+  const userId = requireNullableString(source.userId, 'userId');
+  if (mode === 'generic' && (promotionId !== null || userId !== null)) {
+    throw new Error('sponsoredLogs: generic entry cannot carry Promotion identity');
+  }
+  if (mode === 'promotion' && (promotionId === null || userId === null || orderIdHash !== null)) {
+    throw new Error(
+      'sponsoredLogs: promotion entry requires promotionId/userId and no orderIdHash',
+    );
+  }
+
+  let recoveredGasMist: string | null;
+  let hostPaidGasMist: string | null;
+  let hostNetMist: string | null;
+  let hostFeeMist: string | null;
+  let protocolFeeMist: string | null;
+  let grossGasMist: string | null;
+  let storageRebateMist: string | null;
+  if (economicsStatus === 'known') {
+    recoveredGasMist = requireDecimal(source.recoveredGasMist, 'recoveredGasMist', false);
+    hostPaidGasMist = requireDecimal(source.hostPaidGasMist, 'hostPaidGasMist', false);
+    hostNetMist = requireDecimal(source.hostNetMist, 'hostNetMist', true);
+    hostFeeMist = requireDecimal(source.hostFeeMist, 'hostFeeMist', false);
+    protocolFeeMist = requireNullableDecimal(source.protocolFeeMist, 'protocolFeeMist', false);
+    grossGasMist = requireNullableDecimal(source.grossGasMist, 'grossGasMist', false);
+    storageRebateMist = requireNullableDecimal(
+      source.storageRebateMist,
+      'storageRebateMist',
+      false,
+    );
+  } else {
+    const numericFields = [
+      'recoveredGasMist',
+      'hostPaidGasMist',
+      'hostNetMist',
+      'hostFeeMist',
+      'protocolFeeMist',
+      'grossGasMist',
+      'storageRebateMist',
+    ] as const;
+    if (numericFields.some((field) => source[field] !== null)) {
+      throw new Error('sponsoredLogs: unknown economics requires null numeric fields');
+    }
+    recoveredGasMist = null;
+    hostPaidGasMist = null;
+    hostNetMist = null;
+    hostFeeMist = null;
+    protocolFeeMist = null;
+    grossGasMist = null;
+    storageRebateMist = null;
+  }
+
+  return {
+    createdAt: requireString(source.createdAt, 'createdAt'),
+    mode,
+    outcome,
+    receiptId: requireString(source.receiptId, 'receiptId'),
+    digest: requireNullableString(source.digest, 'digest'),
+    senderAddress: requireString(source.senderAddress, 'senderAddress'),
+    sponsorAddress: requireString(source.sponsorAddress, 'sponsorAddress'),
+    executionPathKey: requireString(source.executionPathKey, 'executionPathKey'),
+    orderIdHash,
+    promotionId,
+    userId,
+    recoveredGasMist,
+    hostPaidGasMist,
+    hostNetMist,
+    hostFeeMist,
+    protocolFeeMist,
+    grossGasMist,
+    storageRebateMist,
+    economicsStatus,
+    failureReason: requireNullableString(source.failureReason, 'failureReason'),
+  };
 }
 
 /**

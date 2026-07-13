@@ -16,7 +16,7 @@ export {
   GasOwnerMismatchError,
   runPreflight,
   signAndSubmit,
-  SponsorSubmitInfraError,
+  SponsorPostSignatureUncertaintyError,
   safeSlotCheckin,
 } from './sessionPrimitives.js';
 

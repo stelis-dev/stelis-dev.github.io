@@ -29,7 +29,7 @@
     }
   },
   "scripts": {
-    "build": "tsc && node scripts/mark-bin-executable.mjs",
+    "build": "tsup --config tsup.config.ts && node scripts/mark-bin-executable.mjs && node scripts/check-publish-artifact.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
@@ -45,7 +45,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@stelis/contracts": "*",
     "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
     "tsx": "^4.8.1",
     "typescript": "~5.9.3",
     "vitest": "^4.1.8"

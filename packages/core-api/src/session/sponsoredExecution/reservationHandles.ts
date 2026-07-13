@@ -6,7 +6,7 @@
  *   - guard their consumers at compile time via brand,
  *   - fail closed at runtime after release/consume,
  *   - can be reconstructed during sponsor processing from durable state
- *     (slot identity, txBytesHash, receiptId, ledger reservation key).
+ *     (sponsor-address lease identity, txBytesHash, receiptId, ledger reservation key).
  *
  * Mint paths (issuing authority):
  *   - `internalReservationHandleFactory` — the ONLY in-process mint authority for
@@ -161,7 +161,6 @@ abstract class ReservationHandleBase<
  * call, and the slot checkin.
  */
 export interface SponsorSlotReservationHandle extends ReservationHandleBrand<'SponsorSlot'> {
-  readonly slotId: string;
   readonly sponsorAddress: string;
   readonly receiptId: string;
   isLive(): boolean;
@@ -175,17 +174,12 @@ class SponsorSlotReservationHandleImpl
 
   constructor(
     factoryKey: ReservationHandleFactoryKey,
-    private readonly _slotId: string,
     private readonly _sponsorAddress: string,
     private readonly _receiptId: string,
   ) {
     super(factoryKey, 'SponsorSlot');
   }
 
-  get slotId(): string {
-    this.requireValid();
-    return this._slotId;
-  }
   get sponsorAddress(): string {
     this.requireValid();
     return this._sponsorAddress;
@@ -315,13 +309,11 @@ class LedgerReservationHandleImpl
  */
 export const internalReservationHandleFactory = {
   newSponsorSlot(
-    slotId: string,
     sponsorAddress: string,
     receiptId: string,
   ): SponsorSlotReservationHandle & { release(): void; consume(): void } {
     return new SponsorSlotReservationHandleImpl(
       RESERVATION_HANDLE_FACTORY_KEY,
-      slotId,
       sponsorAddress,
       receiptId,
     );
@@ -378,21 +370,14 @@ export const __testingReservationHandleInternals = {
 // ─────────────────────────────────────────────
 
 /**
- * Inputs needed to reconstruct `SponsorSlotReservationHandle` at the sponsor
- * sponsor result state after consume(). `slotId` comes from the prepared entry; the
- * sponsor pool's committed-stage HMAC verification of the submitted
- * `txBytes` proves the lease still binds to the prepare commit.
+ * Inputs needed to reconstruct `SponsorSlotReservationHandle` after the
+ * prepared entry is atomically consumed. This handle carries lifecycle
+ * identity only. The sponsor pool's later `sign()` call is the sole authority
+ * that verifies the committed HMAC against the submitted transaction bytes.
  */
 export interface SponsorSlotReconstructionInputs {
-  readonly slotId: string;
   readonly sponsorAddress: string;
   readonly receiptId: string;
-  /**
-   * Result of verifying the submitted txBytes against the pool's committed
-   * HMAC proof for `(receiptId, slotId, txBytesHash)`. Reconstruction MUST
-   * fail if the verification did not succeed at the sponsor pool boundary.
-   */
-  readonly hmacCommitVerified: true;
 }
 
 /** Sponsor-phase reconstruction inputs for the generic-only nonce reservation handle. */
@@ -424,26 +409,21 @@ export interface LedgerReservationReconstructionInputs {
 }
 
 /**
- * Reconstruct sponsor-phase reservation handles from durable inputs that the caller
- * already verified at the sponsor pool / parseSettleArgs / ledger lookup
- * boundaries. Returns fresh handles in the `live` state — the sponsor
- * lifecycle owns its release/consume just like the prepare lifecycle.
+ * Reconstruct sponsor-phase reservation handles from consumed durable inputs.
+ * Nonce and ledger inputs are returned only after their owning checks; sponsor
+ * lease HMAC verification remains at the later pool `sign()` boundary. Returns
+ * fresh handles in the `live` state — the sponsor lifecycle owns their
+ * release/consume just like the prepare lifecycle.
  *
- * Public mint path: callers pass already-verified durable inputs and
- * receive live handles. The verified-flag fields (`hmacCommitVerified`,
- * `inPtbNonceMatch`, `ledgerLookupVerified`) document — at the type level
- * and in the input shape — that reconstruction is gated on a prior
- * boundary check.
+ * The nonce and ledger verified-flag fields document — at the type level and
+ * in the input shape — that those reconstructions are gated on their prior
+ * boundary checks.
  */
 export const reconstructReservationHandles = {
   sponsorSlot(
     inputs: SponsorSlotReconstructionInputs,
   ): SponsorSlotReservationHandle & { release(): void; consume(): void } {
-    return internalReservationHandleFactory.newSponsorSlot(
-      inputs.slotId,
-      inputs.sponsorAddress,
-      inputs.receiptId,
-    );
+    return internalReservationHandleFactory.newSponsorSlot(inputs.sponsorAddress, inputs.receiptId);
   },
   nonce(
     inputs: NonceReconstructionInputs,
@@ -482,18 +462,6 @@ export const reconstructReservationHandles = {
 export interface GasBoundBuildReservationHandles {
   readonly sponsorSlot: SponsorSlotReservationHandle;
   readonly nonce?: NonceReservationHandle;
-}
-
-/**
- * Required reservation handles at the `PrepareStored` boundary (sponsor lease already
- * committed; entry about to be written). Both nonce (generic) and ledger
- * reservation (studio) may be present here; prepare commit transfers
- * ownership to the durable store.
- */
-export interface PreparedCommitReservationHandles {
-  readonly sponsorSlot: SponsorSlotReservationHandle;
-  readonly nonce?: NonceReservationHandle;
-  readonly ledgerReservation?: LedgerReservationHandle;
 }
 
 /**

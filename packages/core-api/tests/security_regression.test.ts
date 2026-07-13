@@ -21,35 +21,23 @@ import {
 import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
 import { PrepareStudioUserQuotaError } from '../src/store/prepareErrors.js';
 import type {
-  GenericPreparedTxEntry,
-  PromotionPreparedTxEntry,
+  GenericPreparedTxDraft,
+  PromotionPreparedTxDraft,
 } from '../src/store/prepareTypes.js';
 
 const SENDER_A = '0x' + 'AA'.repeat(32);
 const SENDER_B = '0x' + 'BB'.repeat(32);
-const SLOT_A = 'slot-a';
 const SLOT_B = 'slot-b';
 const SLOT_D = 'slot-d';
 const CLIENT_IP = '10.0.0.1';
 
-function makeGenericEntry(overrides?: Partial<GenericPreparedTxEntry>): GenericPreparedTxEntry {
+function makeGenericEntry(overrides?: Partial<GenericPreparedTxDraft>): GenericPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: 'pid-default',
     orderId: null,
     senderAddress: SENDER_A,
-    executionCostClaim: 7_350_000n,
-    simGas: 7_000_000n,
-    gasVarianceFixedMist: 100_000n,
-    slippageBufferMist: 250_000n,
-    grossGas: 7_100_000n,
-    quotedHostFeeMist: 0n,
     nonce: 1n,
-    profile: 'new_user',
-    quoteTimestampMs: Date.now(),
-    policyHash: '0xPOLICY',
     txBytesHash: 'mock-hash',
-    slotId: SLOT_A,
     sponsorAddress: '0xSPONSOR',
 
     clientIp: CLIENT_IP,
@@ -60,21 +48,15 @@ function makeGenericEntry(overrides?: Partial<GenericPreparedTxEntry>): GenericP
 }
 
 function makePromotionEntry(
-  overrides?: Partial<PromotionPreparedTxEntry>,
-): PromotionPreparedTxEntry {
+  overrides?: Partial<PromotionPreparedTxDraft>,
+): PromotionPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: 'pid-promo-default',
     orderId: null,
     senderAddress: SENDER_A,
-    executionCostClaim: 7_350_000n,
-    simGas: 7_000_000n,
-    gasVarianceFixedMist: 100_000n,
-    slippageBufferMist: 250_000n,
-    grossGas: 7_100_000n,
+    reservedGasMist: 7_350_000n,
     nonce: 0n,
     txBytesHash: 'mock-hash',
-    slotId: SLOT_A,
     sponsorAddress: '0xSPONSOR',
 
     clientIp: CLIENT_IP,
@@ -93,7 +75,7 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   beforeEach(() => {
     released.length = 0;
     store = new MemoryPrepareStore(
-      (slotId) => void released.push(slotId),
+      (sponsorAddress) => void released.push(sponsorAddress),
       PREPARE_TTL_MS, // ttlMs
       10, // maxPerIp — high enough that IP limit doesn't interfere with user-quota tests
       MAX_OUTSTANDING_PER_STUDIO_USER, // maxPerStudioUser (4th arg)
@@ -109,9 +91,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // Fill beyond MAX_OUTSTANDING_PER_STUDIO_USER with generic entries — should succeed
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER + 2; i++) {
       await store.store(
-        `pid-generic-${i}`,
         makeGenericEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-generic-${i}`,
         }),
@@ -123,9 +104,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   it('promotion mode: allows up to MAX_OUTSTANDING_PER_STUDIO_USER entries per studio user', async () => {
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
       await store.store(
-        `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -137,9 +117,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   it('promotion mode: throws PrepareStudioUserQuotaError when studio user exceeds MAX_OUTSTANDING_PER_STUDIO_USER', async () => {
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
       await store.store(
-        `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -148,8 +127,11 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // One more → PrepareStudioUserQuotaError
     await expect(
       store.store(
-        'pid-promo-overflow',
-        makePromotionEntry({ slotId: SLOT_D, txBytesHash: 'hash-overflow' }),
+        makePromotionEntry({
+          receiptId: 'pid-promo-overflow',
+          sponsorAddress: SLOT_D,
+          txBytesHash: 'hash-overflow',
+        }),
       ),
     ).rejects.toThrow(PrepareStudioUserQuotaError);
   });
@@ -157,9 +139,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   it('promotion quota is per-userId — different Studio user is not affected', async () => {
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
       await store.store(
-        `pid-a${i}`,
         makePromotionEntry({
-          slotId: `slot-a${i}`,
+          sponsorAddress: `slot-a${i}`,
           txBytesHash: `hash-a${i}`,
           receiptId: `pid-a${i}`,
           senderAddress: SENDER_A,
@@ -172,24 +153,25 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // not senderAddress).
     await expect(
       store.store(
-        'pid-b0',
         makePromotionEntry({
-          slotId: SLOT_B,
+          sponsorAddress: SLOT_B,
           txBytesHash: 'hash-b0',
           receiptId: 'pid-b0',
           senderAddress: SENDER_B,
           userId: 'user-002',
         }),
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      receiptId: 'pid-b0',
+      issuedAt: expect.any(Number),
+    });
   });
 
   it('promotion quota frees after consume', async () => {
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
       await store.store(
-        `pid-promo-${i}`,
         makePromotionEntry({
-          slotId: `slot-${i}`,
+          sponsorAddress: `slot-${i}`,
           txBytesHash: `hash-${i}`,
           receiptId: `pid-promo-${i}`,
         }),
@@ -198,19 +180,24 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     await store.consume('pid-promo-0', 'hash-0');
     await expect(
       store.store(
-        'pid-promo-new',
-        makePromotionEntry({ slotId: SLOT_D, txBytesHash: 'hash-new', receiptId: 'pid-promo-new' }),
+        makePromotionEntry({
+          sponsorAddress: SLOT_D,
+          txBytesHash: 'hash-new',
+          receiptId: 'pid-promo-new',
+        }),
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      receiptId: 'pid-promo-new',
+      issuedAt: expect.any(Number),
+    });
   });
 
   it('cross-mode isolation: generic entries do NOT count toward promotion quota', async () => {
     // Fill sender index with generic entries beyond the limit
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER + 2; i++) {
       await store.store(
-        `pid-generic-${i}`,
         makeGenericEntry({
-          slotId: `slot-g${i}`,
+          sponsorAddress: `slot-g${i}`,
           txBytesHash: `hash-g${i}`,
           receiptId: `pid-generic-${i}`,
         }),
@@ -219,10 +206,16 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // Promotion entry for the same sender must still succeed
     await expect(
       store.store(
-        'pid-promo-0',
-        makePromotionEntry({ slotId: 'slot-p0', txBytesHash: 'hash-p0', receiptId: 'pid-promo-0' }),
+        makePromotionEntry({
+          sponsorAddress: 'slot-p0',
+          txBytesHash: 'hash-p0',
+          receiptId: 'pid-promo-0',
+        }),
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      receiptId: 'pid-promo-0',
+      issuedAt: expect.any(Number),
+    });
   });
 
   // ── Studio user key-rotation invariant ─────────────────────────────────
@@ -235,9 +228,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // Fill quota under SENDER_A
     for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
       await store.store(
-        `pid-rot-${i}`,
         makePromotionEntry({
-          slotId: `slot-rot-${i}`,
+          sponsorAddress: `slot-rot-${i}`,
           txBytesHash: `hash-rot-${i}`,
           receiptId: `pid-rot-${i}`,
           senderAddress: SENDER_A,
@@ -248,9 +240,8 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     // Rotate to a new senderAddress for the same userId — must still hit quota.
     await expect(
       store.store(
-        'pid-rot-bypass',
         makePromotionEntry({
-          slotId: SLOT_D,
+          sponsorAddress: SLOT_D,
           txBytesHash: 'hash-rot-bypass',
           receiptId: 'pid-rot-bypass',
           senderAddress: SENDER_B,
@@ -261,35 +252,39 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
   });
 
   it('expired entries are pruned before quota check', async () => {
+    let nowMs = 1_000;
     const shortStore = new MemoryPrepareStore(
-      (slotId) => void released.push(slotId),
+      (sponsorAddress) => void released.push(sponsorAddress),
       100, // 100ms TTL
       10, // maxPerIp — high enough not to interfere
       MAX_OUTSTANDING_PER_STUDIO_USER, // maxPerStudioUser (4th arg)
       60_000, // evictIntervalMs
+      undefined,
+      { nowMs: () => nowMs },
     );
     try {
       for (let i = 0; i < MAX_OUTSTANDING_PER_STUDIO_USER; i++) {
         await shortStore.store(
-          `pid-promo-${i}`,
           makePromotionEntry({
-            slotId: `slot-${i}`,
+            sponsorAddress: `slot-${i}`,
             txBytesHash: `hash-${i}`,
             receiptId: `pid-promo-${i}`,
-            issuedAt: Date.now() - 500, // already expired
           }),
         );
       }
+      nowMs += 101;
       await expect(
         shortStore.store(
-          'pid-promo-new',
           makePromotionEntry({
-            slotId: SLOT_D,
+            sponsorAddress: SLOT_D,
             txBytesHash: 'hash-new',
             receiptId: 'pid-promo-new',
           }),
         ),
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({
+        receiptId: 'pid-promo-new',
+        issuedAt: 1_101,
+      });
     } finally {
       shortStore.dispose();
     }

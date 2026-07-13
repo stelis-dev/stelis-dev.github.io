@@ -23,18 +23,13 @@ export { validateGenericSettlementTransaction } from './validate/transactionKind
 // no verified browser/SDK consumer.
 export { extractVaultTableId, extractMoveObjectFields } from './creditQuery.js';
 
-// R-9 prefix coin classification: used in core-api prepare path, not in browser.
+// Prefix value trace: used in the core-api prepare path, not in the browser.
 export {
-  classifyUserTxCoins,
-  extractPrefixWithdrawals,
+  PrefixValueTraceError,
+  traceUserPrefixValue,
   containsSponsorWithdrawal,
-} from './classifyPrefixCoins.js';
-
-// Move abort code constants for the prepare dry-run classifier and the
-// generic sponsor subcode mapping.
-// CONFIG_ABORT and the `*AbortName` type definitions stay internal to this
-// package; tests reach them via relative import.
-export { SETTLE_ABORT, VAULT_ABORT, DEEPBOOK_ABORT } from './moveAbortCode.js';
+} from './prefixValueTrace.js';
+export type { PrefixValueTrace } from './prefixValueTrace.js';
 
 // Transport error-code unions: type-only re-export so the server-side failure
 // policy (`packages/core-api/src/failures.ts`) can narrow `FailureCode` against

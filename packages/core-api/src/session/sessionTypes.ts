@@ -29,22 +29,44 @@ export type PreflightResult =
 // TX execution result
 // ─────────────────────────────────────────────
 
-/** Normalized result from on-chain transaction execution. */
+/**
+ * Normalized result from sponsor-signed transaction execution.
+ *
+ * Congestion is a terminal cancellation observed after the sponsor signature
+ * but before on-chain execution. Every other returned result is an on-chain
+ * terminal result. Post-signature responses whose terminal status cannot be
+ * proven are thrown as `SponsorPostSignatureUncertaintyError` instead.
+ */
 export type ExecResult =
-  | { success: true; digest: string; effects: unknown; gasUsed: GasUsedFields | null }
+  | {
+      success: true;
+      executionStage: 'on_chain';
+      digest: string;
+      effects: unknown;
+      gasUsed: GasUsedFields | null;
+    }
   | {
       success: false;
+      executionStage: 'after_sponsor_signature';
       digest: string;
       reason: string;
-      isCongestion: boolean;
+      isCongestion: true;
+      gasUsed: null;
+    }
+  | {
+      success: false;
+      executionStage: 'on_chain';
+      digest: string;
+      reason: string;
+      isCongestion: false;
       /**
        * Gas paid for the on-chain attempt (extracted from FailedTransaction
        * effects or status-based failure effects when available). Sponsored
        * execution recorder uses this to mark `economicsStatus = "known"`
-       * for onchain reverts that consumed gas. `null` when:
-       *   - submission was cancelled before any on-chain execution
-       *     (network-level error or congestion);
-       *   - the failed result lacked retrievable effects.
+       * for onchain reverts that consumed gas. `null` when a validated
+       * on-chain terminal result has no canonical gas summary. Transport
+       * errors do not produce this variant, and confirmed congestion uses
+       * the separate `isCongestion: true` variant above.
        */
       gasUsed: GasUsedFields | null;
     };

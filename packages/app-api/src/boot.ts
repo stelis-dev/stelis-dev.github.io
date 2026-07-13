@@ -22,13 +22,15 @@ import {
   parseTrustedProxyHops,
 } from '@stelis/core-api';
 import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { SPONSOR_BALANCE_WARN_MIST } from './sponsor-operations/defaults.js';
 import {
-  requireEnv,
+  SPONSOR_BALANCE_REFILL_TARGET_MIST,
+  SPONSOR_BALANCE_WARN_MIST,
+} from './sponsor-operations/defaults.js';
+import {
   parseOptionalBooleanEnv,
   parseOptionalPositiveBigIntEnv,
   parseOptionalPositiveIntegerEnv,
+  parseRequiredPositiveIntegerEnv,
 } from './env.js';
 import { createRedisClient } from './redisClient.js';
 import { loadRpcConfig, createSuiClient } from './sui/index.js';
@@ -39,25 +41,45 @@ import {
   parseSettlementSwapPathRegistryJson,
 } from './settlementSwapPathRegistry.js';
 import { hashTarget, parseDeveloperJwtTrustConfig } from '@stelis/core-api/studio';
+import { parseDuration } from '@stelis/core-api/admin';
+import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
+import type { ContextRuntimeInput } from './context.js';
+import type { AdminAuthRuntimeConfig } from './adminAuth.js';
+import { createAdminRedisAdapter } from './adminRedis.js';
+import { raiseAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
 
 /** Runtime mode resolved at boot — determines which route groups are active. */
-export interface BootResult {
+export interface BootSummary {
   /** 'generic' | 'dual' (generic always on, studio conditional) */
-  mode: 'generic' | 'dual';
+  readonly mode: 'generic' | 'dual';
   /** Whether the studio env set is complete. */
-  studioEnabled: boolean;
+  readonly studioEnabled: boolean;
   /** Network: testnet or mainnet */
-  network: 'testnet' | 'mainnet';
-  /** Shared SuiGrpcClient — multi-endpoint failover when configured. */
-  suiClient: SuiGrpcClient;
-  /** Failover transport — always present (no single-endpoint fast path). */
-  failoverTransport: import('./sui/failoverTransport.js').SuiRpcFailoverTransport;
-  /** Configured endpoint URLs (safe for admin display — no auth metadata). */
-  rpcEndpointUrls: string[];
+  readonly network: 'testnet' | 'mainnet';
+}
+
+/** Secret-bearing process input. This value never leaves createApp. */
+export interface AppRuntimeInput {
+  readonly context: ContextRuntimeInput;
+  readonly trustedProxyHops: number;
+  readonly corsAllowedOrigins: readonly string[];
+  readonly adminAddress: string | null;
+  readonly adminAuth: AdminAuthRuntimeConfig;
+  readonly adminSponsorOperations: {
+    readonly refillEnabled: boolean;
+    /** Existing admin runway/withdraw fallback, distinct from the optional worker target. */
+    readonly refillTargetMist: bigint;
+    readonly warnMist: bigint;
+  };
+}
+
+export interface BootValidationResult {
+  readonly runtimeInput: AppRuntimeInput;
+  readonly publicSummary: BootSummary;
 }
 
 /** Human-readable runtime mode string for boot logs. */
-export function formatRuntimeMode(mode: BootResult['mode']): string {
+export function formatRuntimeMode(mode: BootSummary['mode']): string {
   return mode === 'dual' ? 'dual (relay + studio)' : 'generic (relay only)';
 }
 
@@ -77,12 +99,72 @@ export function resolveTrustedProxyHopsForBoot(input: {
   );
 }
 
+function parseCorsAllowedOrigins(rawValue: string | undefined): string[] {
+  if (!rawValue?.trim()) return [];
+
+  return rawValue
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(value);
+      } catch {
+        throw new Error(`[app-api] CORS_ORIGINS contains an invalid origin: "${value}"`);
+      }
+      if (
+        (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+        parsed.username !== '' ||
+        parsed.password !== '' ||
+        parsed.pathname !== '/' ||
+        parsed.search !== '' ||
+        parsed.hash !== ''
+      ) {
+        throw new Error(
+          `[app-api] CORS_ORIGINS entry must be an http(s) origin without credentials, path, query, or fragment: "${value}"`,
+        );
+      }
+      return parsed.origin;
+    });
+}
+
+function parseCookieDomain(rawValue: string | undefined): string | null {
+  const value = rawValue?.trim();
+  if (!value) return null;
+
+  const hostname = value.startsWith('.') ? value.slice(1) : value;
+  const labels = hostname.split('.');
+  const valid =
+    value.length <= 253 &&
+    hostname.length > 0 &&
+    labels.every(
+      (label) =>
+        label.length > 0 &&
+        label.length <= 63 &&
+        /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label),
+    );
+  if (!valid) {
+    throw new Error(`[app-api] COOKIE_DOMAIN must be a valid DNS domain, got "${value}"`);
+  }
+  return value.toLowerCase();
+}
+
 /**
  * Runs all fail-fast boot validation. Must complete before accepting requests.
  *
  * Throws on any validation failure (fail-closed).
  */
-export async function runBootValidation(): Promise<BootResult> {
+export async function runBootValidation(): Promise<BootValidationResult> {
+  // Capture before the first await. RPC auth variables referenced indirectly
+  // from rpc.json use this same snapshot through the injected lookup below.
+  const environment: Readonly<Record<string, string | undefined>> = { ...process.env };
+  const requireBootEnv = (name: string): string => {
+    const value = environment[name]?.trim();
+    if (!value) throw new Error(`[app-api] Missing required environment variable: ${name}`);
+    return value;
+  };
+
   // ── 1. Generic required env vars ─────────────────────────────────────────
   // RPC fleet config is loaded from packages/app-api/rpc.json (not env).
   const genericRequired = [
@@ -94,14 +176,15 @@ export async function runBootValidation(): Promise<BootResult> {
   ] as const;
 
   for (const key of genericRequired) {
-    requireEnv(key);
+    requireBootEnv(key);
   }
+  const redisUrl = requireBootEnv('REDIS_URL');
 
   // SPONSOR_LEASE_HMAC_SECRET must be long enough to be a real secret.
   // Matches SPONSOR_LEASE_HMAC_SECRET_MIN_LENGTH in core-api.
   // Fail-fast at boot so a misconfigured deployment never accepts a
   // weak lease proof.
-  const leaseHmacSecret = requireEnv('SPONSOR_LEASE_HMAC_SECRET');
+  const leaseHmacSecret = requireBootEnv('SPONSOR_LEASE_HMAC_SECRET');
   if (leaseHmacSecret.length < 32) {
     throw new Error(
       '[app-api] SPONSOR_LEASE_HMAC_SECRET must be at least 32 characters. ' +
@@ -110,7 +193,7 @@ export async function runBootValidation(): Promise<BootResult> {
   }
 
   // ── 2. Network validation ────────────────────────────────────────────────
-  const network = requireEnv('NETWORK') as 'testnet' | 'mainnet';
+  const network = requireBootEnv('NETWORK') as 'testnet' | 'mainnet';
   if (network !== 'testnet' && network !== 'mainnet') {
     throw new Error(`[app-api] NETWORK must be 'testnet' or 'mainnet', got '${network}'`);
   }
@@ -161,59 +244,95 @@ export async function runBootValidation(): Promise<BootResult> {
   const simulateProbePoolId = settlementSwapPathRegistryEntries[0].poolId;
 
   // ── 4. Trusted proxy hops validation ─────────────────────────────────────
-  void resolveTrustedProxyHopsForBoot({
-    trustedProxyHops: process.env.TRUSTED_PROXY_HOPS,
-    nodeEnv: process.env.NODE_ENV,
+  const trustedProxyHops = resolveTrustedProxyHopsForBoot({
+    trustedProxyHops: environment.TRUSTED_PROXY_HOPS,
+    nodeEnv: environment.NODE_ENV,
   });
 
   // ── 5. Prepare in-flight validation ──────────────────────────────────
-  void parseOptionalPositiveIntegerEnv(
+  const prepareInflightCapacityOverride = parseOptionalPositiveIntegerEnv(
     'PREPARE_INFLIGHT_CAPACITY',
-    process.env.PREPARE_INFLIGHT_CAPACITY,
+    environment.PREPARE_INFLIGHT_CAPACITY,
   );
+  const quotedHostFeeMist = parseHostFeeEnv(environment.HOST_FEE_MIST);
 
   // ── 6. Sponsor Refill Account validation ───────────────────────────────────────────
-  const sponsorRefillAccountSecretKey = process.env.SPONSOR_REFILL_ACCOUNT_SECRET_KEY?.trim();
+  const sponsorRefillAccountSecretKey = environment.SPONSOR_REFILL_ACCOUNT_SECRET_KEY?.trim();
   if (!sponsorRefillAccountSecretKey) {
     throw new Error(
       '[app-api] Missing required environment variable: SPONSOR_REFILL_ACCOUNT_SECRET_KEY. ' +
         'Sponsor Refill Account must be a dedicated key separate from sponsor keys.',
     );
   }
-  parseSponsorKey(sponsorRefillAccountSecretKey, 'SPONSOR_REFILL_ACCOUNT_SECRET_KEY');
+  const sponsorRefillAccountKey = parseSponsorKey(
+    sponsorRefillAccountSecretKey,
+    'SPONSOR_REFILL_ACCOUNT_SECRET_KEY',
+  );
 
   // ── 7. Refill validation ─────────────────────────────────────────────────
-  void parseOptionalBooleanEnv(
-    'SPONSOR_OPERATIONS_REFILL_ENABLED',
-    process.env.SPONSOR_OPERATIONS_REFILL_ENABLED,
-  );
+  const refillEnabled =
+    parseOptionalBooleanEnv(
+      'SPONSOR_OPERATIONS_REFILL_ENABLED',
+      environment.SPONSOR_OPERATIONS_REFILL_ENABLED,
+    ) ?? false;
   const warnMist =
     parseOptionalPositiveBigIntEnv(
       'SPONSOR_BALANCE_WARN_MIST',
-      process.env.SPONSOR_BALANCE_WARN_MIST,
+      environment.SPONSOR_BALANCE_WARN_MIST,
     ) ?? SPONSOR_BALANCE_WARN_MIST;
   const refillTargetMist = parseOptionalPositiveBigIntEnv(
     'SPONSOR_BALANCE_REFILL_TARGET_MIST',
-    process.env.SPONSOR_BALANCE_REFILL_TARGET_MIST,
+    environment.SPONSOR_BALANCE_REFILL_TARGET_MIST,
   );
+  if (refillEnabled && refillTargetMist == null) {
+    throw new Error(
+      '[app-api] SPONSOR_BALANCE_REFILL_TARGET_MIST is required when ' +
+        'SPONSOR_OPERATIONS_REFILL_ENABLED=true',
+    );
+  }
   if (refillTargetMist != null && refillTargetMist <= warnMist) {
     throw new Error(
       '[app-api] SPONSOR_BALANCE_REFILL_TARGET_MIST must be greater than ' +
         `SPONSOR_BALANCE_WARN_MIST (${warnMist.toString()} MIST)`,
     );
   }
+  const sponsorRefillAccountRunwayTargetMist =
+    refillTargetMist ?? SPONSOR_BALANCE_REFILL_TARGET_MIST;
+
+  const parseRequiredSponsorOperationsTimeout = (name: string, raw: string | undefined): number => {
+    if (raw === undefined || raw === '') {
+      throw new Error(
+        `[app-api] ${name} is required (see docs/parameters.md Sponsor Operations settings)`,
+      );
+    }
+    return parseRequiredPositiveIntegerEnv(name, raw);
+  };
+  const slotBalanceTimeoutMs = parseRequiredSponsorOperationsTimeout(
+    'SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS',
+    environment.SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS,
+  );
+  const sponsorRefillAccountBalanceTimeoutMs = parseRequiredSponsorOperationsTimeout(
+    'SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS',
+    environment.SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS,
+  );
+  const refillTimeoutMs = parseRequiredSponsorOperationsTimeout(
+    'SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS',
+    environment.SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS,
+  );
+  const confirmationTimeoutMs = parseRequiredSponsorOperationsTimeout(
+    'SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS',
+    environment.SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS,
+  );
 
   // ── 8. Address constraint validation ─────────────────────────────────────
-  const sponsorKeys = parseSponsorKeys(requireEnv('SPONSOR_SECRET_KEY'));
+  const sponsorKeys = parseSponsorKeys(requireBootEnv('SPONSOR_SECRET_KEY'));
+  const prepareInflightCapacity = prepareInflightCapacityOverride ?? sponsorKeys.length * 2;
   const sponsorAddrs = sponsorKeys.map((kp) => kp.toSuiAddress());
   const recipientAddr = canonicalizeAddress(
-    requireEnv('SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS'),
+    requireBootEnv('SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS'),
     'SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS',
   );
-  const sponsorRefillAccountAddress = parseSponsorKey(
-    sponsorRefillAccountSecretKey,
-    'SPONSOR_REFILL_ACCOUNT_SECRET_KEY',
-  ).toSuiAddress();
+  const sponsorRefillAccountAddress = sponsorRefillAccountKey.toSuiAddress();
   validateAddressConstraints({
     sponsorAddresses: sponsorAddrs,
     settlementPayoutRecipientAddress: recipientAddr,
@@ -221,45 +340,63 @@ export async function runBootValidation(): Promise<BootResult> {
   });
 
   // ── 9. Admin env validation ──────────────────────────────────────────────
-  const adminAddr = process.env.ADMIN_ADDRESS?.trim();
-  if (adminAddr) {
-    if (!/^0x[0-9a-fA-F]{64}$/.test(adminAddr)) {
+  const adminAddrRaw = environment.ADMIN_ADDRESS?.trim();
+  let adminAddress: string | null = null;
+  if (adminAddrRaw) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(adminAddrRaw)) {
       throw new Error(
         '[app-api] ADMIN_ADDRESS must be a valid Sui address (0x + 64 hex characters)',
       );
     }
+    adminAddress = canonicalizeAddress(adminAddrRaw, 'ADMIN_ADDRESS');
     // Sponsor refill account != Admin Address constraint
-    if (sponsorRefillAccountAddress === canonicalizeAddress(adminAddr, 'ADMIN_ADDRESS')) {
+    if (sponsorRefillAccountAddress === adminAddress) {
       throw new Error(
         '[app-api] SPONSOR_REFILL_ACCOUNT_SECRET_KEY address must differ from ADMIN_ADDRESS. ' +
           'Sponsor Refill Account and Admin must be separate identities.',
       );
     }
   }
-  if (process.env.ADMIN_JWT_SECRET?.trim()) {
-    if (process.env.ADMIN_JWT_SECRET.trim().length < 32) {
+  const adminJwtSecret = environment.ADMIN_JWT_SECRET?.trim() || null;
+  if (adminJwtSecret) {
+    if (adminJwtSecret.length < 32) {
       throw new Error('[app-api] ADMIN_JWT_SECRET must be at least 32 characters');
     }
   }
-  if (process.env.ADMIN_SESSION_EXPIRY?.trim()) {
-    const v = process.env.ADMIN_SESSION_EXPIRY.trim();
-    if (!/^\d+(h|m|s)$/.test(v)) {
-      throw new Error(
-        `[app-api] ADMIN_SESSION_EXPIRY must be a duration string like "1h", "30m", or "120s" (got "${v}")`,
-      );
-    }
+  const adminSessionExpiry = environment.ADMIN_SESSION_EXPIRY?.trim() || '1h';
+  const adminSessionMaxAgeSeconds = parseDuration(adminSessionExpiry);
+  const withdrawalReceiptTtlMs = adminSessionMaxAgeSeconds * 1_000;
+  if (!Number.isSafeInteger(withdrawalReceiptTtlMs)) {
+    throw new Error('[app-api] ADMIN_SESSION_EXPIRY is too large for withdrawal receipt TTL');
   }
+  const cookieDomain = parseCookieDomain(environment.COOKIE_DOMAIN);
+  const adminAuth: AdminAuthRuntimeConfig = {
+    jwt: adminJwtSecret
+      ? {
+          jwtSecret: adminJwtSecret,
+          sessionExpiry: adminSessionExpiry,
+          issuer: 'app-api',
+        }
+      : null,
+    cookie: {
+      maxAgeSeconds: adminSessionMaxAgeSeconds,
+      secure: environment.NODE_ENV === 'production',
+      domain: cookieDomain,
+    },
+  };
+
+  const corsAllowedOrigins = parseCorsAllowedOrigins(environment.CORS_ORIGINS);
 
   // ── 10. Redis connectivity + admin not_before key ────────────────────
-  const redis = await createRedisClient(requireEnv('REDIS_URL'));
+  const redis = await createRedisClient(redisUrl);
   try {
-    await redis.set('stelis:app-api:admin:not_before', String(Date.now()));
+    await raiseAppApiAdminSessionNotBefore(createAdminRedisAdapter(redis), Date.now());
   } finally {
     await redis.dispose();
   }
 
   // ── 10a. Load RPC fleet + validate chain identity ─────────────────────────
-  const rpcEndpoints = loadRpcConfig(network);
+  const rpcEndpoints = loadRpcConfig(network, undefined, (name) => environment[name]);
 
   // ── Endpoint verification: chain identity + functional probe ──────────
   // 1. Chain identity: each endpoint must return correct chainIdentifier
@@ -319,7 +456,11 @@ export async function runBootValidation(): Promise<BootResult> {
       verified.map((ep) => redactUrl(ep.url)).join(', '),
   );
 
-  const { client: suiClient, failoverTransport } = createSuiClient({
+  const {
+    client: suiClient,
+    primaryClient: primarySuiClient,
+    failoverTransport,
+  } = createSuiClient({
     network,
     endpoints: verified,
   });
@@ -335,11 +476,12 @@ export async function runBootValidation(): Promise<BootResult> {
     'STUDIO_ALLOWED_TARGETS',
     'STUDIO_DEVELOPER_JWT_TRUST_JSON',
   ];
-  const studioEnvPresent = studioEnvKeys.every((k) => !!process.env[k]?.trim());
+  const studioEnvPresent = studioEnvKeys.every((k) => !!environment[k]?.trim());
+  let studioRuntimeInput: ContextRuntimeInput['studio'] = null;
 
   if (studioEnvPresent) {
     // STUDIO_ALLOWED_TARGETS — comma-separated pkg::mod::fn, at least one entry
-    const targetsRaw = requireEnv('STUDIO_ALLOWED_TARGETS');
+    const targetsRaw = requireBootEnv('STUDIO_ALLOWED_TARGETS');
     const targets = targetsRaw
       .split(',')
       .map((t) => t.trim())
@@ -369,11 +511,11 @@ export async function runBootValidation(): Promise<BootResult> {
     }
 
     // STUDIO_DEVELOPER_JWT_TRUST_JSON — parsed and validated at boot (single issuer object)
-    const trustJson = requireEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON');
-    parseDeveloperJwtTrustConfig(trustJson); // throws on invalid config
+    const trustJson = requireBootEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON');
+    const developerJwtTrustConfig = parseDeveloperJwtTrustConfig(trustJson);
 
     // STUDIO_DEVELOPER_JWT_VERIFY_URL — optional developer-side validity callback
-    const verifyUrl = process.env.STUDIO_DEVELOPER_JWT_VERIFY_URL?.trim();
+    const verifyUrl = environment.STUDIO_DEVELOPER_JWT_VERIFY_URL?.trim() || null;
     if (verifyUrl) {
       try {
         const parsed = new URL(verifyUrl);
@@ -386,19 +528,68 @@ export async function runBootValidation(): Promise<BootResult> {
         );
       }
     }
+
+    studioRuntimeInput = {
+      globalTargetHashes: seen,
+      developerJwtTrustConfig,
+      developerJwtVerifyUrl: verifyUrl,
+    };
   }
 
   const studioEnabled = studioEnvPresent;
-  const mode: BootResult['mode'] = studioEnabled ? 'dual' : 'generic';
+  const mode: BootSummary['mode'] = studioEnabled ? 'dual' : 'generic';
   // eslint-disable-next-line no-console
   console.log(`[app-api] Boot validation complete — mode: ${formatRuntimeMode(mode)}`);
 
   return {
-    mode,
-    studioEnabled,
-    network,
-    suiClient,
-    failoverTransport,
-    rpcEndpointUrls: verified.map((ep) => ep.url),
+    runtimeInput: {
+      context: {
+        redisUrl,
+        network,
+        contractIds: {
+          packageId: contractIds!.packageId,
+          configId: contractIds!.configId,
+          vaultRegistryId: contractIds!.vaultRegistryId,
+        },
+        deepbookPackageId: deepbookIds!.packageId,
+        suiClient,
+        primarySuiClient,
+        failoverTransport,
+        settlementSwapPathRegistryEntries,
+        sponsorKeys,
+        sponsorLeaseHmacSecret: leaseHmacSecret,
+        settlementPayoutRecipientAddress: recipientAddr,
+        quotedHostFeeMist,
+        prepareInflightCapacity,
+        sponsorOperations: {
+          sponsorRefillAccountKey,
+          sponsorRefillAccountAddress,
+          refillEnabled,
+          refillTargetMist: refillTargetMist ?? null,
+          runwayTargetMist: sponsorRefillAccountRunwayTargetMist,
+          warnMist,
+          slotBalanceTimeoutMs,
+          sponsorRefillAccountBalanceTimeoutMs,
+          refillTimeoutMs,
+          confirmationTimeoutMs,
+          withdrawalReceiptTtlMs,
+        },
+        studio: studioRuntimeInput,
+      },
+      trustedProxyHops,
+      corsAllowedOrigins,
+      adminAddress,
+      adminAuth,
+      adminSponsorOperations: {
+        refillEnabled,
+        refillTargetMist: sponsorRefillAccountRunwayTargetMist,
+        warnMist,
+      },
+    },
+    publicSummary: {
+      mode,
+      studioEnabled,
+      network,
+    },
   };
 }

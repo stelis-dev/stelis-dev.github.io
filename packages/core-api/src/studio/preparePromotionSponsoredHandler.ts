@@ -2,7 +2,6 @@
  * preparePromotionSponsoredHandler — public Studio prepare adapter over the
  * SponsoredExecution prepare runner.
  */
-import { toHex } from '@mysten/sui/utils';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { OnchainConfig } from '@stelis/core-relay';
 import type { PromotionStoreAdapter } from './promotionStore.js';
@@ -15,7 +14,7 @@ import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
 import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
 import { PREPARE_SLOT_EXHAUSTED } from '../observability/events.js';
 import {
-  buildStudioPreparedCommitInputs,
+  buildStudioPreparedDraftFields,
   createStudioExecutionPolicy,
   projectStudioPrepareResult,
 } from '../session/sponsoredExecution/studioExecutionPolicy.js';
@@ -102,7 +101,6 @@ export async function handlePromotionPrepare(
   ctx: PromotionPrepareContext,
   params: PromotionPrepareParams,
 ): Promise<PromotionPrepareResult> {
-  const receiptId = generateReceiptIdHex();
   const options = {
     context: {
       sui: ctx.sui,
@@ -124,7 +122,7 @@ export async function handlePromotionPrepare(
   const { policy, state } = createStudioExecutionPolicy(options);
 
   try {
-    const stateMachineResult = await runPrepareStateMachine(
+    return await runPrepareStateMachine(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
@@ -132,21 +130,17 @@ export async function handlePromotionPrepare(
         executionLedger: ctx.executionLedger,
       },
       {
-        hookContext: {
-          receiptId,
-          senderAddress: params.senderAddress,
-          clientIp: params.clientIp,
-        },
+        senderAddress: params.senderAddress,
+        clientIp: params.clientIp,
         ledgerAcquireParams: {
           promotionId: params.promotionId,
           userId: params.verifiedIdentity.userId,
         },
-        preparedCommitInputs: (input) => buildStudioPreparedCommitInputs(options, state, input),
+        preparedDraftFields: () => buildStudioPreparedDraftFields(options, state),
+        projectResponse: (input) => projectStudioPrepareResult(options, state, input),
       },
       policy,
     );
-
-    return projectStudioPrepareResult(options, state, stateMachineResult);
   } catch (err) {
     if (err instanceof RunnerSponsorSlotExhaustedError) {
       logSponsorPoolEvent(PREPARE_SLOT_EXHAUSTED, {
@@ -173,9 +167,4 @@ export async function handlePromotionPrepare(
     }
     throw err;
   }
-}
-
-/** Generate a random canonical receipt ID (`0x` + 32-byte hex). */
-function generateReceiptIdHex(): string {
-  return `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
 }

@@ -8,9 +8,11 @@ import type {
   SlotWriteFields,
 } from '../../src/sponsor-operations/redisState.js';
 import { SPONSOR_BALANCE_WARN_MIST } from '../../src/sponsor-operations/defaults.js';
+import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
 
 function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
   state: RedisSponsorOperationsState;
+  spendState: SponsorRefillAccountSpendStateStore;
   slotWrites: Array<{ address: string; fields: SlotWriteFields }>;
   sponsorRefillAccountWrites: SponsorRefillAccountWriteFields[];
   failSlot?: boolean;
@@ -21,13 +23,10 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
   const slots = new Map<string, SlotRead | null>(Object.entries(initialSlots));
   const ref = { slotWrites, sponsorRefillAccountWrites } as ReturnType<typeof makeStubState>;
   ref.state = {
-    async updateSlot(address, fields) {
+    async updateSlotIfWriteSeq(address, _expectedWriteSeq, fields) {
       if (ref.failSlot) throw new Error('redis write rejected');
       slotWrites.push({ address, fields });
-    },
-    async updateSponsorRefillAccount(fields) {
-      if (ref.failPm) throw new Error('redis write rejected');
-      sponsorRefillAccountWrites.push(fields);
+      return true;
     },
     async readSlot(address) {
       return slots.get(address) ?? null;
@@ -37,6 +36,34 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
     },
     async readAll() {
       return { slots: [], sponsorRefillAccount: {} as never };
+    },
+  };
+  ref.spendState = {
+    async read() {
+      return null;
+    },
+    async readAccountObservationCursor() {
+      return { operationId: null, spendSequence: 0, writeSequence: 0 };
+    },
+    async reserve() {
+      throw new Error('not used');
+    },
+    async markReady() {
+      throw new Error('not used');
+    },
+    async markReconciling() {
+      throw new Error('not used');
+    },
+    async complete() {
+      throw new Error('not used');
+    },
+    async failReserved() {
+      throw new Error('not used');
+    },
+    async updateAccountObservation(_cursor, fields) {
+      if (ref.failPm) throw new Error('redis write rejected');
+      sponsorRefillAccountWrites.push(fields);
+      return true;
     },
   };
   return ref;
@@ -68,6 +95,10 @@ function makeSlotRead(
     refillAttemptedAmountMist: fields.refillAttemptedAmountMist ?? null,
     refillObservedBalanceMist: fields.refillObservedBalanceMist ?? null,
     refillReconciliationResult: fields.refillReconciliationResult ?? null,
+    refillOperationId: fields.refillOperationId ?? null,
+    refillOperationSequence: fields.refillOperationSequence ?? null,
+    refillOperationState: fields.refillOperationState ?? null,
+    refillRequiredSourceBalanceMist: fields.refillRequiredSourceBalanceMist ?? null,
   };
 }
 
@@ -83,6 +114,7 @@ describe('bootstrapSponsorOperations', () => {
     await bootstrapSponsorOperations({
       sui: makeStubSui(async () => SPONSOR_BALANCE_WARN_MIST.toString()),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -99,6 +131,9 @@ describe('bootstrapSponsorOperations', () => {
       refillAttemptedAmountMist: '',
       refillObservedBalanceMist: '',
       refillReconciliationResult: '',
+      refillOperationId: '',
+      refillOperationSequence: '',
+      refillOperationState: '',
     });
   });
 
@@ -107,6 +142,7 @@ describe('bootstrapSponsorOperations', () => {
     await bootstrapSponsorOperations({
       sui: makeStubSui(async () => (SPONSOR_BALANCE_WARN_MIST - 1n).toString()),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -117,6 +153,29 @@ describe('bootstrapSponsorOperations', () => {
     expect(stub.slotWrites[0].fields.state).toBe('low_balance');
   });
 
+  it('does not overwrite a runway eligibility threshold while a boot observation remains low', async () => {
+    const stub = makeStubState({
+      [SLOT_A]: makeSlotRead('refill_failed', {
+        writeSeq: 4,
+        refillRequiredSourceBalanceMist: '237',
+      }),
+    });
+    await bootstrapSponsorOperations({
+      sui: makeStubSui(async () => '0'),
+      state: stub.state,
+      spendState: stub.spendState,
+      slotAddresses: [SLOT_A],
+      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
+      refillTargetMist: 100n,
+      slotBalanceTimeoutMs: 500,
+      sponsorRefillAccountBalanceTimeoutMs: 500,
+    });
+
+    expect(stub.slotWrites[0].fields.state).toBe('low_balance');
+    expect(stub.slotWrites[0].fields).not.toHaveProperty('refillRequiredSourceBalanceMist');
+  });
+
   it('writes rpc_unreachable + lastError when a slot probe rejects', async () => {
     const stub = makeStubState();
     await bootstrapSponsorOperations({
@@ -125,6 +184,7 @@ describe('bootstrapSponsorOperations', () => {
         return '10000000000';
       }),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -140,6 +200,9 @@ describe('bootstrapSponsorOperations', () => {
       refillAttemptedAmountMist: '',
       refillObservedBalanceMist: '',
       refillReconciliationResult: '',
+      refillOperationId: '',
+      refillOperationSequence: '',
+      refillOperationState: '',
     });
   });
 
@@ -151,6 +214,7 @@ describe('bootstrapSponsorOperations', () => {
         return '10000000000';
       }),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -173,6 +237,7 @@ describe('bootstrapSponsorOperations', () => {
         return '10000000000';
       }),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -196,6 +261,7 @@ describe('bootstrapSponsorOperations', () => {
         return '10000000000';
       }),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -216,6 +282,7 @@ describe('bootstrapSponsorOperations', () => {
     await bootstrapSponsorOperations({
       sui: makeStubSui(async () => '30000000000'),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -226,60 +293,32 @@ describe('bootstrapSponsorOperations', () => {
     expect(stub.sponsorRefillAccountWrites[0].refillsRemaining).toBe('3');
   });
 
-  it('confirms an unresolved refill attempt during boot when the target balance is now present', async () => {
+  it('refuses to overwrite a refill that the account coordinator has not reconciled', async () => {
     const stub = makeStubState({
-      [SLOT_A]: makeSlotRead('awaiting_confirmation', {
+      [SLOT_A]: makeSlotRead('refilling', {
         pendingRefillDigest: '0xpending',
         refillAttemptedAmountMist: '6000000000',
         refillObservedBalanceMist: '4000000000',
         refillReconciliationResult: 'dispatch_submitted',
+        refillOperationId: 'operation-a',
+        refillOperationSequence: 3,
+        refillOperationState: 'reconciling',
       }),
     });
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => '10000000000'),
-      state: stub.state,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 10_000_000_000n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.slotWrites[0].fields).toMatchObject({
-      state: 'healthy',
-      balanceMist: '10000000000',
-      pendingRefillDigest: '',
-      refillAttemptedAmountMist: '6000000000',
-      refillObservedBalanceMist: '10000000000',
-      refillReconciliationResult: 'confirmed',
-    });
-  });
-
-  it('preserves an unresolved refill attempt during boot when balance is still below target', async () => {
-    const stub = makeStubState({
-      [SLOT_A]: makeSlotRead('refill_failed', {
-        refillAttemptedAmountMist: '6000000000',
-        refillObservedBalanceMist: '4000000000',
-        refillReconciliationResult: 'dispatch_timeout',
+    await expect(
+      bootstrapSponsorOperations({
+        sui: makeStubSui(async () => '10000000000'),
+        state: stub.state,
+        spendState: stub.spendState,
+        slotAddresses: [SLOT_A],
+        sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+        warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
+        refillTargetMist: 10_000_000_000n,
+        slotBalanceTimeoutMs: 500,
+        sponsorRefillAccountBalanceTimeoutMs: 500,
       }),
-    });
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => '4000000000'),
-      state: stub.state,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 10_000_000_000n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.slotWrites[0].fields).toMatchObject({
-      state: 'awaiting_confirmation',
-      balanceMist: '4000000000',
-      refillAttemptedAmountMist: '6000000000',
-      refillObservedBalanceMist: '4000000000',
-      refillReconciliationResult: 'still_pending',
-    });
+    ).rejects.toThrow('was not recovered');
+    expect(stub.slotWrites).toEqual([]);
   });
 
   it('propagates Redis-write failure and fails boot', async () => {
@@ -289,6 +328,7 @@ describe('bootstrapSponsorOperations', () => {
       bootstrapSponsorOperations({
         sui: makeStubSui(async () => '1000000'),
         state: stub.state,
+        spendState: stub.spendState,
         slotAddresses: [SLOT_A],
         sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
         warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
@@ -308,6 +348,7 @@ describe('bootstrapSponsorOperations', () => {
         return '20000000000';
       }),
       state: stub.state,
+      spendState: stub.spendState,
       slotAddresses: [SLOT_A, SLOT_B],
       sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
       warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,

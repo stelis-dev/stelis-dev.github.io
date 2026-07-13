@@ -21,6 +21,8 @@ export interface CreateSuiClientOptions {
 
 export interface CreateSuiClientResult {
   client: SuiGrpcClient;
+  /** Primary-pinned client used by the serialized Sponsor Refill Account spend flow. */
+  primaryClient: SuiGrpcClient;
   /** Failover transport — always present (no single-endpoint fast path). */
   failoverTransport: SuiRpcFailoverTransport;
 }
@@ -33,8 +35,10 @@ export interface CreateSuiClientResult {
 export function createSuiClient(options: CreateSuiClientOptions): CreateSuiClientResult {
   const { network, endpoints } = options;
   const transport = new SuiRpcFailoverTransport(endpoints, options.failover);
+  const primaryTransport = new SuiRpcFailoverTransport([endpoints[0]!], options.failover);
   return {
     client: new SuiGrpcClient({ network, transport }),
+    primaryClient: new SuiGrpcClient({ network, transport: primaryTransport }),
     failoverTransport: transport,
   };
 }

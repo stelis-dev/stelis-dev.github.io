@@ -51,8 +51,6 @@ import { safeSlotCheckin } from '../sessionPrimitives.js';
  * iterate without inspecting concrete reservation types.
  */
 export interface ReservationLifecycle {
-  /** True iff `acquire()` returned successfully and `release()` has not been called. */
-  isAcquired(): boolean;
   /**
    * Release the reservation in a non-throwing manner. Any exception from
    * the subclass `releaseImpl()` is captured and routed to
@@ -68,7 +66,7 @@ export interface ReservationLifecycle {
  * prepare scope: ownership transfers to the prepared-store entry on
  * success and `release()` becomes a no-op. Implemented ONLY by the
  * reservation kinds whose resource lives on the durable store after
- * `PrepareStored` succeeds — sponsor slot, nonce, ledger budget.
+ * durable prepare-store commit — sponsor slot, nonce, ledger budget.
  *
  * Inflight admission is intentionally NOT transferable: the inflight
  * gate caps in-process concurrency and MUST release on every path,
@@ -83,10 +81,6 @@ export interface OwnershipTransfer {
 
 abstract class ReservationBase implements ReservationLifecycle {
   protected _state: 'pending' | 'acquired' | 'released' | 'transferred' = 'pending';
-
-  isAcquired(): boolean {
-    return this._state === 'acquired';
-  }
 
   /**
    * Reverse-order cleanup. NEVER throws — any subclass `releaseImpl()`
@@ -124,8 +118,6 @@ abstract class ReservationBase implements ReservationLifecycle {
     }
   }
 
-  protected abstract kind(): string;
-
   /**
    * Subclass-specific cleanup. Implementations should still aim for
    * idempotence and minimal external dependencies, but the runner-level
@@ -151,7 +143,7 @@ abstract class ReservationBase implements ReservationLifecycle {
 
 /**
  * Specialized base for reservations whose resource ownership transfers
- * to the durable prepared-store entry on `PrepareStored` success. Sponsor
+ * to the durable prepared-store entry after store success. Sponsor
  * slot, nonce, and ledger reservation are the three kinds that sit on this
  * boundary.
  *
@@ -166,16 +158,13 @@ abstract class TransferableReservationBase extends ReservationBase implements Ow
    * `release()` call is a no-op — ownership has moved to the durable
    * store and the in-process resource is no longer ours to free.
    *
-   * Throws if called before `acquire()` succeeded (the runner / handler
-   * has a sequencing bug).
+   * This method is intentionally non-throwing: it runs after the durable
+   * store commit, where an exception would turn a successful commit into a
+   * public failure. The runner only calls it for successfully acquired
+   * reservations; duplicate calls are harmless.
    */
   transferOwnership(): void {
-    if (this._state !== 'acquired') {
-      throw new Error(
-        `${this.kind()} reservation cannot transfer ownership while in state '${this._state}'`,
-      );
-    }
-    this._state = 'transferred';
+    if (this._state === 'acquired') this._state = 'transferred';
   }
 }
 
@@ -200,9 +189,6 @@ abstract class TransferableReservationBase extends ReservationBase implements Ow
  * the inflight handle still drops unconditionally.
  */
 export abstract class InflightReservation extends ReservationBase {
-  protected kind(): string {
-    return 'Inflight';
-  }
   /**
    * Acquire admission for the given route. Throws on capacity exhaustion.
    * Concrete subclasses bind to a specific limiter implementation in the
@@ -231,14 +217,10 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
   > | null = null;
   protected committedTxBytesHash: string | null = null;
 
-  protected kind(): string {
-    return 'SponsorSlot';
-  }
-
   /**
    * Check out a sponsor slot reserved against `receiptId`. On success the
    * reservation issues `SponsorSlotReservationHandle` keyed to the chosen
-   * `slotId` + `sponsorAddress`. Returns null when the pool is exhausted —
+   * `sponsorAddress`. Returns null when the pool is exhausted —
    * the caller decides the route-specific domain error
    * (`NO_SPONSOR_SLOT` etc.).
    */
@@ -253,18 +235,6 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
    * Calling it on any other reservation type is a compile-time error.
    */
   abstract commitToTxBytesHash(txBytesHash: string): Promise<void>;
-
-  /**
-   * Read the live reservation handle. Throws if `acquire()` did not return a
-   * slot. The runner is the only caller; consumers downstream should hold
-   * the `SponsorSlotReservationHandle` reference returned by `acquire()` directly.
-   */
-  reservationHandle(): SponsorSlotReservationHandle {
-    if (!this.issuedHandle) {
-      throw new Error('SponsorSlotReservation.reservationHandle called before acquire');
-    }
-    return this.issuedHandle;
-  }
 }
 
 // ─────────────────────────────────────────────
@@ -283,10 +253,6 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
 export abstract class NonceReservation extends TransferableReservationBase {
   protected issuedHandle: ReturnType<typeof internalReservationHandleFactory.newNonce> | null =
     null;
-
-  protected kind(): string {
-    return 'Nonce';
-  }
 
   /**
    * Reserve `max(onchainLastNonce, …) + 1` for `senderAddress`. Returns
@@ -323,10 +289,6 @@ export abstract class LedgerBudgetReservation extends TransferableReservationBas
   protected issuedHandle: ReturnType<
     typeof internalReservationHandleFactory.newLedgerReservation
   > | null = null;
-
-  protected kind(): string {
-    return 'LedgerBudget';
-  }
 
   /**
    * Atomically reserve `amountMist` against the promotion's entitlement
@@ -432,10 +394,10 @@ export class InflightReservationImpl extends InflightReservation {
  *
  * `acquire(receiptId)` calls `pool.checkout(receiptId)`. On success the
  * reservation issues `SponsorSlotReservationHandle` keyed to the chosen
- * `slotId` + `sponsorAddress`; on null (pool exhausted) the reservation
+ * `sponsorAddress`; on null (pool exhausted) the reservation
  * stays in the `pending` state so reverse cleanup is a no-op.
  *
- * `commitToTxBytesHash(hash)` calls `pool.commit(slotId, receiptId, hash)`
+ * `commitToTxBytesHash(hash)` calls `pool.commit(sponsorAddress, receiptId, hash)`
  * to promote the lease from reserved → committed. Lease-commit
  * failures propagate to the public handler adapter for route-specific mapping
  * (`SponsorLeaseCommitError` →
@@ -456,7 +418,6 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     const slot = await this.pool.checkout(receiptId);
     if (!slot) return null;
     this.issuedHandle = internalReservationHandleFactory.newSponsorSlot(
-      slot.slotId,
       slot.sponsorAddress,
       receiptId,
     );
@@ -469,7 +430,7 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     if (!this.issuedHandle || !this.receiptId) {
       throw new Error('SponsorSlotReservationImpl.commitToTxBytesHash called before acquire');
     }
-    await this.pool.commit(this.issuedHandle.slotId, this.receiptId, txBytesHash);
+    await this.pool.commit(this.issuedHandle.sponsorAddress, this.receiptId, txBytesHash);
     this.committedTxBytesHash = txBytesHash;
   }
 
@@ -480,7 +441,7 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     // hand-off safety).
     await safeSlotCheckin(
       this.pool,
-      this.issuedHandle.slotId,
+      this.issuedHandle.sponsorAddress,
       this.receiptId,
       this.committedTxBytesHash,
     );
@@ -536,6 +497,8 @@ export class NonceReservationImpl extends NonceReservation {
 // LedgerBudgetReservationImpl
 // ─────────────────────────────────────────────
 
+const PREPARE_STORE_RELEASE_TRIGGER = 'prepare_store_failed';
+
 /**
  * Concrete Studio ledger reservation that binds to a
  * `PromotionExecutionLedger`.
@@ -553,26 +516,15 @@ export class NonceReservationImpl extends NonceReservation {
  *   - On `ledger.release()` throwing, emit
  *     `LEDGER_RELEASE_THREW_IN_HANDLER` (level: warn).
  *
- * The `triggerReason` field defaults to `'prepare_store_failed'`. The runner
- * may set a more specific reason via `setTriggerReason()` before initiating
- * cleanup; this is a best-effort observability field, not a correctness signal.
+ * Release failures are attributed to the prepare-store boundary because this
+ * reservation class is used only by the prepare runner's pre-store cleanup.
  */
 export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
   private receiptId: string | null = null;
-  private triggerReason = 'prepare_store_failed';
   private lastRejectionReason: ReserveFailureReason | null = null;
 
   constructor(private readonly ledger: PromotionExecutionLedger) {
     super();
-  }
-
-  /**
-   * Override the structured-log `triggerReason` field for the next
-   * `release()` call. The runner may set a more specific value (e.g. `'sponsor_failed'`,
-   * `'gas_owner_mismatch'`) before initiating cleanup.
-   */
-  setTriggerReason(reason: string): void {
-    this.triggerReason = reason;
   }
 
   getLastRejectionReason(): ReserveFailureReason | null {
@@ -626,7 +578,7 @@ export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
         LEDGER_RELEASE_FAILED_IN_HANDLER,
         {
           receiptId: this.receiptId,
-          triggerReason: this.triggerReason,
+          triggerReason: PREPARE_STORE_RELEASE_TRIGGER,
           releaseFailureReason: result.reason,
         },
         'error',
@@ -641,7 +593,7 @@ export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
     if (!this.receiptId) return;
     logStructuredEvent(
       LEDGER_RELEASE_THREW_IN_HANDLER,
-      { receiptId: this.receiptId, triggerReason: this.triggerReason },
+      { receiptId: this.receiptId, triggerReason: PREPARE_STORE_RELEASE_TRIGGER },
       'warn',
     );
   }

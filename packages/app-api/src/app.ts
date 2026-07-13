@@ -12,24 +12,27 @@
  */
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { runBootValidation } from './boot.js';
-import { getCtx, setSharedSuiClient } from './context.js';
+import { runBootValidation, type BootSummary } from './boot.js';
+import { createContext } from './context.js';
 import { createRelayRoutes } from './routes/relay.js';
 import { createAuthRoutes } from './routes/auth.js';
 import { createAdminRoutes } from './routes/admin.js';
 import { createStudioRoutes } from './routes/studio.js';
+import { createClientIpResolver, type ClientIpSourceProvider } from './clientIp.js';
 
-export type AppBootResult = Awaited<ReturnType<typeof runBootValidation>>;
+export type AppBootResult = BootSummary;
 
-export async function createApp(): Promise<{ app: Hono; bootResult: AppBootResult }> {
-  // 1. Boot validation (fail-fast) — creates shared Sui RPC client
-  const bootResult = await runBootValidation();
-
-  // 1b. Inject shared Sui client + transport into context module (before any getCtx() calls)
-  setSharedSuiClient(
-    bootResult.suiClient,
-    bootResult.failoverTransport,
-    bootResult.rpcEndpointUrls,
+export async function createApp(
+  options: {
+    clientIpSourceProvider?: ClientIpSourceProvider;
+  } = {},
+): Promise<{ app: Hono; bootResult: AppBootResult }> {
+  // 1. Read and validate mutable runtime inputs exactly once.
+  const { runtimeInput, publicSummary: bootResult } = await runBootValidation();
+  const contextPromise = createContext(runtimeInput.context);
+  const resolveClientIp = createClientIpResolver(
+    runtimeInput.trustedProxyHops,
+    options.clientIpSourceProvider,
   );
 
   // 2. Create Hono app
@@ -64,10 +67,7 @@ export async function createApp(): Promise<{ app: Hono; bootResult: AppBootResul
   );
 
   //    /auth/*, /api/* — admin-facing, restricted to configured origins
-  const allowedOrigins =
-    process.env.CORS_ORIGINS?.split(',')
-      .map((s) => s.trim())
-      .filter(Boolean) ?? [];
+  const allowedOrigins = [...runtimeInput.corsAllowedOrigins];
   if (allowedOrigins.length > 0) {
     app.use(
       '/auth/*',
@@ -95,16 +95,26 @@ export async function createApp(): Promise<{ app: Hono; bootResult: AppBootResul
   // the process crashes here — not on first request.
   // eslint-disable-next-line no-console
   console.log('[app-api] Initializing context (settlement-swap-paths.json on-chain derivation)...');
-  await getCtx();
+  await contextPromise;
 
   // 6. Health check (always available — context already initialized)
   app.get('/health', (c) => c.json({ status: 'ok', mode: bootResult.mode }));
 
   // 7. Mount route groups
-  const relayRoutes = createRelayRoutes(getCtx);
-  const authRoutes = createAuthRoutes(getCtx);
-  const adminRoutes = createAdminRoutes(getCtx);
-  const studioRoutes = createStudioRoutes(getCtx);
+  const relayRoutes = createRelayRoutes(contextPromise, resolveClientIp);
+  const authRoutes = createAuthRoutes(contextPromise, {
+    resolveClientIp,
+    adminAddress: runtimeInput.adminAddress,
+    adminAuth: runtimeInput.adminAuth,
+  });
+  const adminRoutes = createAdminRoutes(contextPromise, {
+    resolveClientIp,
+    network: runtimeInput.context.network,
+    adminAddress: runtimeInput.adminAddress,
+    adminJwt: runtimeInput.adminAuth.jwt,
+    ...runtimeInput.adminSponsorOperations,
+  });
+  const studioRoutes = createStudioRoutes(contextPromise, resolveClientIp);
 
   app.route('/relay', relayRoutes);
   app.route('/auth', authRoutes);

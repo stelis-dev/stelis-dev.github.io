@@ -5,20 +5,12 @@
  * `@stelis/core-api`) into a `SponsoredExecutionLogEntry`
  * and writes it via the configured `SponsoredLogsStoreAdapter`.
  *
- * Outcome filter: only outcomes that the Host paid (or could have
- * paid) gas for go into `Sponsored Executions`. The recorded set is
- * `success`, `onchain_revert`, plus the narrow `internal_error` subset
- * whose `economics.failureReason` starts with `submit_infra_unknown`.
- * That marker is stamped on both routes (generic and promotion) by
- * the post-signature submit-infra exception branch — `pool.sign()`
- * issues the sponsor signature inside `signAndSubmit` before
- * `executeTransaction()` is called, so any non-congestion throw on
- * the latter is post-signature and the TX may have reached the
- * network and burned gas. All other `internal_error` paths (raw
- * catch-all crashes that throw before sponsor signature) did not pay
- * gas; they stay out of this store. `validation_failure`,
- * `preflight_failure`, and `congestion` also did not pay gas and
- * belong to other audit views.
+ * Execution-stage filter: only runs that reached an on-chain terminal
+ * result, or whose landing became uncertain after the sponsor signature,
+ * go into `Sponsored Executions`. The stage is runner-owned metadata;
+ * diagnostic `failureReason` text is never parsed as authority.
+ * Confirmed congestion and every pre-signature failure stay out of this
+ * store because they did not execute on chain.
  *
  * Numeric honesty: every field on an `unknown`-economics row is `null`,
  * including `hostFeeMist`. The recorder MUST NOT coerce an unknown
@@ -40,49 +32,29 @@ import {
 } from '@stelis/core-api/observability';
 import type { SponsorResultCallback, SponsorResultMetadata } from '@stelis/core-api';
 import type { SponsoredLogsStoreAdapter } from './store.js';
-import type { SponsoredExecutionLogEntry, SponsoredExecutionMode } from './types.js';
+import type {
+  SponsoredExecutionLogEntry,
+  SponsoredExecutionLogOutcome,
+  SponsoredExecutionMode,
+} from './types.js';
+import { isSponsoredExecutionLogOutcome } from './types.js';
 
-/**
- * Outcomes that always produce a sponsored-execution row. `success`
- * reached onchain submit; `onchain_revert` reached onchain submit and
- * burned gas.
- */
-const ALWAYS_RECORDED_OUTCOMES = new Set<string>(['success', 'onchain_revert']);
+type RecordableSponsorResultMetadata = SponsorResultMetadata & {
+  readonly outcome: SponsoredExecutionLogOutcome;
+};
 
-/**
- * Marker prefix on `economics.failureReason` for the submit-infra
- * branch (post-signature uncertainty: sponsor signature issued, TX may
- * have reached the network). Both routes stamp it on the
- * `internal_error` outcome before re-throwing the raw RPC error and
- * lock the economics via `sponsorResultEconomicsLocked` so the outer-catch
- * fall-through cannot overwrite the marker:
- *   - Generic: `packages/core-api/src/session/sponsoredExecution/genericExecutionPolicy.ts` — single
- *     `submit_infra_unknown: <rpcMsg>` shape (no per-receipt ledger
- *     reservation on this route).
- *   - Promotion:
- *     `packages/core-api/src/session/sponsoredExecution/studioExecutionPolicy.ts`
- *     — two shapes:
- *       - `submit_infra_unknown: <rpcMsg>` (consume() succeeded)
- *       - `submit_infra_unknown (ledger consume <kind>): <rpcMsg>`
- *         (consume() returned `{ ok: false }` or threw)
- * All three shapes start with `submit_infra_unknown`, so a prefix
- * check is the narrow signal we use to opt this single
- * `internal_error` subset into sponsoredLogs without admitting raw
- * catch-all crashes.
- */
-const SUBMIT_INFRA_FAILURE_REASON_PREFIX = 'submit_infra_unknown';
-
-function shouldRecord(metadata: SponsorResultMetadata): boolean {
-  if (ALWAYS_RECORDED_OUTCOMES.has(metadata.outcome)) {
+function shouldRecord(
+  metadata: SponsorResultMetadata,
+): metadata is RecordableSponsorResultMetadata {
+  if (!isSponsoredExecutionLogOutcome(metadata.outcome)) {
+    return false;
+  }
+  if (metadata.executionStage === 'on_chain') {
     return true;
   }
-  if (metadata.outcome === 'internal_error') {
-    const reason = metadata.economics.failureReason;
-    if (typeof reason === 'string' && reason.startsWith(SUBMIT_INFRA_FAILURE_REASON_PREFIX)) {
-      return true;
-    }
-  }
-  return false;
+  return (
+    metadata.executionStage === 'after_sponsor_signature' && metadata.outcome === 'internal_error'
+  );
 }
 
 /** ISO timestamp source — pluggable for test determinism. */
@@ -146,14 +118,16 @@ export function createSponsoredLogsRecorder(
 }
 
 function buildLogEntry(
-  metadata: SponsorResultMetadata,
+  metadata: RecordableSponsorResultMetadata,
   clock: ClockFn,
 ): SponsoredExecutionLogEntry {
   const mode: SponsoredExecutionMode = metadata.route;
   const econ = metadata.economics;
-  if (econ.economicsStatus === 'known') {
+  // A post-signature uncertainty cannot prove what landed. Even if a buggy
+  // producer supplies numeric economics, persist the row as unknown rather
+  // than manufacturing certainty at the host boundary.
+  if (econ.economicsStatus === 'known' && metadata.executionStage !== 'after_sponsor_signature') {
     return {
-      schemaVersion: 1,
       createdAt: clock().toISOString(),
       mode,
       outcome: metadata.outcome,
@@ -161,7 +135,6 @@ function buildLogEntry(
       digest: metadata.digest ?? null,
       senderAddress: metadata.senderAddress,
       sponsorAddress: metadata.sponsorAddress,
-      slotId: metadata.slotId,
       executionPathKey: metadata.executionPathKey,
       orderIdHash: metadata.orderIdHash,
       promotionId: metadata.promotionId,
@@ -178,7 +151,6 @@ function buildLogEntry(
     };
   }
   return {
-    schemaVersion: 1,
     createdAt: clock().toISOString(),
     mode,
     outcome: metadata.outcome,
@@ -186,7 +158,6 @@ function buildLogEntry(
     digest: metadata.digest ?? null,
     senderAddress: metadata.senderAddress,
     sponsorAddress: metadata.sponsorAddress,
-    slotId: metadata.slotId,
     executionPathKey: metadata.executionPathKey,
     orderIdHash: metadata.orderIdHash,
     promotionId: metadata.promotionId,
@@ -234,10 +205,10 @@ export function fanOutSponsorResult(
             source: 'sponsored_logs_fanout',
             callback_index: i,
             route: metadata.route,
-            slot_id: metadata.slotId,
+            sponsor_address: metadata.sponsorAddress,
             // digest is the cross-reference key documented in
             // `docs/operations.md` (`SPONSOR_RESULT_CALLBACK_FAILED`
-            // → recorder/state failure correlation by digest/slot).
+            // → recorder/state failure correlation by digest/sponsor address).
             // null when the sponsor result path never reached submit.
             digest: metadata.digest ?? null,
             outcome: metadata.outcome,

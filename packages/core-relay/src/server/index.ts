@@ -3,6 +3,7 @@ export {
   extractSettlePaymentInputContract,
   validatePaymentInputIntegrity,
 } from '../paymentInputIntegrity.js';
+export { findUniqueSettleCommandIndex } from '../settleCommand.js';
 
 export type {
   PaymentInputTrace,

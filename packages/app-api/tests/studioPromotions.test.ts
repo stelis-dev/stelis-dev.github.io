@@ -30,21 +30,20 @@ vi.mock('@stelis/core-api/studio', async () => {
   };
 });
 
-vi.mock('../src/clientIp.js', () => ({
-  getClientIp: vi.fn().mockReturnValue('127.0.0.1'),
-}));
-
 vi.mock('../src/developerJwtVerifyCallback.js', () => ({
   callDeveloperVerifyApi: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { createStudioRoutes } from '../src/routes/studio.js';
+import type { ResolveClientIp } from '../src/clientIp.js';
 import type { AppApiContext } from '../src/context.js';
 import {
   MemoryPromotionStore,
   MemoryPromotionExecutionLedger,
 } from '@stelis/core-api/testing/studio';
 import type { CreatePromotionInput } from '@stelis/core-api/studio';
+
+const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -91,7 +90,7 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
 }
 
 function mountApp(ctx: AppApiContext): Hono {
-  const routes = createStudioRoutes(async () => ctx);
+  const routes = createStudioRoutes(Promise.resolve(ctx), resolveClientIp);
   const app = new Hono();
   app.route('/studio', routes);
   return app;

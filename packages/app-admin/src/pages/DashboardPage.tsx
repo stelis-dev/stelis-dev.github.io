@@ -4,15 +4,21 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
+  ApiError,
   getSponsorOperations,
-  getSponsorRefillAccountWithdrawNonce,
-  executeSponsorRefillAccountWithdraw,
+  issueSponsorRefillAccountWithdrawalChallenge,
+  executeSponsorRefillAccountWithdrawal,
   getSponsoredLogsSummary,
   type SponsorOperationsStatus,
   type SponsoredExecutionAggregate,
 } from '../api/client';
 import { SponsoredLogsKpi } from '../components/SponsoredLogsKpi';
-import { buildSponsorRefillAccountWithdrawMessage, type SponsorSlotState } from '@stelis/contracts';
+import {
+  buildSponsorRefillAccountWithdrawMessage,
+  isPositiveU64DecimalString,
+  type SuiNetwork,
+  type SponsorSlotState,
+} from '@stelis/contracts';
 import { getWallets } from '@mysten/wallet-standard';
 import { mistToSui as formatMistToSui, suiToMist, truncateAddress, CopyButton } from '../utils';
 import type { SuiSignPersonalMessageFeature } from '../types';
@@ -33,7 +39,6 @@ const SLOT_STATE_COLOR: Record<SponsorSlotState, string> = {
   healthy: '#22c55e',
   low_balance: '#ef4444',
   refilling: '#f59e0b',
-  awaiting_confirmation: '#3b82f6',
   rpc_unreachable: '#64748b',
   refill_failed: '#ef4444',
 };
@@ -42,7 +47,6 @@ const SLOT_STATE_LABEL: Record<SponsorSlotState, string> = {
   healthy: '● Healthy',
   low_balance: '● Low balance',
   refilling: '● Refilling',
-  awaiting_confirmation: '● Awaiting confirmation',
   rpc_unreachable: '○ RPC unreachable',
   refill_failed: '● Refill failed',
 };
@@ -56,6 +60,72 @@ type WithdrawSignerResolution =
       suiAccount: { address: string };
     }
   | { ok: false; message: string };
+
+interface SignedWithdrawalRequest {
+  readonly adminAddress: string;
+  readonly network: SuiNetwork;
+  readonly nonce: string;
+  readonly signature: string;
+  readonly amountMist: string;
+}
+
+const PENDING_WITHDRAWAL_STORAGE_KEY = 'stelis:admin:pending-withdrawal';
+
+function readPendingWithdrawal(
+  adminAddress: string | null,
+  network: SuiNetwork,
+): SignedWithdrawalRequest | null {
+  try {
+    if (adminAddress === null) {
+      sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+      return null;
+    }
+    const raw = sessionStorage.getItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as Partial<SignedWithdrawalRequest>;
+    if (
+      parsed.adminAddress !== adminAddress ||
+      parsed.network !== network ||
+      typeof parsed.nonce !== 'string' ||
+      parsed.nonce.length === 0 ||
+      typeof parsed.signature !== 'string' ||
+      parsed.signature.length === 0 ||
+      typeof parsed.amountMist !== 'string' ||
+      !isPositiveU64DecimalString(parsed.amountMist)
+    ) {
+      sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+      return null;
+    }
+    return parsed as SignedWithdrawalRequest;
+  } catch {
+    try {
+      sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+    } catch {
+      // Storage is unavailable; fail closed without retaining an in-memory request.
+    }
+    return null;
+  }
+}
+
+function pendingWithdrawalMatchesRuntime(
+  request: SignedWithdrawalRequest,
+  adminAddress: string | null,
+  network: SuiNetwork,
+): boolean {
+  return request.adminAddress === adminAddress && request.network === network;
+}
+
+function rememberPendingWithdrawal(request: SignedWithdrawalRequest | null): void {
+  try {
+    if (request === null) {
+      sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(PENDING_WITHDRAWAL_STORAGE_KEY, JSON.stringify(request));
+    }
+  } catch {
+    // The in-memory request still preserves exact retry identity for this mounted page.
+  }
+}
 
 function validateWithdrawAmountInput(amount: string): WithdrawAmountValidation {
   if (amount.trim().length === 0) {
@@ -75,8 +145,11 @@ function validateWithdrawAmountInput(amount: string): WithdrawAmountValidation {
     };
   }
 
-  if (amountMist === '0' || amountMist.startsWith('-')) {
+  if (amountMist === '0') {
     return { ok: false, message: 'Withdrawal amount must be greater than 0' };
+  }
+  if (!isPositiveU64DecimalString(amountMist)) {
+    return { ok: false, message: 'Withdrawal amount must fit a positive u64 MIST value' };
   }
 
   return { ok: true, amountMist };
@@ -161,11 +234,13 @@ function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
 
 function WithdrawSection({
   adminAddress,
+  network,
   sponsorRefillAccountAddress,
   sponsorRefillAccountBalanceSui,
   onSuccess,
 }: {
   adminAddress: string | null;
+  network: SuiNetwork;
   sponsorRefillAccountAddress: string | null;
   sponsorRefillAccountBalanceSui: string | null;
   onSuccess: () => void;
@@ -174,53 +249,87 @@ function WithdrawSection({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingRequest, setPendingRequest] = useState<SignedWithdrawalRequest | null>(() =>
+    readPendingWithdrawal(adminAddress, network),
+  );
   const amountValidation = validateWithdrawAmountInput(amount);
   const showAmountValidation = amount.trim().length > 0 && !amountValidation.ok;
+
+  useEffect(() => {
+    setPendingRequest((current) => {
+      if (current === null || pendingWithdrawalMatchesRuntime(current, adminAddress, network)) {
+        return current;
+      }
+      rememberPendingWithdrawal(null);
+      return null;
+    });
+  }, [adminAddress, network]);
 
   const handleWithdraw = useCallback(async () => {
     if (!adminAddress) return;
     setResult(null);
-    const nextAmountValidation = validateWithdrawAmountInput(amount);
-    if (!nextAmountValidation.ok) {
-      setError(nextAmountValidation.message);
-      return;
-    }
-    const signerResolution = resolveWithdrawSigner(adminAddress);
-    if (!signerResolution.ok) {
-      setError(signerResolution.message);
-      return;
-    }
 
     setBusy(true);
     setError(null);
+    let request = pendingRequest;
 
     try {
-      // 1. Get nonce
-      const { nonce } = await getSponsorRefillAccountWithdrawNonce();
+      if (request !== null && !pendingWithdrawalMatchesRuntime(request, adminAddress, network)) {
+        request = null;
+        setPendingRequest(null);
+        rememberPendingWithdrawal(null);
+        throw new Error(
+          'Pending withdrawal no longer matches the active admin account and network',
+        );
+      }
+      if (request === null) {
+        const nextAmountValidation = validateWithdrawAmountInput(amount);
+        if (!nextAmountValidation.ok) throw new Error(nextAmountValidation.message);
+        const signerResolution = resolveWithdrawSigner(adminAddress);
+        if (!signerResolution.ok) throw new Error(signerResolution.message);
 
-      // 2. Sign
-      const amountMist = nextAmountValidation.amountMist;
-      const message = buildSponsorRefillAccountWithdrawMessage(amountMist, nonce);
-      const { signature } = await signerResolution.signFeature.signPersonalMessage({
-        message: new TextEncoder().encode(message),
-        account: signerResolution.suiAccount,
-      });
+        const { nonce } = await issueSponsorRefillAccountWithdrawalChallenge();
+        const amountMist = nextAmountValidation.amountMist;
+        const message = buildSponsorRefillAccountWithdrawMessage(network, amountMist, nonce);
+        const { signature } = await signerResolution.signFeature.signPersonalMessage({
+          message: new TextEncoder().encode(message),
+          account: signerResolution.suiAccount,
+        });
+        request = { adminAddress, network, nonce, signature, amountMist };
+        setPendingRequest(request);
+        rememberPendingWithdrawal(request);
+      }
 
-      // 3. Execute
-      const { digest } = await executeSponsorRefillAccountWithdraw({
-        nonce,
-        signature,
-        amountMist,
+      const { digest } = await executeSponsorRefillAccountWithdrawal({
+        nonce: request.nonce,
+        signature: request.signature,
+        amountMist: request.amountMist,
       });
+      setPendingRequest(null);
+      rememberPendingWithdrawal(null);
       setResult(`Success: ${digest}`);
       setAmount('');
       onSuccess();
     } catch (err) {
+      const terminalHttpResponse =
+        err instanceof ApiError &&
+        (err.code === 'WITHDRAWAL_NONCE_MISSING' ||
+          err.code === 'WITHDRAWAL_RUNWAY_BLOCKED' ||
+          err.code === 'WITHDRAWAL_FAILED' ||
+          err.code === 'WITHDRAWAL_NOT_ACCEPTED' ||
+          err.code === 'WITHDRAWAL_SIGNATURE_INVALID');
+      if (terminalHttpResponse) {
+        setPendingRequest(null);
+        rememberPendingWithdrawal(null);
+      } else if (request !== null) {
+        setPendingRequest(request);
+        rememberPendingWithdrawal(request);
+      }
       setError(err instanceof Error ? err.message : 'Withdrawal failed');
     } finally {
       setBusy(false);
     }
-  }, [adminAddress, amount, onSuccess]);
+  }, [adminAddress, amount, network, onSuccess, pendingRequest]);
 
   return (
     <div className="admin-card">
@@ -253,6 +362,7 @@ function WithdrawSection({
             placeholder="0.5"
             step="0.000000001"
             value={amount}
+            disabled={pendingRequest !== null}
             onChange={(e) => {
               setAmount(e.target.value);
               setError(null);
@@ -268,12 +378,17 @@ function WithdrawSection({
         <button
           className="admin-btn admin-btn-primary"
           style={{ whiteSpace: 'nowrap' }}
-          disabled={busy || !adminAddress || !amountValidation.ok}
+          disabled={busy || !adminAddress || (pendingRequest === null && !amountValidation.ok)}
           onClick={() => void handleWithdraw()}
         >
-          {busy ? 'Processing…' : 'Withdraw'}
+          {busy ? 'Processing…' : pendingRequest === null ? 'Withdraw' : 'Retry pending withdrawal'}
         </button>
       </div>
+      {pendingRequest && (
+        <div style={{ fontSize: 11, color: '#fbbf24', marginTop: 6 }}>
+          Pending signed request: {pendingRequest.amountMist} MIST
+        </div>
+      )}
       <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 10, lineHeight: 1.6 }}>
         <span style={{ fontFamily: 'monospace' }}>
           {sponsorRefillAccountAddress ? truncateAddress(sponsorRefillAccountAddress) : '—'}
@@ -587,6 +702,7 @@ export function DashboardPage() {
       {/* Withdrawal */}
       <WithdrawSection
         adminAddress={session?.address ?? null}
+        network={data.network}
         sponsorRefillAccountAddress={sponsorRefillAccountAddress}
         sponsorRefillAccountBalanceSui={sponsorRefillAccountBalanceSui}
         onSuccess={poll}

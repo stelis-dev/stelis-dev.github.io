@@ -32,12 +32,23 @@ import { SponsorPool } from '../src/context.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64, toHex, toBase58 } from '@mysten/sui/utils';
-import type { PromotionPreparedTxEntry } from '../src/store/prepareTypes.js';
+import type {
+  PromotionPreparedTxDraft,
+  PromotionPreparedTxEntry,
+} from '../src/store/prepareTypes.js';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import type {
   SponsorResultCallback,
   SponsorResultMetadata,
 } from '../src/handlers/sponsorResult.js';
+import {
+  congestedObjectsExecutionError,
+  grpcExecutionFailure,
+  grpcExecutionSuccess,
+  grpcSimulationFailure,
+  grpcSimulationSuccess,
+  moveAbortExecutionError,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -49,6 +60,7 @@ const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
 const ALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin';
 const GLOBAL_TARGET_HASHES = new Set(hashTargets([ALLOWED_TARGET]));
+const TEST_DEEPBOOK_PACKAGE_ID = '0xdef';
 
 // Fixed test keypairs
 const SPONSOR_KP = Ed25519Keypair.generate();
@@ -107,6 +119,7 @@ function createMockSui(opts?: {
   simFailReason?: string;
   execFail?: boolean;
   execFailReason?: string;
+  execCongestion?: boolean;
   highGas?: boolean;
   noGasUsed?: boolean;
   /**
@@ -120,7 +133,7 @@ function createMockSui(opts?: {
   /**
    * Simulate an on-chain revert that DOES carry `gasUsed` in
    * the failure-path effects. The default `execFail: true` returns a
-   * FailedTransaction without effects, exercising the
+   * FailedTransaction with a non-canonical gas summary, exercising the
    * `onchain_revert_gas_unknown` branch.
    */
   revertWithGasUsed?: boolean;
@@ -145,40 +158,47 @@ function createMockSui(opts?: {
   return {
     simulateTransaction: async () => {
       if (opts?.simFail) {
-        return {
-          $kind: 'FailedTransaction',
-          FailedTransaction: {
-            status: { error: { message: opts.simFailReason ?? 'sim-error' } },
-          },
-        };
+        const reason = opts.simFailReason ?? 'sim-error';
+        return grpcSimulationFailure(
+          'mock-simulation-failure',
+          moveAbortExecutionError(reason),
+          gasCost,
+        );
       }
-      return {
-        Transaction: {
-          digest: 'mock-digest',
-          status: { success: true },
-          effects: { gasUsed: gasCost },
-        },
-      };
+      return grpcSimulationSuccess('mock-digest', gasCost);
     },
     executeTransaction: async () => {
       if (opts?.submitThrows) {
         throw new Error(opts.submitThrowMessage ?? 'rpc transport error');
       }
       if (opts?.execFail) {
+        const reason = opts.execFailReason ?? 'exec-error';
+        const error = opts.execCongestion
+          ? congestedObjectsExecutionError(reason)
+          : moveAbortExecutionError(reason);
+        const failed = grpcExecutionFailure('tx-digest-revert', error, gasCost);
+        if (opts.revertWithGasUsed || opts.execCongestion) return failed;
         return {
-          $kind: 'FailedTransaction',
+          ...failed,
           FailedTransaction: {
-            digest: 'tx-digest-revert',
-            status: { error: { message: opts.execFailReason ?? 'exec-error' } },
-            effects: opts?.revertWithGasUsed ? { gasUsed: gasCost } : undefined,
+            ...failed.FailedTransaction,
+            effects: {
+              ...failed.FailedTransaction.effects,
+              gasUsed: {},
+            },
           },
         };
       }
+      const success = grpcExecutionSuccess('tx-digest-abc', gasCost);
+      if (!opts?.noGasUsed) return success;
       return {
+        ...success,
         Transaction: {
-          digest: 'tx-digest-abc',
-          status: { success: true },
-          effects: opts?.noGasUsed ? {} : { gasUsed: gasCost },
+          ...success.Transaction,
+          effects: {
+            ...success.Transaction.effects,
+            gasUsed: {},
+          },
         },
       };
     },
@@ -194,6 +214,7 @@ async function setup(opts?: {
   simFailReason?: string;
   execFail?: boolean;
   execFailReason?: string;
+  execCongestion?: boolean;
   highGas?: boolean;
   noGasUsed?: boolean;
   submitThrows?: boolean;
@@ -209,8 +230,8 @@ async function setup(opts?: {
 }) {
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -225,7 +246,7 @@ async function setup(opts?: {
   const signed = await buildSignedTx();
 
   // receiptId must exist before pool.checkout() so the lease proof can
-  // bind receiptId and slotId deterministically.
+  // bind receiptId and sponsorAddress deterministically.
   const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
 
   // Checkout a slot
@@ -234,7 +255,7 @@ async function setup(opts?: {
 
   // Commit the slot lease to the final txBytesHash so
   // handlePromotionSponsor → pool.sign() can pass.
-  await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+  await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
 
   // Reserve via executionLedger
   const reserveResult = await executionLedger.reserve({
@@ -246,13 +267,11 @@ async function setup(opts?: {
   if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
   // Store in prepareStore with mode='promotion'
-  const entry: PromotionPreparedTxEntry = {
-    issuedAt: Date.now(),
+  const entry: PromotionPreparedTxDraft = {
     receiptId,
     reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
     txBytesHash: signed.txHash,
     senderAddress: USER_ADDR,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: `promotion:${TEST_PROMO_ID}`,
@@ -262,7 +281,7 @@ async function setup(opts?: {
     promotionId: TEST_PROMO_ID,
     userId: TEST_USER_ID,
   };
-  await prepareStore.store(receiptId, entry);
+  await prepareStore.store(entry);
 
   // Mock promotion store
   const promotionStore = {
@@ -305,11 +324,11 @@ async function setup(opts?: {
 
   const ctx: PromotionSponsorContext = {
     sui: createMockSui(opts),
-    // Trusted package IDs for sponsor-time abort classification. The
+    // Trusted Stelis package ID for sponsor-time abort classification. The
     // fixtures below use `0xabc::vault` / `0xabc::settle` for trusted
     // Stelis aborts, so the test ctx must carry the matching package ID.
     packageId: '0xabc',
-    deepbookPackageId: '0xabc',
+    deepbookPackageId: TEST_DEEPBOOK_PACKAGE_ID,
     promotionStore,
     executionLedger,
     sponsorPool,
@@ -340,21 +359,10 @@ describe('handlePromotionSponsor', () => {
     const { ctx, signed, executionLedger } = await setup();
 
     const genericReceiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
-    await ctx.prepareStore.store(genericReceiptId, {
-      issuedAt: Date.now(),
+    await ctx.prepareStore.store({
       receiptId: genericReceiptId,
-      executionCostClaim: 2_000_000n,
-      simGas: 1_300_000n,
-      gasVarianceFixedMist: 100_000n,
-      slippageBufferMist: 0n,
-      grossGas: 1_500_000n,
-      profile: 'credit_general',
-      quoteTimestampMs: Date.now(),
-      policyHash: '',
-      quotedHostFeeMist: 0n,
       txBytesHash: signed.txHash,
       senderAddress: USER_ADDR,
-      slotId: 'fake-slot',
       sponsorAddress: SPONSOR_KP.toSuiAddress(),
       clientIp: '127.0.0.1',
       executionPathKey: 'generic-execution-path',
@@ -522,9 +530,12 @@ describe('handlePromotionSponsor', () => {
   test('rejects txBytes hash mismatch (tamper detection) and releases ledger reservation', async () => {
     const { ctx, receiptId, executionLedger } = await setup();
 
-    const emptyKind = new Transaction();
-    const emptyKindBytes = await emptyKind.build({ onlyTransactionKind: true });
-    const tx2 = Transaction.fromKind(emptyKindBytes);
+    // Keep the kind valid under current Promotion admission and change the
+    // full transaction's gas metadata so this test isolates stored-byte hash binding.
+    const validKind = new Transaction();
+    validKind.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+    const validKindBytes = await validKind.build({ onlyTransactionKind: true });
+    const tx2 = Transaction.fromKind(validKindBytes);
     tx2.setSender(USER_ADDR);
     tx2.setGasOwner(SPONSOR_KP.toSuiAddress());
     tx2.setGasBudget(2_000_000n);
@@ -844,13 +855,9 @@ describe('handlePromotionSponsor', () => {
     expect(ent!.consumedGasAllowanceMist).toBe('2000000');
   });
 
-  // Promotion preflight: a recognizable Move abort reason flows through the
-  // shared classifier (`classifySponsorFailureSubcode`) so the structured
-  // subcode reaches the abuse recorder AND the thrown
-  // `PromotionSponsorError.subcode`. Ledger release uses its fixed
-  // `'preflight_simulation_failed'` reason, and the unclassified fallback
-  // literal `simulation_failed` stays in abuse meta only.
-  test('classifies promotion preflight EReplayNonce as REPLAY_NONCE in abuse meta and on the thrown error', async () => {
+  // The actual promotion command is 0x2::coin::Coin. A Stelis abort string at
+  // that outer command is impossible provenance and must stay unclassified.
+  test('does not classify an unrelated Stelis abort string for a promotion coin command', async () => {
     const { ctx, signed, receiptId } = await setup({
       simFail: true,
       simFailReason: 'MoveAbort(0xabc::vault::check_and_advance_nonce, 1) in command 0',
@@ -868,13 +875,13 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('PREFLIGHT_FAILED');
-    expect((err as PromotionSponsorError).subcode).toBe('REPLAY_NONCE');
+    expect((err as PromotionSponsorError).subcode).toBeUndefined();
 
     const preflightCalls = recordSpy.mock.calls.filter((args) => args[2] === 'PREFLIGHT_FAILED');
     expect(preflightCalls.length).toBe(1);
     const [, , , meta] = preflightCalls[0]!;
     expect(meta).toEqual({
-      subcode: 'REPLAY_NONCE',
+      subcode: 'simulation_failed',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,
     });
 
@@ -915,12 +922,8 @@ describe('handlePromotionSponsor', () => {
     recordSpy.mockRestore();
   });
 
-  // Promotion on-chain revert: same classifier wiring as preflight. A
-  // recognizable Move abort reason produces the typed subcode in abuse
-  // meta and on the thrown `PromotionSponsorError.subcode`; an
-  // unclassified reason keeps the `'onchain_revert'` fallback inside
-  // abuse meta only.
-  test('classifies promotion on-chain revert EReplayNonce as REPLAY_NONCE in abuse meta and on the thrown error', async () => {
+  // The same provenance rule applies to the terminal execution result.
+  test('does not classify an unrelated Stelis on-chain abort for a promotion coin command', async () => {
     const { ctx, signed, receiptId } = await setup({
       execFail: true,
       execFailReason: 'MoveAbort(0xabc::vault::check_and_advance_nonce, 1) in command 0',
@@ -938,13 +941,13 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('ONCHAIN_REVERT');
-    expect((err as PromotionSponsorError).subcode).toBe('REPLAY_NONCE');
+    expect((err as PromotionSponsorError).subcode).toBeUndefined();
 
     const onchainCalls = recordSpy.mock.calls.filter((args) => args[2] === 'ONCHAIN_REVERT');
     expect(onchainCalls.length).toBe(1);
     const [, , , meta] = onchainCalls[0]!;
     expect(meta).toEqual({
-      subcode: 'REPLAY_NONCE',
+      subcode: 'onchain_revert',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,
     });
 
@@ -986,19 +989,10 @@ describe('handlePromotionSponsor', () => {
     const { ctx, signed, receiptId, executionLedger } = await setup();
     const abuseBlocker = ctx.abuseBlocker;
 
-    // Override executeTransaction to simulate shared-object congestion.
-    // `signAndSubmit` detects the substring 'ExecutionCancelledDueToShared
-    // ObjectCongestion' and sets `execResult.isCongestion = true`.
-    (ctx.sui as unknown as { executeTransaction: unknown }).executeTransaction = async () => ({
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        digest: 'congestion-digest',
-        status: {
-          $kind: 'ExecutionCancelledDueToSharedObjectCongestion',
-          error: { message: 'ExecutionCancelledDueToSharedObjectCongestion' },
-        },
-      },
-    });
+    // Only the current SDK CongestedObjects terminal kind proves that the
+    // sponsor-signed transaction was cancelled before on-chain execution.
+    (ctx.sui as unknown as { executeTransaction: unknown }).executeTransaction = async () =>
+      grpcExecutionFailure('congestion-digest', congestedObjectsExecutionError());
 
     const recordSpy = vi.spyOn(abuseBlocker, 'recordSponsorFailure');
 
@@ -1033,8 +1027,9 @@ describe('handlePromotionSponsor', () => {
     // the reservedGasMist field disagrees with the PTB's gasData.budget.
     const peeked = await prepareStore.peek(receiptId);
     if (!peeked || peeked.mode !== 'promotion') throw new Error('expected promotion entry');
-    await prepareStore.store(receiptId, {
-      ...peeked,
+    const { issuedAt: _issuedAt, ...draft } = peeked;
+    await prepareStore.store({
+      ...draft,
       reservedGasMist: peeked.reservedGasMist + 1n,
     });
 
@@ -1194,7 +1189,7 @@ describe('handlePromotionSponsor', () => {
     expect(ent!.activeReservationAmountMist).toBeNull();
   });
 
-  test('signAndSubmit throw (submit-infra failure) terminalizes the active reservation (consume, not release)', async () => {
+  test('post-signature uncertainty terminalizes the active reservation (consume, not release)', async () => {
     // Post-signature uncertainty consumes the full reserved
     // amount (release leaks; reaper hold also leaks at TTL). Active
     // reservation must be terminalized; `consumedGasAllowanceMist`
@@ -1283,8 +1278,8 @@ describe('handlePromotionSponsor', () => {
   test('rejects with PROMOTION_NOT_STARTED when startAt is in the future', async () => {
     const executionLedger = new MemoryPromotionExecutionLedger();
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-    const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-      sponsorPool.checkin(slotId, receiptId, txBytesHash),
+    const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+      sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
     );
     const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -1299,7 +1294,7 @@ describe('handlePromotionSponsor', () => {
     const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
     const slot = await sponsorPool.checkout(receiptId);
     if (!slot) throw new Error('No sponsor slot');
-    await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+    await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
     const reserveResult = await executionLedger.reserve({
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
@@ -1309,13 +1304,11 @@ describe('handlePromotionSponsor', () => {
     if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
     const txBytesHash = signed.txHash;
-    await prepareStore.store(receiptId, {
-      issuedAt: Date.now(),
+    await prepareStore.store({
       receiptId,
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n,
       txBytesHash,
-      slotId: slot.slotId,
       sponsorAddress: slot.sponsorAddress,
       clientIp: '127.0.0.1',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,
@@ -1324,7 +1317,7 @@ describe('handlePromotionSponsor', () => {
       mode: 'promotion',
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
-    } satisfies PromotionPreparedTxEntry);
+    } satisfies PromotionPreparedTxDraft);
 
     const future = new Date(Date.now() + 86_400_000).toISOString();
     const promotionStore = {
@@ -1355,6 +1348,8 @@ describe('handlePromotionSponsor', () => {
 
     const ctx: PromotionSponsorContext = {
       sui: createMockSui(),
+      packageId: '0xabc',
+      deepbookPackageId: TEST_DEEPBOOK_PACKAGE_ID,
       promotionStore,
       executionLedger,
       sponsorPool,
@@ -1383,8 +1378,8 @@ describe('handlePromotionSponsor', () => {
   test('rejects when use window has expired (USE_WINDOW_EXPIRED)', async () => {
     const executionLedger = new MemoryPromotionExecutionLedger();
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-    const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-      sponsorPool.checkin(slotId, receiptId, txBytesHash),
+    const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+      sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
     );
     const abuseBlocker = new MemoryAbuseBlocker();
 
@@ -1399,7 +1394,7 @@ describe('handlePromotionSponsor', () => {
     const receiptId = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
     const slot = await sponsorPool.checkout(receiptId);
     if (!slot) throw new Error('No sponsor slot');
-    await sponsorPool.commit(slot.slotId, receiptId, signed.txHash);
+    await sponsorPool.commit(slot.sponsorAddress, receiptId, signed.txHash);
     const reserveResult = await executionLedger.reserve({
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
@@ -1409,13 +1404,11 @@ describe('handlePromotionSponsor', () => {
     if (!reserveResult.ok) throw new Error(`Reserve failed: ${reserveResult.reason}`);
 
     const txBytesHash = signed.txHash;
-    await prepareStore.store(receiptId, {
-      issuedAt: Date.now(),
+    await prepareStore.store({
       receiptId,
       senderAddress: USER_ADDR,
       reservedGasMist: 2_000_000n, // simGas + GAS_VARIANCE_FIXED_MIST
       txBytesHash,
-      slotId: slot.slotId,
       sponsorAddress: slot.sponsorAddress,
       clientIp: '127.0.0.1',
       executionPathKey: `promotion:${TEST_PROMO_ID}`,
@@ -1424,7 +1417,7 @@ describe('handlePromotionSponsor', () => {
       mode: 'promotion',
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
-    } satisfies PromotionPreparedTxEntry);
+    } satisfies PromotionPreparedTxDraft);
 
     const promotionStore = {
       get: async () => ({
@@ -1454,6 +1447,8 @@ describe('handlePromotionSponsor', () => {
 
     const ctx: PromotionSponsorContext = {
       sui: createMockSui(),
+      packageId: '0xabc',
+      deepbookPackageId: TEST_DEEPBOOK_PACKAGE_ID,
       promotionStore,
       executionLedger,
       sponsorPool,
@@ -1690,6 +1685,31 @@ describe('handlePromotionSponsor', () => {
     return { txBytes, txBytesBase64: toBase64(txBytes), userSignature: sig.signature };
   }
 
+  async function buildCommandCountTx(commandCount: number) {
+    const kindTx = new Transaction();
+    for (let index = 0; index < commandCount; index++) {
+      kindTx.moveCall({ target: ALLOWED_TARGET as `${string}::${string}::${string}` });
+    }
+    const kindBytes = await kindTx.build({ onlyTransactionKind: true });
+    const tx = Transaction.fromKind(kindBytes);
+    tx.setSender(USER_ADDR);
+    tx.setGasOwner(SPONSOR_KP.toSuiAddress());
+    tx.setGasBudget(2_000_000n);
+    tx.setGasPrice(1000);
+    const digestBytes = new Uint8Array(32);
+    digestBytes.fill(7);
+    tx.setGasPayment([
+      {
+        objectId: '0x' + '0'.repeat(64),
+        version: '1',
+        digest: toBase58(digestBytes),
+      },
+    ]);
+    const txBytes = await tx.build();
+    const sig = await USER_KP.signTransaction(txBytes);
+    return { txBytesBase64: toBase64(txBytes), userSignature: sig.signature };
+  }
+
   // Helper: tamper tx.sender while signing with USER_KP. Canonical sender
   // mismatch path (same shape as the canonical mismatch test but with a
   // separate digest seed so fixtures don't collide if tests are reordered).
@@ -1841,6 +1861,56 @@ describe('handlePromotionSponsor', () => {
       expectedStatusHint: 403,
       expectedAbuseCode: 'PROMO_FORBIDDEN_COMMAND',
     });
+  });
+
+  test.each([0, 17])(
+    'pure command count %i returns BAD_REQUEST before consume without recording manipulation abuse',
+    async (commandCount) => {
+      const { ctx, receiptId } = await setup();
+      const submission = await buildCommandCountTx(commandCount);
+      const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
+
+      const err = await handlePromotionSponsor(ctx, {
+        promotionId: TEST_PROMO_ID,
+        receiptId,
+        txBytes: submission.txBytesBase64,
+        userSignature: submission.userSignature,
+        verifiedIdentity: buildIdentity(),
+        clientIp: '127.0.0.1',
+      }).catch((error: unknown) => error);
+
+      expect(err).toBeInstanceOf(PromotionSponsorError);
+      expect(err).toMatchObject({
+        code: 'BAD_REQUEST',
+        statusHint: 400,
+        message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
+      });
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(await ctx.prepareStore.peek(receiptId)).not.toBeNull();
+    },
+  );
+
+  test('does not let over-cap padding hide disallowed-target abuse', async () => {
+    const { ctx, receiptId } = await setup();
+    ctx.globalTargetHashes = new Set<string>();
+    const submission = await buildCommandCountTx(17);
+    const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
+
+    const err = await handlePromotionSponsor(ctx, {
+      promotionId: TEST_PROMO_ID,
+      receiptId,
+      txBytes: submission.txBytesBase64,
+      userSignature: submission.userSignature,
+      verifiedIdentity: buildIdentity(),
+      clientIp: '127.0.0.1',
+    }).catch((error: unknown) => error);
+
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect(err).toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+    expect(
+      recordSpy.mock.calls.filter((call) => call[2] === 'PROMO_DISALLOWED_TARGET'),
+    ).toHaveLength(1);
+    expect(await ctx.prepareStore.peek(receiptId)).not.toBeNull();
   });
 
   test('malformed txBytes (valid base64, invalid BCS) returns BAD_REQUEST/400 and preserves prepared entry', async () => {
@@ -2025,18 +2095,20 @@ describe('handlePromotionSponsor', () => {
     expect(probe.calls).toHaveLength(1);
     expect(probe.calls[0]).toMatchObject({
       outcome: 'success',
+      executionStage: 'on_chain',
       route: 'promotion',
       digest: 'tx-digest-abc',
     });
-    // Economics block — promotion success: recovered === paid (ledger
-    // reimburses actualGasMist). Net is exactly 0, NOT a loss.
+    // Promotion allowance consumption is entitlement accounting, not a
+    // transfer that recovers the Host's gas payment.
     expect(probe.calls[0].economics.economicsStatus).toBe('known');
     if (probe.calls[0].economics.economicsStatus === 'known') {
-      expect(probe.calls[0].economics.recoveredGasMist).toBe(
-        probe.calls[0].economics.hostPaidGasMist,
-      );
-      expect(probe.calls[0].economics.hostNetMist).toBe('0');
+      expect(probe.calls[0].economics.recoveredGasMist).toBe('0');
+      expect(probe.calls[0].economics.hostFeeMist).toBe('0');
       expect(BigInt(probe.calls[0].economics.hostPaidGasMist)).toBeGreaterThan(0n);
+      expect(probe.calls[0].economics.hostNetMist).toBe(
+        (-BigInt(probe.calls[0].economics.hostPaidGasMist)).toString(),
+      );
     }
     // Ordering: safeSlotCheckin runs before callback.
     expect(probe.order).toEqual(['checkin', 'callback']);
@@ -2065,6 +2137,7 @@ describe('handlePromotionSponsor', () => {
     expect(probe.calls).toHaveLength(1);
     expect(probe.calls[0]).toMatchObject({
       outcome: 'success',
+      executionStage: 'on_chain',
       route: 'promotion',
     });
     // Economics: gasUsed-missing edge path → unknown economics with
@@ -2073,6 +2146,41 @@ describe('handlePromotionSponsor', () => {
     if (probe.calls[0].economics.economicsStatus === 'unknown') {
       expect(probe.calls[0].economics.failureReason).toBe('GAS_EFFECTS_MISSING');
     }
+  });
+
+  test('host callback: post-success ledger throw keeps known unrecovered gas loss', async () => {
+    const { ctx, signed, receiptId, executionLedger } = await setup();
+    const probe = collectingPromotionCallback();
+    ctx.onSponsorResult = probe.callback;
+    vi.spyOn(executionLedger, 'consume').mockRejectedValue(new Error('redis transport down'));
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const err = await handlePromotionSponsor(ctx, {
+      promotionId: TEST_PROMO_ID,
+      receiptId,
+      txBytes: signed.txBytesBase64,
+      userSignature: signed.userSignature,
+      verifiedIdentity: buildIdentity(),
+      clientIp: '127.0.0.1',
+    }).catch((cause: unknown) => cause);
+
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('CONSUME_FAILED');
+    expect(probe.calls).toHaveLength(1);
+    expect(probe.calls[0]).toMatchObject({
+      outcome: 'success',
+      executionStage: 'on_chain',
+    });
+    expect(probe.calls[0].economics.economicsStatus).toBe('known');
+    if (probe.calls[0].economics.economicsStatus === 'known') {
+      expect(probe.calls[0].economics.recoveredGasMist).toBe('0');
+      expect(probe.calls[0].economics.hostNetMist).toBe(
+        (-BigInt(probe.calls[0].economics.hostPaidGasMist)).toString(),
+      );
+      expect(probe.calls[0].economics.failureReason).toContain('PROMOTION_LEDGER_CONSUME_THREW');
+    }
+
+    consoleErrorSpy.mockRestore();
   });
 
   test('host callback: errors are swallowed — primary result preserved', async () => {
@@ -2121,8 +2229,8 @@ describe('handlePromotionSponsor', () => {
 // ─────────────────────────────────────────────
 //
 // Acceptance:
-//   - submit-infra exception → consume(reservedGasMist), UsageEvent
-//     `submit_infra_unknown`, `PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION`,
+//   - post-signature uncertainty → consume(reservedGasMist), UsageEvent
+//     `post_signature_uncertainty`, reconciliation event,
 //     no `release()`.
 //   - on-chain revert with `gasUsed` → consume(actualGasMist), UsageEvent
 //     `onchain_revert`, no `release()`.
@@ -2134,7 +2242,7 @@ describe('handlePromotionSponsor', () => {
 //   - Pre-submit + congestion remain `release()`.
 
 describe('post-signature/post-submit ledger consume policy', () => {
-  test('submit-infra exception consumes reserved, appends submit_infra_unknown usage row, emits reconciliation event, does not release', async () => {
+  test('post-signature uncertainty consumes reserved, appends usage row, emits reconciliation event, and does not release', async () => {
     const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
       submitThrows: true,
       submitThrowMessage: 'rpc transport error',
@@ -2162,7 +2270,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(entitlement!.activeReservationReceiptId).toBeNull();
 
     // UsageEvent append.
-    const failedRow = usageRows.find((r) => r.failureReason === 'submit_infra_unknown');
+    const failedRow = usageRows.find((r) => r.failureReason === 'post_signature_uncertainty');
     expect(failedRow).toBeDefined();
     expect(failedRow!.result).toBe('failed');
     expect(failedRow!.txDigest).toBeNull();
@@ -2178,7 +2286,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
           return null;
         }
       })
-      .find((entry) => entry?.['event'] === 'PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION');
+      .find((entry) => entry?.['event'] === 'PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY');
     expect(reconLog).toBeDefined();
     expect(reconLog!['promotionId']).toBe(TEST_PROMO_ID);
     expect(reconLog!['userId']).toBe(TEST_USER_ID);
@@ -2196,6 +2304,10 @@ describe('post-signature/post-submit ledger consume policy', () => {
       revertWithGasUsed: true,
       withUsageCapture: true,
     });
+    const sponsorResults: SponsorResultMetadata[] = [];
+    ctx.onSponsorResult = (metadata) => {
+      sponsorResults.push(metadata);
+    };
 
     const err = await handlePromotionSponsor(ctx, {
       promotionId: TEST_PROMO_ID,
@@ -2222,6 +2334,20 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(failedRow!.consumedGasMist).toBe('1300000');
     expect(failedRow!.releasedGasMist).toBe('700000');
     expect(failedRow!.txDigest).toBe('tx-digest-revert');
+
+    expect(sponsorResults).toHaveLength(1);
+    expect(sponsorResults[0]).toMatchObject({
+      outcome: 'onchain_revert',
+      executionStage: 'on_chain',
+      digest: 'tx-digest-revert',
+      economics: {
+        economicsStatus: 'known',
+        recoveredGasMist: '0',
+        hostPaidGasMist: '1300000',
+        hostFeeMist: '0',
+        hostNetMist: '-1300000',
+      },
+    });
   });
 
   test('on-chain revert with gasUsed but zero net (rebate ≥ computation+storage) stays onchain_revert with 0 consume + full surplus released', async () => {
@@ -2322,7 +2448,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(failedRow!.txDigest).toBe('tx-digest-abc');
   });
 
-  test('release-not-called lock — submit_infra_unknown / onchain_revert(_gas_unknown) / gas_used_missing never invoke ledger.release()', async () => {
+  test('post-signature uncertainty and post-submit loss paths never invoke ledger.release()', async () => {
     // Lock that the remaining `releaseLedgerReservationWithLog()` call
     // sites are limited to pre-submit / no-gas-burn / congestion
     // branches. This test wraps `executionLedger.release` with a spy
@@ -2335,7 +2461,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
       expectedCode: string;
     }> = [
       {
-        label: 'submit-infra exception',
+        label: 'post-signature uncertainty',
         opts: { submitThrows: true, withUsageCapture: true },
         expectedCode: '__throw__', // not a PromotionSponsorError; raw rethrow
       },
@@ -2476,14 +2602,10 @@ describe('post-signature/post-submit ledger consume policy', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('submit-infra sponsor result callback retains submit_infra_unknown economics + ledger consume kind (no overwrite by outer catch)', async () => {
-    // Sponsor result callback economics regression: the submit-infra branch
-    // sets `sponsorResultOutcome === 'internal_error'` (the appropriate
-    // outcome — TX may have landed; consume() may itself have failed),
-    // The submit-infra branch locks economics via
-    // `sponsorResultEconomicsLocked` so route catch-all handling cannot replace
-    // `submit_infra_unknown` with the raw RPC error message. This test
-    // asserts the callback observes the branch-specific reason.
+  test('post-signature uncertainty callback retains ledger reconciliation context', async () => {
+    // The typed execution stage is the recorder authority. This separately
+    // checks that the diagnostic reason preserves ledger reconciliation
+    // context instead of being replaced by the outer raw error.
     const { ctx, signed, receiptId, executionLedger } = await setup({
       submitThrows: true,
       submitThrowMessage: 'rpc transport error',
@@ -2515,12 +2637,13 @@ describe('post-signature/post-submit ledger consume policy', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe('internal_error');
+    expect(calls[0]!.executionStage).toBe('after_sponsor_signature');
     expect(calls[0]!.route).toBe('promotion');
-    // Critical: economics carry the submit_infra_unknown reason and
+    // Critical: economics carry the post-signature uncertainty reason and
     // ledger consume kind, NOT the raw RPC error message.
     expect(calls[0]!.economics.economicsStatus).toBe('unknown');
     if (calls[0]!.economics.economicsStatus === 'unknown') {
-      expect(calls[0]!.economics.failureReason).toContain('submit_infra_unknown');
+      expect(calls[0]!.economics.failureReason).toContain('post_signature_uncertainty');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume failed');
       expect(calls[0]!.economics.failureReason).toContain('rpc transport error');
     }
@@ -2528,9 +2651,49 @@ describe('post-signature/post-submit ledger consume policy', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('on-chain revert + consume() returns ok=false: sponsor result callback economics stays unknown/loss with the on-chain revert reason (no callback overwrite)', async () => {
-    // Companion to the submit-infra sponsor result callback economics test:
-    // a failed-path consume() on the on-chain-revert branch must still
+  test('malformed terminal result after sponsor signature uses the uncertain consume path, not pre-sign release', async () => {
+    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
+      withUsageCapture: true,
+    });
+    (ctx.sui as unknown as { executeTransaction: () => Promise<unknown> }).executeTransaction =
+      async () => ({
+        $kind: 'Transaction',
+        Transaction: {
+          digest: 'malformed-effects-digest',
+          status: { success: true, error: null },
+          effects: {},
+        },
+      });
+    const calls: SponsorResultMetadata[] = [];
+    ctx.onSponsorResult = (metadata) => {
+      calls.push(metadata);
+    };
+
+    const err = await handlePromotionSponsor(ctx, {
+      promotionId: TEST_PROMO_ID,
+      receiptId,
+      txBytes: signed.txBytesBase64,
+      userSignature: signed.userSignature,
+      verifiedIdentity: buildIdentity(),
+      clientIp: '127.0.0.1',
+    }).catch((cause: unknown) => cause);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('malformed terminal result');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      outcome: 'internal_error',
+      executionStage: 'after_sponsor_signature',
+      route: 'promotion',
+    });
+    expect(usageRows.some((row) => row.failureReason === 'post_signature_uncertainty')).toBe(true);
+    const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
+    expect(entitlement?.activeReservationReceiptId).toBeNull();
+    expect(BigInt(entitlement?.consumedGasAllowanceMist ?? '0')).toBeGreaterThan(0n);
+  });
+
+  test('on-chain revert + consume() returns ok=false keeps known on-chain gas loss and the ledger failure reason', async () => {
+    // A failed-path consume() on the on-chain-revert branch must still
     // send `outcome='onchain_revert'` to the host callback with the
     // unknown-economics fall-through carrying the revert reason. The
     // outer catch must not overwrite this with the
@@ -2566,19 +2729,24 @@ describe('post-signature/post-submit ledger consume policy', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe('onchain_revert');
+    expect(calls[0]!.executionStage).toBe('on_chain');
     expect(calls[0]!.route).toBe('promotion');
     // The on-chain revert branch sets `sponsorResultEconomics` directly
     // before throwing the PromotionSponsorError, so the outer catch
     // gate at `sponsorResultOutcome === 'internal_error'` does not run and
-    // the rich economics is preserved. With a failed consume, the
-    // unknown-economics branch fires with the ledger-consume kind
+    // the rich economics is preserved. Ledger consume failure does not
+    // make on-chain gas unknown; it is entitlement-accounting context
     // appended to the failureReason. Must NOT be the raw
     // PromotionSponsorError message ("Transaction reverted on-chain:
     // ..."), which is what would have been written by the outer catch
     // fall-through in the absence of the inner branch's economics
     // stamp.
-    expect(calls[0]!.economics.economicsStatus).toBe('unknown');
-    if (calls[0]!.economics.economicsStatus === 'unknown') {
+    expect(calls[0]!.economics.economicsStatus).toBe('known');
+    if (calls[0]!.economics.economicsStatus === 'known') {
+      expect(calls[0]!.economics.recoveredGasMist).toBe('0');
+      expect(calls[0]!.economics.hostNetMist).toBe(
+        (-BigInt(calls[0]!.economics.hostPaidGasMist)).toString(),
+      );
       expect(calls[0]!.economics.failureReason).toContain('onchain_revert');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume failed');
       expect(calls[0]!.economics.failureReason).toContain('arbitrary on-chain abort');
@@ -2618,8 +2786,13 @@ describe('post-signature/post-submit ledger consume policy', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe('onchain_revert');
-    expect(calls[0]!.economics.economicsStatus).toBe('unknown');
-    if (calls[0]!.economics.economicsStatus === 'unknown') {
+    expect(calls[0]!.executionStage).toBe('on_chain');
+    expect(calls[0]!.economics.economicsStatus).toBe('known');
+    if (calls[0]!.economics.economicsStatus === 'known') {
+      expect(calls[0]!.economics.recoveredGasMist).toBe('0');
+      expect(calls[0]!.economics.hostNetMist).toBe(
+        (-BigInt(calls[0]!.economics.hostPaidGasMist)).toString(),
+      );
       expect(calls[0]!.economics.failureReason).toContain('onchain_revert');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume threw');
       expect(calls[0]!.economics.failureReason).toContain('arbitrary on-chain abort');
@@ -2670,8 +2843,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(calls[0]!.economics.economicsStatus).toBe('unknown');
     if (calls[0]!.economics.economicsStatus === 'unknown') {
       // Handler appends the ledger-consume kind to the GAS_EFFECTS_MISSING
-      // reason so operators see both signals on the row. Marker prefix
-      // is GAS_EFFECTS_MISSING; consume failure annotation is appended.
+      // reason so operators see both signals on the row.
       expect(calls[0]!.economics.failureReason).toContain('GAS_EFFECTS_MISSING');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume failed');
     }
@@ -2714,11 +2886,11 @@ describe('post-signature/post-submit ledger consume policy', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('pre-sign pool.sign() rejection (SponsorLeaseExpiredError) releases reservation, no consume, no submit_infra_unknown UsageEvent, no PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION (sponsor signature was never issued)', async () => {
+  test('pre-sign pool.sign() rejection releases reservation without post-signature uncertainty records', async () => {
     // Boundary regression: `pool.sign()` runs BEFORE
     // `executeTransaction()` inside `signAndSubmit`. A pre-sign lease
     // failure means the sponsor signature was NEVER issued, so the
-    // promotion submit-infra cleanup (consume + UsageEvent +
+    // promotion post-signature cleanup (consume + UsageEvent +
     // reconciliation event) MUST NOT fire. The active reservation
     // must be released via the pre-submit cleanup path so the user's
     // allowance is not held until the ExecutionLedger reservation reaper
@@ -2750,12 +2922,12 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(ent!.activeReservationReceiptId).toBeNull();
     expect(ent!.consumedGasAllowanceMist).toBe('0');
 
-    // No `submit_infra_unknown` UsageEvent. That failed usage row is reserved
+    // No post-signature uncertainty UsageEvent. That failed usage row is reserved
     // for post-signature executeTransaction throws; pre-sign lease failures must
     // not reuse that row shape.
-    expect(usageRows.find((r) => r.failureReason === 'submit_infra_unknown')).toBeUndefined();
+    expect(usageRows.find((r) => r.failureReason === 'post_signature_uncertainty')).toBeUndefined();
 
-    // No `PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION` reconciliation
+    // No post-signature uncertainty reconciliation
     // event. That event signals operator-side reconciliation for an
     // on-chain TX whose landing is uncertain; a pre-sign lease
     // failure has no on-chain TX to reconcile.
@@ -2767,17 +2939,18 @@ describe('post-signature/post-submit ledger consume policy', () => {
           return null;
         }
       })
-      .find((entry) => entry?.['event'] === 'PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION');
+      .find((entry) => entry?.['event'] === 'PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY');
     expect(reconLog).toBeUndefined();
 
     // Sponsor result callback receives `validation_failure` (existing
     // classification rule for `SponsorLeaseExpiredError`); economics must NOT
-    // carry the `submit_infra_unknown` marker.
+    // carry the post-signature uncertainty marker.
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe('validation_failure');
+    expect(calls[0]!.executionStage).toBe('before_sponsor_signature');
     expect(calls[0]!.economics.economicsStatus).toBe('unknown');
     if (calls[0]!.economics.economicsStatus === 'unknown') {
-      expect(calls[0]!.economics.failureReason ?? '').not.toContain('submit_infra_unknown');
+      expect(calls[0]!.economics.failureReason ?? '').not.toContain('post_signature_uncertainty');
     }
 
     consoleErrorSpy.mockRestore();
@@ -2786,7 +2959,8 @@ describe('post-signature/post-submit ledger consume policy', () => {
   test('congestion still releases (entitlement consumed=0)', async () => {
     const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
       execFail: true,
-      execFailReason: 'ExecutionCancelledDueToSharedObjectCongestion: shared object contention',
+      execFailReason: 'confirmed shared-object congestion',
+      execCongestion: true,
       withUsageCapture: true,
     });
 

@@ -32,7 +32,7 @@ Create a `.env` file in this package directory:
 
 ```env
 # Required: Relay API endpoint for the SDK (must end with /relay)
-# Network (testnet/mainnet) is auto-detected from the API via GET /relay/config.
+# Network is auto-detected from the Host via GET /relay/config.
 VITE_STELIS_RELAY_API_URL=https://your-host.example.com/relay
 
 # Optional: repository docs base URL used by /docs deep links (GitHub links hidden if omitted)
@@ -105,6 +105,7 @@ Required build-time variables:
 
 > **Important**: `VITE_STELIS_RELAY_API_URL` must point to your `app-api` deployment URL with the `/relay` suffix.
 
-The sample page selects `https://fullnode.testnet.sui.io:443` or `https://fullnode.mainnet.sui.io:443` from the network returned by `GET /relay/config`.
+The sample page selects the matching public Sui RPC endpoint from the network
+returned by `GET /relay/config`.
 
 > **CORS**: The `/relay/*` API is open to all origins (`Access-Control-Allow-Origin: *`). No additional CORS configuration is needed on `app-api`.

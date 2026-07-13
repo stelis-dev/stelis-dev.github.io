@@ -20,6 +20,11 @@ External developer companies and agents do not modify or republish this package 
 They consume the deployed contracts through the SDK or the provided Host packages.
 Contract changes and package publishing are maintainer-only workflows.
 
+The current Stelis deployment is testnet-only. Testnet contract changes are
+published as fresh packages and replace the current testnet IDs. Consumers use
+only the current interface and IDs; this repository does not keep aliases or
+compatibility readers for superseded testnet packages.
+
 Use it when you need to inspect or modify:
 
 - fee and pause behavior
@@ -255,15 +260,9 @@ packages/contracts/move/
 
 Full invariant list: [invariants.md](../../../docs/invariants.md)
 
-| Category           | Count | Description                                                                             |
-| ------------------ | ----- | --------------------------------------------------------------------------------------- |
-| O (Ownership)      | 5     | UserVault ownership + withdrawal                                                        |
-| S (Settlement)     | 17    | Settlement math + limits + read-only Config + replay + spread guard + integrity binding |
-| V (Vault Registry) | 3     | Registered vault enforcement (1 vault per user)                                         |
-| E (Economy)        | 8     | Non-loss economic model                                                                 |
-| P (Pause)          | 3     | Pause security                                                                          |
-| A (Admin)          | 7     | Admin safety rails                                                                      |
-| R (Relay)          | 17    | Off-chain Relay API validation                                                           |
+That document owns the current category membership and entries. This README
+does not mirror category counts because a second count would drift without
+adding implementation authority.
 
 ## When Not to Start Here
 

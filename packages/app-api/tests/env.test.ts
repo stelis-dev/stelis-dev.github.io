@@ -6,26 +6,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  requireEnv,
   parseOptionalBooleanEnv,
   parseOptionalPositiveBigIntEnv,
   parseOptionalPositiveIntegerEnv,
 } from '../src/env.js';
 
 describe('env parsing utilities', () => {
-  describe('requireEnv', () => {
-    it('throws on missing env var', () => {
-      delete process.env.__TEST_MISSING__;
-      expect(() => requireEnv('__TEST_MISSING__')).toThrow('[app-api] Missing required');
-    });
-
-    it('returns trimmed value for present env var', () => {
-      process.env.__TEST_PRESENT__ = '  hello  ';
-      expect(requireEnv('__TEST_PRESENT__')).toBe('hello');
-      delete process.env.__TEST_PRESENT__;
-    });
-  });
-
   describe('parseOptionalBooleanEnv', () => {
     it('returns undefined for undefined/empty', () => {
       expect(parseOptionalBooleanEnv('X', undefined)).toBeUndefined();

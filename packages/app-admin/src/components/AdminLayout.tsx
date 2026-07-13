@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, useOutletContext } from 'react-router-dom';
 import { RenewModal } from './RenewModal';
-import { logout, getSponsorOperations } from '../api/client';
+import { logoutAdminSession, getSponsorOperations } from '../api/client';
 import type { AuthContext } from './AuthGuard';
 
 const RENEW_WARNING_SECONDS = 60;
@@ -113,7 +113,7 @@ export function AdminLayout() {
 
   const handleLogout = useCallback(async () => {
     try {
-      await logout();
+      await logoutAdminSession();
     } catch {
       /* ignore */
     }

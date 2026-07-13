@@ -10,16 +10,17 @@
  * Key layout:
  *   {prefix}{receiptId}             → JSON(SerializedEntry)
  *                                      PX = ttlMs + PREPARE_STORE_KEY_TTL_GRACE_MS
- *   {prefix}ip:{clientIp}           → JSON([{pid, slotId, issuedAt}])
+ *   {prefix}ip:{clientIp}           → JSON([{pid, t}])
  *                                      PX = ttlMs * PREPARE_STORE_INDEX_TTL_MULTIPLIER
- *   {prefix}sender:{senderAddress}  → JSON([{pid, slotId, issuedAt, nonce}] plus
+ *   {prefix}sender:{senderAddress}  → JSON([{pid, t, nonce}] plus
  *                                      pending [{pid, nonce, pending, t}])
  *                                      PX = ttlMs * PREPARE_STORE_INDEX_TTL_MULTIPLIER
- *   {prefix}user:{userId}           → JSON([{pid, issuedAt}]) for promotion mode
+ *   {prefix}user:{userId}           → JSON([{pid, t}]) for promotion mode
  *                                      PX = ttlMs * PREPARE_STORE_INDEX_TTL_MULTIPLIER
  *
  * TTL expiry slot release policy:
- *   On consume/store, Lua checks issuedAt + ttlMs < server time → 'expired'.
+ *   STORE stamps issuedAt from Redis TIME. Peek/consume compare that value
+ *   against Redis TIME, so no Host-local wall clock participates.
  *   On abandon (no consume call), RedisSponsorPool lease TTL auto-releases the
  *   slot after the prepare TTL plus sponsor-lease grace. See operations.md for
  *   details.
@@ -29,7 +30,14 @@
  *   memoryPrepareStore.ts — Memory reference implementation
  *   redisSponsorPool.ts — Redis adapter pattern
  */
-import type { PreparedTxEntry, PrepareStoreAdapter } from './prepareTypes.js';
+import {
+  assertCurrentPreparedTxEntryKeys,
+  parseCurrentPreparedTxDraft,
+  parseCurrentPreparedTxEntry,
+  type PreparedTxDraft,
+  type PreparedTxEntry,
+  type PrepareStoreAdapter,
+} from './prepareTypes.js';
 import type { RedisClientLike } from './redisClient.js';
 import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
 import { SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE } from '../observability/events.js';
@@ -46,7 +54,6 @@ import {
   MAX_OUTSTANDING_PER_STUDIO_USER,
 } from './memoryPrepareStore.js';
 import { PrepareSenderQuotaError, PrepareStudioUserQuotaError } from './prepareErrors.js';
-import { type Clock, systemClock } from '../clock.js';
 
 /** Extra physical receipt-key TTL after logical prepare expiry. */
 const PREPARE_STORE_KEY_TTL_GRACE_MS = 5_000;
@@ -66,20 +73,18 @@ const PREPARE_STORE_INDEX_TTL_MULTIPLIER = 2;
  *
  * KEYS[1] = entry key, KEYS[2] = ip key, KEYS[3] = sender key,
  * KEYS[4] = user key (promotion-only; pass empty string for generic)
- * ARGV[1] = entry JSON, ARGV[2] = entryPxMs, ARGV[3] = receiptId
- * ARGV[4] = slotId, ARGV[5] = issuedAt, ARGV[6] = maxPerIp
- * ARGV[7] = ipPxMs, ARGV[8] = prefix
- * ARGV[9] = maxPerStudioUser, ARGV[10] = senderPxMs
- * ARGV[11] = nonce, ARGV[12] = entryMode, ARGV[13] = ttlMs
- * ARGV[14] = userPxMs (promotion-only; pass 0 for generic)
+ * ARGV[1] = draft JSON, ARGV[2] = entryPxMs, ARGV[3] = maxPerIp
+ * ARGV[4] = ipPxMs, ARGV[5] = prefix
+ * ARGV[6] = maxPerStudioUser, ARGV[7] = senderPxMs
+ * ARGV[8] = ttlMs, ARGV[9] = userPxMs
  *
  * The sponsor pool commits
- * `HMAC(secret, receiptId || slotId || commitDigest)` to its lease
+ * `HMAC(secret, receiptId || sponsorAddress || commitDigest)` to its lease
  * store — reserved at `checkout()` and then replaced with the
  * prepare-commit hash (`txBytesHash`) by the prepare runner's
  * `sponsorPool.commit()` call — so the prepare store does not persist
  * any lease material itself. Release callbacks use
- * `(slotId, receiptId, txBytesHash)` so the pool CAS can verify the
+ * `(sponsorAddress, receiptId, txBytesHash)` so the pool CAS can verify the
  * committed HMAC proof before deleting the slot; `receiptId` is already
  * tracked as `pid` in each IP/sender entry, and the committed
  * `txBytesHash` is read from the stored entry (or the raw JSON in
@@ -87,30 +92,40 @@ const PREPARE_STORE_INDEX_TTL_MULTIPLIER = 2;
  *
  * Returns:
  *   '__user_quota__'                  if promotion-mode user quota exceeded (entry NOT stored)
- *   JSON array of evicted [{pid, slotId, entryJson}]  (may be empty '[]') on success
+ *   {issuedAt, JSON array of evicted [{pid, entryJson}]} on success
  */
 const STORE_SCRIPT = `
+-- RedisPrepareStore STORE_SCRIPT
 local entryKey = KEYS[1]
 local ipKey = KEYS[2]
 local senderKey = KEYS[3]
 local userKey = KEYS[4]
-local entryJson = ARGV[1]
+local draftJson = ARGV[1]
 local entryPx = tonumber(ARGV[2])
-local pid = ARGV[3]
-local slotId = ARGV[4]
-local issuedAt = tonumber(ARGV[5])
-local maxPerIp = tonumber(ARGV[6])
-local ipPx = tonumber(ARGV[7])
-local prefix = ARGV[8]
-local maxPerStudioUser = tonumber(ARGV[9])
-local senderPx = tonumber(ARGV[10])
-local nonce = ARGV[11]
-local entryMode = ARGV[12]
-local ttlMs = tonumber(ARGV[13])
-local userPx = tonumber(ARGV[14])
+local maxPerIp = tonumber(ARGV[3])
+local ipPx = tonumber(ARGV[4])
+local prefix = ARGV[5]
+local maxPerStudioUser = tonumber(ARGV[6])
+local senderPx = tonumber(ARGV[7])
+local ttlMs = tonumber(ARGV[8])
+local userPx = tonumber(ARGV[9])
+
+-- Decode and validate every caller-controlled value before the first write.
+-- Redis does not roll back writes that precede a Lua runtime error.
+local draft = cjson.decode(draftJson)
+if type(draft) ~= 'table'
+  or type(draft.receiptId) ~= 'string'
+  or type(draft.nonce) ~= 'string'
+  or (draft.mode ~= 'generic' and draft.mode ~= 'promotion') then
+  error('invalid prepared draft')
+end
+local pid = draft.receiptId
+local nonce = draft.nonce
+local entryMode = draft.mode
 
 local timeResult = redis.call('TIME')
 local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
+local issuedAt = nowMs
 
 -- Sender index — live-compact regardless of mode. The sender index
 -- carries S-14 nonce coordination and replay protection; it is keyed by
@@ -122,16 +137,28 @@ if senderRaw then
 end
 local liveSender = {}
 for _, item in ipairs(senderList) do
-  if item.pending then
-    if item.t and (item.t + ttlMs < nowMs) then
-      -- Stale pending reservation — drop
-    else
-      liveSender[#liveSender + 1] = item
+  if type(item) == 'table'
+    and type(item.pid) == 'string'
+    and type(item.t) == 'number'
+    and type(item.nonce) == 'string' then
+    if item.pending == true then
+      if item.t + ttlMs < nowMs then
+        -- Stale pending reservation — drop
+      else
+        liveSender[#liveSender + 1] = {
+          pid = item.pid,
+          nonce = item.nonce,
+          pending = true,
+          t = item.t,
+        }
+      end
+    elseif item.pending == nil then
+      if item.t + ttlMs < nowMs then
+        -- Logical TTL expired — drop even if physical key still exists
+      elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
+        liveSender[#liveSender + 1] = { pid = item.pid, nonce = item.nonce, t = item.t }
+      end
     end
-  elseif item.t and (item.t + ttlMs < nowMs) then
-    -- Logical TTL expired — drop even if physical key still exists
-  elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
-    liveSender[#liveSender + 1] = item
   end
 end
 
@@ -145,10 +172,12 @@ if entryMode == 'promotion' and userKey ~= '' then
   if userRaw then
     local userList = cjson.decode(userRaw)
     for _, item in ipairs(userList) do
-      if item.t and (item.t + ttlMs < nowMs) then
-        -- Logical TTL expired — drop
-      elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
-        liveUser[#liveUser + 1] = item
+      if type(item) == 'table' and type(item.pid) == 'string' and type(item.t) == 'number' then
+        if item.t + ttlMs < nowMs then
+          -- Logical TTL expired — drop
+        elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
+          liveUser[#liveUser + 1] = { pid = item.pid, t = item.t }
+        end
       end
     end
   end
@@ -157,8 +186,8 @@ if entryMode == 'promotion' and userKey ~= '' then
   end
 end
 
-redis.call('SET', entryKey, entryJson, 'PX', entryPx)
-
+-- IP concurrency index. Decode and determine every eviction before any
+-- durable mutation so corrupt JSON cannot leave an entry without indexes.
 local ipRaw = redis.call('GET', ipKey)
 local list = {}
 if ipRaw then
@@ -167,49 +196,101 @@ end
 
 local live = {}
 for _, item in ipairs(list) do
-  if redis.call('EXISTS', prefix .. item.pid) == 1 then
-    live[#live + 1] = item
+  if type(item) == 'table'
+    and type(item.pid) == 'string'
+    and type(item.t) == 'number'
+    and redis.call('EXISTS', prefix .. item.pid) == 1 then
+    live[#live + 1] = { pid = item.pid, t = item.t }
   end
 end
 
 local evicted = {}
 while #live >= maxPerIp do
   local oldest = table.remove(live, 1)
+  -- GET can fail with WRONGTYPE under Redis corruption, so it also belongs
+  -- to the read-only preflight section.
   local evictedEntryJson = redis.call('GET', prefix .. oldest.pid)
-  redis.call('DEL', prefix .. oldest.pid)
-  evicted[#evicted + 1] = { pid = oldest.pid, slotId = oldest.slotId, entryJson = evictedEntryJson or '' }
+  evicted[#evicted + 1] = { pid = oldest.pid, entryJson = evictedEntryJson or '' }
 end
 
-live[#live + 1] = { pid = pid, slotId = slotId, t = issuedAt }
-redis.call('SET', ipKey, cjson.encode(live), 'PX', ipPx)
+live[#live + 1] = { pid = pid, t = issuedAt }
 
--- Update sender index: remove current pid + any IP-evicted pids, add live entry
 local evictedPids = {}
 for _, ev in ipairs(evicted) do
   evictedPids[ev.pid] = true
 end
+
+-- Build every derived projection in memory before the first write.
 local updatedSender = {}
 for _, item in ipairs(liveSender) do
   if item.pid ~= pid and not evictedPids[item.pid] then
     updatedSender[#updatedSender + 1] = item
   end
 end
-updatedSender[#updatedSender + 1] = { pid = pid, slotId = slotId, t = issuedAt, nonce = nonce }
-redis.call('SET', senderKey, cjson.encode(updatedSender), 'PX', senderPx)
+updatedSender[#updatedSender + 1] = { pid = pid, t = issuedAt, nonce = nonce }
 
--- Update user index for promotion entries (Studio outstanding-prepare quota).
+local updatedUser = nil
 if entryMode == 'promotion' and userKey ~= '' then
-  local updatedUser = {}
+  updatedUser = {}
   for _, item in ipairs(liveUser) do
     if item.pid ~= pid and not evictedPids[item.pid] then
       updatedUser[#updatedUser + 1] = item
     end
   end
   updatedUser[#updatedUser + 1] = { pid = pid, t = issuedAt }
-  redis.call('SET', userKey, cjson.encode(updatedUser), 'PX', userPx)
 end
 
-return cjson.encode(evicted)
+draft.issuedAt = issuedAt
+local entryJson = cjson.encode(draft)
+local encodedIp = cjson.encode(live)
+local encodedSender = cjson.encode(updatedSender)
+local encodedUser = nil
+if updatedUser then
+  encodedUser = cjson.encode(updatedUser)
+end
+local encodedEvicted = cjson.encode(evicted)
+
+-- Mutation section. All data-dependent decode/read/encode work completed
+-- above, so corrupt derived state rejects without a partial commit.
+for _, ev in ipairs(evicted) do
+  redis.call('DEL', prefix .. ev.pid)
+end
+redis.call('SET', entryKey, entryJson, 'PX', entryPx)
+redis.call('SET', ipKey, encodedIp, 'PX', ipPx)
+redis.call('SET', senderKey, encodedSender, 'PX', senderPx)
+
+-- Update user index for promotion entries (Studio outstanding-prepare quota).
+if encodedUser then
+  redis.call('SET', userKey, encodedUser, 'PX', userPx)
+end
+
+return { tostring(issuedAt), encodedEvicted }
+`;
+
+/**
+ * PEEK_SCRIPT — one Redis-clock-authoritative logical TTL read.
+ *
+ * Corrupt JSON or an invalid/missing issuedAt is returned unchanged so the
+ * TypeScript current-shape decoder throws and the sponsor lifecycle can call
+ * evictPreparedEntry() for best-effort lease release.
+ */
+const PEEK_SCRIPT = `
+-- RedisPrepareStore PEEK_SCRIPT
+local raw = redis.call('GET', KEYS[1])
+if not raw then return nil end
+
+local decoded, entry = pcall(cjson.decode, raw)
+if not decoded or type(entry) ~= 'table' or type(entry.issuedAt) ~= 'number' then
+  return raw
+end
+
+local ttlMs = tonumber(ARGV[1])
+local timeResult = redis.call('TIME')
+local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
+if entry.issuedAt + ttlMs < nowMs then
+  return nil
+end
+return raw
 `;
 
 /**
@@ -297,7 +378,7 @@ end
 local timeResult = redis.call('TIME')
 local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
 
-local function rewriteList(key, removePid)
+local function rewriteList(key, removePid, indexKind)
   if not key or key == '' then return end
   local listRaw = redis.call('GET', key)
   if not listRaw then return end
@@ -306,15 +387,31 @@ local function rewriteList(key, removePid)
 
   local updated = {}
   for _, item in ipairs(list) do
-    if item.pid ~= removePid then
-      if item.pending then
-        if item.t and (item.t + ttlMs >= nowMs) then
-          updated[#updated + 1] = item
+    if type(item) == 'table'
+      and type(item.pid) == 'string'
+      and item.pid ~= removePid
+      and type(item.t) == 'number' then
+      if indexKind == 'sender' then
+        if item.pending == true and type(item.nonce) == 'string' then
+          if item.t + ttlMs >= nowMs then
+            updated[#updated + 1] = {
+              pid = item.pid,
+              nonce = item.nonce,
+              pending = true,
+              t = item.t,
+            }
+          end
+        elseif item.pending == nil and type(item.nonce) == 'string' then
+          if item.t + ttlMs < nowMs then
+            -- Logical TTL expired — drop
+          elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
+            updated[#updated + 1] = { pid = item.pid, nonce = item.nonce, t = item.t }
+          end
         end
-      elseif item.t and (item.t + ttlMs < nowMs) then
+      elseif item.t + ttlMs < nowMs then
         -- Logical TTL expired — drop
-      elseif item.pid and redis.call('EXISTS', prefix .. item.pid) == 1 then
-        updated[#updated + 1] = item
+      elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
+        updated[#updated + 1] = { pid = item.pid, t = item.t }
       end
     end
   end
@@ -326,14 +423,18 @@ local function rewriteList(key, removePid)
   end
 end
 
-if entry.clientIp then
-  rewriteList(prefix .. 'ip:' .. entry.clientIp, pid)
+-- The entry has already been deleted, so cleanup of derived indexes must
+-- never prevent the raw lease evidence from being returned. Invalid field
+-- types and malformed index rows are simply not recoverable here; pcall
+-- contains any remaining Redis/Lua error to this best-effort cleanup.
+if type(entry.clientIp) == 'string' then
+  pcall(rewriteList, prefix .. 'ip:' .. entry.clientIp, pid, 'ip')
 end
-if entry.senderAddress then
-  rewriteList(prefix .. 'sender:' .. entry.senderAddress, pid)
+if type(entry.senderAddress) == 'string' then
+  pcall(rewriteList, prefix .. 'sender:' .. entry.senderAddress, pid, 'sender')
 end
-if entry.mode == 'promotion' and entry.userId then
-  rewriteList(prefix .. 'user:' .. entry.userId, pid)
+if entry.mode == 'promotion' and type(entry.userId) == 'string' then
+  pcall(rewriteList, prefix .. 'user:' .. entry.userId, pid, 'user')
 end
 
 return raw
@@ -346,93 +447,11 @@ return raw
 // Serialization helpers
 // ─────────────────────────────────────────────
 
-/**
- * BigInt fields present in the base of every PreparedTxEntry (all modes).
- * Only `nonce` lives in `PreparedTxEntryBase`; mode-specific BigInt fields
- * (currently `reservedGasMist` on promotion) are projected separately.
- */
-const BASE_BIGINT_FIELDS = ['nonce'] as const;
-
-/**
- * BigInt field only present in `PromotionPreparedTxEntry`.
- * The ExecutionLedger reservation ceiling written at prepare time and
- * compared against actual execution gas in the Studio sponsor SponsoredExecutionPolicy
- * sponsor result accounting.
- */
-const PROMOTION_BIGINT_FIELD = 'reservedGasMist' as const;
-
-/**
- * JSON-safe representation of PreparedTxEntry.
- * BigInt fields are stored as decimal strings.
- *
- * Single canonical entry shape:
- *   Generic:   coordination-only fields + `txBytesHash`. Sponsor reads
- *              every settle value from `parseSettleArgs(txBytes)`; the
- *              entry holds no settle observability copies.
- *   Promotion: coordination fields + `reservedGasMist` BigInt.
- */
-type SerializedEntry = {
-  _v?: number;
-  mode: string;
-  // Base fields always present
-  nonce: string;
-  receiptId: string;
-  issuedAt: number;
-  senderAddress: string;
-  txBytesHash: string;
-  slotId: string;
-  sponsorAddress: string;
-  clientIp: string;
-  executionPathKey: string;
-  orderId: string | null;
-  // Promotion-mode fields (present iff mode === 'promotion')
-  reservedGasMist?: string;
-  promotionId?: string;
-  userId?: string;
-};
-
-/**
- * Schema version for serialized PreparedTxEntry.
- *
- * Writer + reader contract:
- *   - Writer stamps `ENTRY_SCHEMA_VERSION` on every entry.
- *   - Reader accepts exactly `ENTRY_SCHEMA_VERSION`. Any other `_v`
- *     (including missing or non-numeric) is rejected at the version
- *     gate and routed through the fail-closed corrupt-entry path:
- *     `RedisPrepareEntryVersionError` → `_releaseSlotFromRawEntry`
- *     releases the slot via `extractSlotInfoFromRawEntry` →
- *     `evictPreparedEntry` deletes the entry → sponsor returns
- *     `PREPARED_TX_NOT_FOUND`. User retries `/prepare`. The slot is
- *     never stranded.
- *   - Past-shape entries at any earlier `_v` are NOT read by this
- *     reader; `deserializeEntry` projects only the current schema
- *     fields into the typed runtime object, so a mismatched shape
- *     cannot smuggle unknown fields into the entry.
- *
- * Two-stage HMAC lease proof. The sponsor pool stores
- * `HMAC(secret, receiptId || slotId || commitDigest)` in its lease
- * key — `commitDigest` is a reserved sentinel at `checkout()` and the
- * prepare-commit hash (`txBytesHash`) after `sponsorPool.commit()`.
- * `onRelease(slotId, receiptId, txBytesHash | null)` is the canonical
- * release path.
- */
-const ENTRY_SCHEMA_VERSION = 1;
 const DECIMAL_BIGINT_RE = /^(?:0|[1-9]\d*)$/;
-
-export class RedisPrepareEntryVersionError extends Error {
-  constructor(public readonly receivedVersion: unknown) {
-    super(
-      `RedisPrepareStore: refusing to deserialize entry with unsupported schema version ${String(
-        receivedVersion,
-      )} (current=${ENTRY_SCHEMA_VERSION})`,
-    );
-    this.name = 'RedisPrepareEntryVersionError';
-  }
-}
 
 function parseSerializedBigInt(value: unknown, field: string): bigint {
   if (typeof value !== 'string' || !DECIMAL_BIGINT_RE.test(value)) {
-    throw new Error(`RedisPrepareStore: ${field} must be a decimal bigint string`);
+    throw new Error(`RedisPrepareStore: ${field} must be a canonical unsigned decimal string`);
   }
   return BigInt(value);
 }
@@ -487,47 +506,136 @@ function parseRedisIntegerResult(value: unknown, field: string): number {
   );
 }
 
-function serializeEntry(entry: PreparedTxEntry): string {
-  const obj: Record<string, unknown> = { ...entry };
-  obj._v = ENTRY_SCHEMA_VERSION;
-  // Base BigInt fields (all modes)
-  for (const field of BASE_BIGINT_FIELDS) {
-    obj[field] = String(entry[field]);
+function serializeDraft(draft: PreparedTxDraft): string {
+  const common = {
+    mode: draft.mode,
+    receiptId: draft.receiptId,
+    senderAddress: draft.senderAddress,
+    txBytesHash: draft.txBytesHash,
+    sponsorAddress: draft.sponsorAddress,
+    clientIp: draft.clientIp,
+    executionPathKey: draft.executionPathKey,
+    orderId: draft.orderId,
+    nonce: draft.nonce.toString(),
+  };
+  if (draft.mode === 'generic') {
+    return JSON.stringify(common);
   }
-  if (entry.mode === 'promotion') {
-    // Promotion-only BigInt field
-    obj[PROMOTION_BIGINT_FIELD] = String(entry[PROMOTION_BIGINT_FIELD]);
+  return JSON.stringify({
+    ...common,
+    mode: 'promotion',
+    promotionId: draft.promotionId,
+    userId: draft.userId,
+    reservedGasMist: draft.reservedGasMist.toString(),
+  });
+}
+
+interface StoreScriptResult {
+  readonly issuedAt: number;
+  readonly evictedRaw: unknown;
+}
+
+function parseStoreScriptResult(value: unknown): StoreScriptResult {
+  if (!Array.isArray(value) || value.length < 2) {
+    throw new Error('RedisPrepareStore: STORE script returned an invalid result');
   }
-  // Generic entries carry no extra BigInt fields beyond the base; the
-  // sponsor path re-derives every settle observability value from
-  // `parseSettleArgs(txBytes)` and the serializer intentionally emits
-  // nothing beyond the coordination shape.
-  return JSON.stringify(obj);
+  const rawIssuedAt = value[0];
+  const issuedAt =
+    typeof rawIssuedAt === 'number'
+      ? rawIssuedAt
+      : typeof rawIssuedAt === 'string'
+        ? Number(rawIssuedAt)
+        : Number.NaN;
+  if (!Number.isSafeInteger(issuedAt) || issuedAt < 0) {
+    throw new Error('RedisPrepareStore: STORE script returned an invalid issuedAt');
+  }
+  return { issuedAt, evictedRaw: value[1] };
+}
+
+interface StoreEvictedEntry {
+  readonly pid: string;
+  readonly entryJson: string;
 }
 
 /**
- * Best-effort recovery of slot identity from a raw JSON entry that we
+ * Decode derived eviction evidence without changing the committed store result.
+ * The Lua script generated this value before mutation; an unexpected client
+ * result is operational corruption, not grounds to turn a durable success into
+ * a failed prepare response.
+ */
+function parseStoreEvictedEntries(value: unknown): StoreEvictedEntry[] {
+  if (value === '[]' || value === '{}') return [];
+  if (typeof value !== 'string') {
+    logUnrecoverableStoreEvictionResult();
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    logUnrecoverableStoreEvictionResult();
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    logUnrecoverableStoreEvictionResult();
+    return [];
+  }
+
+  const entries: StoreEvictedEntry[] = [];
+  let malformed = false;
+  for (const item of parsed) {
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      typeof (item as { pid?: unknown }).pid !== 'string' ||
+      typeof (item as { entryJson?: unknown }).entryJson !== 'string'
+    ) {
+      malformed = true;
+      continue;
+    }
+    entries.push(item as StoreEvictedEntry);
+  }
+  if (malformed) logUnrecoverableStoreEvictionResult();
+  return entries;
+}
+
+function logUnrecoverableStoreEvictionResult(): void {
+  try {
+    logSponsorPoolEvent(
+      SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE,
+      {
+        adapter: 'redis-prepare',
+        reason: 'ip_concurrent_eviction_result_unrecoverable',
+      },
+      'warn',
+    );
+  } catch {
+    // Observability failure after the Lua commit must not change success.
+  }
+}
+
+/**
+ * Best-effort recovery of sponsor identity from a raw JSON entry that we
  * cannot fully deserialize.
  *
- * This is the slot-cleanup safety net. Even if `deserializeEntry()` throws
- * (unsupported schema version, corrupted BigInt strings, mode-discriminator
- * inconsistency, etc.), the consume()/peek() callers must still be able to
- * release the held sponsor slot — otherwise an unparseable entry can lock
- * a slot until its lease TTL expires.
+ * This is the lease-cleanup safety net. Even if `deserializeEntry()` throws,
+ * consume()/peek() callers still release a recoverable sponsor-address lease.
  *
- * Extracts `{slotId, receiptId, txBytesHash}`.
+ * Extracts `sponsorAddress` and `txBytesHash`; `receiptId` comes from the
+ * Redis key/method argument that selected the row, never from corrupt JSON.
  * `txBytesHash` is returned as a string when present on the raw JSON and
  * as `null` when absent. Callers pass the
  * returned `txBytesHash` straight into `checkin()`; the pool's HMAC CAS
  * will silently no-op for stale values and the Redis lease PX TTL
  * covers the residual state.
  *
- * Returns null only if neither `slotId` nor `receiptId` can be extracted
- * from the raw shape. JSON-level parse failure also yields null.
+ * Returns null if `sponsorAddress` cannot be extracted from the raw shape.
+ * JSON-level parse failure also yields null.
  */
-function extractSlotInfoFromRawEntry(
+function extractSponsorInfoFromRawEntry(
   json: string,
-): { slotId: string; receiptId: string; txBytesHash: string | null } | null {
+  authoritativeReceiptId: string,
+): { sponsorAddress: string; receiptId: string; txBytesHash: string | null } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -536,59 +644,27 @@ function extractSlotInfoFromRawEntry(
   }
   if (!parsed || typeof parsed !== 'object') return null;
   const obj = parsed as Record<string, unknown>;
-  const slotId = obj.slotId;
-  const receiptId = obj.receiptId;
-  if (typeof slotId !== 'string' || typeof receiptId !== 'string') return null;
-  if (slotId.length === 0 || receiptId.length === 0) return null;
+  const sponsorAddress = obj.sponsorAddress;
+  if (typeof sponsorAddress !== 'string' || sponsorAddress.length === 0) return null;
   const txBytesHash = typeof obj.txBytesHash === 'string' ? obj.txBytesHash : null;
-  return { slotId, receiptId, txBytesHash };
+  return { sponsorAddress, receiptId: authoritativeReceiptId, txBytesHash };
 }
 
-function deserializeEntry(json: string): PreparedTxEntry {
-  const obj = JSON.parse(json) as SerializedEntry;
-
-  // Version gate: accept only `ENTRY_SCHEMA_VERSION`. Any other `_v`
-  // (missing, wrong number, non-numeric) fails closed through the
-  // corrupt-entry path.
-  if (typeof obj._v !== 'number' || obj._v !== ENTRY_SCHEMA_VERSION) {
-    throw new RedisPrepareEntryVersionError(obj._v);
+function deserializeEntry(json: string, expectedReceiptId: string): PreparedTxEntry {
+  const raw: unknown = JSON.parse(json);
+  const mode = assertCurrentPreparedTxEntryKeys(raw);
+  const obj = raw as Record<string, unknown>;
+  if (obj.receiptId !== expectedReceiptId) {
+    throw new Error('RedisPrepareStore: stored receiptId does not match its Redis key');
   }
-
-  // Strict current-shape projection. Do not spread the parsed object —
-  // only the fields named by the current schema enter the typed runtime
-  // entry. Anything else on the JSON is ignored.
-  if (obj.mode === 'generic') {
-    return {
-      mode: 'generic',
-      nonce: parseSerializedBigInt(obj.nonce, 'nonce'),
-      receiptId: obj.receiptId,
-      issuedAt: obj.issuedAt,
-      senderAddress: obj.senderAddress,
-      txBytesHash: obj.txBytesHash,
-      slotId: obj.slotId,
-      sponsorAddress: obj.sponsorAddress,
-      clientIp: obj.clientIp,
-      executionPathKey: obj.executionPathKey,
-      orderId: obj.orderId,
-    };
-  }
-
-  return {
-    mode: 'promotion',
+  const converted: Record<string, unknown> = {
+    ...obj,
     nonce: parseSerializedBigInt(obj.nonce, 'nonce'),
-    reservedGasMist: parseSerializedBigInt(obj.reservedGasMist, 'reservedGasMist'),
-    receiptId: obj.receiptId,
-    issuedAt: obj.issuedAt,
-    senderAddress: obj.senderAddress,
-    txBytesHash: obj.txBytesHash,
-    slotId: obj.slotId,
-    sponsorAddress: obj.sponsorAddress,
-    clientIp: obj.clientIp,
-    executionPathKey: obj.executionPathKey,
-    orderId: obj.orderId,
-    promotionId: obj.promotionId!,
-    userId: obj.userId!,
   };
+  if (mode === 'promotion') {
+    converted.reservedGasMist = parseSerializedBigInt(obj.reservedGasMist, 'reservedGasMist');
+  }
+  return parseCurrentPreparedTxEntry(converted);
 }
 
 // ─────────────────────────────────────────────
@@ -601,8 +677,6 @@ export interface RedisPrepareStoreOptions {
   maxPerIp?: number;
   maxPerStudioUser?: number;
   maxOutstandingPerSender?: number;
-  /** Optional `Clock` for the JS-side `peek()` TTL read. Defaults to `systemClock`. */
-  clock?: Clock;
 }
 
 // ─────────────────────────────────────────────
@@ -624,12 +698,11 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
   private readonly _maxPerIp: number;
   private readonly _maxPerStudioUser: number;
   private readonly _maxOutstandingPerSender: number;
-  private readonly _clock: Clock;
 
   /**
    * @param onRelease Two-stage lease signature:
-   *                  `(slotId, receiptId, txBytesHash) =>
-   *                     sponsorPool.checkin(slotId, receiptId, txBytesHash)`.
+   *                  `(sponsorAddress, receiptId, txBytesHash) =>
+   *                     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash)`.
    *                  Store release paths always pass the committed
    *                  `txBytesHash` from the deserialized entry (or
    *                  whatever the raw-entry extractor can recover),
@@ -674,7 +747,6 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
     this._maxPerIp = maxPerIp;
     this._maxPerStudioUser = maxPerStudioUser;
     this._maxOutstandingPerSender = maxOutstandingPerSender;
-    this._clock = options.clock ?? systemClock;
   }
 
   // ── Key helpers ──────────────────────────────────────────────────
@@ -697,8 +769,10 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
 
   // ── PrepareStoreAdapter methods ──────────────────────────────────
 
-  async store(receiptId: string, entry: PreparedTxEntry): Promise<void> {
-    const entryJson = serializeEntry(entry);
+  async store(draft: PreparedTxDraft): Promise<PreparedTxEntry> {
+    const currentDraft = parseCurrentPreparedTxDraft(draft);
+    const receiptId = currentDraft.receiptId;
+    const draftJson = serializeDraft(currentDraft);
     const entryPxMs = this._ttlMs + PREPARE_STORE_KEY_TTL_GRACE_MS;
     const ipPxMs = this._ttlMs * PREPARE_STORE_INDEX_TTL_MULTIPLIER;
     const senderPxMs = this._ttlMs * PREPARE_STORE_INDEX_TTL_MULTIPLIER;
@@ -706,129 +780,133 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
     // Empty userKey for non-promotion entries — Lua skips the user-index
     // branches when userKey == ''. The KEYS array length stays uniform so
     // shared-key naming stays deterministic regardless of runtime mode.
-    const userKey = entry.mode === 'promotion' ? this.userKey(entry.userId) : '';
+    const userKey = currentDraft.mode === 'promotion' ? this.userKey(currentDraft.userId) : '';
 
     const result = await this._client.eval(
       STORE_SCRIPT,
       [
         this.entryKey(receiptId),
-        this.ipKey(entry.clientIp),
-        this.senderKey(entry.senderAddress),
+        this.ipKey(currentDraft.clientIp),
+        this.senderKey(currentDraft.senderAddress),
         userKey,
       ],
       [
-        entryJson,
+        draftJson,
         String(entryPxMs),
-        receiptId,
-        entry.slotId,
-        String(entry.issuedAt),
         String(this._maxPerIp),
         String(ipPxMs),
         this._keyPrefix,
         String(this._maxPerStudioUser),
         String(senderPxMs),
-        entry.nonce.toString(),
-        entry.mode,
         String(this._ttlMs),
         String(userPxMs),
       ],
     );
 
     // User quota exceeded — slot NOT released here (outer catch owns cleanup).
-    const evictedRaw = result as string;
-    if (evictedRaw === '__user_quota__') {
+    if (result === '__user_quota__') {
       // Promotion-only path; userId is present.
-      const userId = entry.mode === 'promotion' ? entry.userId : entry.senderAddress;
+      const userId =
+        currentDraft.mode === 'promotion' ? currentDraft.userId : currentDraft.senderAddress;
       throw new PrepareStudioUserQuotaError(userId, this._maxPerStudioUser);
     }
 
+    const storeResult = parseStoreScriptResult(result);
+    const committed = parseCurrentPreparedTxEntry({
+      ...currentDraft,
+      issuedAt: storeResult.issuedAt,
+    });
+
     // Release slots for IP-evicted entries
-    // Note: Lua cjson.encode({}) returns '{}' (empty object), not '[]' (empty array).
-    if (evictedRaw && evictedRaw !== '[]' && evictedRaw !== '{}') {
-      const parsed = JSON.parse(evictedRaw);
-      const evicted = Array.isArray(parsed)
-        ? (parsed as Array<{ pid: string; slotId: string; entryJson?: string }>)
-        : [];
-      for (const item of evicted) {
-        // Slot release — best effort, independent of coordinator cleanup.
-        // `item.pid` is the evicted entry's receiptId. We also need the
-        // committed `txBytesHash` to satisfy the pool's CAS.
-        // The evictedEntry JSON carries it, so parse once and pass.
-        let evictedTxBytesHash: string | null = null;
-        let evictedEntry: PreparedTxEntry | null = null;
-        if (item.entryJson) {
-          try {
-            evictedEntry = deserializeEntry(item.entryJson);
-            evictedTxBytesHash = evictedEntry.txBytesHash;
-          } catch {
-            // Fall back to raw-JSON extraction — the corrupt-entry path
-            // cannot rely on the full deserializer.
-            const raw = extractSlotInfoFromRawEntry(item.entryJson);
-            evictedTxBytesHash = raw?.txBytesHash ?? null;
-          }
+    // Derived evidence decoding is intentionally non-throwing: the new entry
+    // is already durably committed when eval returns.
+    const evicted = parseStoreEvictedEntries(storeResult.evictedRaw);
+    for (const item of evicted) {
+      // Slot release — best effort, independent of coordinator cleanup.
+      // `item.pid` is the evicted entry's receiptId. We also need the
+      // committed `txBytesHash` to satisfy the pool's CAS.
+      // The evictedEntry JSON carries it, so parse once and pass.
+      let evictedEntry: PreparedTxEntry | null = null;
+      if (item.entryJson) {
+        try {
+          evictedEntry = deserializeEntry(item.entryJson, item.pid);
+        } catch {
+          void this._releaseSponsorFromRawEntry(item.entryJson, item.pid, 'ip_concurrent_eviction');
         }
+      } else {
+        void this._releaseSponsorFromRawEntry('', item.pid, 'ip_concurrent_eviction');
+      }
+      if (evictedEntry) {
         void invokeReleaseCallback({
           onRelease: this._onRelease,
-          slotId: item.slotId,
-          receiptId: item.pid,
-          txBytesHash: evictedTxBytesHash,
+          sponsorAddress: evictedEntry.sponsorAddress,
+          receiptId: evictedEntry.receiptId,
+          txBytesHash: evictedEntry.txBytesHash,
           adapter: 'redis-prepare',
           reason: 'ip_concurrent_eviction',
           extraFields: { evicted_receipt_id: item.pid },
         });
+      }
 
-        // Coordinator cleanup — runs independently of slot release outcome.
-        if (this._onEntryEvict && evictedEntry) {
-          invokeEvictCallback({
-            onEntryEvict: this._onEntryEvict,
-            entry: evictedEntry,
-            adapter: 'redis-prepare',
-            reason: 'ip_concurrent_eviction',
-          });
-        }
+      // Coordinator cleanup — runs independently of slot release outcome.
+      if (this._onEntryEvict && evictedEntry) {
+        invokeEvictCallback({
+          onEntryEvict: this._onEntryEvict,
+          entry: evictedEntry,
+          adapter: 'redis-prepare',
+          reason: 'ip_concurrent_eviction',
+        });
       }
     }
+    return committed;
   }
 
   /**
-   * Best-effort slot release for entries we cannot fully deserialize.
-   * Used by consume() and peek() to keep slot cleanup safe even when
-   * `deserializeEntry()` throws (corrupted JSON, version mismatch, etc.).
+   * Best-effort sponsor-address release for entries we cannot fully deserialize.
+   * Used by consume() and peek() to keep lease cleanup safe even when
+   * `deserializeEntry()` rejects the current shape.
    *
    * The Lua CONSUME script has already removed the entry from Redis at
-   * this point, so without this fallback the held sponsor slot would
+   * this point, so without this fallback the held sponsor lease would
    * remain locked until its lease TTL expires.
    */
-  private _releaseSlotFromRawEntry(
+  private _releaseSponsorFromRawEntry(
     rawJson: string,
+    authoritativeReceiptId: string,
     reason:
+      | 'ip_concurrent_eviction'
       | 'prepare_expired_undeserializable'
       | 'hash_mismatch_undeserializable'
       | 'consume_success_undeserializable'
       | 'undeserializable_eviction',
   ): Promise<void> {
-    const slot = extractSlotInfoFromRawEntry(rawJson);
-    if (!slot) {
-      // Cannot find slot identity — slot will only be reclaimed by lease TTL.
+    const sponsor = extractSponsorInfoFromRawEntry(rawJson, authoritativeReceiptId);
+    if (!sponsor) {
+      // Cannot find sponsor identity — lease will only be reclaimed by TTL.
       // This is semantically distinct from a _LEASE_RELEASE_FAILED event:
       // there was no release attempt to succeed or fail. Keep it on a
       // separate structured event so operators can correlate with
       // lease-TTL reclamation without conflating failure families.
-      logSponsorPoolEvent(
-        SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE,
-        {
-          adapter: 'redis-prepare',
-          reason,
-        },
-        'warn',
-      );
+      try {
+        logSponsorPoolEvent(
+          SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE,
+          {
+            adapter: 'redis-prepare',
+            reason,
+          },
+          'warn',
+        );
+      } catch {
+        // This helper is used only after Redis has already deleted or committed
+        // durable state. Observability failure must not escape that boundary.
+      }
       return Promise.resolve();
     }
     return invokeReleaseCallback({
       onRelease: this._onRelease,
-      slotId: slot.slotId,
-      receiptId: slot.receiptId,
-      txBytesHash: slot.txBytesHash,
+      sponsorAddress: sponsor.sponsorAddress,
+      receiptId: sponsor.receiptId,
+      txBytesHash: sponsor.txBytesHash,
       adapter: 'redis-prepare',
       reason,
     });
@@ -869,10 +947,10 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
       const entryJson = str.slice('__expired_entry__:'.length);
       // Slot cleanup must happen even if deserializeEntry throws.
       try {
-        const expiredEntry = deserializeEntry(entryJson);
+        const expiredEntry = deserializeEntry(entryJson, receiptId);
         void invokeReleaseCallback({
           onRelease: this._onRelease,
-          slotId: expiredEntry.slotId,
+          sponsorAddress: expiredEntry.sponsorAddress,
           receiptId: expiredEntry.receiptId,
           txBytesHash: expiredEntry.txBytesHash,
           adapter: 'redis-prepare',
@@ -887,7 +965,11 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
           });
         }
       } catch {
-        void this._releaseSlotFromRawEntry(entryJson, 'prepare_expired_undeserializable');
+        void this._releaseSponsorFromRawEntry(
+          entryJson,
+          receiptId,
+          'prepare_expired_undeserializable',
+        );
       }
       return 'expired';
     }
@@ -895,10 +977,10 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
     if (str.startsWith('__hash_mismatch_entry__:')) {
       const entryJson = str.slice('__hash_mismatch_entry__:'.length);
       try {
-        const mismatchEntry = deserializeEntry(entryJson);
+        const mismatchEntry = deserializeEntry(entryJson, receiptId);
         void invokeReleaseCallback({
           onRelease: this._onRelease,
-          slotId: mismatchEntry.slotId,
+          sponsorAddress: mismatchEntry.sponsorAddress,
           receiptId: mismatchEntry.receiptId,
           txBytesHash: mismatchEntry.txBytesHash,
           adapter: 'redis-prepare',
@@ -913,7 +995,11 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
           });
         }
       } catch {
-        void this._releaseSlotFromRawEntry(entryJson, 'hash_mismatch_undeserializable');
+        void this._releaseSponsorFromRawEntry(
+          entryJson,
+          receiptId,
+          'hash_mismatch_undeserializable',
+        );
       }
       return 'hash_mismatch';
     }
@@ -923,30 +1009,31 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
     // slot would be orphaned — release it best-effort and re-throw so the
     // caller still reports the error.
     try {
-      return deserializeEntry(str);
+      return deserializeEntry(str, receiptId);
     } catch (err) {
-      void this._releaseSlotFromRawEntry(str, 'consume_success_undeserializable');
+      void this._releaseSponsorFromRawEntry(str, receiptId, 'consume_success_undeserializable');
       throw err;
     }
   }
 
   async peek(receiptId: string): Promise<PreparedTxEntry | null> {
-    const raw = await this._client.get(this.entryKey(receiptId));
+    const raw = (await this._client.eval(
+      PEEK_SCRIPT,
+      [this.entryKey(receiptId)],
+      [String(this._ttlMs)],
+    )) as string | null | undefined;
     if (!raw) return null;
     // Deserialization failure must propagate so sponsor processing can
     // release the held slot via evictPreparedEntry(). Silently returning
     // null would route control to a generic "not found" early-return that
     // never touches the slot.
-    const entry = deserializeEntry(raw);
-    // Logical TTL check (same as Lua)
-    if (this._clock.nowMs() - entry.issuedAt > this._ttlMs) return null;
-    return entry;
+    return deserializeEntry(raw, receiptId);
   }
 
   /**
    * Best-effort invalidation of a stored prepared entry.
    *
-   * Reads the raw JSON, pulls slot identity directly without going through
+   * Reads the raw JSON, pulls sponsor-address identity without going through
    * `deserializeEntry()`, releases the slot, and atomically removes the
    * entry from Redis. Idempotent and never throws. Covers both corrupt-
    * entry eviction (deserialize failure on peek/consume) and post-`peek`
@@ -973,7 +1060,7 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
     // one Redis operation. The returned raw entry is the slot-release
     // evidence; malformed JSON simply falls through to the unrecoverable
     // slot-info path.
-    await this._releaseSlotFromRawEntry(raw, 'undeserializable_eviction');
+    await this._releaseSponsorFromRawEntry(raw, receiptId, 'undeserializable_eviction');
   }
 
   /**
@@ -1084,19 +1171,32 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
       if senderRaw then
         local senderList = cjson.decode(senderRaw)
         for _, item in ipairs(senderList) do
-          if item.pending then
-            if item.t and (item.t + ttlMs >= nowMs) then
-              compacted[#compacted + 1] = item
-              if item.nonce ~= nil then
-                senderMax = maxDecStrings(senderMax, item.nonce)
+          if type(item) == 'table'
+            and type(item.pid) == 'string'
+            and type(item.t) == 'number'
+            and type(item.nonce) == 'string' then
+            local currentNonce = normalizeDec(item.nonce)
+            if item.pending == true then
+              if item.t + ttlMs >= nowMs then
+                compacted[#compacted + 1] = {
+                  pid = item.pid,
+                  nonce = currentNonce,
+                  pending = true,
+                  t = item.t,
+                }
+                senderMax = maxDecStrings(senderMax, currentNonce)
               end
-            end
-          elseif item.t and (item.t + ttlMs < nowMs) then
-            -- Logical TTL expired — drop even if physical key still exists
-          elseif item.pid and redis.call('EXISTS', prefix .. item.pid) == 1 then
-            compacted[#compacted + 1] = item
-            if item.nonce ~= nil then
-              senderMax = maxDecStrings(senderMax, item.nonce)
+            elseif item.pending == nil then
+              if item.t + ttlMs < nowMs then
+                -- Logical TTL expired — drop even if physical key still exists
+              elseif redis.call('EXISTS', prefix .. item.pid) == 1 then
+                compacted[#compacted + 1] = {
+                  pid = item.pid,
+                  nonce = currentNonce,
+                  t = item.t,
+                }
+                senderMax = maxDecStrings(senderMax, currentNonce)
+              end
             end
           end
         end
@@ -1159,10 +1259,24 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
       local senderList = cjson.decode(senderRaw)
       local updated = {}
       for _, item in ipairs(senderList) do
-        -- Drop the matching pending reservation only. A live entry with
-        -- the same pid (post-store promotion) is preserved.
-        if not (item.pending and item.pid == resId) then
-          updated[#updated + 1] = item
+        if type(item) == 'table'
+          and type(item.pid) == 'string'
+          and type(item.t) == 'number'
+          and type(item.nonce) == 'string' then
+          if item.pending == true then
+            -- Drop the matching pending reservation only.
+            if item.pid ~= resId then
+              updated[#updated + 1] = {
+                pid = item.pid,
+                nonce = item.nonce,
+                pending = true,
+                t = item.t,
+              }
+            end
+          elseif item.pending == nil then
+            -- A live entry with the same pid (post-store promotion) is preserved.
+            updated[#updated + 1] = { pid = item.pid, nonce = item.nonce, t = item.t }
+          end
         end
       end
 
@@ -1203,64 +1317,72 @@ local prefix = ARGV[4]
 local raw = redis.call('GET', entryKey)
 if not raw then return nil end
 
-local entry = cjson.decode(raw)
-local ipKey = prefix .. 'ip:' .. entry.clientIp
+local decoded, entry = pcall(cjson.decode, raw)
+local entryIsTable = decoded and type(entry) == 'table'
 
 local timeResult = redis.call('TIME')
 local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
 
-local function removeFromIp()
-  local ipRaw = redis.call('GET', ipKey)
-  if not ipRaw then return end
-  local list = cjson.decode(ipRaw)
+local function removeFromIndex(key, indexKind)
+  if type(key) ~= 'string' or key == '' then return end
+  local indexRaw = redis.call('GET', key)
+  if not indexRaw then return end
+  local ok, list = pcall(cjson.decode, indexRaw)
+  if not ok or type(list) ~= 'table' then return end
   local updated = {}
   for _, item in ipairs(list) do
-    if item.pid ~= pid then
-      updated[#updated + 1] = item
+    if type(item) == 'table'
+      and type(item.pid) == 'string'
+      and item.pid ~= pid
+      and type(item.t) == 'number' then
+      if indexKind == 'sender' then
+        if item.pending == true and type(item.nonce) == 'string' then
+          updated[#updated + 1] = {
+            pid = item.pid,
+            nonce = item.nonce,
+            pending = true,
+            t = item.t,
+          }
+        elseif item.pending == nil and type(item.nonce) == 'string' then
+          updated[#updated + 1] = { pid = item.pid, nonce = item.nonce, t = item.t }
+        end
+      else
+        updated[#updated + 1] = { pid = item.pid, t = item.t }
+      end
     end
   end
   if #updated > 0 then
-    redis.call('SET', ipKey, cjson.encode(updated), 'KEEPTTL')
+    redis.call('SET', key, cjson.encode(updated), 'KEEPTTL')
   else
-    redis.call('DEL', ipKey)
+    redis.call('DEL', key)
   end
 end
 
-local function removeFromSender()
-  if not entry.senderAddress then return end
-  local senderKey = prefix .. 'sender:' .. entry.senderAddress
-  local senderRaw = redis.call('GET', senderKey)
-  if not senderRaw then return end
-  local list = cjson.decode(senderRaw)
-  local updated = {}
-  for _, item in ipairs(list) do
-    if item.pid ~= pid then
-      updated[#updated + 1] = item
-    end
-  end
-  if #updated > 0 then
-    redis.call('SET', senderKey, cjson.encode(updated), 'KEEPTTL')
-  else
-    redis.call('DEL', senderKey)
-  end
-end
-
-if entry.issuedAt + ttlMs < nowMs then
-  redis.call('DEL', entryKey)
-  removeFromIp()
-  removeFromSender()
-  return '__expired_entry__:' .. raw
-end
-
-if entry.txBytesHash ~= expectedHash then
-  redis.call('DEL', entryKey)
-  removeFromIp()
-  removeFromSender()
-  return '__hash_mismatch_entry__:' .. raw
+local resultKind = 'success'
+if entryIsTable and type(entry.issuedAt) == 'number' and entry.issuedAt + ttlMs < nowMs then
+  resultKind = 'expired'
+elseif entryIsTable and type(entry.txBytesHash) == 'string' and entry.txBytesHash ~= expectedHash then
+  resultKind = 'hash_mismatch'
 end
 
 redis.call('DEL', entryKey)
-removeFromIp()
-removeFromSender()
+
+-- Indexes are derived cleanup. Once the entry is deleted, malformed entry
+-- fields or index rows must not suppress the raw lease evidence returned to
+-- the TypeScript layer. Only safe string keys are used, and pcall isolates
+-- any remaining cleanup error.
+if entryIsTable and type(entry.clientIp) == 'string' then
+  pcall(removeFromIndex, prefix .. 'ip:' .. entry.clientIp, 'ip')
+end
+if entryIsTable and type(entry.senderAddress) == 'string' then
+  pcall(removeFromIndex, prefix .. 'sender:' .. entry.senderAddress, 'sender')
+end
+
+if resultKind == 'expired' then
+  return '__expired_entry__:' .. raw
+end
+if resultKind == 'hash_mismatch' then
+  return '__hash_mismatch_entry__:' .. raw
+end
 return raw
 `;

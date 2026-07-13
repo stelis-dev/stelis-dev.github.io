@@ -26,6 +26,7 @@ import { reconstructReservationHandles } from '../src/session/sponsoredExecution
 import { SenderSignatureError } from '../src/session/sessionPrimitives.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { getFailurePolicy } from '../src/failures.js';
+import { SETTLE_MODULE, SETTLE_WITH_CREDIT_FUNCTION, type PtbCommand } from '@stelis/contracts';
 import type {
   GenericPreparedTxEntry,
   PromotionPreparedTxEntry,
@@ -38,6 +39,7 @@ const SENDER = `0x${'11'.repeat(32)}`;
 const OTHER_SENDER = `0x${'33'.repeat(32)}`;
 const SPONSOR = `0x${'22'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
+const STELIS_PACKAGE_ID = `0x${'66'.repeat(32)}`;
 const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
 const GAS_USED = {
   computationCost: '1000',
@@ -78,7 +80,6 @@ function makePrepared(overrides: Partial<GenericPreparedTxEntry> = {}): GenericP
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'credit',
     orderId: 'order-1',
@@ -95,7 +96,6 @@ function makePromotionEntry(): PromotionPreparedTxEntry {
     senderAddress: SENDER,
     clientIp: '127.0.0.1',
     txBytesHash: 'a'.repeat(64),
-    slotId: 'slot-1',
     sponsorAddress: SPONSOR,
     executionPathKey: 'promotion:p1',
     orderId: null,
@@ -112,7 +112,7 @@ function makeContext(overrides: Partial<HostContext> = {}): HostContext {
     settlementPayoutRecipientAddress: `0x${'33'.repeat(32)}`,
     configId: `0x${'44'.repeat(32)}`,
     vaultRegistryId: `0x${'55'.repeat(32)}`,
-    packageId: `0x${'66'.repeat(32)}`,
+    packageId: STELIS_PACKAGE_ID,
     deepbookPackageId: `0x${'77'.repeat(32)}`,
     vaultsTableId: undefined,
     sui: {} as HostContext['sui'],
@@ -129,6 +129,19 @@ function makeContext(overrides: Partial<HostContext> = {}): HostContext {
     onSponsorResult: undefined,
     ...overrides,
   } as HostContext;
+}
+
+function creditSettlementCommands(): readonly PtbCommand[] {
+  return [
+    {
+      kind: 'MoveCall',
+      packageId: STELIS_PACKAGE_ID,
+      module: SETTLE_MODULE,
+      function: SETTLE_WITH_CREDIT_FUNCTION,
+      typeArguments: [],
+      arguments: [],
+    },
+  ];
 }
 
 function makeSponsorOptions(
@@ -186,11 +199,10 @@ function makePostCtx(): PostConsumeSponsorContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
+    executionStage: 'on_chain',
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
-      slotId: 'slot-1',
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
-      hmacCommitVerified: true,
     }),
   };
 }
@@ -256,6 +268,7 @@ function seedSponsorState(
     prepared: makePrepared(),
     revalidation: {
       builtTx: {} as Transaction,
+      commands: creditSettlementCommands(),
       freshConfig: {
         protocolFlatFeeMist: 10n,
       } as NonNullable<GenericExecutionPolicyState['sponsor']>['revalidation']['freshConfig'],
@@ -285,14 +298,10 @@ describe('createGenericExecutionPolicy', () => {
 
     expect(policy.discriminator).toBe('generic');
     expect(policy.handleRequirements.gasBoundBuild).toEqual({
-      sponsorSlot: true,
       nonce: true,
     });
-    expect(policy.handleRequirements.preparedCommit).toEqual({
-      sponsorSlot: true,
-      nonce: true,
-    });
-    expect(policy.handleRequirements.sponsorResult).toEqual({ sponsorSlot: true });
+    expect(policy.handleRequirements.preparedCommit).toEqual({});
+    expect(policy.handleRequirements.sponsorResult).toEqual({});
     expect(policy.hooks.RouteReservationAfterBuild).toBeDefined();
   });
 
@@ -328,15 +337,18 @@ describe('createGenericExecutionPolicy', () => {
         store: vi.fn(),
       },
     };
-    const preparedCommitInputs = vi.fn();
+    const preparedDraftFields = vi.fn();
+    const projectResponse = vi.fn();
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     try {
       const err = await runPrepareStateMachine(
         host,
         {
-          hookContext: makePrepareHookCtx(),
-          preparedCommitInputs,
+          senderAddress: makePrepareHookCtx().senderAddress,
+          clientIp: makePrepareHookCtx().clientIp,
+          preparedDraftFields,
+          projectResponse,
         },
         policy,
       ).catch((caught: unknown) => caught);
@@ -354,7 +366,8 @@ describe('createGenericExecutionPolicy', () => {
       expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
       expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
       expect(host.prepareStore.store).not.toHaveBeenCalled();
-      expect(preparedCommitInputs).not.toHaveBeenCalled();
+      expect(preparedDraftFields).not.toHaveBeenCalled();
+      expect(projectResponse).not.toHaveBeenCalled();
       expect(recordSponsorFailure).not.toHaveBeenCalled();
 
       const buildEvents = infoSpy.mock.calls
@@ -370,6 +383,59 @@ describe('createGenericExecutionPolicy', () => {
     } finally {
       infoSpy.mockRestore();
     }
+  });
+
+  test('generic prepare rejects 12 user commands before resource acquisition', async () => {
+    const userTx = new Transaction();
+    for (let index = 0; index < 12; index++) {
+      userTx.moveCall({ target: `0x${'99'.repeat(32)}::example::act` });
+    }
+    const deserializeUserTxKind = vi.fn().mockResolvedValue(userTx);
+    const { policy } = createGenericExecutionPolicy(
+      makePrepareOptions({
+        deps: {
+          deserializeUserTxKind:
+            deserializeUserTxKind as GenericExecutionPolicyDependencies['deserializeUserTxKind'],
+        },
+      }),
+    );
+    const host = {
+      inflightLimiter: {
+        tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
+      },
+      sponsorPool: {
+        checkout: vi.fn(),
+        commit: vi.fn(),
+        checkin: vi.fn(),
+      },
+      prepareStore: {
+        reserveNonce: vi.fn(),
+        releaseReservation: vi.fn(),
+        store: vi.fn(),
+      },
+    };
+
+    const err = await runPrepareStateMachine(
+      host,
+      {
+        senderAddress: makePrepareHookCtx().senderAddress,
+        clientIp: makePrepareHookCtx().clientIp,
+        preparedDraftFields: vi.fn(),
+        projectResponse: vi.fn(),
+      },
+      policy,
+    ).catch((caught: unknown) => caught);
+
+    expect(err).toBeInstanceOf(PrepareValidationError);
+    expect(err).toMatchObject({
+      code: 'P1_TOO_MANY_COMMANDS',
+      message: 'P1 validation failed: User TransactionKind command count 12 exceeds max 11',
+    });
+    expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
+    expect(host.inflightLimiter.tryAcquire).not.toHaveBeenCalled();
+    expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
+    expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
+    expect(host.prepareStore.store).not.toHaveBeenCalled();
   });
 
   test('does not widen the package main barrel', async () => {
@@ -426,7 +492,7 @@ describe('createGenericSponsorConsumeAdapter', () => {
     await expect(adapter.validateConsumedEntry?.(makePromotionEntry())).rejects.toMatchObject({
       code: 'MODE_MISMATCH',
     });
-    expect(checkin).toHaveBeenCalledWith('slot-1', RECEIPT_ID, 'a'.repeat(64));
+    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, 'a'.repeat(64));
   });
 
   test('hash mismatch records IP-only tampering before returning the classified error', async () => {
@@ -575,6 +641,7 @@ describe('generic sponsor postconsume hooks', () => {
           checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
           revalidateGenericSponsorPolicy: vi.fn(async () => ({
             builtTx: {} as Transaction,
+            commands: creditSettlementCommands(),
             freshConfig: { protocolFlatFeeMist: 10n },
             settleArgs: { nonce: 7n },
             isNewUserSettle: false,
@@ -606,6 +673,7 @@ describe('generic sponsor postconsume hooks', () => {
           checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
           revalidateGenericSponsorPolicy: vi.fn(async () => ({
             builtTx: {} as Transaction,
+            commands: creditSettlementCommands(),
             freshConfig: { protocolFlatFeeMist: 10n },
             settleArgs: { nonce: 8n },
             isNewUserSettle: false,
@@ -664,6 +732,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     seedSponsorState(state);
     const failed: ExecResult = {
       success: false,
+      executionStage: 'on_chain',
       digest: '0xdead',
       reason: 'MoveAbort(101)',
       isCongestion: false,
@@ -694,6 +763,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
+      executionStage: 'on_chain',
       digest: '0xok',
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
@@ -735,6 +805,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       seedSponsorState(state);
       const success: Extract<ExecResult, { success: true }> = {
         success: true,
+        executionStage: 'on_chain',
         digest: '0xok',
         effects: { status: 'ok' },
         gasUsed: GAS_USED,

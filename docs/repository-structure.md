@@ -76,6 +76,7 @@ graph TD
     CoreApi --> Relay
     Sdk --> Contracts
     Sdk --> Relay
+    Mcp --> Contracts
     AppApi --> Contracts
     AppApi --> Relay
     AppApi --> CoreApi
@@ -88,7 +89,7 @@ graph TD
 Important rules:
 
 - `@stelis/sdk` and `@stelis/mcp-server` are sibling products. They must not import each other.
-- `@stelis/mcp-server` calls a Stelis host over HTTP. It does not import `@stelis/core-api` or `@stelis/app-api`.
+- `@stelis/mcp-server` calls a Stelis Host over HTTP and consumes current wire contracts from `@stelis/contracts` in source. Its published build bundles that private source-of-truth code and does not require `@stelis/contracts` at runtime. It does not import `@stelis/sdk`, `@stelis/core-api`, or `@stelis/app-api`.
 - App packages depend on internal packages only when they are built inside this repository.
 - External user entry points are product packages, not internal packages.
 - Do not add a new top-level package unless it is a product package or a durable internal package with clear ownership.
@@ -152,7 +153,11 @@ Do not add exports just for symmetry. Add an export only when a verified consume
 
 ### Move Package
 
-`packages/contracts/move` is the on-chain package. TypeScript contract IDs and shared data live in `@stelis/contracts`, but contract deployment and upgrade are separate operational processes.
+`packages/contracts/move` is the on-chain package. TypeScript contract IDs and
+shared data live in `@stelis/contracts`. The current Stelis deployment is
+testnet-only, and testnet contract changes use fresh package deployments.
+Consumers use only the current package interface and IDs; compatibility paths
+for superseded testnet packages are not retained.
 
 ## Documentation Boundaries
 

@@ -17,20 +17,30 @@ import {
   MAX_SPONSOR_REQUEST_BODY_BYTES,
   SponsorBlockedError,
   validateBps,
-  type SponsorParams,
-  type SponsorResult,
 } from '@stelis/core-api';
-import { INTEGRITY_POLICY_VERSION, SLIPPAGE_CAP_BPS, GAS_MARGIN_CAP_BPS } from '@stelis/contracts';
+import {
+  GAS_MARGIN_CAP_BPS,
+  HostWireParseError,
+  SLIPPAGE_CAP_BPS,
+  parseRelayPrepareRequest,
+  parseRelaySponsorRequest,
+  type RelayConfigResponse,
+  type RelayPrepareResponse,
+  type RelaySponsorResponse,
+} from '@stelis/contracts';
 
 import type { AppApiContext } from '../context.js';
-import { getClientIp } from '../clientIp.js';
+import type { ResolveClientIp } from '../clientIp.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { canonicalizeAddress } from '@stelis/core-api';
 import { mapError, respondMapped } from '../errorMap.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
 
-export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
+export function createRelayRoutes(
+  contextPromise: Promise<AppApiContext>,
+  resolveClientIp: ResolveClientIp,
+) {
   const app = new Hono();
 
   // ── GET /relay/status ─────────────────────────────────────────────
@@ -45,7 +55,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
 
   // ── GET /relay/config ─────────────────────────────────────────────
   app.get('/config', async (c) => {
-    const ctx = await getCtx();
+    const ctx = await contextPromise;
     const host = ctx.host;
     try {
       const config = await host.getConfig();
@@ -60,15 +70,15 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
         return { ...p, lotSize: lot, minSize: min };
       });
 
-      return c.json({
+      const response: RelayConfigResponse = {
         network: host.network,
         packageId: host.packageId,
         settlementPayoutRecipient: host.settlementPayoutRecipientAddress,
         supportedSettlementSwapPaths: jsonSafePools,
         quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         protocolFlatFeeMist: config.protocolFlatFeeMist.toString(),
-        integrityPolicyVersion: INTEGRITY_POLICY_VERSION,
-      });
+      };
+      return c.json(response);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[/relay/config] getConfig() failed:', err);
@@ -85,8 +95,8 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
   // ── POST /relay/prepare ───────────────────────────────────────────
   app.post('/prepare', async (c) => {
     try {
-      const ip = getClientIp(c);
-      const ctx = await getCtx();
+      const ip = resolveClientIp(c);
+      const ctx = await contextPromise;
       const host = ctx.host;
 
       // Sponsor operations gate check — shared-state read + pure derivation.
@@ -129,38 +139,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
         );
       }
 
-      const body = await readJsonBodyWithLimit<Record<string, unknown>>(
-        c.req.raw,
-        MAX_PREPARE_REQUEST_BODY_BYTES,
+      const body = parseRelayPrepareRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_PREPARE_REQUEST_BODY_BYTES),
       );
-
-      if (typeof body.txKindBytes !== 'string' || typeof body.senderAddress !== 'string') {
-        return c.json(
-          { error: 'Missing required fields: txKindBytes, senderAddress', code: 'BAD_REQUEST' },
-          400,
-        );
-      }
-      if (typeof body.settlementTokenType !== 'string' || body.settlementTokenType === '') {
-        return c.json(
-          { error: 'Missing required field: settlementTokenType', code: 'BAD_REQUEST' },
-          400,
-        );
-      }
-      if (
-        typeof body.txKindBytesHash !== 'string' ||
-        typeof body.prepareAuthorizationTimestampMs !== 'number' ||
-        typeof body.prepareAuthorizationRequestNonce !== 'string' ||
-        typeof body.prepareAuthorizationSignature !== 'string'
-      ) {
-        return c.json(
-          {
-            error:
-              'Missing required fields: txKindBytesHash, prepareAuthorizationTimestampMs, prepareAuthorizationRequestNonce, prepareAuthorizationSignature',
-            code: 'BAD_REQUEST',
-          },
-          400,
-        );
-      }
 
       // Canonical sender boundary — normalize once, use everywhere downstream.
       let canonicalSender: string;
@@ -201,7 +182,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       }
 
       // ── Generic path ─────────────────────────────────────
-      const result = await handlePrepare(
+      const result: RelayPrepareResponse = await handlePrepare(
         host,
         {
           txKindBytes: body.txKindBytes,
@@ -209,7 +190,7 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
           settlementTokenType: body.settlementTokenType,
           slippageBps,
           gasMarginBps,
-          orderId: typeof body.orderId === 'string' ? body.orderId : undefined,
+          orderId: body.orderId,
           txKindBytesHash: body.txKindBytesHash,
           prepareAuthorizationTimestampMs: body.prepareAuthorizationTimestampMs,
           prepareAuthorizationRequestNonce: body.prepareAuthorizationRequestNonce,
@@ -220,6 +201,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
       );
       return c.json(result);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const mapped = mapError(err);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
@@ -232,8 +216,8 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
   // ── POST /relay/sponsor ───────────────────────────────────────────
   app.post('/sponsor', async (c) => {
     try {
-      const ip = getClientIp(c);
-      const ctx = await getCtx();
+      const ip = resolveClientIp(c);
+      const ctx = await contextPromise;
       const host = ctx.host;
 
       // Sponsor operations gate check — shared-state read + pure derivation.
@@ -267,32 +251,16 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
         );
       }
 
-      const body = await readJsonBodyWithLimit<Partial<SponsorParams>>(
-        c.req.raw,
-        MAX_SPONSOR_REQUEST_BODY_BYTES,
+      const { txBytes, userSignature, receiptId } = parseRelaySponsorRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SPONSOR_REQUEST_BODY_BYTES),
       );
-      const { txBytes, userSignature, receiptId } = body;
-
-      if (
-        typeof txBytes !== 'string' ||
-        typeof userSignature !== 'string' ||
-        typeof receiptId !== 'string'
-      ) {
-        return c.json(
-          {
-            error: 'Missing required fields: txBytes, userSignature, receiptId',
-            code: 'BAD_REQUEST',
-          },
-          400,
-        );
-      }
 
       // handleSponsor routes through the sponsor runner:
       // pre-consume validation → consume stored hash → post-consume checks
       // → sign/submit → sponsor result policy → finally slot checkin/release hook.
       // The post-terminal host callback writes slot and sponsor refill account state through that
       // runner path, so no separate wake signal is required here.
-      const sponsorResult: SponsorResult = await handleSponsor(
+      const sponsorResult: RelaySponsorResponse = await handleSponsor(
         host,
         { txBytes, userSignature, receiptId },
         ip,
@@ -300,6 +268,9 @@ export function createRelayRoutes(getCtx: () => Promise<AppApiContext>) {
 
       return c.json(sponsorResult);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       // SponsorBlockedError carries a dynamic retryAfterMs that must be
       // projected into both the body (via toBlockedError) and the
       // Retry-After header; stays route-local.

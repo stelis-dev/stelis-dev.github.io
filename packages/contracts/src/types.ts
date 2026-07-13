@@ -190,7 +190,7 @@ export interface PrepareAuthorizationFields {
  * `orderId` or a precomputed `orderIdHash`.
  */
 export type ExpectedSettleEventFields = {
-  /** Stelis-issued receipt ID, encoded as hex. */
+  /** Stelis-issued 32-byte receipt ID, encoded as hex with an optional `0x` prefix. */
   receiptId: string;
   /** User wallet address expected in the on-chain event. */
   user: string;
@@ -200,4 +200,11 @@ export type ExpectedSettleEventFields = {
   quotedHostFeeMist?: string;
   /** Expected protocol fee in MIST, when the integration tracks amounts. */
   protocolFeeMist?: string;
-} & ({ orderId: string; orderIdHash?: never } | { orderId?: never; orderIdHash: string });
+} & (
+  | { orderId: string; orderIdHash?: never }
+  | {
+      orderId?: never;
+      /** Precomputed 32-byte SHA-256 hash, with an optional `0x` prefix. */
+      orderIdHash: string;
+    }
+);

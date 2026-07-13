@@ -1,5 +1,5 @@
 import { Transaction } from '@mysten/sui/transactions';
-import { convertSdkCommands } from '@stelis/core-relay';
+import { convertSdkCommands, MAX_FINAL_COMMANDS } from '@stelis/core-relay';
 import type { PromotionPreparedTxEntry } from '../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
@@ -14,6 +14,7 @@ import {
   LEDGER_CONSUME_THREW_IN_HANDLER,
 } from '../observability/events.js';
 import {
+  validatePromotionCommandCount,
   validatePromotionPtbStructure,
   validatePromotionTargets,
   validatePromotionEligibility,
@@ -91,11 +92,12 @@ export type ConsumeLedgerOutcome =
   | { ok: false; kind: 'threw'; error: string };
 
 /**
- * Failure-path ledger consume helper.
+ * Post-signature ledger consume helper.
  *
- * Used by post-signature/post-submit promotion failure branches
- * (submit-infra exception, on-chain revert with/without `gasUsed`,
- * post-success `GAS_EFFECTS_MISSING`). Behavior contract:
+ * Used by post-signature/post-submit promotion ledger updates
+ * (post-signature uncertainty, on-chain revert with/without `gasUsed`,
+ * post-success `GAS_EFFECTS_MISSING`, and success-side entitlement
+ * consumption). Behavior contract:
  *
  *   - On `ConsumeResult.ok === true` returns `{ ok: true }`.
  *   - On `ConsumeResult.ok === false` emits
@@ -105,10 +107,10 @@ export type ConsumeLedgerOutcome =
  *     same context and returns `{ ok: false, kind: 'threw', error }`.
  *
  * The helper does NOT throw and does NOT fall back to `release()`. A
- * failure-path consume failure leaves the reservation eligible for the
+ * consume failure leaves the reservation eligible for the
  * ExecutionLedger reservation reaper release path, which is documented
- * operator follow-up — call sites must mark sponsor result economics as
- * unknown/loss instead of pretending the ledger settled successfully.
+ * operator follow-up. Callers derive economic certainty from on-chain gas
+ * evidence, never from whether this entitlement update succeeded.
  *
  * Branch-specific failure reasons stay at the call site (they go into the
  * UsageEvent `failureReason`); this helper only logs ledger-call outcome.
@@ -226,6 +228,15 @@ export async function validatePromotionPreconsumePolicy(
     throw sponsorPolicyErrorForTargetPolicy(targetFailure);
   }
 
+  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
+  if (commandCountFailure) {
+    throw new PromotionSponsorPolicyError(
+      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
+      'BAD_REQUEST',
+      400,
+    );
+  }
+
   // S3 — eligibility (promotion active + claimed + use-window).
   const promotion = await ctx.promotionStore.get(input.promotionId);
   const entitlement = promotion
@@ -304,22 +315,24 @@ async function recordSponsorAbuseForPtbStructure(
     promotionId: input.promotionId,
     userId: input.verifiedIdentity.userId,
   };
-  if (f.code === 'FORBIDDEN_COMMAND') {
-    await recordPromotionAbuseEvent(
-      ctx.abuseBlocker,
-      input.clientIp,
-      { kind: 'studio_user', userId: peeked.userId },
-      PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
-      { ...common, kind: f.kind },
-    );
-  } else if (f.code === 'GASCOIN_FORBIDDEN') {
-    await recordPromotionAbuseEvent(
-      ctx.abuseBlocker,
-      input.clientIp,
-      { kind: 'studio_user', userId: peeked.userId },
-      PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
-      common,
-    );
+  switch (f.code) {
+    case 'FORBIDDEN_COMMAND':
+      await recordPromotionAbuseEvent(
+        ctx.abuseBlocker,
+        input.clientIp,
+        { kind: 'studio_user', userId: peeked.userId },
+        PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
+        { ...common, kind: f.kind },
+      );
+      return;
+    case 'GASCOIN_FORBIDDEN':
+      await recordPromotionAbuseEvent(
+        ctx.abuseBlocker,
+        input.clientIp,
+        { kind: 'studio_user', userId: peeked.userId },
+        PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
+        common,
+      );
   }
 }
 

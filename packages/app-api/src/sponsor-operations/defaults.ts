@@ -7,7 +7,7 @@
  *
  * The four `SPONSOR_OPERATIONS_*` timing budgets named in
  * `docs/parameters.md` are NOT carried here. They are injected as
- * required env-driven parameters at boot by `context.ts`. The repository
+ * required env-driven parameters by `boot.ts`. The repository
  * documents them as deployment-defined required env values with no
  * code-side numeric default.
  */

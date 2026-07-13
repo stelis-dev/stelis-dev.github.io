@@ -6,15 +6,31 @@
  *   - validateSettlementSwapPathRegistry: duplicate-token rejection, empty-registry rejection
  *   - determineSettlementToken: settle.move baseForQuote direction enforcement
  */
-import { describe, it, expect, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const { forbiddenReadFile, forbiddenReadFileSync } = vi.hoisted(() => ({
+  forbiddenReadFile: vi.fn(() => {
+    throw new Error('registry resolver must not read a file');
+  }),
+  forbiddenReadFileSync: vi.fn(() => {
+    throw new Error('registry resolver must not read a file');
+  }),
+}));
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return { ...actual, readFile: forbiddenReadFile };
+});
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return { ...actual, readFileSync: forbiddenReadFileSync };
+});
 import {
   parseSettlementSwapPathRegistryJson,
   validateSettlementSwapPathRegistry,
   determineSettlementToken,
-  loadSettlementSwapPathRegistry,
+  resolveSettlementSwapPathRegistry,
 } from '../src/settlementSwapPathRegistry.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 
@@ -233,7 +249,7 @@ describe('determineSettlementToken', () => {
 });
 
 // ─────────────────────────────────────────────
-// loadSettlementSwapPathRegistry fee derivation
+// resolveSettlementSwapPathRegistry fee derivation
 // ─────────────────────────────────────────────
 
 function bcsU64(value: bigint): Uint8Array {
@@ -261,12 +277,13 @@ function viewResult(values: Uint8Array[]) {
   };
 }
 
-describe('loadSettlementSwapPathRegistry', () => {
-  it('publishes fee-bearing settlement swap paths on Stelis input-fee basis', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'stelis-settlement-swap-path-registry-'));
-    const jsonPath = join(dir, 'settlement-swap-paths.json');
-    await writeFile(jsonPath, JSON.stringify(settlementSwapPathRegistryJson([POOL_ID])), 'utf-8');
+describe('resolveSettlementSwapPathRegistry', () => {
+  beforeEach(() => {
+    forbiddenReadFile.mockClear();
+    forbiddenReadFileSync.mockClear();
+  });
 
+  it('publishes fee-bearing settlement swap paths on Stelis input-fee basis', async () => {
     const client = {
       getObject: vi.fn(async () => ({
         object: {
@@ -299,26 +316,23 @@ describe('loadSettlementSwapPathRegistry', () => {
       }),
     };
 
-    try {
-      const settlementSwapPaths = await loadSettlementSwapPathRegistry(
-        client as never,
-        DEEPBOOK_PACKAGE_ID,
-        jsonPath,
-        'testnet',
-      );
-      expect(settlementSwapPaths).toHaveLength(1);
-      expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(25);
-      expect(settlementSwapPaths[0].hops[0].feeBps).toBe(25);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    const settlementSwapPaths = await resolveSettlementSwapPathRegistry(
+      client as never,
+      DEEPBOOK_PACKAGE_ID,
+      entries,
+    );
+    expect(settlementSwapPaths).toHaveLength(1);
+    expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(25);
+    expect(settlementSwapPaths[0].hops[0].feeBps).toBe(25);
+    expect(forbiddenReadFile).not.toHaveBeenCalled();
+    expect(forbiddenReadFileSync).not.toHaveBeenCalled();
   });
 
   it('uses deployed DeepBook fee constants instead of local literals', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'stelis-settlement-swap-path-registry-'));
-    const jsonPath = join(dir, 'settlement-swap-paths.json');
-    await writeFile(jsonPath, JSON.stringify(settlementSwapPathRegistryJson([POOL_ID])), 'utf-8');
-
     const client = {
       getObject: vi.fn(async () => ({
         object: {
@@ -349,17 +363,16 @@ describe('loadSettlementSwapPathRegistry', () => {
       }),
     };
 
-    try {
-      const settlementSwapPaths = await loadSettlementSwapPathRegistry(
-        client as never,
-        DEEPBOOK_PACKAGE_ID,
-        jsonPath,
-        'testnet',
-      );
-      expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(40);
-      expect(settlementSwapPaths[0].hops[0].feeBps).toBe(40);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    const settlementSwapPaths = await resolveSettlementSwapPathRegistry(
+      client as never,
+      DEEPBOOK_PACKAGE_ID,
+      entries,
+    );
+    expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(40);
+    expect(settlementSwapPaths[0].hops[0].feeBps).toBe(40);
   });
 });

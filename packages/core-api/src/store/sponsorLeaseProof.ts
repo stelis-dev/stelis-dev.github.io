@@ -9,7 +9,7 @@
  *
  * Sponsor-side verdicts are tx-derived (parsed settle args + fresh
  * on-chain config + explicit sender binding). The remaining off-chain
- * authority is the sponsor-pool slot signing gate. A receipt/slot-only
+ * authority is the sponsor-pool signing gate. A receipt/sponsor-only
  * HMAC is insufficient, because a live lease proof can be replayed
  * against a forged prepare entry under the same `receiptId`.
  *
@@ -20,14 +20,14 @@
  * know the process-env secret.
  *
  * Signed string shape:
- *   `${receiptId}|${slotId}|${commitDigest}`
+ *   `${receiptId}|${sponsorAddress}|${commitDigest}`
  *
  *   commitDigest =
  *     COMMIT_DIGEST_RESERVED  (at `checkout`, before prepare commit exists)
  *   | txBytesHash             (hex SHA-256; set by `commit`, verified by `sign`)
  *
  * The literal `|` separator prevents boundary ambiguity between fields.
- * `receiptId` is `0x` + 64 hex chars, `slotId` is a Sui address
+ * `receiptId` is `0x` + 64 hex chars, `sponsorAddress` is a Sui address
  * (`0x` + 64 hex chars), and `txBytesHash` is 64 hex chars; none of them
  * contain the separator.
  *
@@ -38,8 +38,8 @@
  * — no tx can match the reserved HMAC. This guarantees that
  * `checkout → sign` without `commit` always fails closed.
  *
- * Slot pinning: including `slotId` in the payload prevents a receipt +
- * hash combination from being reused against a different slot. Commit
+ * Sponsor pinning: including `sponsorAddress` in the payload prevents a receipt +
+ * hash combination from being reused against a different sponsor. Commit
  * pinning: including the prepare commit digest prevents a live lease from
  * authorising any PTB other than the one the prepare flow committed to.
  */
@@ -80,7 +80,7 @@ export class SponsorLeaseCommitError extends Error {
 }
 
 /**
- * Compute the lease proof for a `(receiptId, slotId, commitDigest)` tuple.
+ * Compute the lease proof for a `(receiptId, sponsorAddress, commitDigest)` tuple.
  *
  * Returns a hex-encoded HMAC-SHA256 digest. The output length is 64
  * characters, which is safe to store in Redis as a normal string value.
@@ -94,17 +94,17 @@ export class SponsorLeaseCommitError extends Error {
 export function computeLeaseProof(
   secret: string,
   receiptId: string,
-  slotId: string,
+  sponsorAddress: string,
   commitDigest: string,
 ): string {
   return createHmac('sha256', secret)
-    .update(`${receiptId}|${slotId}|${commitDigest}`)
+    .update(`${receiptId}|${sponsorAddress}|${commitDigest}`)
     .digest('hex');
 }
 
 /**
  * Constant-time comparison of a stored lease proof against the expected
- * proof computed for a `(receiptId, slotId, commitDigest)` tuple.
+ * proof computed for a `(receiptId, sponsorAddress, commitDigest)` tuple.
  *
  * `stored` is the Redis / in-memory value observed by the pool adapter.
  * `expected` is the fresh computation from `computeLeaseProof`.

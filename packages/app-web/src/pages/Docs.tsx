@@ -47,7 +47,7 @@ const endpoints: EndpointOverview[] = [
     detail:
       'The SDK calls this during connect() to fetch network metadata, settlement swap path support, and integrity-handshake fields.',
     highlights: [
-      'Returns packageId, settlementPayoutRecipient payout address, supportedSettlementSwapPaths, quoted fee fields, and integrityPolicyVersion',
+      'Returns packageId, settlementPayoutRecipient payout address, supportedSettlementSwapPaths, and quoted fee fields',
       'Use this before constructing production client assumptions',
     ],
     docHref: `${API_DOC_URL}#get-relay-config`,

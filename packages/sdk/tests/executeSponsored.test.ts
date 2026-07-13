@@ -39,7 +39,6 @@ const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => (
 // ── Mock: integrity (skip S-16) ─────────────────────────────────────────────
 vi.mock('../src/integrity.js', () => ({
   verifyPtbIntegrity: vi.fn(),
-  SUPPORTED_INTEGRITY_POLICY_VERSION: 1,
   StelisIntegrityError: class StelisIntegrityError extends Error {
     constructor(msg: string) {
       super(msg);
@@ -123,7 +122,6 @@ const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   ],
   quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
-  integrityPolicyVersion: 1,
 };
 
 function makeMockSuiClient(): SuiGrpcClient {

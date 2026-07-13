@@ -35,13 +35,14 @@ import type {
   PolicyPostconsumeReconstruction,
 } from '../src/session/sponsoredExecution/index.js';
 import type {
-  GenericPreparedTxEntry,
-  PromotionPreparedTxEntry,
+  GenericPreparedTxDraft,
+  PromotionPreparedTxDraft,
 } from '../src/store/prepareTypes.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { SponsorPool } from '../src/context.js';
+import { SponsorPostSignatureUncertaintyError } from '../src/session/sessionPrimitives.js';
 import {
   runSponsorConsumePhase,
   type SponsorConsumePolicyAdapter,
@@ -69,6 +70,7 @@ const TEST_USER_SIGNATURE = 'mock-user-sig';
 
 const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
   success: true,
+  executionStage: 'on_chain',
   digest: 'mock-digest',
   effects: undefined,
   gasUsed: {
@@ -81,6 +83,7 @@ const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
 
 const FAILED_EXEC_ONCHAIN: ExecResult = {
   success: false,
+  executionStage: 'on_chain',
   digest: 'failed-digest',
   reason: 'MoveAbort',
   isCongestion: false,
@@ -89,8 +92,9 @@ const FAILED_EXEC_ONCHAIN: ExecResult = {
 
 const FAILED_EXEC_CONGESTION: ExecResult = {
   success: false,
+  executionStage: 'after_sponsor_signature',
   digest: '',
-  reason: 'ExecutionCancelledDueToSharedObjectCongestion',
+  reason: 'confirmed shared-object congestion',
   isCongestion: true,
   gasUsed: null,
 };
@@ -149,7 +153,6 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
     ChainSnapshot: () => ({}),
     ExecutionPolicySelected: () => {},
     SlotFreePlan: () => {},
-    ReceiptIdGenerated: () => {},
     SponsorSlotReservationAcquired: () => {},
     RouteReservationBeforeBuild: () => {},
     GasBoundBuild: () => ({
@@ -160,8 +163,6 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
     RouteReservationAfterBuild: () => {},
     SelfCheck: () => {},
     SponsorLeaseCommitted: () => {},
-    PrepareStored: () => {},
-    AwaitUserSignature: () => {},
     DecodeSponsorSubmission: recordPre('DecodeSponsorSubmission'),
     UserSignatureValidation: recordPre('UserSignatureValidation'),
     Consume: recordPre('Consume'),
@@ -263,9 +264,9 @@ function makeGenericPolicy(opts: MakePolicyOptions = {}): {
     policy: {
       discriminator: 'generic',
       handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true, nonce: true },
-        preparedCommit: { sponsorSlot: true, nonce: true },
-        sponsorResult: { sponsorSlot: true },
+        gasBoundBuild: { nonce: true },
+        preparedCommit: {},
+        sponsorResult: {},
       },
       hooks,
     },
@@ -282,9 +283,9 @@ function makePromotionPolicy(opts: MakePolicyOptions = {}): {
     policy: {
       discriminator: 'promotion',
       handleRequirements: {
-        gasBoundBuild: { sponsorSlot: true },
-        preparedCommit: { sponsorSlot: true, ledgerReservation: true },
-        sponsorResult: { sponsorSlot: true, ledgerReservation: true },
+        gasBoundBuild: {},
+        preparedCommit: { ledgerReservation: true },
+        sponsorResult: { ledgerReservation: true },
       },
       hooks,
     },
@@ -300,10 +301,10 @@ interface HostBuild {
   signAndSubmitMock: ReturnType<typeof vi.fn>;
 }
 
-function makeHost(opts?: { execResult?: ExecResult; signThrows?: Error }): HostBuild {
+function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): HostBuild {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((slotId, receiptId, txBytesHash) =>
-    sponsorPool.checkin(slotId, receiptId, txBytesHash),
+  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
+    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
   const ledger = new MemoryPromotionExecutionLedger();
 
@@ -331,40 +332,36 @@ function makeHost(opts?: { execResult?: ExecResult; signThrows?: Error }): HostB
 /**
  * Pre-store a generic prepared entry + commit the matching HMAC lease
  * on the sponsor pool so `runSponsorConsumePhase` finds a valid entry
- * keyed to `TEST_TX_BYTES_HASH`. Returns the slotId chosen by the pool.
+ * keyed to `TEST_TX_BYTES_HASH`. Returns the sponsorAddress chosen by the pool.
  */
 async function pinGenericEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: GenericPreparedTxEntry = {
+  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+  const entry: GenericPreparedTxDraft = {
     mode: 'generic',
-    issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: 'credit',
     orderId: null,
     nonce: 1n,
   };
-  await host.prepareStore.store(TEST_RECEIPT_ID, entry);
-  return slot.slotId;
+  await host.prepareStore.store(entry);
+  return slot.sponsorAddress;
 }
 
 async function pinPromotionEntry(host: HostBuild): Promise<string> {
   const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
   if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: PromotionPreparedTxEntry = {
+  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+  const entry: PromotionPreparedTxDraft = {
     mode: 'promotion',
-    issuedAt: Date.now(),
     receiptId: TEST_RECEIPT_ID,
     senderAddress: TEST_SENDER,
     txBytesHash: TEST_TX_BYTES_HASH,
-    slotId: slot.slotId,
     sponsorAddress: slot.sponsorAddress,
     clientIp: '127.0.0.1',
     executionPathKey: `promotion:${TEST_PROMO}`,
@@ -374,8 +371,8 @@ async function pinPromotionEntry(host: HostBuild): Promise<string> {
     userId: TEST_USER,
     reservedGasMist: 1_400_000n,
   };
-  await host.prepareStore.store(TEST_RECEIPT_ID, entry);
-  return slot.slotId;
+  await host.prepareStore.store(entry);
+  return slot.sponsorAddress;
 }
 
 /**
@@ -507,9 +504,9 @@ describe('runSponsorStateMachine — generic happy path', () => {
     }
   });
 
-  test('host.signAndSubmit is called with (slotId, receiptId, txBytes, userSignature) from the consumed entry', async () => {
+  test('host.signAndSubmit is called with (sponsorAddress, receiptId, txBytes, userSignature) from the consumed entry', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -517,7 +514,7 @@ describe('runSponsorStateMachine — generic happy path', () => {
 
     expect(host.signAndSubmitMock).toHaveBeenCalledTimes(1);
     expect(host.signAndSubmitMock).toHaveBeenCalledWith(
-      slotId,
+      sponsorAddress,
       TEST_RECEIPT_ID,
       TEST_TX_BYTES,
       TEST_USER_SIGNATURE,
@@ -609,7 +606,7 @@ describe('runSponsorStateMachine — consume failures', () => {
 describe('runSponsorStateMachine — finally slot checkin parity', () => {
   test('SharedPostconsumeChecks throws → finally runs safeSlotCheckin', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ failAtState: 'SharedPostconsumeChecks' });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -619,12 +616,12 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow('policy fault at SharedPostconsumeChecks');
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('Preflight throws → finally runs safeSlotCheckin', async () => {
     const host = makeHost();
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ failAtState: 'Preflight', emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -634,14 +631,14 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow('policy fault at Preflight');
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('signAndSubmit throws → finally runs safeSlotCheckin (pre-sign and post-sign branches both reach finally)', async () => {
     const preSignErr = new Error('SponsorLeaseExpired-equivalent');
     const host = makeHost({ signThrows: preSignErr });
-    const slotId = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ emitNonce: true });
+    const sponsorAddress = await pinGenericEntry(host);
+    const { policy, log } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
     const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
@@ -650,12 +647,35 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toBe(preSignErr);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    const release = log.find((entry) => entry.state === 'Release');
+    expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
+      'before_sponsor_signature',
+    );
+  });
+
+  test('typed post-signature uncertainty updates Release metadata before rethrowing the original cause', async () => {
+    const cause = new Error('rpc transport error');
+    const host = makeHost({
+      signThrows: new SponsorPostSignatureUncertaintyError(cause),
+    });
+    await pinGenericEntry(host);
+    const { policy, log } = makeGenericPolicy({ emitNonce: true });
+    const adapter = makeMockConsumeAdapter('generic');
+
+    await expect(
+      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
+    ).rejects.toBe(cause);
+
+    const release = log.find((entry) => entry.state === 'Release');
+    expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
+      'after_sponsor_signature',
+    );
   });
 
   test('execResult.success === false → ClassifySponsorResult throws (route classification); finally still runs safeSlotCheckin', async () => {
     const host = makeHost({ execResult: FAILED_EXEC_ONCHAIN });
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -665,12 +685,12 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow(/route-classified sponsor result failure/);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 
   test('congestion path: ClassifySponsorResult classifies failed execResult.isCongestion → throws; finally still runs safeSlotCheckin', async () => {
     const host = makeHost({ execResult: FAILED_EXEC_CONGESTION });
-    const slotId = await pinGenericEntry(host);
+    const sponsorAddress = await pinGenericEntry(host);
     const { policy } = makeGenericPolicy({ emitNonce: true });
     const adapter = makeMockConsumeAdapter('generic');
 
@@ -680,7 +700,7 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
     ).rejects.toThrow(/route-classified sponsor result failure/);
 
-    expect(checkinSpy).toHaveBeenCalledWith(slotId, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
   });
 });
 
@@ -703,6 +723,7 @@ describe('runSponsorStateMachine — Submit hook non-masking', () => {
     expect(submit?.args).toHaveLength(1);
     expect(sponsorResult?.args).toHaveLength(2);
     expect(sponsorResult?.args[1]).toBe(SUCCESS_EXEC);
+    expect((sponsorResult?.args[0] as PostConsumeSponsorContext).executionStage).toBe('on_chain');
   });
 
   test('Submit throws on success path → ClassifySponsorResult still fires (success branch); primary success result still returned', async () => {

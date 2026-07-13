@@ -37,9 +37,9 @@ const fixedClock = () => new Date(FROZEN_TS);
 
 function makeMetadata(overrides: Partial<SponsorResultMetadata> = {}): SponsorResultMetadata {
   const base: SponsorResultMetadata = {
-    slotId: '0xslot',
     sponsorAddress: '0xsponsor',
     outcome: 'success',
+    executionStage: 'on_chain',
     route: 'generic',
     digest: '0xdigest',
     receiptId: 'r1',
@@ -98,10 +98,16 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
   it('skips congestion / preflight / validation', async () => {
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
-    for (const outcome of ['congestion', 'preflight_failure', 'validation_failure'] as const) {
+    for (const [outcome, executionStage] of [
+      ['congestion', 'after_sponsor_signature'],
+      ['preflight_failure', 'before_sponsor_signature'],
+      ['preflight_failure', 'on_chain'],
+      ['validation_failure', 'before_sponsor_signature'],
+    ] as const) {
       await cb(
         makeMetadata({
           outcome,
+          executionStage,
           economics: { economicsStatus: 'unknown', failureReason: outcome },
         }),
       );
@@ -109,51 +115,39 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
     expect(store.appended).toHaveLength(0);
   });
 
-  it('skips internal_error fall-through (no submit_infra_unknown marker — never burned gas)', async () => {
-    // Generic catch-all `internal_error` whose `failureReason` does NOT
-    // start with `submit_infra_unknown` — these are crashes that throw
-    // before sponsor signature, so the Host never paid gas onchain.
-    // They belong to other audit views, not Sponsored Executions.
+  it('skips an internal error before the sponsor signature regardless of diagnostic text', async () => {
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
     await cb(
       makeMetadata({
         outcome: 'internal_error',
+        executionStage: 'before_sponsor_signature',
         economics: {
           economicsStatus: 'unknown',
-          failureReason: 'unexpected error: foo',
+          failureReason: 'unrelated diagnostic text',
         },
       }),
     );
     expect(store.appended).toHaveLength(0);
   });
 
-  it('records internal_error when failureReason starts with submit_infra_unknown (post-signature uncertainty: TX may have landed)', async () => {
-    // Submit-infra branch in the promotion handler stamps
-    // `submit_infra_unknown: <rpcMsg>` (or `submit_infra_unknown
-    // (ledger consume <kind>): <rpcMsg>`) onto economics before
-    // re-throwing the raw RPC error. The sponsor signature was already
-    // issued before `executeTransaction()` threw, so the TX may have
-    // reached the network and burned gas. Record it so operators see
-    // these incidents in the same Sponsored Executions view they
-    // already use to reconcile success / on-chain-revert rows.
+  it('records post-signature internal uncertainty without parsing failureReason', async () => {
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
     await cb(
       makeMetadata({
         outcome: 'internal_error',
+        executionStage: 'after_sponsor_signature',
         economics: {
           economicsStatus: 'unknown',
-          failureReason: 'submit_infra_unknown (ledger consume failed): rpc transport error',
+          failureReason: 'rpc transport error',
         },
       }),
     );
     expect(store.appended).toHaveLength(1);
     expect(store.appended[0].outcome).toBe('internal_error');
     expect(store.appended[0].economicsStatus).toBe('unknown');
-    expect(store.appended[0].failureReason).toBe(
-      'submit_infra_unknown (ledger consume failed): rpc transport error',
-    );
+    expect(store.appended[0].failureReason).toBe('rpc transport error');
     // Numeric honesty: every monetary field must be null on the
     // unknown-economics row — recorder must not coerce an unknown
     // amount.
@@ -162,27 +156,51 @@ describe('createSponsoredLogsRecorder — outcome filter', () => {
     expect(store.appended[0].hostNetMist).toBeNull();
   });
 
-  it('records the generic-execution-path submit-infra shape (no ledger consume kind suffix) — `submit_infra_unknown: <rpcMsg>`', async () => {
-    // Generic route has no per-receipt ledger reservation, so the
-    // submit-infra stamp is the consume()-succeeded shape only:
-    // `submit_infra_unknown: <rpcMsg>`. Both routes share the same
-    // marker prefix and both must opt in.
+  it('never persists numeric certainty for an after-signature uncertain row', async () => {
     const store = new CapturingStore();
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
     await cb(
       makeMetadata({
         outcome: 'internal_error',
-        route: 'generic',
+        executionStage: 'after_sponsor_signature',
         economics: {
-          economicsStatus: 'unknown',
-          failureReason: 'submit_infra_unknown: rpc transport error',
+          economicsStatus: 'known',
+          recoveredGasMist: '999',
+          hostPaidGasMist: '999',
+          hostFeeMist: '0',
+          hostNetMist: '0',
+          grossGasMist: '999',
+          storageRebateMist: '0',
+          protocolFeeMist: null,
+          failureReason: 'malformed producer economics',
         },
       }),
     );
-    expect(store.appended).toHaveLength(1);
-    expect(store.appended[0].outcome).toBe('internal_error');
-    expect(store.appended[0].mode).toBe('generic');
-    expect(store.appended[0].failureReason).toBe('submit_infra_unknown: rpc transport error');
+
+    expect(store.appended[0]).toMatchObject({
+      economicsStatus: 'unknown',
+      recoveredGasMist: null,
+      hostPaidGasMist: null,
+      hostFeeMist: null,
+      hostNetMist: null,
+    });
+  });
+
+  it('skips confirmed congestion even though it is after the sponsor signature', async () => {
+    const store = new CapturingStore();
+    const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
+    await cb(
+      makeMetadata({
+        outcome: 'congestion',
+        executionStage: 'after_sponsor_signature',
+        route: 'generic',
+        economics: {
+          economicsStatus: 'unknown',
+          failureReason: 'confirmed shared-object congestion',
+        },
+      }),
+    );
+    expect(store.appended).toHaveLength(0);
   });
 });
 
@@ -193,7 +211,6 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     await cb(makeMetadata());
     const e = store.appended[0];
     expect(e).toMatchObject({
-      schemaVersion: 1,
       createdAt: FROZEN_TS,
       mode: 'generic',
       outcome: 'success',
@@ -201,7 +218,6 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       digest: '0xdigest',
       senderAddress: '0xsender',
       sponsorAddress: '0xsponsor',
-      slotId: '0xslot',
       executionPathKey: 'rk',
       orderIdHash: 'abcdef',
       promotionId: null,
@@ -239,6 +255,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     expect(e.grossGasMist).toBeNull();
     expect(e.storageRebateMist).toBeNull();
     expect(e.hostFeeMist).toBeNull();
+    expect(e.protocolFeeMist).toBeNull();
     expect(e.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
   });
 
@@ -253,10 +270,10 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
         userId: 'user-1',
         economics: {
           economicsStatus: 'known',
-          recoveredGasMist: '5000',
+          recoveredGasMist: '0',
           hostPaidGasMist: '5000',
           hostFeeMist: '0',
-          hostNetMist: '0',
+          hostNetMist: '-5000',
           grossGasMist: '6000',
           storageRebateMist: '1000',
           protocolFeeMist: '0',
@@ -269,7 +286,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     expect(e.promotionId).toBe('promo-1');
     expect(e.userId).toBe('user-1');
     expect(e.orderIdHash).toBeNull();
-    expect(e.hostNetMist).toBe('0');
+    expect(e.hostNetMist).toBe('-5000');
   });
 });
 
@@ -351,7 +368,7 @@ describe('fanOutSponsorResult', () => {
         outcome: 'success',
         route: 'generic',
         digest: '0xfanout_digest',
-        slotId: '0xslot_x',
+        sponsorAddress: '0xsponsor_x',
       }),
     );
     const events = warnSpy.mock.calls
@@ -365,9 +382,9 @@ describe('fanOutSponsorResult', () => {
     expect(fanFailed?.error).toBe('child boom');
     // digest is the cross-reference key in `docs/operations.md`:
     // operators correlate fanOut failures with `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`
-    // / `SPONSORED_LOGS_RECORDER_FAILED` on the same digest/slot.
+    // / `SPONSORED_LOGS_RECORDER_FAILED` on the same digest/sponsor address.
     expect(fanFailed?.digest).toBe('0xfanout_digest');
-    expect(fanFailed?.slot_id).toBe('0xslot_x');
+    expect(fanFailed?.sponsor_address).toBe('0xsponsor_x');
     warnSpy.mockRestore();
   });
 

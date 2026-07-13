@@ -12,7 +12,8 @@
  *   - runGenericPrepareBuildPipeline orchestrator (coordinates multi-pass flow)
  *
  * Does not own: settlement swap direction tables (constants.ts), settle field schema
- * (settlePayloadContract.ts), on-chain types (types.ts), or persisted store types
+ * (the generated `@stelis/contracts` settlement contract), on-chain types
+ * (types.ts), or persisted store types
  * (prepareTypes.ts).
  */
 
@@ -24,64 +25,35 @@ import type {
 import type { PaymentInputSource } from '@stelis/core-relay/server';
 
 // ─────────────────────────────────────────────
-// PrefixUsage — user TX prefix coin provenance
+// FundingResolution — exact payment materialization
 // ─────────────────────────────────────────────
 
 /**
- * Canonical representation of user PTB prefix coin state.
- *
- * Extracted from the deserialized user TX before any settlement
- * suffix is appended. Used by the planner to determine which coins
- * are available for payment (R-9 compliance) and how much address
- * balance the prefix already consumed.
+ * Exact funding selected from one prefix-value trace and one chain discovery.
+ * The compiler materializes these IDs and amounts without querying or selecting.
  */
-export interface PrefixUsage {
-  /** Coins that survive the user prefix (MergeCoins targets, still alive). */
-  readonly survivors: Set<string>;
-  /** Coins consumed by user TX commands. */
-  readonly consumed: Set<string>;
-  /** Result-backed objects (opaque, may not be coins). */
-  readonly opaqueInUse: Set<string>;
-  /**
-   * All SplitCoins source coins after precedence pruning. Settlement-token
-   * selection may admit the narrower `reusableSplitSources` subset, while
-   * conservative paths may still exclude the whole set.
-   */
-  readonly mutated: Set<string>;
-  /**
-   * Narrow additive subset of direct-input SplitCoins sources that remain
-   * structurally eligible for the narrow settlement-token safe-reuse policy.
-   */
-  readonly reusableSplitSources: Set<string>;
-  /** MergeCoins destination → source IDs mapping for merge credit calculation. */
-  readonly mergeDestToSources: Map<string, Set<string>>;
-  /** Address-balance amount consumed by prefix FundsWithdrawal commands. */
-  readonly prefixAbConsumed: bigint;
-}
+export type SwapFundingResolution =
+  | {
+      readonly source: 'coin_object';
+      readonly baseCoinId: string;
+      readonly mergeCoinIds: readonly string[];
+      /** Exact balance after the user prefix and planned merges, before the Host split. */
+      readonly remainingBalance: bigint;
+    }
+  | {
+      readonly source: 'address_balance';
+      readonly redeemAmount: bigint;
+    }
+  | {
+      readonly source: 'mixed_topup';
+      readonly baseCoinId: string;
+      readonly mergeCoinIds: readonly string[];
+      /** Exact balance after the user prefix and planned object merges. */
+      readonly remainingBalance: bigint;
+      readonly redeemAmount: bigint;
+    };
 
-// ─────────────────────────────────────────────
-// FundingPlan — payment source decision
-// ─────────────────────────────────────────────
-
-/**
- * Explicit funding-source decision made by the planner.
- *
- * Pure decision that the compiler consumes without re-querying.
- */
-export interface FundingPlan {
-  /** Which payment pathway to use. */
-  readonly source: PaymentInputSource;
-  /** Coins available for payment (after R-9 exclusion). */
-  readonly usableCoins: ReadonlyArray<{ objectId: string; balance: string }>;
-  /** Total balance of usable coins (including merge credit). */
-  readonly usableCoinTotal: bigint;
-  /** Address balance available (after prefix FundsWithdrawal deduction). */
-  readonly addressBalance: bigint;
-  /** Amount to redeem from address balance (0 for coin_object path). */
-  readonly redeemDelta: bigint;
-  /** Vault credit to apply (0 for new_user or when credit insufficient). */
-  readonly useCreditAmount: bigint;
-}
+export type FundingResolution = { readonly source: 'none_credit_only' } | SwapFundingResolution;
 
 // ─────────────────────────────────────────────
 // SwapPlan — swap amount and guard calculations
@@ -96,7 +68,9 @@ export interface FundingPlan {
 export interface SwapPlan {
   /** Exact settlement token amount to swap (after direction-aware DeepBook min/lot constraints). */
   readonly swapAmountSmallest: bigint;
-  /** Minimum SUI output (slippage guard). */
+  /** Minimum SUI output required for settlement sufficiency. */
+  readonly requiredSwapOutputMist: bigint;
+  /** Final on-chain minimum SUI output (settlement sufficiency and slippage guard). */
   readonly minSuiOut: bigint;
 }
 
@@ -111,11 +85,8 @@ export interface SwapPlan {
  * The compiler must not re-derive settlement swap path shape, swap amounts, or
  * funding-source decisions from chain state — those are in this plan.
  *
- * The compiler does perform coin object discovery (listCoins) because
- * coin selection is tightly coupled with PTB mutation (merge/split).
- * However, the funding source priority (coin_object vs address_balance
- * vs mixed_topup) is determined by the planner and the compiler
- * follows plan.funding.source without re-deciding.
+ * Funding object discovery and selection are complete before this type is
+ * assembled. The compiler only materializes `funding`.
  */
 export interface SettlementPlan {
   /** Settle profile (credit_general | with_vault | new_user). */
@@ -131,7 +102,9 @@ export interface SettlementPlan {
   /** Settlement swap direction string for function name resolution. */
   readonly settlementSwapDirection: SettlementSwapDirection;
   /** Funding-source decision. */
-  readonly funding: FundingPlan;
+  readonly funding: FundingResolution;
+  /** Existing User Vault credit applied by the selected settlement variant. */
+  readonly useCreditAmount: bigint;
   /** Swap calculation outputs (amounts and guards). */
   readonly swap: SwapPlan;
   /** Audit fields for settle_core. */
@@ -143,7 +116,8 @@ export interface SettlementPlan {
  *
  * These are the 13 fields from SETTLE_FIELD_SCHEMA, plus the
  * settlement payout recipient address. All values are determined at plan time
- * and passed through to the PTB compiler without modification.
+ * without being re-decided by the PTB compiler. The JSON-facing timestamp is
+ * checked and converted to the compiled u64 bigint representation there.
  */
 export interface SettlePlanAuditFields {
   readonly executionCostClaim: bigint;

@@ -56,6 +56,7 @@ export {
   validateActivationPrerequisites,
   InvalidStatusTransitionError,
   PromotionActivationError,
+  PromotionCurrentConflictError,
 } from './promotionStore.js';
 
 // Promotion execution accounting is owned by PromotionExecutionLedger

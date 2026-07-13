@@ -13,7 +13,7 @@
 
 /**
  * Thrown by `SponsorPoolAdapter.sign()` when the committed two-stage HMAC
- * lease proof for `(receiptId, slotId, hash(submittedTxBytes))` does not
+ * lease proof for `(receiptId, sponsorAddress, hash(submittedTxBytes))` does not
  * match the stored value — either because the slot was re-allocated
  * after TTL expiry, the lease is still in the reservation stage and
  * therefore cannot satisfy any submitted tx, or the Redis lease value
@@ -27,8 +27,8 @@
 export class SponsorLeaseExpiredError extends Error {
   readonly code = 'LEASE_EXPIRED' as const;
 
-  constructor(slotId: string) {
-    super(`Sponsor lease expired for slot ${slotId} — retry /prepare`);
+  constructor(sponsorAddress: string) {
+    super(`Sponsor lease expired for address ${sponsorAddress} — retry /prepare`);
     this.name = 'SponsorLeaseExpiredError';
   }
 }

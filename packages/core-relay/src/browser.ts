@@ -22,7 +22,7 @@
  */
 
 // ── Constants (browser-safe, core-relay-interior) ───────────────────────────
-export { MAX_COMMANDS, SUI_CLOCK_OBJECT_ID } from './constants.js';
+export { MAX_FINAL_COMMANDS, SUI_CLOCK_OBJECT_ID } from './constants.js';
 
 // ── Hash utilities (browser-safe, uses SubtleCrypto) ────────────────────────
 export { sha256Bytes } from './hash.js';
@@ -46,12 +46,7 @@ export type {
 export { ok, fail } from './types.js';
 
 // ── Validation ──────────────────────────────────────────────────────────────
-export {
-  validatePtbStructure,
-  validateUserCommands,
-  validateSettleArgs,
-  isMoveCall,
-} from './validate/static.js';
+export { validatePtbStructure, validateSettleArgs, isMoveCall } from './validate/static.js';
 export { validateGenericUserTransactionKind } from './validate/transactionKind.js';
 export { validateNonlossSponsor } from './validate/nonloss.js';
 export type { SponsorNonlossContext } from './validate/nonloss.js';
@@ -102,7 +97,7 @@ export type { IntegrityVerdict } from './integrityCompare.js';
 // ── GasCoin reference detection (S-15/S-16) ─────────────────────────────────
 export { containsGasCoinReference } from './validate/static.js';
 
-// ── PTB input object ID extraction (shared helper for S-16 + R-9) ───────────
+// ── PTB input object ID extraction (integrity + prefix value tracing) ────────
 export { extractObjectIdFromInput } from './ptbInputUtils.js';
 
 // ── tx gas preset guard ─────────────────────────────────────────────────────

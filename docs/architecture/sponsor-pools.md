@@ -42,7 +42,13 @@ Sponsor slot refill moves SUI from the Sponsor Refill Account to a sponsor slot.
 
 Sponsored execution uses the leased sponsor slot as `gasOwner`. The Sui SDK resolves the gas payment during transaction build, and Sui execution deducts gas from the selected gas payment.
 
-Admin withdrawal uses the Sponsor Refill Account signer. It transfers either the whole `tx.gas` value for max withdrawal or a split `tx.gas` coin for an exact amount. Admin withdrawal is protected by admin session validation, signed single-use withdrawal nonce, admin-operation rate limiting, operation logging, dry-run, and runway guard.
+Admin withdrawal uses the Sponsor Refill Account signer and transfers one exact positive u64 MIST amount. Admin withdrawal is protected by admin session validation, a network-bound signed single-use withdrawal nonce, admin-operation rate limiting, operation logging, simulation, and the same account-scoped spend flow used by refill. If that withdrawal's HTTP outcome is pending, app-admin retains its exact network, nonce, signature, and amount for the browser session and retries it instead of signing a new request. A request rejected because another account spend was recovered is not classified or retried as its own pending withdrawal.
+
+Refill and withdrawal resolve the final transaction bytes and exact gas budget while holding the Sponsor Refill Account dispatch lock. The Host atomically records the operation, then stores the signed bytes, signature, gas budget, and digest in Redis before network submission. This account-spend boundary is pinned to the configured primary Sui RPC endpoint so transaction visibility and the following balance observation do not cross Host failover endpoints. Recovery queries that digest first and resubmits only the stored bytes when the chain explicitly reports it absent. The durable operation and sequence CAS, rather than lock TTL, prevent a late result from authoring a different transaction or overwriting newer state.
+
+A transaction result closes a refill only after the same primary RPC boundary can find its digest. The following bounded slot observation classifies the mutable current balance as `healthy`, `low_balance`, or `rpc_unreachable`; target attainment is not a second proof of the already confirmed transfer. A low current balance can trigger a later refill, while digest identity and account serialization prevent it from being mistaken for recovery of the prior transaction.
+
+Every spend uses a fresh Sponsor Refill Account balance and the gas budget encoded in the submitted transaction. The remaining balance must retain `Sponsor Refill Account runway target * sponsor slot count` after the transfer and gas budget. The configured refill target is that runway target when present; otherwise the current sponsor refill target default remains the withdrawal runway even when the automatic refill worker is disabled.
 
 ## Health Gate
 

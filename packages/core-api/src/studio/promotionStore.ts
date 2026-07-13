@@ -151,16 +151,13 @@ export class PromotionFieldImmutableError extends Error {
   }
 }
 
-export class ConcurrentStatusTransitionError extends Error {
+export class PromotionCurrentConflictError extends Error {
   constructor(
-    public readonly expected: PromotionStatus,
-    public readonly actual: PromotionStatus,
+    public readonly promotionId: string,
+    public readonly operation: 'create' | 'update' | 'status' | 'delete',
   ) {
-    super(
-      `Status transition lost race: expected current status ${expected}, ` +
-        `found ${actual}; a concurrent transition modified this promotion`,
-    );
-    this.name = 'ConcurrentStatusTransitionError';
+    super(`Promotion ${promotionId} changed while attempting ${operation}`);
+    this.name = 'PromotionCurrentConflictError';
   }
 }
 
@@ -234,6 +231,86 @@ export function validateActivationPrerequisites(record: Promotion): void {
   }
 }
 
+function createPromotionRecord(
+  input: CreatePromotionInput,
+  promotionId: string,
+  now: string,
+): Promotion {
+  return {
+    promotionId,
+    type: input.type,
+    displayName: input.displayName,
+    description: input.description,
+    status: 'draft',
+    maxParticipants: input.maxParticipants,
+    perUserGasAllowanceMist: input.perUserGasAllowanceMist,
+    claimDeadlineAt: input.claimDeadlineAt,
+    postClaimUseWindowMs: input.postClaimUseWindowMs,
+    startAt: input.startAt,
+    pauseReason: null,
+    archiveReason: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function snapshotUpdatePromotionInput(input: UpdatePromotionInput): UpdatePromotionInput {
+  const snapshot: UpdatePromotionInput = {};
+  if (input.displayName !== undefined) snapshot.displayName = input.displayName;
+  if (input.description !== undefined) snapshot.description = input.description;
+  if (input.maxParticipants !== undefined) snapshot.maxParticipants = input.maxParticipants;
+  if (input.perUserGasAllowanceMist !== undefined) {
+    snapshot.perUserGasAllowanceMist = input.perUserGasAllowanceMist;
+  }
+  if (input.claimDeadlineAt !== undefined) snapshot.claimDeadlineAt = input.claimDeadlineAt;
+  if (input.postClaimUseWindowMs !== undefined) {
+    snapshot.postClaimUseWindowMs = input.postClaimUseWindowMs;
+  }
+  if (input.startAt !== undefined) snapshot.startAt = input.startAt;
+  return snapshot;
+}
+
+function updatePromotionRecord(
+  existing: Promotion,
+  input: UpdatePromotionInput,
+  now: string,
+): Promotion {
+  ensureUpdatableFields(existing, input);
+  return {
+    ...existing,
+    ...input,
+    updatedAt: now,
+  };
+}
+
+function transitionPromotionRecord(
+  existing: Promotion,
+  newStatus: PromotionStatus,
+  reason: string | undefined,
+  now: string,
+): Promotion {
+  if (!isValidTransition(existing.status, newStatus)) {
+    throw new InvalidStatusTransitionError(existing.status, newStatus);
+  }
+  if (newStatus === 'active') validateActivationPrerequisites(existing);
+  return {
+    ...existing,
+    status: newStatus,
+    updatedAt: now,
+    pauseReason: newStatus === 'paused' ? (reason ?? null) : existing.pauseReason,
+    archiveReason: newStatus === 'archived' ? (reason ?? null) : existing.archiveReason,
+  };
+}
+
+function clonePromotion(record: Promotion): Promotion {
+  return { ...record };
+}
+
+function decidePromotionDelete(record: Promotion | null): 'delete' | 'not_deletable' | 'not_found' {
+  if (record === null) return 'not_found';
+  return record.status === 'draft' ? 'delete' : 'not_deletable';
+}
+
 // ─────────────────────────────────────────────
 // Memory Implementation (testing)
 // ─────────────────────────────────────────────
@@ -249,43 +326,35 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
   }
 
   async create(input: CreatePromotionInput): Promise<Promotion> {
+    const promotionId = this.generateId();
     const now = new Date().toISOString();
-    const record: Promotion = {
-      ...input,
-      promotionId: this.generateId(),
-      status: 'draft',
-      pauseReason: null,
-      archiveReason: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this._records.set(record.promotionId, record);
-    return record;
+    const record = createPromotionRecord(input, promotionId, now);
+    if (this._records.has(promotionId)) {
+      throw new PromotionCurrentConflictError(promotionId, 'create');
+    }
+    this._records.set(promotionId, clonePromotion(record));
+    return clonePromotion(record);
   }
 
   async get(promotionId: string): Promise<Promotion | null> {
-    return this._records.get(promotionId) ?? null;
+    const record = this._records.get(promotionId);
+    return record === undefined ? null : clonePromotion(record);
   }
 
   async list(filter?: { status?: PromotionStatus }): Promise<Promotion[]> {
     const all = Array.from(this._records.values());
-    if (!filter?.status) return all;
-    return all.filter((r) => r.status === filter.status);
+    const filtered = filter?.status ? all.filter((record) => record.status === filter.status) : all;
+    return filtered.map(clonePromotion);
   }
 
   async update(promotionId: string, input: UpdatePromotionInput): Promise<Promotion | null> {
+    const now = new Date().toISOString();
+    const patch = snapshotUpdatePromotionInput(input);
     const existing = this._records.get(promotionId);
     if (!existing) return null;
-
-    ensureUpdatableFields(existing, input);
-
-    const updated: Promotion = {
-      ...existing,
-      ...stripUndefined(input as Record<string, unknown>),
-      updatedAt: new Date().toISOString(),
-    };
-    this._records.set(promotionId, updated);
-    return updated;
+    const updated = updatePromotionRecord(existing, patch, now);
+    this._records.set(promotionId, clonePromotion(updated));
+    return clonePromotion(updated);
   }
 
   async transitionStatus(
@@ -293,34 +362,17 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     newStatus: PromotionStatus,
     reason?: string,
   ): Promise<Promotion | null> {
+    const now = new Date().toISOString();
     const existing = this._records.get(promotionId);
     if (!existing) return null;
-
-    if (!isValidTransition(existing.status, newStatus)) {
-      throw new InvalidStatusTransitionError(existing.status, newStatus);
-    }
-
-    // Activation gate: verify prerequisites before allowing active status
-    if (newStatus === 'active') {
-      validateActivationPrerequisites(existing);
-    }
-
-    const now = new Date().toISOString();
-    const updated: Promotion = {
-      ...existing,
-      status: newStatus,
-      updatedAt: now,
-      pauseReason: newStatus === 'paused' ? (reason ?? null) : existing.pauseReason,
-      archiveReason: newStatus === 'archived' ? (reason ?? null) : existing.archiveReason,
-    };
-    this._records.set(promotionId, updated);
-    return updated;
+    const updated = transitionPromotionRecord(existing, newStatus, reason, now);
+    this._records.set(promotionId, clonePromotion(updated));
+    return clonePromotion(updated);
   }
 
   async delete(promotionId: string): Promise<boolean> {
-    const existing = this._records.get(promotionId);
-    if (!existing) return false;
-    if (existing.status !== 'draft') return false;
+    const decision = decidePromotionDelete(this._records.get(promotionId) ?? null);
+    if (decision !== 'delete') return false;
     this._records.delete(promotionId);
     return true;
   }
@@ -371,35 +423,33 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     return `${this._prefix}index:status:${status}`;
   }
 
+  private async _readSerialized(
+    promotionId: string,
+  ): Promise<{ readonly raw: string; readonly record: Promotion } | null> {
+    const raw = await this._client.get(this._recordKey(promotionId));
+    return raw === null ? null : { raw, record: JSON.parse(raw) as Promotion };
+  }
+
   async create(input: CreatePromotionInput): Promise<Promotion> {
     const promotionId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const record: Promotion = {
-      ...input,
-      promotionId,
-      status: 'draft',
-      pauseReason: null,
-      archiveReason: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const record = createPromotionRecord(input, promotionId, now);
 
     const json = JSON.stringify(record);
-
-    // Atomic: SET record + SADD to all index + SADD to status index
-    await this._client.eval(
+    const result = await this._client.eval(
       CREATE_LUA,
       [this._recordKey(promotionId), this._allIndexKey, this._statusIndexKey('draft')],
       [json, promotionId],
     );
-
+    if (result === 'CURRENT_CONFLICT') {
+      throw new PromotionCurrentConflictError(promotionId, 'create');
+    }
+    if (result !== 'OK') throw new Error(`Unexpected CREATE_LUA result: ${String(result)}`);
     return record;
   }
 
   async get(promotionId: string): Promise<Promotion | null> {
-    const raw = await this._client.get(this._recordKey(promotionId));
-    if (!raw) return null;
-    return JSON.parse(raw) as Promotion;
+    return (await this._readSerialized(promotionId))?.record ?? null;
   }
 
   async list(filter?: { status?: PromotionStatus }): Promise<Promotion[]> {
@@ -415,18 +465,20 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
   }
 
   async update(promotionId: string, input: UpdatePromotionInput): Promise<Promotion | null> {
-    const existing = await this.get(promotionId);
-    if (!existing) return null;
-
-    ensureUpdatableFields(existing, input);
-
-    const updated: Promotion = {
-      ...existing,
-      ...stripUndefined(input as Record<string, unknown>),
-      updatedAt: new Date().toISOString(),
-    };
-
-    await this._client.set(this._recordKey(promotionId), JSON.stringify(updated));
+    const now = new Date().toISOString();
+    const patch = snapshotUpdatePromotionInput(input);
+    const current = await this._readSerialized(promotionId);
+    if (current === null) return null;
+    const updated = updatePromotionRecord(current.record, patch, now);
+    const result = await this._client.eval(
+      UPDATE_LUA,
+      [this._recordKey(promotionId)],
+      [current.raw, JSON.stringify(updated)],
+    );
+    if (result === 'CURRENT_CONFLICT') {
+      throw new PromotionCurrentConflictError(promotionId, 'update');
+    }
+    if (result !== 'OK') throw new Error(`Unexpected UPDATE_LUA result: ${String(result)}`);
     return updated;
   }
 
@@ -435,63 +487,56 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     newStatus: PromotionStatus,
     reason?: string,
   ): Promise<Promotion | null> {
-    const existing = await this.get(promotionId);
-    if (!existing) return null;
-
-    if (!isValidTransition(existing.status, newStatus)) {
-      throw new InvalidStatusTransitionError(existing.status, newStatus);
-    }
-
-    // Activation gate: verify prerequisites before allowing active status
-    if (newStatus === 'active') {
-      validateActivationPrerequisites(existing);
-    }
-
     const now = new Date().toISOString();
-    const updated: Promotion = {
-      ...existing,
-      status: newStatus,
-      updatedAt: now,
-      pauseReason: newStatus === 'paused' ? (reason ?? null) : existing.pauseReason,
-      archiveReason: newStatus === 'archived' ? (reason ?? null) : existing.archiveReason,
-    };
-
-    const json = JSON.stringify(updated);
-
-    // Atomic: CAS-guarded update record + move between status indexes.
-    // ARGV[3] is the status the caller observed; a concurrent transition
-    // that changed the record's status since that read is rejected here.
+    const current = await this._readSerialized(promotionId);
+    if (current === null) return null;
+    const updated = transitionPromotionRecord(current.record, newStatus, reason, now);
     const result = await this._client.eval(
-      TRANSITION_LUA,
+      STATUS_LUA,
       [
         this._recordKey(promotionId),
-        this._statusIndexKey(existing.status),
+        this._statusIndexKey(current.record.status),
         this._statusIndexKey(newStatus),
       ],
-      [json, promotionId, existing.status],
+      [current.raw, JSON.stringify(updated), promotionId],
     );
-
     if (result === 'OK') return updated;
-    if (result === 'NOT_FOUND') return null;
-    if (typeof result === 'string' && result.startsWith('CAS_FAIL:')) {
-      const actual = result.substring('CAS_FAIL:'.length) as PromotionStatus;
-      throw new ConcurrentStatusTransitionError(existing.status, actual);
+    if (result === 'CURRENT_CONFLICT') {
+      throw new PromotionCurrentConflictError(promotionId, 'status');
     }
-    throw new Error(`Unexpected TRANSITION_LUA result: ${String(result)}`);
+    throw new Error(`Unexpected STATUS_LUA result: ${String(result)}`);
   }
 
   async delete(promotionId: string): Promise<boolean> {
-    const existing = await this.get(promotionId);
-    if (!existing) return false;
-    if (existing.status !== 'draft') return false;
-
-    // Atomic: DEL record + SREM from all index + SREM from status index
-    await this._client.eval(
+    const expectedRaw = await this._client.get(this._recordKey(promotionId));
+    const decision = decidePromotionDelete(
+      expectedRaw === null ? null : (JSON.parse(expectedRaw) as Promotion),
+    );
+    const result = await this._client.eval(
       DELETE_LUA,
       [this._recordKey(promotionId), this._allIndexKey, this._statusIndexKey('draft')],
-      [promotionId],
+      [expectedRaw ?? '', promotionId],
     );
-    return true;
+    if (result === 'OK') {
+      if (decision !== 'delete') throw new Error('DELETE_LUA contradicted the current record');
+      return true;
+    }
+    if (result === 'NOT_FOUND') {
+      if (decision !== 'not_found') {
+        throw new PromotionCurrentConflictError(promotionId, 'delete');
+      }
+      return false;
+    }
+    if (result === 'NOT_DELETABLE') {
+      if (decision !== 'not_deletable') {
+        throw new Error('DELETE_LUA contradicted the current record');
+      }
+      return false;
+    }
+    if (result === 'CURRENT_CONFLICT') {
+      throw new PromotionCurrentConflictError(promotionId, 'delete');
+    }
+    throw new Error(`Unexpected DELETE_LUA result: ${String(result)}`);
   }
 }
 
@@ -509,10 +554,11 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
  * ARGV[2] = promotionId
  */
 const CREATE_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return 'CURRENT_CONFLICT' end
 redis.call('SET', KEYS[1], ARGV[1])
 redis.call('SADD', KEYS[2], ARGV[2])
 redis.call('SADD', KEYS[3], ARGV[2])
-return 1
+return 'OK'
 `;
 
 /**
@@ -532,57 +578,58 @@ return redis.call('MGET', unpack(keys))
 `;
 
 /**
- * TRANSITION — CAS-guarded status index move + record update.
+ * UPDATE — exact-current-record CAS followed by record replacement.
  *
  * KEYS[1] = record key
- * KEYS[2] = old status index key (corresponds to expected current status)
- * KEYS[3] = new status index key
- * ARGV[1] = JSON record (the caller-constructed target record)
- * ARGV[2] = promotionId
- * ARGV[3] = expected current status (CAS guard)
- *
- * Returns:
- *   'OK'                        — success
- *   'NOT_FOUND'                 — record no longer exists
- *   'CAS_FAIL:<actual_status>'  — record status changed since caller read
+ * ARGV[1] = exact serialized record observed by the caller
+ * ARGV[2] = serialized target record
  */
-const TRANSITION_LUA = `
+const UPDATE_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
-if not currentRaw then return 'NOT_FOUND' end
-local current = cjson.decode(currentRaw)
-if current.status ~= ARGV[3] then
-  return 'CAS_FAIL:' .. current.status
-end
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('SREM', KEYS[2], ARGV[2])
-redis.call('SADD', KEYS[3], ARGV[2])
+if not currentRaw or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
+redis.call('SET', KEYS[1], ARGV[2])
 return 'OK'
 `;
 
 /**
- * DELETE — atomic DEL + SREM from both indexes.
+ * STATUS — exact-current-record CAS, record update, and status-index move.
+ *
+ * KEYS[1] = record key
+ * KEYS[2] = old status index key
+ * KEYS[3] = new status index key
+ * ARGV[1] = exact serialized record observed by the caller
+ * ARGV[2] = serialized target record
+ * ARGV[3] = promotionId
+ */
+const STATUS_LUA = `
+local currentRaw = redis.call('GET', KEYS[1])
+if not currentRaw or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
+redis.call('SET', KEYS[1], ARGV[2])
+redis.call('SREM', KEYS[2], ARGV[3])
+redis.call('SADD', KEYS[3], ARGV[3])
+return 'OK'
+`;
+
+/**
+ * DELETE — exact-current-record CAS, draft check, and atomic index removal.
  *
  * KEYS[1] = record key
  * KEYS[2] = all index key
  * KEYS[3] = status index key (draft)
- * ARGV[1] = promotionId
+ * ARGV[1] = exact serialized record observed by the caller, or empty if absent
+ * ARGV[2] = promotionId
  */
 const DELETE_LUA = `
+local currentRaw = redis.call('GET', KEYS[1])
+if not currentRaw then
+  if ARGV[1] == '' then return 'NOT_FOUND' end
+  return 'CURRENT_CONFLICT'
+end
+if ARGV[1] == '' or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
+local current = cjson.decode(currentRaw)
+if current.status ~= 'draft' then return 'NOT_DELETABLE' end
 redis.call('DEL', KEYS[1])
-redis.call('SREM', KEYS[2], ARGV[1])
-redis.call('SREM', KEYS[3], ARGV[1])
-return 1
+redis.call('SREM', KEYS[2], ARGV[2])
+redis.call('SREM', KEYS[3], ARGV[2])
+return 'OK'
 `;
-
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-
-/** Remove undefined values from an object (for partial updates). */
-function stripUndefined(obj: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) result[k] = v;
-  }
-  return result;
-}

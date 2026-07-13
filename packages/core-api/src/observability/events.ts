@@ -88,13 +88,13 @@ export const PROMOTION_ABUSE_RECORDER_FAILED = 'PROMOTION_ABUSE_RECORDER_FAILED'
 export const PROMOTION_GAS_OVERRUN_WARNING = 'PROMOTION_GAS_OVERRUN_WARNING';
 export const PROMOTION_USAGE_RECORDER_FAILED = 'PROMOTION_USAGE_RECORDER_FAILED';
 export const PROMOTION_SPONSOR_EXECUTION = 'PROMOTION_SPONSOR_EXECUTION';
-export const PROMOTION_LEDGER_CONSUME_FAILED = 'PROMOTION_LEDGER_CONSUME_FAILED';
 
-// Submit-infrastructure exception after `pool.sign()` issued the sponsor
-// signature. The transaction may have reached the network but no execution
-// effects are available. Operators reconcile by senderAddress + receiptId
-// + submitted-time window (digest is unavailable at the throw site).
-export const PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION = 'PROMOTION_SPONSOR_SUBMIT_INFRA_EXCEPTION';
+// Uncertain landing after `pool.sign()` issued the sponsor signature. The
+// transaction may have reached the network, but the Host could not prove a
+// terminal result. Operators reconcile by senderAddress + receiptId +
+// submitted-time window (digest is unavailable at the uncertainty boundary).
+export const PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY =
+  'PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY';
 
 // ─────────────────────────────────────────────
 // Execution-ledger lifecycle

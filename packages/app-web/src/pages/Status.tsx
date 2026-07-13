@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import pkg from '../../package.json';
 import { RELAY_API_BASE } from '../relayApiEndpoint';
+import { parseRelayConfigResponse, type RelayConfigResponse } from '@stelis/sdk';
 
 const APP_VERSION = pkg.version;
 const STATUS_PROBE_TIMEOUT_MS = 5_000;
@@ -10,17 +11,6 @@ const STATUS_PROBE_INTERVAL_MS = 30_000;
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type ServiceStatus = 'operational' | 'degraded' | 'outage' | 'loading';
-
-interface SettlementSwapPathSummary {
-  settlementTokenSymbol: string;
-  settlementTokenType: string;
-  effectiveFeeRateBps: number;
-}
-
-interface RelayConfigResponse {
-  network: string;
-  supportedSettlementSwapPaths: SettlementSwapPathSummary[];
-}
 
 interface Incident {
   id: string;
@@ -54,8 +44,8 @@ function useHostStatus() {
   useEffect(() => {
     fetch(`${RELAY_API_BASE}/config`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: RelayConfigResponse | null) => {
-        if (data) setConfig(data);
+      .then((data: unknown) => {
+        if (data) setConfig(parseRelayConfigResponse(data));
       })
       .catch(() => null);
   }, []);
@@ -141,8 +131,8 @@ function SettlementSwapPathRow({
   settlementSwapPath,
   network,
 }: {
-  settlementSwapPath: SettlementSwapPathSummary;
-  network: string;
+  settlementSwapPath: RelayConfigResponse['supportedSettlementSwapPaths'][number];
+  network: RelayConfigResponse['network'];
 }) {
   const feeLabel =
     settlementSwapPath.effectiveFeeRateBps === 0

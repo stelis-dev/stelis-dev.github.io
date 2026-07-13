@@ -11,8 +11,8 @@
  */
 
 import { Transaction } from '@mysten/sui/transactions';
-import { fromHex, toBase64 } from '@mysten/sui/utils';
-import type { SettleProfile, SingleHopSettlementSwapPath } from '@stelis/contracts';
+import { fromHex } from '@mysten/sui/utils';
+import type { PtbCommand, SettleProfile, SingleHopSettlementSwapPath } from '@stelis/contracts';
 import { GAS_MARGIN_CAP_BPS, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
 import {
   convertSdkCommands,
@@ -82,15 +82,14 @@ import {
   runPreflight,
   SenderSignatureError,
   signAndSubmit,
-  SponsorSubmitInfraError,
+  SponsorPostSignatureUncertaintyError,
   verifyGasOwner,
   verifySenderSignature,
 } from '../sessionPrimitives.js';
 import type { GasUsedFields } from '../sessionTypes.js';
 import type { SponsorConsumePolicyAdapter } from '../sponsorLifecycle.js';
 import type { SponsorResultEconomics, SponsorResultOutcome } from '../../handlers/sponsorResult.js';
-import type { GenericCommitInputs } from './preparedCommit.js';
-import type { PrepareStateMachineRequest, PrepareStateMachineResult } from './runner.js';
+import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from './runner.js';
 import type { SignAndSubmitPort } from './sponsorRunner.js';
 import type {
   GasBoundBuildInput,
@@ -221,6 +220,7 @@ export class GenericSponsorPolicyError extends Error {
 
 export interface RevalidateGenericResult {
   readonly builtTx: Transaction;
+  readonly commands: readonly PtbCommand[];
   readonly freshConfig: OnchainConfig;
   readonly settleArgs: ExtractedSettleArgs;
   readonly isNewUserSettle: boolean;
@@ -280,9 +280,9 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
   const policy: SponsoredExecutionPolicy<'generic'> = {
     discriminator: 'generic',
     handleRequirements: {
-      gasBoundBuild: { sponsorSlot: true, nonce: true },
-      preparedCommit: { sponsorSlot: true, nonce: true },
-      sponsorResult: { sponsorSlot: true },
+      gasBoundBuild: { nonce: true },
+      preparedCommit: {},
+      sponsorResult: {},
     },
     hooks: {
       Intent: (ctx) => {
@@ -301,10 +301,8 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
       ChainSnapshot: async () => runGenericChainSnapshot(options, state),
       ExecutionPolicySelected: () => {},
       SlotFreePlan: () => {},
-      ReceiptIdGenerated: () => {},
       SponsorSlotReservationAcquired: (_ctx, sponsorSlot) => {
         logPrepareStage('sponsor_slot_checked_out', {
-          slot_id: sponsorSlot.slotId,
           sponsor_address: sponsorSlot.sponsorAddress,
         });
       },
@@ -319,19 +317,6 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
       RouteReservationAfterBuild: () => {},
       SelfCheck: async () => runGenericSelfCheck(options, state),
       SponsorLeaseCommitted: () => {},
-      PrepareStored: () => {
-        const prepareState = requirePrepareState(state);
-        logPrepareStage('prepare_stored', {
-          execution_path_key: prepareState.executionPathKey ?? 'unknown',
-        });
-      },
-      AwaitUserSignature: () => {
-        const prepareState = requirePrepareState(state);
-        const buildResult = requireValue(prepareState.buildResult, 'prepare buildResult');
-        logPrepareStage('response_ready', {
-          execution_cost_claim_mist: buildResult.executionCostClaim.toString(),
-        });
-      },
       DecodeSponsorSubmission: async (ctx) =>
         runGenericDecodeSponsorSubmission(options, state, ctx),
       UserSignatureValidation: async (ctx) =>
@@ -392,7 +377,7 @@ export function createGenericSponsorConsumeAdapter(input: {
       if (entry.mode === 'promotion') {
         await safeSlotCheckin(
           input.hostContext.sponsorPool,
-          entry.slotId,
+          entry.sponsorAddress,
           entry.receiptId,
           entry.txBytesHash,
         );
@@ -406,33 +391,23 @@ export function createGenericSponsorConsumeAdapter(input: {
   };
 }
 
-export function buildGenericPreparedCommitInputs(
+export function buildGenericPreparedDraftFields(
   options: GenericExecutionPolicyOptions,
   state: GenericExecutionPolicyState,
-  input: Parameters<PrepareStateMachineRequest['preparedCommitInputs']>[0],
-): GenericCommitInputs {
+): PrepareDraftPolicyFields {
   const prepare = requirePrepare(options);
   const prepareState = requirePrepareState(state);
-  const nonce = requireValue(input.nonce, 'nonce reservation handle');
   const executionPathKey = requireValue(prepareState.executionPathKey, 'executionPathKey');
   return {
-    mode: 'generic',
-    receiptId: input.receiptId,
-    senderAddress: prepare.params.senderAddress,
-    clientIp: prepare.params.clientIp,
-    txBytesHash: input.txBytesHash,
-    slotId: input.sponsorSlot.slotId,
-    sponsorAddress: input.sponsorSlot.sponsorAddress,
     executionPathKey,
     orderId: prepare.params.orderId ?? null,
-    nonce: nonce.nonce,
   };
 }
 
 export function projectGenericPrepareResult(
   options: GenericExecutionPolicyOptions,
   state: GenericExecutionPolicyState,
-  stateMachineResult: PrepareStateMachineResult,
+  input: PrepareResponseProjectionInput,
 ): GenericPreparePolicyResult {
   const prepare = requirePrepare(options);
   const prepareState = requirePrepareState(state);
@@ -440,15 +415,13 @@ export function projectGenericPrepareResult(
   const config = requireValue(prepareState.config, 'on-chain config');
   const quoteTimestampMs = requireValue(prepareState.quoteTimestampMs, 'quoteTimestampMs');
   const policyHashHex = requireValue(prepareState.policyHashHex, 'policyHashHex');
-  if (stateMachineResult.commit.mode !== 'generic') {
-    throw new GenericExecutionPolicyError(
-      'generic prepare projector received non-generic prepared commit',
-    );
+  if (input.draft.mode !== 'generic') {
+    throw new GenericExecutionPolicyError('generic prepare projector received non-generic draft');
   }
-  return {
-    txBytes: toBase64(stateMachineResult.txBytes),
-    receiptId: stateMachineResult.receiptId,
-    nonce: stateMachineResult.commit.nonce.toString(),
+  const result = {
+    txBytes: input.txBytesBase64,
+    receiptId: input.draft.receiptId,
+    nonce: input.draft.nonce.toString(),
     cost: {
       simGas: buildResult.simGas.toString(),
       gasVarianceFixedMist: buildResult.gasVarianceFixedMist.toString(),
@@ -463,6 +436,11 @@ export function projectGenericPrepareResult(
     policyHash: `0x${policyHashHex}`,
     orderId: prepare.params.orderId,
   };
+  logPrepareStage('response_ready', {
+    execution_path_key: prepareState.executionPathKey ?? 'unknown',
+    execution_cost_claim_mist: buildResult.executionCostClaim.toString(),
+  });
+  return result;
 }
 
 export function projectGenericSponsorResult(
@@ -492,25 +470,25 @@ export function createGenericSignAndSubmitPort(
   state: GenericExecutionPolicyState,
 ): SignAndSubmitPort {
   const d = getDeps(options);
-  return async (slotId, receiptId, txBytes, userSignature) => {
+  return async (sponsorAddress, receiptId, txBytes, userSignature) => {
     try {
       return await d.signAndSubmit(
         options.hostContext.sponsorPool,
         options.hostContext.sui,
-        slotId,
+        sponsorAddress,
         receiptId,
         txBytes,
         userSignature,
       );
     } catch (err) {
-      if (err instanceof SponsorSubmitInfraError) {
+      if (err instanceof SponsorPostSignatureUncertaintyError) {
         const sponsorState = requireSponsorState(state);
         sponsorState.sponsorResultOutcome = 'internal_error';
         sponsorState.sponsorResultDigest = undefined;
         sponsorState.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-          unknownSponsoredExecutionEconomics(`submit_infra_unknown: ${err.message}`),
+          unknownSponsoredExecutionEconomics(`post_signature_uncertainty: ${err.message}`),
         );
-        throw err.cause;
+        throw err;
       }
       if (err instanceof SponsorLeaseExpiredError) {
         const sponsorState = requireSponsorState(state);
@@ -1030,15 +1008,15 @@ async function runGenericPreflight(
   const state = requireSponsorState(runtime);
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
+  const revalidation = requireValue(state.revalidation, 'sponsor revalidation');
   const txSender = requireValue(state.txSender, 'tx sender');
   const preflight = await d.runPreflight(options.hostContext.sui, sponsor.txBytes);
 
   if (!preflight.success) {
-    const subcode = classifySponsorFailureSubcode(
-      preflight.reason,
-      options.hostContext.packageId,
-      options.hostContext.deepbookPackageId,
-    );
+    const subcode = classifySponsorFailureSubcode(preflight.reason, options.hostContext.packageId, {
+      kind: 'settlement',
+      commands: revalidation.commands,
+    });
     await d.recordSponsorFailureForAbuse(
       options.hostContext.abuseBlocker,
       ctx.clientIp,
@@ -1105,11 +1083,10 @@ async function classifyGenericSponsorResult(
       throw sponsor.errors.sponsorCongestion(result.reason);
     }
 
-    const subcode = classifySponsorFailureSubcode(
-      result.reason,
-      options.hostContext.packageId,
-      options.hostContext.deepbookPackageId,
-    );
+    const subcode = classifySponsorFailureSubcode(result.reason, options.hostContext.packageId, {
+      kind: 'settlement',
+      commands: revalidation.commands,
+    });
     await d.recordSponsorFailureForAbuse(
       options.hostContext.abuseBlocker,
       ctx.clientIp,
@@ -1148,7 +1125,6 @@ async function classifyGenericSponsorResult(
         receipt_id: prepared.receiptId,
         sender: txSender,
         client_ip: ctx.clientIp,
-        slot_id: prepared.slotId,
         sponsor_address: prepared.sponsorAddress,
         execution_path_key: prepared.executionPathKey,
       },
@@ -1223,9 +1199,9 @@ async function runGenericRelease(
 
   try {
     await callback({
-      slotId: prepared.slotId,
       sponsorAddress: prepared.sponsorAddress,
       outcome: state.sponsorResultOutcome,
+      executionStage: ctx.executionStage,
       route: 'generic',
       digest: state.sponsorResultDigest,
       receiptId: prepared.receiptId,
@@ -1242,7 +1218,7 @@ async function runGenericRelease(
       {
         source: 'sponsor_handler',
         route: 'generic',
-        slot_id: prepared.slotId,
+        sponsor_address: prepared.sponsorAddress,
         digest: state.sponsorResultDigest ?? null,
         outcome: state.sponsorResultOutcome,
         error: err instanceof Error ? err.message : String(err),
@@ -1436,7 +1412,7 @@ async function revalidateGenericSponsorPolicy(
 
   const isNewUserSettle = isNewUserSettleMoveCall(builtCommands, env.packageId);
 
-  return { builtTx, freshConfig, settleArgs, isNewUserSettle };
+  return { builtTx, commands: builtCommands, freshConfig, settleArgs, isNewUserSettle };
 }
 
 function validateGenericSponsorNonloss(

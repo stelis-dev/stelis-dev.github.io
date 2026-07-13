@@ -2,11 +2,13 @@
  * Layer 3: Sponsor-time nonloss math validation
  *
  * `validateNonlossSponsor` is the public, browser-exported helper consumed
- * by the generic sponsor SponsoredExecutionPolicy. Dust prevention (`totalIn >= minSettleMist`) is
- * not enforced here because `totalIn` is a runtime value that depends on
- * swap execution and is not visible at sponsor time; the on-chain S-3
- * assert (`ETotalInTooLow`) is the dust defense and returns as
- * `SPONSOR_ONCHAIN_FAILED` if it fires.
+ * by the generic sponsor SponsoredExecutionPolicy. For swap settlements,
+ * dust prevention (`totalIn >= minSettleMist`) is not enforced here because
+ * `totalIn` depends on runtime swap execution and is not visible at sponsor
+ * time; the on-chain S-3 assert (`ETotalInTooLow`) is that path's dust defense
+ * and returns as `SPONSOR_ONCHAIN_FAILED` if it fires. The Host planner applies
+ * the same threshold before choosing the credit-only path, whose Move entry
+ * intentionally disables the on-chain S-3 guard.
  *
  * See docs/architecture/pricing-and-validation.md#current-validation-layers.
  */

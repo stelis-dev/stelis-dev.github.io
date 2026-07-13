@@ -15,7 +15,7 @@
  *   - Real `handleSponsor()` (no mock).
  *   - Real `SponsorPool` from `context.ts` (single in-memory pool).
  *
- * The test forges an unsupported `_v` value into a stored entry, then
+ * The test adds a field outside the exact current stored shape, then
  * drives `handleSponsor()` end-to-end and asserts:
  *   1. The sponsor path rejects with `PREPARED_TX_NOT_FOUND`.
  *   2. The slot held by the corrupt entry is checked in (released).
@@ -40,7 +40,7 @@ import { SponsorPool } from '../src/context.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
-import type { GenericPreparedTxEntry } from '../src/store/prepareTypes.js';
+import type { GenericPreparedTxDraft } from '../src/store/prepareTypes.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
 
 // ─── Test constants ─────────────────────────────────────────────────────
@@ -129,18 +129,16 @@ async function buildValidTx(): Promise<{
   return { txBytes: bytes, encodedTxBytes: toBase64(bytes), txHash: hash };
 }
 
-function makePreparedEntry(txHash: string): GenericPreparedTxEntry {
+function makePreparedDraft(txHash: string): GenericPreparedTxDraft {
   return {
-    issuedAt: Date.now(),
     receiptId: PAYMENT_ID,
     senderAddress: SENDER,
     nonce: 1n,
     txBytesHash: txHash,
-    // slotId is filled in after slot checkout in the test body.
+    // sponsorAddress is filled in after slot checkout in the test body.
     // No raw lease token is persisted with the entry. The sponsor pool stores
     // its committed lease proof separately, keyed by slot and bound to the
     // receipt id plus commit digest.
-    slotId: '__placeholder__',
     sponsorAddress: SPONSOR_ADDRESS,
     clientIp: CLIENT_IP,
     executionPathKey: 'credit',
@@ -190,11 +188,11 @@ async function buildHarness(): Promise<E2EHarness> {
   const checkinSpy = vi.spyOn(sponsorPool, 'checkin');
 
   // Track release calls separately for the assertion message.
-  // onRelease passes `(slotId, receiptId, txBytesHash | null)`. The third
+  // onRelease passes `(sponsorAddress, receiptId, txBytesHash | null)`. The third
   // argument is the commit digest the lease was promoted to in the prepare flow.
   const releaseSpy = vi.fn(
-    async (slotId: string, receiptId: string, txBytesHash: string | null) => {
-      await sponsorPool.checkin(slotId, receiptId, txBytesHash);
+    async (sponsorAddress: string, receiptId: string, txBytesHash: string | null) => {
+      await sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash);
     },
   );
 
@@ -256,23 +254,21 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const userSig = await buildValidSignature(txBytes);
 
     // 3. Store a valid prepared entry through the real RedisPrepareStore.
-    const entry = makePreparedEntry(txHash);
-    entry.slotId = slot.slotId;
+    const draft = makePreparedDraft(txHash);
+    draft.sponsorAddress = slot.sponsorAddress;
     // Commit the lease to the prepared txBytesHash before store().
     // A post-store corruption path then
     // exercises the evictPreparedEntry → pool.checkin chain with the
     // committed txBytesHash.
-    await sponsorPool.commit(slot.slotId, PAYMENT_ID, txHash);
-    await prepareStore.store(PAYMENT_ID, entry);
+    await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, txHash);
+    await prepareStore.store(draft);
 
-    // 4. Forge corruption: read raw JSON from FakeRedisClient, set
-    //    `_v: 99`, write back. The store now contains a real-shaped
-    //    entry that the deserializer will refuse on the version check.
+    // 4. Forge corruption by adding a field outside the exact current shape.
     const entryKey = `stelis:prepare:${PAYMENT_ID}`;
     const rawJson = await redis.get(entryKey);
     expect(rawJson).not.toBeNull();
     const parsed = JSON.parse(rawJson!);
-    parsed._v = 99;
+    parsed.unexpected = true;
     await redis.set(entryKey, JSON.stringify(parsed), { PX: 65_000 });
 
     // 5. Drive handleSponsor end-to-end. It must reject AND clean up.
@@ -290,7 +286,8 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     //     recovers the committed hash from the forged JSON, and the
     //     pool CAS matches because the Redis lease is already committed
     //     to that same hash above.
-    expect(releaseSpy).toHaveBeenCalledWith(slot.slotId, PAYMENT_ID, txHash);
+    expect(releaseSpy).toHaveBeenCalledWith(slot.sponsorAddress, PAYMENT_ID, txHash);
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
 
     // 6b. Entry must be gone from the underlying store. evictPreparedEntry
     //     issues a DEL after attempting slot recovery.
@@ -305,7 +302,7 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     //
     //   consume() success branch → try { return deserializeEntry(str) }
     //                              catch (err) {
-    //                                _releaseSlotFromRawEntry(str, ...);
+    //                                releaseSponsorFromRawEntry(str, ...);
     //                                throw err;
     //                              }
     //
@@ -315,7 +312,7 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     //
     // Spy on `prepareStore.peek` so it (1) calls the REAL peek
     // implementation, (2) returns a valid entry, and (3) immediately
-    // afterward forges a `_v: 99` corruption into the same entry's raw
+    // afterward adds a field outside the current shape to the same raw
     // JSON. By the time the handler reaches `consume()` a few async ticks
     // later, the entry is corrupt and `consume()`'s success-branch
     // deserialize fails. The store releases the slot best-effort and
@@ -335,14 +332,14 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
 
     const { txBytes, encodedTxBytes, txHash } = await buildValidTx();
     const userSig = await buildValidSignature(txBytes);
-    const entry = makePreparedEntry(txHash);
-    entry.slotId = slot.slotId;
+    const draft = makePreparedDraft(txHash);
+    draft.sponsorAddress = slot.sponsorAddress;
     // Commit the lease to the prepared txBytesHash before store(). A
     // post-store corruption path then
     // exercises the evictPreparedEntry → pool.checkin chain with the
     // committed txBytesHash.
-    await sponsorPool.commit(slot.slotId, PAYMENT_ID, txHash);
-    await prepareStore.store(PAYMENT_ID, entry);
+    await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, txHash);
+    await prepareStore.store(draft);
 
     const entryKey = `stelis:prepare:${PAYMENT_ID}`;
 
@@ -352,13 +349,13 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const peekSpy = vi.spyOn(prepareStore, 'peek').mockImplementation(async (rid: string) => {
       // 1. Run the real peek end-to-end (real GET, real deserialize).
       const result = await realPeek(rid);
-      // 2. Forge `_v: 99` corruption AFTER peek returns. The redis
+      // 2. Forge current-shape corruption AFTER peek returns. The Redis
       //    write is observed by the next operation (consume's Lua GET).
       if (rid === PAYMENT_ID) {
         const rawJson = await redis.get(entryKey);
         if (rawJson) {
           const parsed = JSON.parse(rawJson);
-          parsed._v = 99;
+          parsed.unexpected = true;
           await redis.set(entryKey, JSON.stringify(parsed), { PX: 65_000 });
         }
       }
@@ -388,19 +385,18 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const consumeResult = consumeSpy.mock.results.at(-1);
     expect(consumeResult?.type).toBe('return');
     if (consumeResult?.type === 'return') {
-      await expect(consumeResult.value).rejects.toThrow(/unsupported schema version 99/);
+      await expect(consumeResult.value).rejects.toThrow(/unexpected field/);
     }
 
-    // Slot must be released — either through the store-internal
-    // _releaseSlotFromRawEntry() that runs before consume's throw, OR
-    // through the handler's evictPreparedEntry() catch path. Either way the
-    // _onRelease callback (releaseSpy) must observe the slot ID at
-    // least once.
-    // onRelease is invoked with `(slotId, receiptId, txBytesHash)`.
+    // The store-internal raw recovery releases before rethrow. The handler's
+    // following idempotent eviction sees an absent entry and must not release
+    // the same lease a second time.
+    // onRelease is invoked with `(sponsorAddress, receiptId, txBytesHash)`.
     // The raw-entry extractor recovers the committed hash from the
     // forged JSON, and the pool CAS matches because the Redis lease
     // is already committed to that same hash above.
-    expect(releaseSpy).toHaveBeenCalledWith(slot.slotId, PAYMENT_ID, txHash);
+    expect(releaseSpy).toHaveBeenCalledWith(slot.sponsorAddress, PAYMENT_ID, txHash);
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
 
     // Entry must be gone from Redis after the failure handling.
     const afterRaw = await redis.get(entryKey);
@@ -434,10 +430,10 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     const slot = await sponsorPool.checkout(PAYMENT_ID);
     if (!slot) throw new Error('expected slot');
     const legit = await buildValidTx();
-    const legitEntry = makePreparedEntry(legit.txHash);
-    legitEntry.slotId = slot.slotId;
-    await sponsorPool.commit(slot.slotId, PAYMENT_ID, legit.txHash);
-    await prepareStore.store(PAYMENT_ID, legitEntry);
+    const legitDraft = makePreparedDraft(legit.txHash);
+    legitDraft.sponsorAddress = slot.sponsorAddress;
+    await sponsorPool.commit(slot.sponsorAddress, PAYMENT_ID, legit.txHash);
+    await prepareStore.store(legitDraft);
 
     // 2. Attacker overwrites entry[PAYMENT_ID].txBytesHash to a
     //    hash of their choice, simulating Redis-write compromise.
@@ -463,11 +459,13 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     //    lease value is still HMAC(secret, PAYMENT_ID || slot || legit.txHash).
     //    pool.sign() computes HMAC(secret, PAYMENT_ID || slot || hash(attackerBytes))
     //    which is a different hex digest — the comparison fails.
-    await expect(sponsorPool.sign(slot.slotId, PAYMENT_ID, attackerBytes)).rejects.toThrow();
+    await expect(
+      sponsorPool.sign(slot.sponsorAddress, PAYMENT_ID, attackerBytes),
+    ).rejects.toThrow();
 
     // 5. Positive control: the legitimate bytes still succeed
     //    because the commit digest was hash(legit.txBytes).
-    const ok = await sponsorPool.sign(slot.slotId, PAYMENT_ID, legit.txBytes);
+    const ok = await sponsorPool.sign(slot.sponsorAddress, PAYMENT_ID, legit.txBytes);
     expect(ok.signature).toBeDefined();
   });
 });

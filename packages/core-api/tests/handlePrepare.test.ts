@@ -28,9 +28,7 @@ const TEST_SENDER_ADDR = TEST_PREPARE_AUTH_SENDER;
 
 // ─── Mock HostContext factory ────────────────────────────────────────────
 
-function makeMockContext(overrides?: {
-  checkoutResult?: { slotId: string; sponsorAddress: string } | null;
-}) {
+function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string } | null }) {
   const onchainConfig = {
     packageId: '0xPACKAGE',
     configId: '0xCONFIG',
@@ -71,7 +69,7 @@ function makeMockContext(overrides?: {
           .mockResolvedValue(
             overrides?.checkoutResult !== undefined
               ? overrides.checkoutResult
-              : { slotId: 'slot-1', sponsorAddress: '0xSPONSOR' },
+              : { sponsorAddress: '0xSPONSOR' },
           ),
         commit: vi.fn().mockResolvedValue(undefined),
         checkin: vi.fn().mockResolvedValue(undefined),
@@ -306,7 +304,7 @@ describe('handlePrepare', () => {
     // we assert on the receiptIdHex shape rather than a fixed value.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     const checkinCall = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinCall[0]).toBe('slot-1');
+    expect(checkinCall[0]).toBe('0xSPONSOR');
     expect(checkinCall[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
@@ -370,7 +368,7 @@ describe('handlePrepare', () => {
     // receiptId is the lease authenticator. Assert on its
     // shape rather than a fixed value.
     const checkinArgs = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinArgs[0]).toBe('slot-1');
+    expect(checkinArgs[0]).toBe('0xSPONSOR');
     expect(checkinArgs[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 

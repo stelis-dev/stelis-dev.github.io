@@ -6,7 +6,9 @@
  *
  * Canonical formulas (see `docs/economics-formal.md`):
  *
- *   recovered    = host-side gas recovery (executionCostClaim or consumedGasMist)
+ *   recovered    = value transferred back to the Host for this execution.
+ *                  Generic settlement uses executionCostClaim; promotion
+ *                  entitlement consumption transfers no value, so it is 0.
  *   paid         = host-paid net gas on chain, CLAMPED:
  *                  max(0, storage_cost + computation_cost - storage_rebate).
  *                  Identical to `simGas` in `docs/economics-formal.md`.
@@ -49,7 +51,7 @@ export interface SponsoredExecutionEconomicsKnown {
 /**
  * Unknown economics — set when the sponsor result path cannot prove the
  * host-paid amount (e.g. preflight failure, congestion, post-submit
- * `gasUsed` missing, post-signature submit-infra exception). Whether
+ * `gasUsed` missing, post-signature uncertainty). Whether
  * a row is persisted at all is the host recorder's outcome-filter
  * decision; when the recorder does persist the row, every monetary
  * field is `null` and the row is excluded from aggregate net/loss

@@ -3,7 +3,7 @@
  *
  * Tests verify:
  *   1. client.prepare() is called with correct params
- *   2. PrepareResponse fields are passed through correctly
+ *   2. RelayPrepareResponse fields are passed through correctly
  *   3. onGasEstimate callback receives totalCost (MIST) with 'SUI' symbol
  *   4. queryUserCredit is called and vaultId is returned
  *   5. Optional params (slippageBps, gasMarginBps) are forwarded
@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayConfigResponse, PrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 const { mockExtractSettleFields, mockValidateSettleFields, mockValidateGenericUserTx } = vi.hoisted(
@@ -38,7 +38,6 @@ vi.mock('../src/credit.js', async (importOriginal) => {
 // prepareSponsored tests verify prepare delegation, not PTB integrity.
 vi.mock('../src/integrity.js', () => ({
   verifyPtbIntegrity: vi.fn(),
-  SUPPORTED_INTEGRITY_POLICY_VERSION: 1,
   StelisIntegrityError: class StelisIntegrityError extends Error {
     constructor(msg: string) {
       super(msg);
@@ -61,7 +60,10 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
 // Mock StelisClient so StelisSDK.connect() succeeds without network.
 const mockPrepare =
   vi.fn<
-    (params: Record<string, unknown>, headers?: Record<string, string>) => Promise<PrepareResponse>
+    (
+      params: Record<string, unknown>,
+      headers?: Record<string, string>,
+    ) => Promise<RelayPrepareResponse>
   >();
 const mockSponsor = vi.fn();
 
@@ -122,10 +124,9 @@ const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   ],
   quotedHostFeeMist: '100000',
   protocolFlatFeeMist: '20000',
-  integrityPolicyVersion: 1,
 };
 
-const MOCK_PREPARE_RESPONSE: PrepareResponse = {
+const MOCK_PREPARE_RESPONSE: RelayPrepareResponse = {
   txBytes: 'base64MockTxBytes',
   receiptId: '0x' + 'ff'.repeat(32),
   nonce: '1',

@@ -2,17 +2,9 @@
  * [app-api] Host-level environment parsing utilities.
  *
  * These are runtime host utilities — not domain logic.
- * They read process.env values and validate format.
+ * Boot passes snapshotted raw values into these parsers.
  * Kept in app-api (host layer), not core-api (framework-agnostic).
  */
-
-export function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`[app-api] Missing required environment variable: ${name}`);
-  }
-  return value;
-}
 
 export function parseOptionalBooleanEnv(
   name: string,

@@ -9,7 +9,7 @@ import {
   RedisPromotionStore,
   InvalidStatusTransitionError,
   PromotionFieldImmutableError,
-  ConcurrentStatusTransitionError,
+  PromotionCurrentConflictError,
   type CreatePromotionInput,
 } from '../src/studio/promotionStore.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
@@ -57,6 +57,26 @@ describe('RedisPromotionStore', () => {
   it('returns null for non-existent promotion', async () => {
     const result = await store.get('nonexistent');
     expect(result).toBeNull();
+  });
+
+  it('does not overwrite an existing record when generated IDs collide', async () => {
+    const fixedId = '00000000-0000-4000-8000-000000000001';
+    const randomUuid = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(fixedId);
+    try {
+      const original = await store.create(makeInput({ displayName: 'Original' }));
+
+      await expect(store.create(makeInput({ displayName: 'Replacement' }))).rejects.toMatchObject({
+        name: 'PromotionCurrentConflictError',
+        promotionId: fixedId,
+        operation: 'create',
+      } satisfies Partial<PromotionCurrentConflictError>);
+
+      expect(await store.get(fixedId)).toEqual(original);
+      expect(await store.list()).toEqual([original]);
+      expect(await store.list({ status: 'draft' })).toEqual([original]);
+    } finally {
+      randomUuid.mockRestore();
+    }
   });
 
   // ── list ───────────────────────────────────────────────────────
@@ -108,6 +128,25 @@ describe('RedisPromotionStore', () => {
   it('returns null when updating non-existent', async () => {
     const result = await store.update('nope', { displayName: 'X' });
     expect(result).toBeNull();
+  });
+
+  it('rejects an update when the full record changed after its read', async () => {
+    const created = await store.create(makeInput());
+    const recordKey = `stelis:promo:${created.promotionId}`;
+    const staleRaw = await redis.get(recordKey);
+    const winner = await store.update(created.promotionId, { description: 'concurrent winner' });
+
+    await expect(
+      withStaleFirstRead(redis, recordKey, staleRaw!, () =>
+        store.update(created.promotionId, { displayName: 'stale loser' }),
+      ),
+    ).rejects.toMatchObject({
+      name: 'PromotionCurrentConflictError',
+      promotionId: created.promotionId,
+      operation: 'update',
+    } satisfies Partial<PromotionCurrentConflictError>);
+
+    expect(await store.get(created.promotionId)).toEqual(winner);
   });
 
   // ── Immutable-after-draft fields ──────────────────────────────
@@ -199,62 +238,27 @@ describe('RedisPromotionStore', () => {
     expect(result).toBeNull();
   });
 
-  // ── TRANSITION_LUA CAS ────────────────────────────────────────
+  // ── STATUS_LUA full-record CAS ─────────────────────────────────
 
-  /**
-   * Simulates the admission race: the TS-side `get()` returns a stale
-   * `active` view while Redis already holds `archived` from a concurrent
-   * writer. Spying on `redis.get` returns stale only on the first call
-   * (the store's pre-check); the second call (from the CAS Lua's own GET)
-   * sees the real archived state and the CAS rejects the transition.
-   */
-  async function runStaleReadRaceTo(
-    existing: Awaited<ReturnType<typeof store.create>>,
-    racedStatus: 'paused' | 'archived',
-  ): Promise<unknown> {
-    const recordKey = `stelis:promo:${existing.promotionId}`;
-    const currentRaw = await redis.get(recordKey);
-    const current = JSON.parse(currentRaw!);
-    const racedRecord = { ...current, status: racedStatus };
-    await redis.set(recordKey, JSON.stringify(racedRecord));
-
-    const originalGet = redis.get.bind(redis);
-    let callCount = 0;
-    const spy = vi.spyOn(redis, 'get').mockImplementation(async (key: string) => {
-      callCount++;
-      if (callCount === 1) return JSON.stringify(current);
-      return originalGet(key);
-    });
-
-    try {
-      return await store.transitionStatus(existing.promotionId, 'paused');
-    } catch (err) {
-      return err;
-    } finally {
-      spy.mockRestore();
-    }
-  }
-
-  it('throws ConcurrentStatusTransitionError when Lua sees a raced status', async () => {
+  it('rejects a status transition after a same-status record update', async () => {
     const created = await store.create(makeInput());
-    await store.transitionStatus(created.promotionId, 'active');
+    const recordKey = `stelis:promo:${created.promotionId}`;
+    const staleRaw = await redis.get(recordKey);
+    const winner = await store.update(created.promotionId, { displayName: 'concurrent winner' });
 
-    const outcome = await runStaleReadRaceTo(created, 'archived');
-    expect(outcome).toBeInstanceOf(ConcurrentStatusTransitionError);
-    const err = outcome as ConcurrentStatusTransitionError;
-    expect(err.expected).toBe('active');
-    expect(err.actual).toBe('archived');
-  });
+    await expect(
+      withStaleFirstRead(redis, recordKey, staleRaw!, () =>
+        store.transitionStatus(created.promotionId, 'active'),
+      ),
+    ).rejects.toMatchObject({
+      name: 'PromotionCurrentConflictError',
+      promotionId: created.promotionId,
+      operation: 'status',
+    } satisfies Partial<PromotionCurrentConflictError>);
 
-  it('CAS-failing transition does not overwrite archived final state', async () => {
-    const created = await store.create(makeInput());
-    await store.transitionStatus(created.promotionId, 'active');
-
-    await runStaleReadRaceTo(created, 'archived');
-
-    // After the losing transition, the record must still be archived.
-    const after = await store.get(created.promotionId);
-    expect(after!.status).toBe('archived');
+    expect(await store.get(created.promotionId)).toEqual(winner);
+    expect(await store.list({ status: 'draft' })).toEqual([winner]);
+    expect(await store.list({ status: 'active' })).toEqual([]);
   });
 
   // ── delete ────────────────────────────────────────────────────
@@ -287,4 +291,46 @@ describe('RedisPromotionStore', () => {
     const result = await store.delete('nope');
     expect(result).toBe(false);
   });
+
+  it('rejects delete when activation wins after the draft read', async () => {
+    const created = await store.create(makeInput());
+    const recordKey = `stelis:promo:${created.promotionId}`;
+    const staleRaw = await redis.get(recordKey);
+    const activated = await store.transitionStatus(created.promotionId, 'active');
+
+    await expect(
+      withStaleFirstRead(redis, recordKey, staleRaw!, () => store.delete(created.promotionId)),
+    ).rejects.toMatchObject({
+      name: 'PromotionCurrentConflictError',
+      promotionId: created.promotionId,
+      operation: 'delete',
+    } satisfies Partial<PromotionCurrentConflictError>);
+
+    expect(await store.get(created.promotionId)).toEqual(activated);
+    expect(await store.list({ status: 'draft' })).toEqual([]);
+    expect(await store.list({ status: 'active' })).toEqual([activated]);
+  });
 });
+
+async function withStaleFirstRead<T>(
+  redis: FakeRedisClient,
+  recordKey: string,
+  staleRaw: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const originalGet = redis.get.bind(redis);
+  let staleReadReturned = false;
+  const spy = vi.spyOn(redis, 'get').mockImplementation(async (key: string) => {
+    if (key === recordKey && !staleReadReturned) {
+      staleReadReturned = true;
+      return staleRaw;
+    }
+    return originalGet(key);
+  });
+
+  try {
+    return await operation();
+  } finally {
+    spy.mockRestore();
+  }
+}

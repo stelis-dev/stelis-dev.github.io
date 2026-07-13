@@ -1,21 +1,19 @@
 /**
  * Tests for extractSettleEvents.
  *
- * Uses mock SuiGrpcClient to check batch extraction behavior.
+ * Uses realistic Sui transaction-result discriminants while keeping the
+ * network client local and deterministic.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import { extractSettleEvents } from '../../src/server/extractSettleEvents.js';
 import { SettleEventBcs } from '../../src/server/settleEventDecoder.js';
+import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
-// ─────────────────────────────────────────────
-// Mock data
-// ─────────────────────────────────────────────
-
-const PACKAGE_ID = '0xabc123';
+const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 const SETTLE_EVENT_TYPE = `${PACKAGE_ID}::events::SettleEvent`;
+const USER = `0x${'ab'.repeat(32)}`;
 
-/** Create a valid SettleEvent BCS payload for testing. */
 function createMockSettleEventBcs(
   overrides: {
     receiptId?: number[];
@@ -28,23 +26,63 @@ function createMockSettleEventBcs(
     receipt_id: overrides.receiptId ?? Array.from({ length: 32 }, (_, i) => i),
     nonce: 1n,
     policy_hash: Array.from({ length: 32 }, () => 0),
-    quote_timestamp_ms: BigInt(1000),
-    exec_timestamp_ms: overrides.execTimestampMs ?? BigInt(2000),
-    sim_gas_reported: BigInt(100),
-    gas_variance_fixed_mist: BigInt(10),
-    slippage_buffer_mist: BigInt(5),
-    execution_cost_claim_mist: BigInt(50),
-    quoted_host_fee_mist: BigInt(60),
-    protocol_fee: BigInt(20),
-    protocol_treasury: '0x' + '00'.repeat(32),
-    payout: BigInt(900),
-    total_in: BigInt(1000),
-    surplus_credited: BigInt(0),
-    config_version: BigInt(1),
-    user: overrides.user ?? '0x' + 'ab'.repeat(32),
-    settlement_payout_recipient: '0x' + 'cc'.repeat(32),
+    quote_timestamp_ms: 1000n,
+    exec_timestamp_ms: overrides.execTimestampMs ?? 2000n,
+    sim_gas_reported: 100n,
+    gas_variance_fixed_mist: 10n,
+    slippage_buffer_mist: 5n,
+    execution_cost_claim_mist: 50n,
+    quoted_host_fee_mist: 60n,
+    protocol_fee: 20n,
+    protocol_treasury: `0x${'00'.repeat(32)}`,
+    payout: 900n,
+    total_in: 1000n,
+    surplus_credited: 0n,
+    config_version: 1n,
+    user: overrides.user ?? USER,
+    settlement_payout_recipient: `0x${'cc'.repeat(32)}`,
     order_id_hash: overrides.orderIdHash ?? Array.from({ length: 32 }, () => 0xff),
   }).toBytes();
+}
+
+function createEvent(bcs: Uint8Array, eventType = SETTLE_EVENT_TYPE) {
+  return {
+    packageId: PACKAGE_ID,
+    module: 'events',
+    sender: USER,
+    eventType,
+    bcs,
+    json: null,
+  };
+}
+
+function successfulTransaction(events: unknown[] | undefined, digest = 'digest') {
+  return {
+    $kind: 'Transaction',
+    Transaction: {
+      digest,
+      signatures: [],
+      epoch: '1',
+      status: { success: true, error: null },
+      events,
+    },
+  };
+}
+
+function failedTransaction(events: unknown[], message: string, digest = 'failed') {
+  return {
+    $kind: 'FailedTransaction',
+    FailedTransaction: {
+      digest,
+      signatures: [],
+      epoch: '1',
+      status: {
+        success: false,
+        error: { $kind: 'Unknown', Unknown: null, message },
+      },
+      events,
+    },
+  };
 }
 
 function createMockClient(responses: Record<string, unknown>) {
@@ -57,83 +95,96 @@ function createMockClient(responses: Record<string, unknown>) {
   } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 }
 
-// ─────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────
-
 describe('extractSettleEvents', () => {
-  it('B-1: extracts SettleEvent from TX with events', async () => {
-    const bcsBytes = createMockSettleEventBcs();
-    const client = createMockClient({
-      digest1: {
-        Transaction: {
-          events: [{ eventType: SETTLE_EVENT_TYPE, bcs: bcsBytes }],
-        },
-      },
-    });
-
-    const results = await extractSettleEvents(client, ['digest1'], {
-      packageId: PACKAGE_ID,
-    });
-
-    expect(results).toHaveLength(1);
-    expect(results[0].digest).toBe('digest1');
-    expect(results[0].receiptId).toMatch(/^[0-9a-f]+$/);
-    expect(results[0].user).toBeTruthy();
-    expect(results[0].timestampMs).toBe('2000');
-  });
-
-  it('B-2: returns empty for TX without SettleEvent', async () => {
-    const client = createMockClient({
-      digest2: {
-        Transaction: {
-          events: [{ eventType: `${PACKAGE_ID}::events::OtherEvent`, bcs: new Uint8Array() }],
-        },
-      },
-    });
-
-    const results = await extractSettleEvents(client, ['digest2'], {
-      packageId: PACKAGE_ID,
-    });
-
-    expect(results).toHaveLength(0);
-  });
-
-  it('B-3: batch processing — 3 digests, 2 with SettleEvent', async () => {
-    const bcs1 = createMockSettleEventBcs({ execTimestampMs: BigInt(1000) });
-    const bcs2 = createMockSettleEventBcs({ execTimestampMs: BigInt(3000) });
-    const client = createMockClient({
-      d1: { Transaction: { events: [{ eventType: SETTLE_EVENT_TYPE, bcs: bcs1 }] } },
-      d2: { Transaction: { events: [] } },
-      d3: { Transaction: { events: [{ eventType: SETTLE_EVENT_TYPE, bcs: bcs2 }] } },
-    });
-
-    const results = await extractSettleEvents(client, ['d1', 'd2', 'd3'], {
-      packageId: PACKAGE_ID,
-    });
-
-    expect(results).toHaveLength(2);
-    expect(results[0].digest).toBe('d1');
-    expect(results[0].timestampMs).toBe('1000');
-    expect(results[1].digest).toBe('d3');
-    expect(results[1].timestampMs).toBe('3000');
-  });
-
-  it('B-4: skips failed digest, processes rest normally', async () => {
-    const bcsOk = createMockSettleEventBcs();
+  it('extracts the canonical SettleEvent from a successful transaction', async () => {
     const logger = vi.fn();
     const client = createMockClient({
-      good: { Transaction: { events: [{ eventType: SETTLE_EVENT_TYPE, bcs: bcsOk }] } },
+      digest1: successfulTransaction([createEvent(createMockSettleEventBcs())], 'digest1'),
+    });
+
+    const results = await extractSettleEvents(client, ['digest1'], logger);
+
+    expect(results).toEqual([
+      expect.objectContaining({ digest: 'digest1', user: USER, timestampMs: '2000' }),
+    ]);
+    expect(logger).not.toHaveBeenCalled();
+  });
+
+  it('normally skips a successful transaction with no canonical SettleEvent', async () => {
+    const logger = vi.fn();
+    const client = createMockClient({
+      digest2: successfulTransaction([
+        createEvent(new Uint8Array(), `${PACKAGE_ID}::events::OtherEvent`),
+      ]),
+    });
+
+    const results = await extractSettleEvents(client, ['digest2'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).not.toHaveBeenCalled();
+  });
+
+  it('continues after a fetch failure and reports the failed digest', async () => {
+    const logger = vi.fn();
+    const client = createMockClient({
       bad: new Error('network timeout'),
+      good: successfulTransaction([createEvent(createMockSettleEventBcs())], 'good'),
     });
 
-    const results = await extractSettleEvents(client, ['bad', 'good'], {
-      packageId: PACKAGE_ID,
-      logger,
-    });
+    const results = await extractSettleEvents(client, ['bad', 'good'], logger);
 
-    expect(results).toHaveLength(1);
-    expect(results[0].digest).toBe('good');
+    expect(results).toEqual([expect.objectContaining({ digest: 'good' })]);
     expect(logger).toHaveBeenCalledWith(expect.stringContaining('network timeout'));
+  });
+
+  it('skips a FailedTransaction even when it carries a matching event', async () => {
+    const logger = vi.fn();
+    const event = createEvent(createMockSettleEventBcs());
+    const client = createMockClient({
+      failed: failedTransaction([event], 'MoveAbort in settlement', 'failed'),
+    });
+
+    const results = await extractSettleEvents(client, ['failed'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('execution failed'));
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('MoveAbort in settlement'));
+  });
+
+  it('reports and skips a successful response missing requested events', async () => {
+    const logger = vi.fn();
+    const client = createMockClient({ missing: successfulTransaction(undefined, 'missing') });
+
+    const results = await extractSettleEvents(client, ['missing'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('requested events were missing'));
+  });
+
+  it('skips duplicate SettleEvents and reports the count boundary', async () => {
+    const logger = vi.fn();
+    const event = createEvent(createMockSettleEventBcs());
+    const client = createMockClient({ duplicate: successfulTransaction([event, event]) });
+
+    const results = await extractSettleEvents(client, ['duplicate'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('expected one SettleEvent'));
+  });
+
+  it('skips non-canonical event BCS and reports the rejected boundary', async () => {
+    const canonical = createMockSettleEventBcs();
+    const withTrailingByte = new Uint8Array(canonical.length + 1);
+    withTrailingByte.set(canonical);
+    const logger = vi.fn();
+    const client = createMockClient({
+      malformed: successfulTransaction([createEvent(withTrailingByte)]),
+    });
+
+    const results = await extractSettleEvents(client, ['malformed'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('invalid SettleEvent BCS'));
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('not canonical'));
   });
 });

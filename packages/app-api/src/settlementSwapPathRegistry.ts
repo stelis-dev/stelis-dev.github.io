@@ -46,9 +46,9 @@ export function getSettlementSwapPathRegistryPath(): string {
 // ─────────────────────────────────────────────
 
 /** Parsed entry from the settlement swap path registry. */
-interface ParsedSettlementSwapPathRegistryEntry {
+export interface ParsedSettlementSwapPathRegistryEntry {
   /** DeepBook pool ID for a single supported settlement swap path. */
-  poolId: string;
+  readonly poolId: string;
 }
 
 /**
@@ -603,58 +603,36 @@ export function validateSettlementSwapPathRegistry(
 }
 
 // ─────────────────────────────────────────────
-// Top-level loader
+// Top-level resolver
 // ─────────────────────────────────────────────
 
 /**
- * Load and resolve the settlement swap path registry from a JSON file.
- *
- * Called from context.ts during initialization.
+ * Resolve an already parsed settlement swap path registry from on-chain data.
+ * File ownership stays at the boot boundary so context creation cannot reread
+ * or reinterpret a mutable runtime file.
  *
  * @param client       Sui gRPC client (already connected)
  * @param deepbookPkg  DeepBook package ID from DEEPBOOK_IDS
- * @param jsonFilePath Path to settlement-swap-paths.json
+ * @param entries      Entries parsed once by boot
  *
  * @returns Fully resolved SingleHopSettlementSwapPath[]
  * @throws Error on any failure (fail-closed at boot)
  */
-export async function loadSettlementSwapPathRegistry(
+export async function resolveSettlementSwapPathRegistry(
   client: SuiGrpcClient,
   deepbookPkg: string,
-  jsonFilePath: string,
-  network: SuiNetwork,
+  entries: readonly ParsedSettlementSwapPathRegistryEntry[],
 ): Promise<SingleHopSettlementSwapPath[]> {
-  // 1. Read and parse JSON file
-  const { readFile } = await import('node:fs/promises');
-  let raw: string;
-  try {
-    raw = await readFile(jsonFilePath, 'utf-8');
-  } catch (err) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] Cannot read "${jsonFilePath}": ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] Invalid JSON in "${jsonFilePath}": ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  const entries = parseSettlementSwapPathRegistryJson(json, network);
   const feeParams = await queryDeepbookFeeParameters(client, deepbookPkg);
 
-  // 2. Resolve each settlement swap path from on-chain data
+  // 1. Resolve each settlement swap path from on-chain data
   const settlementSwapPaths: SingleHopSettlementSwapPath[] = [];
   for (const entry of entries) {
     const config = await resolveSettlementSwapPathConfig(client, deepbookPkg, entry, feeParams);
     settlementSwapPaths.push(config);
   }
 
-  // 3. Validate the resolved set
+  // 2. Validate the resolved set
   validateSettlementSwapPathRegistry(settlementSwapPaths);
 
   return settlementSwapPaths;

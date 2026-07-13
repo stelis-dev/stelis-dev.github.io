@@ -41,7 +41,7 @@ import {
 } from '@stelis/core-api/studio';
 import { checkBlockedRequest, toBlockedError } from '@stelis/core-api';
 import type { AppApiContext } from '../context.js';
-import { getClientIp } from '../clientIp.js';
+import type { ResolveClientIp } from '../clientIp.js';
 import { callDeveloperVerifyApi } from '../developerJwtVerifyCallback.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
 
@@ -106,9 +106,10 @@ export async function verifyDeveloperJwtFromRequest(
 export async function runStudioAuth(
   c: Context,
   ctx: AppApiContext,
+  resolveClientIp: ResolveClientIp,
   opts: StudioAuthOptions,
 ): Promise<StudioAuthResult> {
-  const ip = getClientIp(c);
+  const ip = resolveClientIp(c);
 
   // 1. JWT verify.
   let identity: VerifiedDeveloperIdentity;

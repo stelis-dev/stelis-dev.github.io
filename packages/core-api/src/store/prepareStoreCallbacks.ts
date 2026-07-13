@@ -4,7 +4,7 @@
  * `MemoryPrepareStore` and `RedisPrepareStore` both inject two
  * best-effort callbacks per adapter:
  *
- *   - `_onRelease(slotId, receiptId, txBytesHash)` — sponsor slot return.
+ *   - `_onRelease(sponsorAddress, receiptId, txBytesHash)` — sponsor lease return.
  *   - `_onEntryEvict(entry)` — coordinator-side entry cleanup.
  *
  * Each callback may return `void` or a `Promise<void>`, and may also
@@ -52,7 +52,7 @@ export type PrepareStoreEvictReason =
   | 'background_ttl_eviction';
 
 export type OnReleaseCallback = (
-  slotId: string,
+  sponsorAddress: string,
   receiptId: string,
   txBytesHash: string | null,
 ) => void | Promise<void>;
@@ -77,7 +77,7 @@ export type OnEntryEvictCallback = (entry: PreparedTxEntry) => void | Promise<vo
  */
 export function invokeReleaseCallback(args: {
   onRelease: OnReleaseCallback;
-  slotId: string;
+  sponsorAddress: string;
   receiptId: string;
   txBytesHash: string | null;
   adapter: PrepareStoreAdapterTag;
@@ -87,13 +87,13 @@ export function invokeReleaseCallback(args: {
 }): Promise<void> {
   const emitSuccess = args.emitSuccess ?? true;
   return Promise.resolve()
-    .then(() => args.onRelease(args.slotId, args.receiptId, args.txBytesHash))
+    .then(() => args.onRelease(args.sponsorAddress, args.receiptId, args.txBytesHash))
     .then(() => {
       if (!emitSuccess) return;
       logSponsorPoolEvent(SPONSOR_POOL_LEASE_RELEASE, {
         adapter: args.adapter,
         reason: args.reason,
-        slot_id: args.slotId,
+        sponsor_address: args.sponsorAddress,
         ...args.extraFields,
       });
     })
@@ -103,7 +103,7 @@ export function invokeReleaseCallback(args: {
         {
           adapter: args.adapter,
           reason: args.reason,
-          slot_id: args.slotId,
+          sponsor_address: args.sponsorAddress,
           ...args.extraFields,
           error: err instanceof Error ? err.message : String(err),
         },
@@ -140,7 +140,7 @@ export function invokeEvictCallback(args: {
         {
           adapter: args.adapter,
           reason: args.reason,
-          slot_id: args.entry.slotId,
+          sponsor_address: args.entry.sponsorAddress,
           receipt_id: args.entry.receiptId,
           error: err instanceof Error ? err.message : String(err),
         },

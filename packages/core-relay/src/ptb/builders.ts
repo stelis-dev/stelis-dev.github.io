@@ -9,13 +9,20 @@
  *
  * buildWithdrawPtb() stays in sdk/src/ptb.ts — user operation.
  */
-import { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions';
+import {
+  Transaction,
+  type TransactionArgument,
+  type TransactionObjectArgument,
+} from '@mysten/sui/transactions';
 import { SUI_CLOCK_OBJECT_ID } from '../constants.js';
 import {
+  SETTLE_FIELD_SCHEMA,
+  SETTLEMENT_ENTRY_FUNCTIONS,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
+  SETTLE_MODULE,
   SETTLE_WITH_CREDIT_FUNCTION,
+  type SettleFieldValues,
 } from '@stelis/contracts';
-import { SETTLE_FIELD_SCHEMA, type SettleFieldValues } from '../settlePayloadContract.js';
 import type { SettlementSwapDirection } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
@@ -47,6 +54,13 @@ function validateSettleInput(params: {
   if (params.executionCostClaim < 0n) {
     throw new Error(`executionCostClaim must be non-negative, got ${params.executionCostClaim}`);
   }
+}
+
+function requireCompiledU64BigInt(name: string, value: unknown): bigint {
+  if (typeof value !== 'bigint') {
+    throw new Error(`${name} must be a bigint for compiled Move u64`);
+  }
+  return value;
 }
 
 // ─────────────────────────────────────────────
@@ -92,7 +106,7 @@ interface SwapAndSettleSharedParams {
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */
   expectedConfigVersion: bigint;
-  quoteTimestampMs: number;
+  quoteTimestampMs: bigint;
   policyHash: Uint8Array;
   /** sha256(orderId) if provided, empty otherwise. On-chain S-10b: 0 or 32 bytes. */
   orderIdHash: Uint8Array;
@@ -117,23 +131,59 @@ const toObjArg = (tx: Transaction, id: string | TransactionObjectArgument) =>
   typeof id === 'string' ? tx.object(id) : id;
 
 /**
- * Build the 13 settle Pure args by iterating SETTLE_FIELD_SCHEMA.
+ * Build the settle Pure args by iterating SETTLE_FIELD_SCHEMA.
  *
  * Single assembly source for both swap and credit builders.
- * Field order is driven by the canonical schema — not by manual push order.
- * This eliminates push-order drift between the two builder functions.
+ * Field order is driven by the compiled schema for both builder functions.
  */
 function buildSettlePureArgs(tx: Transaction, values: SettleFieldValues) {
-  return SETTLE_FIELD_SCHEMA.map((field) => {
-    const v = values[field.name];
-    switch (field.moveType) {
-      case 'u64':
-        return tx.pure.u64(v as bigint | number);
-      case 'address':
-        return tx.pure.address(v as string);
-      case 'vector<u8>':
-        return tx.pure.vector('u8', Array.from(v as Uint8Array));
+  for (const field of SETTLE_FIELD_SCHEMA) {
+    if (field.moveType === 'u64') {
+      requireCompiledU64BigInt(field.name, values[field.name]);
     }
+  }
+
+  return new Map<string, TransactionArgument>(
+    SETTLE_FIELD_SCHEMA.map((field) => {
+      const v = values[field.name];
+      switch (field.moveType) {
+        case 'u64':
+          return [field.moveName, tx.pure.u64(v as bigint)] as const;
+        case 'address':
+          return [field.moveName, tx.pure.address(v as string)] as const;
+        case 'vector<u8>':
+          return [field.moveName, tx.pure.vector('u8', Array.from(v as Uint8Array))] as const;
+      }
+    }),
+  );
+}
+
+/** Order named arguments exactly as the compiled production function declares them. */
+function orderCompiledSettleArguments(
+  functionName: string,
+  argumentsByName: ReadonlyMap<string, TransactionArgument>,
+  typeArgumentCount: number,
+): TransactionArgument[] {
+  const entry = (
+    SETTLEMENT_ENTRY_FUNCTIONS as Readonly<
+      Record<string, (typeof SETTLEMENT_ENTRY_FUNCTIONS)[keyof typeof SETTLEMENT_ENTRY_FUNCTIONS]>
+    >
+  )[functionName];
+  if (!entry) throw new Error(`Unsupported compiled settlement function ${functionName}`);
+  if (entry.typeParameters.length !== typeArgumentCount) {
+    throw new Error(
+      `Compiled settlement function ${functionName} requires ${entry.typeParameters.length} type arguments, got ${typeArgumentCount}`,
+    );
+  }
+
+  return entry.parameters.map((parameter) => {
+    const argument = argumentsByName.get(parameter.name);
+    if (!argument) {
+      throw new Error(
+        `No builder argument for compiled parameter ${functionName}.${parameter.name}: ${parameter.moveType}`,
+      );
+    }
+    return argument;
   });
 }
 
@@ -149,41 +199,35 @@ function buildSettlePureArgs(tx: Transaction, values: SettleFieldValues) {
 export function buildSwapAndSettlePtb(tx: Transaction, params: SwapAndSettleParams): void {
   validateSettleInput(params);
 
+  const swapAmount = requireCompiledU64BigInt('swapAmount', params.swapAmount);
+  const minSuiOut = requireCompiledU64BigInt('minSuiOut', params.minSuiOut);
+  const useCreditAmount =
+    params.variant === 'with_vault'
+      ? requireCompiledU64BigInt('useCreditAmount', params.useCreditAmount ?? 0n)
+      : 0n;
+
   // Resolve target function name from settlementSwapDirection + variant
   const directionFunctions = SETTLEMENT_SWAP_DIRECTION_FUNCTIONS[params.settlementSwapDirection];
   const fnName =
     params.variant === 'new_user' ? directionFunctions.newUser : directionFunctions.withVault;
 
-  const commonArgs = [
-    tx.object(params.configId),
-    tx.object(params.vaultRegistryId),
-    tx.object(SUI_CLOCK_OBJECT_ID),
-  ];
-
-  const settleArgs = buildSettlePureArgs(tx, params);
-
   const typeArguments = [params.settlementTokenType];
-
-  const swapArgs = [
-    tx.object(params.poolId),
-    toObjArg(tx, params.paymentCoinId),
-    tx.pure.u64(params.swapAmount),
-    tx.pure.u64(params.minSuiOut),
-  ];
-
-  const moveArgs =
-    params.variant === 'new_user'
-      ? [...commonArgs, ...swapArgs, ...settleArgs]
-      : [
-          ...commonArgs,
-          tx.object(params.vaultId),
-          ...swapArgs,
-          ...settleArgs,
-          tx.pure.u64(params.useCreditAmount ?? 0n),
-        ];
+  const argumentsByName = buildSettlePureArgs(tx, params);
+  argumentsByName.set('config', tx.object(params.configId));
+  argumentsByName.set('registry', tx.object(params.vaultRegistryId));
+  argumentsByName.set('clock', tx.object(SUI_CLOCK_OBJECT_ID));
+  argumentsByName.set('pool', tx.object(params.poolId));
+  argumentsByName.set('payment_coin', toObjArg(tx, params.paymentCoinId));
+  argumentsByName.set('swap_amount', tx.pure.u64(swapAmount));
+  argumentsByName.set('min_sui_out', tx.pure.u64(minSuiOut));
+  if (params.variant === 'with_vault') {
+    argumentsByName.set('user_vault', tx.object(params.vaultId));
+    argumentsByName.set('use_credit_amount', tx.pure.u64(useCreditAmount));
+  }
+  const moveArgs = orderCompiledSettleArguments(fnName, argumentsByName, typeArguments.length);
 
   tx.moveCall({
-    target: `${params.packageId}::settle::${fnName}`,
+    target: `${params.packageId}::${SETTLE_MODULE}::${fnName}`,
     typeArguments,
     arguments: moveArgs,
   });
@@ -214,7 +258,7 @@ export interface SettleWithCreditPtbParams {
   expectedProtocolFeeMist: bigint;
   /** Expected config_version at quote time — drift detection. */
   expectedConfigVersion: bigint;
-  quoteTimestampMs: number;
+  quoteTimestampMs: bigint;
   policyHash: Uint8Array;
   /** sha256(orderId) if provided, empty otherwise. On-chain S-10b: 0 or 32 bytes. */
   orderIdHash: Uint8Array;
@@ -230,19 +274,23 @@ export function buildSettleWithCreditPtb(tx: Transaction, params: SettleWithCred
       `${SETTLE_WITH_CREDIT_FUNCTION} requires slippageBufferMist=0, got ${params.slippageBufferMist}`,
     );
   }
+  const useCreditAmount = requireCompiledU64BigInt('useCreditAmount', params.useCreditAmount);
 
-  const prefixArgs = [
-    tx.object(params.configId),
-    tx.object(params.vaultRegistryId),
-    tx.object(SUI_CLOCK_OBJECT_ID),
-    tx.object(params.vaultId),
-    tx.pure.u64(params.useCreditAmount),
-  ];
-
-  const settleArgs = buildSettlePureArgs(tx, params);
+  const argumentsByName = buildSettlePureArgs(tx, params);
+  argumentsByName.set('config', tx.object(params.configId));
+  argumentsByName.set('registry', tx.object(params.vaultRegistryId));
+  argumentsByName.set('clock', tx.object(SUI_CLOCK_OBJECT_ID));
+  argumentsByName.set('user_vault', tx.object(params.vaultId));
+  argumentsByName.set('use_credit_amount', tx.pure.u64(useCreditAmount));
+  const typeArguments: string[] = [];
 
   tx.moveCall({
-    target: `${params.packageId}::settle::${SETTLE_WITH_CREDIT_FUNCTION}`,
-    arguments: [...prefixArgs, ...settleArgs],
+    target: `${params.packageId}::${SETTLE_MODULE}::${SETTLE_WITH_CREDIT_FUNCTION}`,
+    typeArguments,
+    arguments: orderCompiledSettleArguments(
+      SETTLE_WITH_CREDIT_FUNCTION,
+      argumentsByName,
+      typeArguments.length,
+    ),
   });
 }
