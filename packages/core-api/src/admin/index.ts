@@ -25,6 +25,7 @@ export { verifyAdminSignature, verifySignedMessage } from './adminAuth.js';
 
 // ── Redis command contract ──────────────────────────────────────────────────
 export type { AdminRedisClient } from './adminRedis.js';
+export { raiseAdminSessionNotBefore } from './adminSessionNotBefore.js';
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
 export { checkAndIncrement, resetAttempts } from './adminRateLimit.js';

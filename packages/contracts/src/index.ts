@@ -22,6 +22,43 @@ export type {
 } from './types.js';
 
 export type {
+  RelayConfigResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
+  PromotionPrepareRequest,
+  PromotionPrepareResponse,
+  PromotionSponsorRequest,
+  PromotionSponsorResponse,
+  AdminAuthChallengeResponse,
+  AdminAuthVerifyRequest,
+  AdminAuthSuccessResponse,
+  SponsorRefillAccountWithdrawalChallengeResponse,
+  SponsorRefillAccountWithdrawalRequest,
+  SponsorRefillAccountWithdrawalResponse,
+} from './hostWire.js';
+
+export {
+  HostWireParseError,
+  parseRelayConfigResponse,
+  parseRelayPrepareRequest,
+  parseRelayPrepareResponse,
+  parseRelaySponsorRequest,
+  parseRelaySponsorResponse,
+  parsePromotionPrepareRequest,
+  parsePromotionPrepareResponse,
+  parsePromotionSponsorRequest,
+  parsePromotionSponsorResponse,
+  parseAdminAuthChallengeResponse,
+  parseAdminAuthVerifyRequest,
+  parseAdminAuthSuccessResponse,
+  parseSponsorRefillAccountWithdrawalChallengeResponse,
+  parseSponsorRefillAccountWithdrawalRequest,
+  parseSponsorRefillAccountWithdrawalResponse,
+} from './hostWire.js';
+
+export type {
   SettleVariantClass,
   SettleFieldValues,
   SettleEventFieldMoveType,
@@ -52,7 +89,6 @@ export {
   settlementSwapDirectionFromSwapDirections,
   PROFILE_RANKS,
   SUI_TYPE,
-  INTEGRITY_POLICY_VERSION,
   DEEPBOOK_IDS,
   STELIS_CONTRACT_IDS,
   requireContractId,

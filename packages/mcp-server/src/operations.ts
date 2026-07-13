@@ -1,12 +1,17 @@
 import type { StelisMcpServerConfig } from './config.js';
 import { requestJson } from './http.js';
-import type {
-  JsonObject,
-  PrepareRequest,
-  PromotionPrepareRequest,
-  PromotionSponsorRequest,
-  SponsorRequest,
-} from './types.js';
+import type { JsonObject } from './types.js';
+import {
+  parsePromotionPrepareResponse,
+  parsePromotionSponsorResponse,
+  parseRelayConfigResponse,
+  parseRelayPrepareResponse,
+  parseRelaySponsorResponse,
+  type PromotionPrepareRequest,
+  type PromotionSponsorRequest,
+  type RelayPrepareRequest,
+  type RelaySponsorRequest,
+} from '@stelis/contracts';
 
 interface RelayApiScopedInput {
   relayApiUrl?: string;
@@ -16,38 +21,44 @@ interface RelayApiScopedInput {
 export async function getRelayApiConfig(
   config: StelisMcpServerConfig,
   input: RelayApiScopedInput,
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    path: '/config',
-  });
+): Promise<ReturnType<typeof parseRelayConfigResponse>> {
+  return parseRelayConfigResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      path: '/config',
+    }),
+  );
 }
 
 export async function prepareSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayApiScopedInput & PrepareRequest,
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    method: 'POST',
-    path: '/prepare',
-    body: omitRelayApiFields(input),
-  });
+  input: RelayApiScopedInput & RelayPrepareRequest,
+): Promise<ReturnType<typeof parseRelayPrepareResponse>> {
+  return parseRelayPrepareResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      method: 'POST',
+      path: '/prepare',
+      body: omitRelayApiFields(input),
+    }),
+  );
 }
 
 export async function submitSponsoredTransaction(
   config: StelisMcpServerConfig,
-  input: RelayApiScopedInput & SponsorRequest,
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    method: 'POST',
-    path: '/sponsor',
-    body: omitRelayApiFields(input),
-  });
+  input: RelayApiScopedInput & RelaySponsorRequest,
+): Promise<ReturnType<typeof parseRelaySponsorResponse>> {
+  return parseRelaySponsorResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      method: 'POST',
+      path: '/sponsor',
+      body: omitRelayApiFields(input),
+    }),
+  );
 }
 
 export async function listPromotions(
@@ -97,19 +108,21 @@ export async function preparePromotionSponsoredTransaction(
     developerJwt: string;
     promotionId: string;
   } & PromotionPrepareRequest,
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    base: 'studio',
-    method: 'POST',
-    path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/prepare`,
-    headers: bearerHeader(input.developerJwt),
-    body: {
-      senderAddress: input.senderAddress,
-      txKindBytes: input.txKindBytes,
-    },
-  });
+): Promise<ReturnType<typeof parsePromotionPrepareResponse>> {
+  return parsePromotionPrepareResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      base: 'studio',
+      method: 'POST',
+      path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/prepare`,
+      headers: bearerHeader(input.developerJwt),
+      body: {
+        senderAddress: input.senderAddress,
+        txKindBytes: input.txKindBytes,
+      },
+    }),
+  );
 }
 
 export async function submitPromotionSponsoredTransaction(
@@ -118,20 +131,22 @@ export async function submitPromotionSponsoredTransaction(
     developerJwt: string;
     promotionId: string;
   } & PromotionSponsorRequest,
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    base: 'studio',
-    method: 'POST',
-    path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/sponsor`,
-    headers: bearerHeader(input.developerJwt),
-    body: {
-      receiptId: input.receiptId,
-      txBytes: input.txBytes,
-      userSignature: input.userSignature,
-    },
-  });
+): Promise<ReturnType<typeof parsePromotionSponsorResponse>> {
+  return parsePromotionSponsorResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      base: 'studio',
+      method: 'POST',
+      path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/sponsor`,
+      headers: bearerHeader(input.developerJwt),
+      body: {
+        receiptId: input.receiptId,
+        txBytes: input.txBytes,
+        userSignature: input.userSignature,
+      },
+    }),
+  );
 }
 
 function bearerHeader(developerJwt: string): Record<string, string> {

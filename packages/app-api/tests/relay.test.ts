@@ -274,7 +274,6 @@ describe('relay routes', () => {
       expect(pool.minSize).toBe(1);
       expect(body.quotedHostFeeMist).toBe('500');
       expect(body.protocolFlatFeeMist).toBe('100');
-      expect(body.integrityPolicyVersion).toBeDefined();
 
       assertResponseKeys(body, 'relayConfigResponse');
       assertArrayItemKeys(body, 'supportedSettlementSwapPaths', 'singleHopSettlementSwapPath');
@@ -613,59 +612,69 @@ describe('relay routes', () => {
       ...PREPARE_AUTH_FIELDS,
     };
 
-    it('rejects string slippageBps with 422 INVALID_SLIPPAGE_BPS', async () => {
+    it('rejects a present non-string orderId instead of silently dropping it', async () => {
+      const res = await app.request('/relay/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...validPrepareBase, orderId: 123 }),
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({ code: 'BAD_REQUEST' });
+    });
+
+    it('rejects string slippageBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, slippageBps: '200' }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects boolean slippageBps with 422 INVALID_SLIPPAGE_BPS', async () => {
+    it('rejects boolean slippageBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, slippageBps: true }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects null slippageBps with 422 INVALID_SLIPPAGE_BPS', async () => {
+    it('rejects null slippageBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, slippageBps: null }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects object slippageBps with 422 INVALID_SLIPPAGE_BPS', async () => {
+    it('rejects object slippageBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, slippageBps: { value: 200 } }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects decimal slippageBps with 422 INVALID_SLIPPAGE_BPS', async () => {
+    it('rejects decimal slippageBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, slippageBps: 1.5 }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
     it('rejects over-cap slippageBps (501) with 422 INVALID_SLIPPAGE_BPS', async () => {
@@ -679,59 +688,59 @@ describe('relay routes', () => {
       expect(body.code).toBe('INVALID_SLIPPAGE_BPS');
     });
 
-    it('rejects string gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {
+    it('rejects string gasMarginBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, gasMarginBps: '1000' }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_GAS_MARGIN_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects boolean gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {
+    it('rejects boolean gasMarginBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, gasMarginBps: false }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_GAS_MARGIN_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects null gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {
+    it('rejects null gasMarginBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, gasMarginBps: null }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_GAS_MARGIN_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects object gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {
+    it('rejects object gasMarginBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, gasMarginBps: { value: 1000 } }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_GAS_MARGIN_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
-    it('rejects decimal gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {
+    it('rejects decimal gasMarginBps as a malformed optional field', async () => {
       const res = await app.request('/relay/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...validPrepareBase, gasMarginBps: 10.5 }),
       });
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.code).toBe('INVALID_GAS_MARGIN_BPS');
+      expect(body.code).toBe('BAD_REQUEST');
     });
 
     it('rejects negative gasMarginBps with 422 INVALID_GAS_MARGIN_BPS', async () => {

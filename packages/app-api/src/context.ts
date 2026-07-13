@@ -324,9 +324,9 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // ── 9. Warm up (fail-closed) ────────────────────────────────────
     await host.warmUp();
 
-    // NOTE: NOT_BEFORE_KEY is set in boot.ts only (not here).
-    // createApp eagerly awaits context initialization. Re-setting not_before
-    // here would still create a second authority for session invalidation.
+    // The admin session cutoff is raised in boot.ts only (not here).
+    // createApp eagerly awaits context initialization. Raising it here would
+    // still create a second authority for session invalidation.
 
     // ── 10. Sponsor Refill Account + SponsorOperations ───────────────────────────────
     const sponsorRefillAccountKey = input.sponsorOperations.sponsorRefillAccountKey;

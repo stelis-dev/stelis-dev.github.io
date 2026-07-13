@@ -22,8 +22,10 @@ export type {
   ExecuteSuiFirstResult,
   // Relay config response & responses
   RelayConfigResponse,
-  PrepareResponse,
-  SponsorResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
   SettleProfile,
   // Settlement swap path config (1-hop only)
   SingleHopSettlementSwapPath,
@@ -32,9 +34,9 @@ export type {
   PrepareSponsoredOptions,
   PrepareSponsoredResult,
   // Promotion (promotion-specific sponsored execution)
-  PromotionPrepareParams,
+  PromotionPrepareRequest,
   PromotionPrepareResponse,
-  PromotionSponsorParams,
+  PromotionSponsorRequest,
   PromotionSponsorResponse,
   ExecutePromotionSponsoredOptions,
   ExecutePromotionSponsoredResult,
@@ -74,6 +76,7 @@ export type { CreditResult } from './credit.js';
 // ─────────────────────────────────────────────
 
 export { StelisIntegrityError } from './integrity.js';
+export { parseRelayConfigResponse } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // On-chain contract IDs (re-export from @stelis/contracts)

@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { buildApiUrl, getNonce, verifySignature } from '../api/client';
+import { buildApiUrl, issueAdminAuthChallenge, verifyAdminAuth } from '../api/client';
 import {
   createDAppKit,
   DAppKitProvider,
@@ -64,7 +64,7 @@ function AdminLoginForm({ network }: { network: AppAdminNetwork }) {
 
     (async () => {
       try {
-        const { nonce } = await getNonce();
+        const { nonce } = await issueAdminAuthChallenge();
 
         const wallets = getWallets().get();
         const suiWallet = wallets.find(
@@ -85,7 +85,7 @@ function AdminLoginForm({ network }: { network: AppAdminNetwork }) {
         });
 
         setState('verifying');
-        await verifySignature({ nonce, signature, address: account.address });
+        await verifyAdminAuth({ nonce, signature, address: account.address });
 
         navigate('/dashboard', { replace: true });
       } catch (err) {

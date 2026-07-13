@@ -4,6 +4,7 @@ import { resolveRelayApiUrl } from '../src/http.js';
 import {
   getRelayApiConfig,
   listPromotions,
+  preparePromotionSponsoredTransaction,
   prepareSponsoredTransaction,
   submitPromotionSponsoredTransaction,
 } from '../src/operations.js';
@@ -43,10 +44,18 @@ describe('resolveRelayApiUrl', () => {
 
 describe('Stelis MCP operations', () => {
   it('reads Relay API config from GET /relay/config', async () => {
-    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse({ network: 'testnet' }));
+    const relayConfig = {
+      network: 'testnet',
+      packageId: '0x1',
+      settlementPayoutRecipient: '0x2',
+      supportedSettlementSwapPaths: [],
+      quotedHostFeeMist: '1',
+      protocolFlatFeeMist: '1',
+    };
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse(relayConfig));
     const result = await getRelayApiConfig(createConfig(fetchFn), {});
 
-    expect(result).toEqual({ network: 'testnet' });
+    expect(result).toEqual(relayConfig);
     expect(fetchFn).toHaveBeenCalledWith(
       'https://host.example/relay/config',
       expect.objectContaining({ method: 'GET' }),
@@ -58,6 +67,19 @@ describe('Stelis MCP operations', () => {
       jsonResponse({
         txBytes: 'tx',
         receiptId: '0xabc',
+        nonce: '1',
+        cost: {
+          simGas: '1',
+          gasVarianceFixedMist: '1',
+          slippageBufferMist: '1',
+          quotedHostFee: '1',
+          protocolFee: '1',
+          executionCostClaim: '1',
+          grossGas: '1',
+        },
+        profile: 'credit_general',
+        quoteTimestampMs: 1_700_000_000_000,
+        policyHash: '0xabc',
       }),
     );
 
@@ -103,7 +125,9 @@ describe('Stelis MCP operations', () => {
   });
 
   it('posts promotion sponsor to the studio base URL', async () => {
-    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse({ digest: 'abc' }));
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ digest: 'abc', effects: {}, actualGasMist: '1' }));
 
     await submitPromotionSponsoredTransaction(createConfig(fetchFn), {
       developerJwt: 'jwt',
@@ -124,5 +148,34 @@ describe('Stelis MCP operations', () => {
       txBytes: 'tx',
       userSignature: 'sig',
     });
+  });
+
+  it('validates promotion prepare and sponsor responses at the Host boundary', async () => {
+    const prepareFetch = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(
+        jsonResponse({ txBytes: 'tx', receiptId: 'receipt', estimatedGasMist: '1' }),
+      );
+    await expect(
+      preparePromotionSponsoredTransaction(createConfig(prepareFetch), {
+        developerJwt: 'jwt',
+        promotionId: 'promo',
+        senderAddress: '0x1',
+        txKindBytes: 'kind',
+      }),
+    ).resolves.toMatchObject({ receiptId: 'receipt' });
+
+    const malformedSponsorFetch = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ digest: 'digest', effects: {} }));
+    await expect(
+      submitPromotionSponsoredTransaction(createConfig(malformedSponsorFetch), {
+        developerJwt: 'jwt',
+        promotionId: 'promo',
+        receiptId: 'receipt',
+        txBytes: 'tx',
+        userSignature: 'signature',
+      }),
+    ).rejects.toThrow('actualGasMist must be a string');
   });
 });

@@ -34,8 +34,8 @@
     },
     "scripts": {
         "build": "tsc",
-        "test": "vitest run --exclude tests/**/*.redis.test.ts",
-        "test:redis": "vitest run tests/redisAdapters.redis.test.ts tests/executionLedger.redis.test.ts tests/promotionStore.redis.test.ts",
+        "test": "vitest run --exclude 'tests/**/*.redis.test.ts'",
+        "test:redis": "vitest run tests/redisAdapters.redis.test.ts tests/executionLedger.redis.test.ts tests/promotionStore.redis.test.ts tests/adminSessionNotBefore.redis.test.ts",
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit"
     },

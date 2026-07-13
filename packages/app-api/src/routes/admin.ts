@@ -10,7 +10,11 @@
 import { Hono } from 'hono';
 import {
   buildSponsorRefillAccountWithdrawMessage,
+  HostWireParseError,
   isPositiveU64DecimalString,
+  parseSponsorRefillAccountWithdrawalRequest,
+  type SponsorRefillAccountWithdrawalResponse,
+  type SponsorRefillAccountWithdrawalChallengeResponse,
   type DeepBookPoolHop,
   type SponsorOperationsStatus,
   type SuiNetwork,
@@ -487,8 +491,8 @@ export function createAdminRoutes(
     }
   });
 
-  // ── GET /api/sponsor-refill-account/withdraw — issue withdraw nonce ─────────────────
-  app.get('/sponsor-refill-account/withdraw', async (c) => {
+  // ── POST /api/sponsor-refill-account/withdrawal-challenge ────────────────────────────
+  app.post('/sponsor-refill-account/withdrawal-challenge', async (c) => {
     let ip: string | null = null;
     try {
       ip = runtime.resolveClientIp(c);
@@ -500,7 +504,8 @@ export function createAdminRoutes(
         { px: WITHDRAW_NONCE_TTL_MS },
       );
       const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_MS).toISOString();
-      return c.json({ nonce, expiresAt });
+      const response: SponsorRefillAccountWithdrawalChallengeResponse = { nonce, expiresAt };
+      return c.json(response);
     } catch (err) {
       const mapped = mapError(err);
       if (mapped) return respondMapped(c, mapped);
@@ -536,21 +541,10 @@ export function createAdminRoutes(
       }
 
       // Parse body
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as {
-        amountMist?: string;
-        nonce?: string;
-        signature?: string;
-      };
+      const body = parseSponsorRefillAccountWithdrawalRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+      );
       const { amountMist, nonce, signature } = body;
-      if (!amountMist || !nonce || !signature) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: '400: missing fields',
-        });
-        return c.json({ error: 'amountMist, nonce, and signature are required' }, 400);
-      }
 
       // amountMist validation
       if (!isPositiveU64DecimalString(amountMist)) {
@@ -665,6 +659,9 @@ export function createAdminRoutes(
       }
 
       const { digest, remainingBalanceMist } = result;
+      if (remainingBalanceMist === null) {
+        throw new Error('Successful withdrawal is missing remainingBalanceMist');
+      }
 
       await writeAdminAuditLog(redis, {
         event: 'WITHDRAWAL_SUCCESS',
@@ -673,13 +670,17 @@ export function createAdminRoutes(
         detail: `${amountMist} MIST → ${recipientAddress} (${digest})`,
       });
 
-      return c.json({
+      const response: SponsorRefillAccountWithdrawalResponse = {
         digest,
         amountMist,
         recipient: recipientAddress,
         remainingBalanceMist,
-      });
+      };
+      return c.json(response);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
       const mapped = mapError(err);

@@ -6,8 +6,8 @@ import { useOutletContext } from 'react-router-dom';
 import {
   ApiError,
   getSponsorOperations,
-  getSponsorRefillAccountWithdrawNonce,
-  executeSponsorRefillAccountWithdraw,
+  issueSponsorRefillAccountWithdrawalChallenge,
+  executeSponsorRefillAccountWithdrawal,
   getSponsoredLogsSummary,
   type SponsorOperationsStatus,
   type SponsoredExecutionAggregate,
@@ -288,7 +288,7 @@ function WithdrawSection({
         const signerResolution = resolveWithdrawSigner(adminAddress);
         if (!signerResolution.ok) throw new Error(signerResolution.message);
 
-        const { nonce } = await getSponsorRefillAccountWithdrawNonce();
+        const { nonce } = await issueSponsorRefillAccountWithdrawalChallenge();
         const amountMist = nextAmountValidation.amountMist;
         const message = buildSponsorRefillAccountWithdrawMessage(network, amountMist, nonce);
         const { signature } = await signerResolution.signFeature.signPersonalMessage({
@@ -300,7 +300,7 @@ function WithdrawSection({
         rememberPendingWithdrawal(request);
       }
 
-      const { digest } = await executeSponsorRefillAccountWithdraw({
+      const { digest } = await executeSponsorRefillAccountWithdrawal({
         nonce: request.nonce,
         signature: request.signature,
         amountMist: request.amountMist,

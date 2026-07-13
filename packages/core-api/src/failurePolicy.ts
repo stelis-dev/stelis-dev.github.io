@@ -431,13 +431,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     bodyFields: ['meta'],
     notes: 'Market condition; subcode-level carve-out applies at sponsor time.',
   },
-  NO_COINS_FOUND: {
-    code: 'NO_COINS_FOUND',
-    classification: 'normal',
-    httpStatus: 422,
-    abuseImpact: IP_ONLY,
-    bodyFields: ['meta'],
-  },
   PAYMENT_COIN_CONFLICT: {
     code: 'PAYMENT_COIN_CONFLICT',
     classification: 'normal',

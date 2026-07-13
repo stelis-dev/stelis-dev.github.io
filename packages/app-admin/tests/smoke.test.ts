@@ -37,7 +37,7 @@ describe('API client', () => {
     expect(result).toEqual(mockResponse);
   });
 
-  it('getNonce sends GET /auth/nonce with credentials', async () => {
+  it('issueAdminAuthChallenge sends POST /auth/nonce with credentials', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -46,23 +46,23 @@ describe('API client', () => {
       }),
     );
 
-    const { getNonce } = await import('../src/api/client');
-    const result = await getNonce();
+    const { issueAdminAuthChallenge } = await import('../src/api/client');
+    const result = await issueAdminAuthChallenge();
 
     expect(result.nonce).toBe('test-nonce-123');
   });
 
-  it('verifySignature sends POST /auth/verify with body', async () => {
+  it('verifyAdminAuth sends POST /auth/verify with body', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ ok: true }),
       }),
     );
 
-    const { verifySignature } = await import('../src/api/client');
-    await verifySignature({ nonce: 'n', signature: 's', address: '0x1' });
+    const { verifyAdminAuth } = await import('../src/api/client');
+    await verifyAdminAuth({ nonce: 'n', signature: 's', address: '0x1' });
 
     expect(fetch).toHaveBeenCalledWith(
       '/auth/verify',
@@ -74,17 +74,17 @@ describe('API client', () => {
     );
   });
 
-  it('renewSession sends POST /auth/renew with body through the shared API client', async () => {
+  it('renewAdminSession sends POST /auth/renew with body through the shared API client', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ ok: true }),
       }),
     );
 
-    const { renewSession } = await import('../src/api/client');
-    await renewSession({ nonce: 'n', signature: 's', address: '0x1' });
+    const { renewAdminSession } = await import('../src/api/client');
+    await renewAdminSession({ nonce: 'n', signature: 's', address: '0x1' });
 
     expect(fetch).toHaveBeenCalledWith(
       '/auth/renew',
@@ -182,7 +182,7 @@ describe('API client', () => {
     expect(result.blocklist[0].ttl).toBe(300);
   });
 
-  it('getSponsorRefillAccountWithdrawNonce returns expiresAt as string (ISO)', async () => {
+  it('issueSponsorRefillAccountWithdrawalChallenge returns the current challenge', async () => {
     const serverResponse = {
       nonce: 'stelis-withdraw:uuid:123',
       expiresAt: '2026-03-27T00:00:00.000Z',
@@ -195,24 +195,30 @@ describe('API client', () => {
       }),
     );
 
-    const { getSponsorRefillAccountWithdrawNonce } = await import('../src/api/client');
-    const result = await getSponsorRefillAccountWithdrawNonce();
+    const { issueSponsorRefillAccountWithdrawalChallenge } = await import('../src/api/client');
+    const result = await issueSponsorRefillAccountWithdrawalChallenge();
 
     expect(typeof result.expiresAt).toBe('string');
     expect(result.nonce).toContain('stelis-withdraw');
   });
 
-  it('executeSponsorRefillAccountWithdraw sends POST /api/sponsor-refill-account/withdraw without dead address field', async () => {
+  it('executeSponsorRefillAccountWithdrawal validates the current response', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ digest: '0xDIGEST' }),
+        json: () =>
+          Promise.resolve({
+            digest: '0xDIGEST',
+            amountMist: '1000',
+            recipient: '0x1',
+            remainingBalanceMist: '9000',
+          }),
       }),
     );
 
-    const { executeSponsorRefillAccountWithdraw } = await import('../src/api/client');
-    await executeSponsorRefillAccountWithdraw({ nonce: 'n', signature: 's', amountMist: '1000' });
+    const { executeSponsorRefillAccountWithdrawal } = await import('../src/api/client');
+    await executeSponsorRefillAccountWithdrawal({ nonce: 'n', signature: 's', amountMist: '1000' });
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/sponsor-refill-account/withdraw',
@@ -228,12 +234,12 @@ describe('API client', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ ok: true }),
       }),
     );
 
-    const { logout } = await import('../src/api/client');
-    await logout();
+    const { logoutAdminSession } = await import('../src/api/client');
+    await logoutAdminSession();
 
     expect(fetch).toHaveBeenCalledWith(
       '/auth/logout',

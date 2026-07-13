@@ -12,9 +12,7 @@ import { ADMIN_COOKIE, verifyAdminJwt } from './adminAuth.js';
 import type { AdminJwtConfig, AdminRedisClient } from '@stelis/core-api/admin';
 import type { AppApiContext } from './context.js';
 import { createAdminRedisAdapter } from './adminRedis.js';
-
-/** Unified not_before key for app-api. */
-export const NOT_BEFORE_KEY = 'stelis:app-api:admin:not_before';
+import { ADMIN_SESSION_NOT_BEFORE_KEY } from './adminSessionNotBefore.js';
 
 /** One-shot flag to avoid log spam when Redis key is missing. */
 let _keyMissingWarned = false;
@@ -64,7 +62,7 @@ export async function requireAdminSession(
     if (!session) return null;
     // iat, exp, and iatMs are already validated as finite numbers by verifyAdminJwt
 
-    const raw = await redis.get(NOT_BEFORE_KEY);
+    const raw = await redis.get(ADMIN_SESSION_NOT_BEFORE_KEY);
 
     // fail-closed: key missing → reject (boot sets this key at startup)
     if (raw == null) {
@@ -72,7 +70,7 @@ export async function requireAdminSession(
         _keyMissingWarned = true;
         // eslint-disable-next-line no-console
         console.error(
-          `[admin] Redis key "${NOT_BEFORE_KEY}" is missing. ` +
+          `[admin] Redis key "${ADMIN_SESSION_NOT_BEFORE_KEY}" is missing. ` +
             'All admin sessions will be rejected until server restart.',
         );
       }

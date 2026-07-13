@@ -16,6 +16,12 @@ import {
   resetAttempts,
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
+import {
+  HostWireParseError,
+  parseAdminAuthVerifyRequest,
+  type AdminAuthChallengeResponse,
+  type AdminAuthSuccessResponse,
+} from '@stelis/contracts';
 import type { AppApiContext } from '../context.js';
 import { createAdminRedisAdapter } from '../adminRedis.js';
 import {
@@ -28,6 +34,7 @@ import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import type { ResolveClientIp } from '../clientIp.js';
 import { safeErrorSummary, writeAdminAuditLog } from '../adminAuditLog.js';
 import { mapError, respondMapped } from '../errorMap.js';
+import { raiseAppApiAdminSessionNotBefore } from '../adminSessionNotBefore.js';
 
 const NONCE_TTL_MS = 60_000;
 
@@ -57,8 +64,8 @@ export function createAuthRoutes(
 ) {
   const app = new Hono();
 
-  // ── GET /auth/nonce ────────────────────────────────────────────────
-  app.get('/nonce', async (c) => {
+  // ── POST /auth/nonce ───────────────────────────────────────────────
+  app.post('/nonce', async (c) => {
     try {
       const redis = await getAdminRedis(contextPromise);
       const ip = runtime.resolveClientIp(c);
@@ -70,7 +77,8 @@ export function createAuthRoutes(
 
       const nonce = `stelis-admin-login:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(`stelis:admin:nonce:${nonce}`, '1', { px: NONCE_TTL_MS });
-      return c.json({ nonce });
+      const response: AdminAuthChallengeResponse = { nonce };
+      return c.json(response);
     } catch (err) {
       const mapped = mapError(err);
       if (mapped) return respondMapped(c, mapped);
@@ -93,38 +101,10 @@ export function createAuthRoutes(
         return c.json({ error: 'Too many requests. Try again in 15 minutes.' }, 429);
       }
 
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as {
-        nonce?: string;
-        signature?: string;
-        address?: string;
-      };
+      const body = parseAdminAuthVerifyRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+      );
       const { nonce, signature, address } = body;
-
-      if (
-        typeof nonce !== 'string' ||
-        typeof signature !== 'string' ||
-        typeof address !== 'string'
-      ) {
-        await writeAdminAuditLog(redis, {
-          event: 'ADMIN_LOGIN_FAILED',
-          reason: 'bad_request',
-          ip,
-        });
-        return c.json({ error: 'Missing required fields: nonce, signature, address' }, 400);
-      }
-
-      // Consume nonce (single-use)
-      const nonceKey = `stelis:admin:nonce:${nonce}`;
-      const deleted = await redis.del(nonceKey);
-      if (deleted === 0) {
-        await writeAdminAuditLog(redis, {
-          event: 'ADMIN_LOGIN_FAILED',
-          reason: 'invalid_nonce',
-          ip,
-          address,
-        });
-        return c.json({ error: 'Invalid or expired nonce' }, 401);
-      }
 
       // Verify signature + check address matches ADMIN_ADDRESS
       const configuredAuth = requireConfiguredAdminAuth(runtime);
@@ -144,6 +124,20 @@ export function createAuthRoutes(
         return c.json({ error: 'Signature verification failed' }, 401);
       }
 
+      // Verify first, then atomically consume. Concurrent valid requests can
+      // both verify, but only one DEL can win the single-use nonce.
+      const nonceKey = `stelis:admin:nonce:${nonce}`;
+      const deleted = await redis.del(nonceKey);
+      if (deleted === 0) {
+        await writeAdminAuditLog(redis, {
+          event: 'ADMIN_LOGIN_FAILED',
+          reason: 'invalid_nonce',
+          ip,
+          address,
+        });
+        return c.json({ error: 'Invalid or expired nonce' }, 401);
+      }
+
       // Success — complete all fallible work before staging the cookie.
       // Hono preserves staged headers even on catch-path 500 responses,
       // so Set-Cookie must only be set right before the final return.
@@ -152,8 +146,12 @@ export function createAuthRoutes(
       await resetAttempts(redis, ip);
       await writeAdminAuditLog(redis, { event: 'ADMIN_LOGIN_SUCCESS', ip, address });
       c.header('Set-Cookie', cookie);
-      return c.json({ ok: true });
+      const response: AdminAuthSuccessResponse = { ok: true };
+      return c.json(response);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
       const mapped = mapError(err);
@@ -187,38 +185,10 @@ export function createAuthRoutes(
         return c.json({ error: 'Too many requests. Try again in 15 minutes.' }, 429);
       }
 
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as {
-        nonce?: string;
-        signature?: string;
-        address?: string;
-      };
+      const body = parseAdminAuthVerifyRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+      );
       const { nonce, signature, address } = body;
-
-      if (
-        typeof nonce !== 'string' ||
-        typeof signature !== 'string' ||
-        typeof address !== 'string'
-      ) {
-        await writeAdminAuditLog(redis, {
-          event: 'ADMIN_RENEW_FAILED',
-          reason: 'bad_request',
-          ip,
-        });
-        return c.json({ error: 'Missing required fields: nonce, signature, address' }, 400);
-      }
-
-      // Consume nonce
-      const nonceKey = `stelis:admin:nonce:${nonce}`;
-      const deleted = await redis.del(nonceKey);
-      if (deleted === 0) {
-        await writeAdminAuditLog(redis, {
-          event: 'ADMIN_RENEW_FAILED',
-          reason: 'invalid_nonce',
-          ip,
-          address,
-        });
-        return c.json({ error: 'Invalid or expired nonce' }, 401);
-      }
 
       const configuredAuth = requireConfiguredAdminAuth(runtime);
       const valid = await verifyAdminSignature({
@@ -237,14 +207,30 @@ export function createAuthRoutes(
         return c.json({ error: 'Signature verification failed' }, 401);
       }
 
+      const nonceKey = `stelis:admin:nonce:${nonce}`;
+      const deleted = await redis.del(nonceKey);
+      if (deleted === 0) {
+        await writeAdminAuditLog(redis, {
+          event: 'ADMIN_RENEW_FAILED',
+          reason: 'invalid_nonce',
+          ip,
+          address,
+        });
+        return c.json({ error: 'Invalid or expired nonce' }, 401);
+      }
+
       // Success — complete all fallible work before staging the cookie.
       const token = await signAdminJwt(address, configuredAuth.jwt);
       const cookie = buildAuthCookieHeader(token, runtime.adminAuth.cookie);
       await resetAttempts(redis, ip);
       await writeAdminAuditLog(redis, { event: 'ADMIN_RENEW_SUCCESS', ip, address });
       c.header('Set-Cookie', cookie);
-      return c.json({ ok: true });
+      const response: AdminAuthSuccessResponse = { ok: true };
+      return c.json(response);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
       const mapped = mapError(err);
@@ -267,8 +253,24 @@ export function createAuthRoutes(
 
   // ── POST /auth/logout ──────────────────────────────────────────────
   app.post('/logout', async (c) => {
-    c.header('Set-Cookie', buildLogoutCookieHeader(runtime.adminAuth.cookie));
-    return c.json({ ok: true });
+    try {
+      const session = await requireAdminSessionFromContext(
+        c,
+        contextPromise,
+        runtime.adminAuth.jwt,
+      );
+      if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+      const redis = await getAdminRedis(contextPromise);
+      await raiseAppApiAdminSessionNotBefore(redis, Math.max(Date.now(), session.iatMs + 1));
+      c.header('Set-Cookie', buildLogoutCookieHeader(runtime.adminAuth.cookie));
+      const response: AdminAuthSuccessResponse = { ok: true };
+      return c.json(response);
+    } catch (err) {
+      // Do not expire the cookie or claim success until the durable cutoff is raised.
+      console.error('[app-api] /auth/logout failed', safeErrorSummary(err)); // eslint-disable-line no-console
+      return c.json({ error: 'Internal server error' }, 500);
+    }
   });
 
   // ── GET /auth/session ──────────────────────────────────────────────

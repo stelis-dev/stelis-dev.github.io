@@ -84,6 +84,15 @@ beforeEach(async () => {
   setRequiredEnvironment();
 
   state.createRedisClient.mockResolvedValue({
+    eval: vi.fn().mockImplementation(async (_script, _keys, args) => {
+      process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
+      process.env.CORS_ORIGINS = 'https://admin.after.example';
+      process.env.ADMIN_JWT_SECRET = 'x'.repeat(32);
+      process.env.ADMIN_ADDRESS = `0x${'ab'.repeat(32)}`;
+      process.env.STUDIO_ALLOWED_TARGETS = `0x${'cd'.repeat(32)}::module::entry`;
+      process.env.STUDIO_DEVELOPER_JWT_TRUST_JSON = '{not valid json';
+      return args[0];
+    }),
     set: vi.fn().mockImplementation(async () => {
       process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
       process.env.CORS_ORIGINS = 'https://admin.after.example';

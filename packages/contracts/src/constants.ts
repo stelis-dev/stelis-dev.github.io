@@ -80,18 +80,6 @@ export const SUI_TYPE =
   '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
 
 // ─────────────────────────────────────────────
-// Integrity policy version
-// ─────────────────────────────────────────────
-
-/**
- * Integrity policy version shared by SDK and server code.
- *
- * Both the SDK (client-side verification) and the server (/relay/config)
- * must reference this constant. Changing it in one place updates both.
- */
-export const INTEGRITY_POLICY_VERSION = 1;
-
-// ─────────────────────────────────────────────
 // DeepBook IDs per network
 // ─────────────────────────────────────────────
 

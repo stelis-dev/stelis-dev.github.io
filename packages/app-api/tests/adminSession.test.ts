@@ -40,7 +40,8 @@ import {
   verifyAdminJwt,
   buildAuthCookieHeader,
 } from '../src/adminAuth.js';
-import { requireAdminSession, NOT_BEFORE_KEY } from '../src/requireAdminSession.js';
+import { requireAdminSession } from '../src/requireAdminSession.js';
+import { ADMIN_SESSION_NOT_BEFORE_KEY } from '../src/adminSessionNotBefore.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -55,7 +56,7 @@ describe('admin session policy constants', () => {
   });
 
   it('not_before key is stelis:app-api:admin:not_before', () => {
-    expect(NOT_BEFORE_KEY).toBe('stelis:app-api:admin:not_before');
+    expect(ADMIN_SESSION_NOT_BEFORE_KEY).toBe('stelis:app-api:admin:not_before');
   });
 });
 
@@ -148,7 +149,7 @@ describe('cookie parsing', () => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
     const now = Date.now();
     mockRedis.get.mockImplementation(async (key: string) => {
-      if (key === NOT_BEFORE_KEY) return String(now - 1000);
+      if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return String(now - 1000);
       return null;
     });
 
@@ -215,7 +216,7 @@ describe('not_before enforcement', () => {
     const now = Date.now();
     // not_before is in the past → session should be accepted
     mockRedis.get.mockImplementation(async (key: string) => {
-      if (key === NOT_BEFORE_KEY) return String(now - 10000);
+      if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return String(now - 10000);
       return null;
     });
 
@@ -229,7 +230,7 @@ describe('not_before enforcement', () => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
     // not_before is in the future → session issued before restart
     mockRedis.get.mockImplementation(async (key: string) => {
-      if (key === NOT_BEFORE_KEY) return String(Date.now() + 60000);
+      if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return String(Date.now() + 60000);
       return null;
     });
 
@@ -249,7 +250,7 @@ describe('not_before enforcement', () => {
 
     // Verify the exact key that was queried
     const getCall = mockRedis.get.mock.calls.find(
-      (call) => call[0] === 'stelis:app-api:admin:not_before',
+      (call) => call[0] === ADMIN_SESSION_NOT_BEFORE_KEY,
     );
     expect(getCall).toBeDefined();
   });
@@ -294,7 +295,7 @@ describe('fail-closed behavior', () => {
   it('rejects when not_before value is non-numeric', async () => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
     mockRedis.get.mockImplementation(async (key: string) => {
-      if (key === NOT_BEFORE_KEY) return 'not-a-number';
+      if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return 'not-a-number';
       return null;
     });
 
@@ -308,7 +309,7 @@ describe('fail-closed behavior', () => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
     mockRedis.get.mockImplementation(async (key: string) => {
       // parseInt('123abc') = 123, but /^\d+$/ rejects
-      if (key === NOT_BEFORE_KEY) return '123abc';
+      if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return '123abc';
       return null;
     });
 

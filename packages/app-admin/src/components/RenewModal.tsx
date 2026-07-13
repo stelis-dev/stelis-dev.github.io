@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getWallets } from '@mysten/wallet-standard';
 import type { SuiSignPersonalMessageFeature } from '../types';
-import { getNonce, renewSession } from '../api/client';
+import { issueAdminAuthChallenge, renewAdminSession } from '../api/client';
 
 type RenewState = 'idle' | 'signing' | 'verifying' | 'error';
 
@@ -117,7 +117,7 @@ export function RenewModal({
       const suiAccount = suiWallet.accounts.find((a) => a.address === address);
       if (!suiAccount) throw new Error('Admin account not found in connected wallet.');
 
-      const { nonce } = await getNonce();
+      const { nonce } = await issueAdminAuthChallenge();
 
       // Sign
       const { signature } = await signFeature.signPersonalMessage({
@@ -127,7 +127,7 @@ export function RenewModal({
 
       // Renew
       setState('verifying');
-      await renewSession({ nonce, signature, address });
+      await renewAdminSession({ nonce, signature, address });
 
       onSuccess();
     } catch (err) {

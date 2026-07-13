@@ -602,18 +602,22 @@ import type {
   ExecuteSponsoredResult,
   GasEstimateResult,
   ExecuteSuiFirstResult,
-  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist, integrityPolicyVersion
+  RelayConfigResponse, // /relay/config response: network, packageId, settlementPayoutRecipient, supportedSettlementSwapPaths, quotedHostFeeMist, protocolFlatFeeMist
   SingleHopSettlementSwapPath, // settlement swap path config (1-hop only)
   DeepBookPoolHop, // config for a single pool hop
-  PrepareResponse,
-  SponsorResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
   SettleProfile,
   PrepareSponsoredOptions, // options for 2-step prepareSponsored()
   PrepareSponsoredResult, // result of prepareSponsored() — includes policyHash, profile
   // Promotion types
   ExecutePromotionSponsoredOptions,
   ExecutePromotionSponsoredResult,
+  PromotionPrepareRequest,
   PromotionPrepareResponse,
+  PromotionSponsorRequest,
   PromotionSponsorResponse,
 } from '@stelis/sdk';
 

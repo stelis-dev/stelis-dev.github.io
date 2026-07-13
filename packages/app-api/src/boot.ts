@@ -45,6 +45,8 @@ import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
 import type { ContextRuntimeInput } from './context.js';
 import type { AdminAuthRuntimeConfig } from './adminAuth.js';
+import { createAdminRedisAdapter } from './adminRedis.js';
+import { raiseAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
 
 /** Runtime mode resolved at boot — determines which route groups are active. */
 export interface BootSummary {
@@ -388,7 +390,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
   // ── 10. Redis connectivity + admin not_before key ────────────────────
   const redis = await createRedisClient(redisUrl);
   try {
-    await redis.set('stelis:app-api:admin:not_before', String(Date.now()));
+    await raiseAppApiAdminSessionNotBefore(createAdminRedisAdapter(redis), Date.now());
   } finally {
     await redis.dispose();
   }

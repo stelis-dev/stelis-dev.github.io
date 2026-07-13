@@ -8,6 +8,7 @@
  */
 import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from 'react';
 import { RELAY_API_BASE } from './relayApiEndpoint';
+import { parseRelayConfigResponse } from '@stelis/sdk';
 
 export type AppWebNetwork = 'testnet' | 'mainnet';
 
@@ -27,12 +28,6 @@ const AppConfigContext = createContext<AppConfigContextValue>({
   error: null,
 });
 
-const VALID_NETWORKS: readonly string[] = ['testnet', 'mainnet'];
-
-function isValidNetwork(value: unknown): value is AppWebNetwork {
-  return typeof value === 'string' && VALID_NETWORKS.includes(value);
-}
-
 export function AppConfigProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppConfigContextValue>({
     config: null,
@@ -48,14 +43,10 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
         if (!res.ok) throw new Error(`/relay/config returned ${res.status}`);
         return res.json();
       })
-      .then((data: { network?: string }) => {
+      .then((data: unknown) => {
         if (cancelled) return;
-        if (!isValidNetwork(data.network)) {
-          throw new Error(
-            `API returned invalid network: "${data.network}". Expected: testnet | mainnet.`,
-          );
-        }
-        setState({ config: { network: data.network }, loading: false, error: null });
+        const config = parseRelayConfigResponse(data);
+        setState({ config: { network: config.network }, loading: false, error: null });
       })
       .catch((err) => {
         if (cancelled) return;

@@ -38,7 +38,6 @@ Returns runtime capability:
 - `supportedSettlementSwapPaths`
 - `quotedHostFeeMist`
 - `protocolFlatFeeMist`
-- `integrityPolicyVersion`
 
 Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement token list and settlement swap path list.
 Each `settlementTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `settlementTokenType`; clients do not send a pool ID or path ID.
@@ -172,7 +171,7 @@ Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `Transac
 
 Mounted auth routes:
 
-- `GET /auth/nonce`
+- `POST /auth/nonce`
 - `POST /auth/verify`
 - `POST /auth/renew`
 - `POST /auth/logout`
@@ -190,7 +189,7 @@ Mounted admin routes:
 - `GET /api/sponsored-logs/summary`
 - `GET /api/sponsored-logs`
 - `GET /api/sponsor-operations`
-- `GET /api/sponsor-refill-account/withdraw`
+- `POST /api/sponsor-refill-account/withdrawal-challenge`
 - `POST /api/sponsor-refill-account/withdraw`
 - `GET /api/settlement-swap-paths`
 - `GET /api/studio`

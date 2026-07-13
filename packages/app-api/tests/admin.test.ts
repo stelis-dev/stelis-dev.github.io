@@ -496,9 +496,17 @@ describe('admin routes', () => {
     });
   });
 
-  describe('GET /api/sponsor-refill-account/withdraw (nonce)', () => {
-    it('returns 200 with nonce and expiresAt', async () => {
+  describe('POST /api/sponsor-refill-account/withdrawal-challenge', () => {
+    it('does not issue a challenge through the withdrawal execution URL', async () => {
       const res = await app.request('/api/sponsor-refill-account/withdraw');
+      expect(res.status).toBe(404);
+      expect(mockRedis.set).not.toHaveBeenCalled();
+    });
+
+    it('returns 200 with nonce and expiresAt', async () => {
+      const res = await app.request('/api/sponsor-refill-account/withdrawal-challenge', {
+        method: 'POST',
+      });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.nonce).toBeDefined();
@@ -516,7 +524,9 @@ describe('admin routes', () => {
         throw clientIpResolutionError();
       });
 
-      const res = await app.request('/api/sponsor-refill-account/withdraw');
+      const res = await app.request('/api/sponsor-refill-account/withdrawal-challenge', {
+        method: 'POST',
+      });
 
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toMatchObject({
@@ -542,7 +552,7 @@ describe('admin routes', () => {
       });
       expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.error).toContain('required');
+      expect(body.error).toContain('nonce must be a string');
     });
 
     it('returns 400 on invalid amountMist format', async () => {

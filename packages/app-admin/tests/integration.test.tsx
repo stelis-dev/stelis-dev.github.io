@@ -269,7 +269,10 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (
+          url === '/api/sponsor-refill-account/withdrawal-challenge' &&
+          method === 'POST'
+        ) {
           calls.withdrawNonce += 1;
           return Promise.resolve({
             ok: true,
@@ -286,7 +289,13 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ digest: '0xDIGEST' }),
+            json: () =>
+              Promise.resolve({
+                digest: '0xDIGEST',
+                amountMist: '1000000000',
+                recipient: VALID_SESSION.address,
+                remainingBalanceMist: '9000000000',
+              }),
           });
         }
         return Promise.resolve({
@@ -470,7 +479,10 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (
+          url === '/api/sponsor-refill-account/withdrawal-challenge' &&
+          method === 'POST'
+        ) {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -482,7 +494,13 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ digest: '0xDIGEST' }),
+            json: () =>
+              Promise.resolve({
+                digest: '0xDIGEST',
+                amountMist: '1000000000',
+                recipient: VALID_SESSION.address,
+                remainingBalanceMist: '9000000000',
+              }),
           });
         }
         return Promise.resolve({
@@ -559,7 +577,10 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (
+          url === '/api/sponsor-refill-account/withdrawal-challenge' &&
+          method === 'POST'
+        ) {
           nonceRequests += 1;
           return Promise.resolve({
             ok: true,
@@ -583,7 +604,13 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ digest: '0xRECOVERED' }),
+            json: () =>
+              Promise.resolve({
+                digest: '0xRECOVERED',
+                amountMist: '1500000000',
+                recipient: VALID_SESSION.address,
+                remainingBalanceMist: '8500000000',
+              }),
           });
         }
         return Promise.resolve({
@@ -682,7 +709,10 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'GET') {
+        if (
+          url === '/api/sponsor-refill-account/withdrawal-challenge' &&
+          method === 'POST'
+        ) {
           return Promise.resolve({
             ok: true,
             status: 200,

@@ -1,6 +1,6 @@
 /**
- * Schema-SDK contract coverage — bidirectional field-level assertions between
- * `docs/schemas/relay-api.schema.json` and SDK `types.ts` interfaces.
+ * Schema-wire contract coverage — bidirectional field-level assertions between
+ * `docs/schemas/relay-api.schema.json` and the shared Host wire interfaces.
  *
  * SDK `tsconfig.json` excludes `**\/*.test.ts` from typecheck, so
  * compile-time `keyof` barriers in this file would not be caught by
@@ -23,9 +23,9 @@ import ts from 'typescript';
 // ─────────────────────────────────────────────
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sdkSrcDir = join(here, '..', 'src');
 const workspaceRoot = join(here, '..', '..', '..');
-const typesFilePath = join(sdkSrcDir, 'types.ts');
+const typesFilePath = join(workspaceRoot, 'packages', 'contracts', 'src', 'hostWire.ts');
+const sdkTypesFilePath = join(here, '..', 'src', 'types.ts');
 
 function readWorkspaceFile(relPath: string): string {
   return readFileSync(join(workspaceRoot, relPath), 'utf8');
@@ -112,21 +112,21 @@ interface LockPair {
 }
 
 const RELAY_LOCK_PAIRS: LockPair[] = [
-  { schemaDef: 'prepareRequest', sdkInterface: 'PrepareParams' },
+  { schemaDef: 'prepareRequest', sdkInterface: 'RelayPrepareRequest' },
   {
     schemaDef: 'prepareResponse',
-    sdkInterface: 'PrepareResponse',
-    nested: [{ schemaDef: 'prepareCost', sdkInterface: '__inline_PrepareResponse_cost__' }],
+    sdkInterface: 'RelayPrepareResponse',
+    nested: [{ schemaDef: 'prepareCost', sdkInterface: '__inline_RelayPrepareResponse_cost__' }],
   },
-  { schemaDef: 'sponsorRequest', sdkInterface: 'SponsorParams' },
-  { schemaDef: 'sponsorResponse', sdkInterface: 'SponsorResponse' },
+  { schemaDef: 'sponsorRequest', sdkInterface: 'RelaySponsorRequest' },
+  { schemaDef: 'sponsorResponse', sdkInterface: 'RelaySponsorResponse' },
   { schemaDef: 'relayConfigResponse', sdkInterface: 'RelayConfigResponse' },
 ];
 
 const STUDIO_LOCK_PAIRS: LockPair[] = [
-  { schemaDef: 'promotionPrepareRequest', sdkInterface: 'PromotionPrepareParams' },
+  { schemaDef: 'promotionPrepareRequest', sdkInterface: 'PromotionPrepareRequest' },
   { schemaDef: 'promotionPrepareResponse', sdkInterface: 'PromotionPrepareResponse' },
-  { schemaDef: 'promotionSponsorRequest', sdkInterface: 'PromotionSponsorParams' },
+  { schemaDef: 'promotionSponsorRequest', sdkInterface: 'PromotionSponsorRequest' },
   { schemaDef: 'promotionSponsorResponse', sdkInterface: 'PromotionSponsorResponse' },
   { schemaDef: 'promotionListItem', sdkInterface: 'PromotionListItem' },
   { schemaDef: 'promotionListResponse', sdkInterface: 'PromotionListResponse' },
@@ -139,7 +139,10 @@ const STUDIO_LOCK_PAIRS: LockPair[] = [
 // ─────────────────────────────────────────────
 
 const schema = loadSchema();
-const interfaces = parseInterfaceMembers(typesFilePath);
+const interfaces = new Map([
+  ...parseInterfaceMembers(typesFilePath),
+  ...parseInterfaceMembers(sdkTypesFilePath),
+]);
 
 function extractCostMembers(): { members: string[]; optional: string[] } {
   const src = readFileSync(typesFilePath, 'utf8');
@@ -148,7 +151,7 @@ function extractCostMembers(): { members: string[]; optional: string[] } {
   const optional: string[] = [];
 
   function visit(node: ts.Node): void {
-    if (ts.isInterfaceDeclaration(node) && node.name.text === 'PrepareResponse') {
+    if (ts.isInterfaceDeclaration(node) && node.name.text === 'RelayPrepareResponse') {
       for (const member of node.members) {
         if (ts.isPropertySignature(member) && member.name && ts.isIdentifier(member.name)) {
           if (member.name.text === 'cost' && member.type && ts.isTypeLiteralNode(member.type)) {
@@ -178,7 +181,7 @@ function runLockPairTests(pairs: LockPair[]): void {
     describe(`${pair.schemaDef} <-> ${pair.sdkInterface}`, () => {
       const schemaFields = getSchemaFields(schema, pair.schemaDef);
 
-      if (pair.sdkInterface === '__inline_PrepareResponse_cost__') {
+      if (pair.sdkInterface === '__inline_RelayPrepareResponse_cost__') {
         return;
       }
 
@@ -208,8 +211,8 @@ function runLockPairTests(pairs: LockPair[]): void {
 
     if (pair.nested) {
       for (const nested of pair.nested) {
-        if (nested.sdkInterface === '__inline_PrepareResponse_cost__') {
-          describe(`${nested.schemaDef} <-> PrepareResponse.cost (inline)`, () => {
+        if (nested.sdkInterface === '__inline_RelayPrepareResponse_cost__') {
+          describe(`${nested.schemaDef} <-> RelayPrepareResponse.cost (inline)`, () => {
             const costSchemaFields = getSchemaFields(schema, nested.schemaDef);
             const costSdk = extractCostMembers();
 

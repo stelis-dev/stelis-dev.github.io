@@ -22,7 +22,7 @@ const PACKAGE_IMPORT_ALLOWLIST = {
   '@stelis/app-api': ['@stelis/contracts', '@stelis/core-api'],
   '@stelis/app-web': ['@stelis/sdk'],
   '@stelis/app-admin': ['@stelis/contracts'],
-  '@stelis/mcp-server': [],
+  '@stelis/mcp-server': ['@stelis/contracts'],
 };
 
 const SPECIFIER_ALLOWLIST = {

@@ -110,8 +110,7 @@
         "settlementPayoutRecipient",
         "supportedSettlementSwapPaths",
         "quotedHostFeeMist",
-        "protocolFlatFeeMist",
-        "integrityPolicyVersion"
+        "protocolFlatFeeMist"
       ],
       "properties": {
         "network": {
@@ -136,10 +135,6 @@
         },
         "protocolFlatFeeMist": {
           "$ref": "#/$defs/mistString"
-        },
-        "integrityPolicyVersion": {
-          "type": "integer",
-          "minimum": 1
         }
       }
     },
@@ -389,7 +384,6 @@
         "CLAIM_WOULD_EXCEED_MAX",
         "INSUFFICIENT_SETTLE_INPUT",
         "SPREAD_EXCEEDED",
-        "NO_COINS_FOUND",
         "PAYMENT_COIN_CONFLICT",
         "DRY_RUN_FAILED",
         "DRY_RUN_NO_GAS",

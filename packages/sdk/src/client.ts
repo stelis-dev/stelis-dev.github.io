@@ -9,18 +9,24 @@ import type {
   StelisClientConfig,
   StelisRequestTimeouts,
   StatusResponse,
-  PrepareParams,
-  PrepareResponse,
-  SponsorParams,
-  SponsorResponse,
+  RelayPrepareRequest,
+  RelayPrepareResponse,
+  RelaySponsorRequest,
+  RelaySponsorResponse,
   StelisApiError,
-  PromotionPrepareParams,
+  PromotionPrepareRequest,
   PromotionPrepareResponse,
-  PromotionSponsorParams,
+  PromotionSponsorRequest,
   PromotionSponsorResponse,
   PromotionListResponse,
   PromotionDetailResponse,
 } from './types.js';
+import {
+  parsePromotionPrepareResponse,
+  parsePromotionSponsorResponse,
+  parseRelayPrepareResponse,
+  parseRelaySponsorResponse,
+} from '@stelis/contracts';
 
 interface ResolvedRequestTimeouts {
   statusMs: number;
@@ -83,16 +89,26 @@ export class StelisClient {
   // POST /prepare
   // ─────────────────────────────────────────
 
-  async prepare(params: PrepareParams, headers?: Record<string, string>): Promise<PrepareResponse> {
-    return this.post<PrepareResponse>('/prepare', params, this.timeouts.prepareMs, headers);
+  async prepare(
+    params: RelayPrepareRequest,
+    headers?: Record<string, string>,
+  ): Promise<RelayPrepareResponse> {
+    return parseRelayPrepareResponse(
+      await this.post('/prepare', params, this.timeouts.prepareMs, headers),
+    );
   }
 
   // ─────────────────────────────────────────
   // POST /sponsor
   // ─────────────────────────────────────────
 
-  async sponsor(params: SponsorParams, headers?: Record<string, string>): Promise<SponsorResponse> {
-    return this.post<SponsorResponse>('/sponsor', params, this.timeouts.sponsorMs, headers);
+  async sponsor(
+    params: RelaySponsorRequest,
+    headers?: Record<string, string>,
+  ): Promise<RelaySponsorResponse> {
+    return parseRelaySponsorResponse(
+      await this.post('/sponsor', params, this.timeouts.sponsorMs, headers),
+    );
   }
 
   // ─────────────────────────────────────────
@@ -101,27 +117,31 @@ export class StelisClient {
 
   async promotionPrepare(
     promotionId: string,
-    params: PromotionPrepareParams,
+    params: PromotionPrepareRequest,
     developerJwt: string,
   ): Promise<PromotionPrepareResponse> {
-    return this.studioPost<PromotionPrepareResponse>(
-      `/studio/promotions/${encodeURIComponent(promotionId)}/prepare`,
-      params,
-      this.timeouts.studioWriteMs,
-      { Authorization: `Bearer ${developerJwt}` },
+    return parsePromotionPrepareResponse(
+      await this.studioPost(
+        `/studio/promotions/${encodeURIComponent(promotionId)}/prepare`,
+        params,
+        this.timeouts.studioWriteMs,
+        { Authorization: `Bearer ${developerJwt}` },
+      ),
     );
   }
 
   async promotionSponsor(
     promotionId: string,
-    params: PromotionSponsorParams,
+    params: PromotionSponsorRequest,
     developerJwt: string,
   ): Promise<PromotionSponsorResponse> {
-    return this.studioPost<PromotionSponsorResponse>(
-      `/studio/promotions/${encodeURIComponent(promotionId)}/sponsor`,
-      params,
-      this.timeouts.studioWriteMs,
-      { Authorization: `Bearer ${developerJwt}` },
+    return parsePromotionSponsorResponse(
+      await this.studioPost(
+        `/studio/promotions/${encodeURIComponent(promotionId)}/sponsor`,
+        params,
+        this.timeouts.studioWriteMs,
+        { Authorization: `Bearer ${developerJwt}` },
+      ),
     );
   }
 

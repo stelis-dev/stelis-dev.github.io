@@ -23,6 +23,7 @@ vi.mock('@stelis/core-api/admin', () => ({
   verifyAdminSignature: vi.fn().mockResolvedValue(true),
   checkAndIncrement: vi.fn().mockResolvedValue({ allowed: true, current: 1, retryAfterMs: 0 }),
   resetAttempts: vi.fn().mockResolvedValue(undefined),
+  raiseAdminSessionNotBefore: vi.fn().mockResolvedValue(1_700_000_000_001),
 }));
 
 // ── Mock adminAuth helpers ──────────────────────────────────────────────
@@ -92,9 +93,15 @@ describe('auth routes', () => {
     mountAuthRoutes();
   });
 
-  describe('GET /auth/nonce', () => {
-    it('returns 200 with nonce string', async () => {
+  describe('POST /auth/nonce', () => {
+    it('does not expose nonce issuance through GET', async () => {
       const res = await app.request('/auth/nonce');
+      expect(res.status).toBe(404);
+      expect(mockRedis.set).not.toHaveBeenCalled();
+    });
+
+    it('returns 200 with nonce string', async () => {
+      const res = await app.request('/auth/nonce', { method: 'POST' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.nonce).toBeDefined();
@@ -109,7 +116,7 @@ describe('auth routes', () => {
         current: 6,
         retryAfterMs: 900000,
       });
-      const res = await app.request('/auth/nonce');
+      const res = await app.request('/auth/nonce', { method: 'POST' });
       expect(res.status).toBe(429);
       await expect(res.json()).resolves.toEqual({
         error: 'Too many requests. Try again in 15 minutes.',
@@ -122,7 +129,7 @@ describe('auth routes', () => {
         throw clientIpResolutionError();
       });
 
-      const res = await app.request('/auth/nonce');
+      const res = await app.request('/auth/nonce', { method: 'POST' });
 
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toMatchObject({
@@ -140,7 +147,7 @@ describe('auth routes', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       try {
-        const res = await app.request('/auth/nonce');
+        const res = await app.request('/auth/nonce', { method: 'POST' });
         expect(res.status).toBe(500);
         await expect(res.json()).resolves.toEqual({ error: 'Internal server error' });
         expect(errorSpy).toHaveBeenCalledWith(
@@ -175,6 +182,38 @@ describe('auth routes', () => {
         }),
       });
       expect(res.status).toBe(401);
+    });
+
+    it('does not consume the nonce when signature verification fails', async () => {
+      const { verifyAdminSignature } = await import('@stelis/core-api/admin');
+      vi.mocked(verifyAdminSignature).mockResolvedValueOnce(false);
+      const res = await app.request('/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nonce: 'valid-nonce',
+          signature: 'invalid-signature',
+          address: '0x' + 'a'.repeat(64),
+        }),
+      });
+      expect(res.status).toBe(401);
+      expect(mockRedis.del).not.toHaveBeenCalled();
+    });
+
+    it('allows only one concurrent valid request to consume a nonce', async () => {
+      mockRedis.del.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      const request = () =>
+        app.request('/auth/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nonce: 'shared-nonce',
+            signature: 'valid-signature',
+            address: '0x' + 'a'.repeat(64),
+          }),
+        });
+      const responses = await Promise.all([request(), request()]);
+      expect(responses.map((response) => response.status).sort()).toEqual([200, 401]);
     });
 
     it('returns 200 with Set-Cookie on valid verify', async () => {
@@ -287,12 +326,37 @@ describe('auth routes', () => {
   describe('POST /auth/logout', () => {
     it('returns 200 with logout cookie', async () => {
       const { buildLogoutCookieHeader } = await import('../src/adminAuth.js');
+      vi.mocked(requireAdminSessionFromContext).mockResolvedValueOnce({
+        address: '0xADMIN',
+        iat: 1_700_000_000,
+        exp: 1_800_000_000,
+        iatMs: 1_700_000_000_000,
+      });
       const res = await app.request('/auth/logout', { method: 'POST' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(res.headers.get('Set-Cookie')).toContain('Max-Age=0');
       expect(buildLogoutCookieHeader).toHaveBeenCalledWith(AUTH_RUNTIME.adminAuth.cookie);
+    });
+
+    it('returns 500 without expiring the cookie when the Redis cutoff update fails', async () => {
+      const { raiseAdminSessionNotBefore } = await import('@stelis/core-api/admin');
+      vi.mocked(requireAdminSessionFromContext).mockResolvedValueOnce({
+        address: '0xADMIN',
+        iat: 1_700_000_000,
+        exp: 1_800_000_000,
+        iatMs: 1_700_000_000_000,
+      });
+      vi.mocked(raiseAdminSessionNotBefore).mockRejectedValueOnce(new Error('Redis unavailable'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await app.request('/auth/logout', { method: 'POST' });
+        expect(res.status).toBe(500);
+        expect(res.headers.get('Set-Cookie')).toBeNull();
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 

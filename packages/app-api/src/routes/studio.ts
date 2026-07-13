@@ -24,7 +24,6 @@ import {
   type PromotionPrepareContext,
   handlePromotionSponsor,
   type PromotionSponsorContext,
-  type PromotionSponsorResult,
   recordPromotionAbuseEvent,
   PROMOTION_ABUSE_CODES,
 } from '@stelis/core-api/studio';
@@ -34,6 +33,13 @@ import {
   MAX_PREPARE_REQUEST_BODY_BYTES,
   MAX_SPONSOR_REQUEST_BODY_BYTES,
 } from '@stelis/core-api';
+import {
+  HostWireParseError,
+  parsePromotionPrepareRequest,
+  parsePromotionSponsorRequest,
+  type PromotionPrepareResponse,
+  type PromotionSponsorResponse,
+} from '@stelis/contracts';
 import type { AppApiContext } from '../context.js';
 import type { ResolveClientIp } from '../clientIp.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
@@ -244,16 +250,9 @@ export function createStudioRoutes(
       const { identity, ip } = auth;
       const promotionId = c.req.param('id');
 
-      const body = await readJsonBodyWithLimit<Record<string, unknown>>(
-        c.req.raw,
-        MAX_PREPARE_REQUEST_BODY_BYTES,
+      const body = parsePromotionPrepareRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_PREPARE_REQUEST_BODY_BYTES),
       );
-      if (typeof body.senderAddress !== 'string' || typeof body.txKindBytes !== 'string') {
-        return c.json(
-          { error: 'Missing required fields: senderAddress, txKindBytes', code: 'BAD_REQUEST' },
-          400,
-        );
-      }
 
       const prepareCtx: PromotionPrepareContext = {
         sui: ctx.host.sui,
@@ -266,7 +265,7 @@ export function createStudioRoutes(
         globalTargetHashes: ctx.studioGlobalTargetHashes,
       };
 
-      const result = await handlePromotionPrepare(prepareCtx, {
+      const result: PromotionPrepareResponse = await handlePromotionPrepare(prepareCtx, {
         promotionId,
         senderAddress: body.senderAddress,
         txKindBytes: body.txKindBytes,
@@ -276,6 +275,9 @@ export function createStudioRoutes(
 
       return c.json(result);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const mapped = mapError(err);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
@@ -321,23 +323,9 @@ export function createStudioRoutes(
       const { identity, ip } = auth;
       const promotionId = c.req.param('id');
 
-      const body = await readJsonBodyWithLimit<Record<string, unknown>>(
-        c.req.raw,
-        MAX_SPONSOR_REQUEST_BODY_BYTES,
+      const body = parsePromotionSponsorRequest(
+        await readJsonBodyWithLimit(c.req.raw, MAX_SPONSOR_REQUEST_BODY_BYTES),
       );
-      if (
-        typeof body.receiptId !== 'string' ||
-        typeof body.txBytes !== 'string' ||
-        typeof body.userSignature !== 'string'
-      ) {
-        return c.json(
-          {
-            error: 'Missing required fields: receiptId, txBytes, userSignature',
-            code: 'BAD_REQUEST',
-          },
-          400,
-        );
-      }
 
       const sponsorCtx: PromotionSponsorContext = {
         sui: ctx.host.sui,
@@ -360,7 +348,7 @@ export function createStudioRoutes(
       // The post-terminal host callback writes slot and sponsor refill account state through
       // the sponsor runner path, so no separate wake signal
       // is required here.
-      const sponsorResult: PromotionSponsorResult = await handlePromotionSponsor(sponsorCtx, {
+      const sponsorResult: PromotionSponsorResponse = await handlePromotionSponsor(sponsorCtx, {
         promotionId,
         receiptId: body.receiptId,
         txBytes: body.txBytes,
@@ -371,6 +359,9 @@ export function createStudioRoutes(
 
       return c.json(sponsorResult);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+      }
       const mapped = mapError(err);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
