@@ -8,10 +8,9 @@ import type { SponsorFailureMeta } from './store/abuseBlockTypes.js';
 import { logStructuredEvent } from './structuredEventLog.js';
 import { SPONSOR_DRIFT_OBSERVED } from './observability/events.js';
 import { FAILURE_TABLE, type FailurePolicy } from './failurePolicy.js';
-export { ADMISSION_FAILURE_CODES, FAILURE_TABLE, PROMOTION_ABUSE_CODES } from './failurePolicy.js';
+export { FAILURE_TABLE, PROMOTION_ABUSE_CODES } from './failurePolicy.js';
 export type {
   AbuseImpact,
-  AdmissionFailureCode,
   FailureClassification,
   FailureCode,
   FailurePolicy,
@@ -120,8 +119,6 @@ export const ADDRESS_CARVE_OUT_SUBCODES = [
   'REPLAY_NONCE',
 ] as const;
 
-export type AddressCarveOutSubcode = (typeof ADDRESS_CARVE_OUT_SUBCODES)[number];
-
 /**
  * Market-volatility Move-abort subcodes that skip the non-IP
  * `PREFLIGHT_FAILED` simulation-tier counter. Once the same condition
@@ -138,8 +135,6 @@ export const MARKET_VOLATILITY_CARVE_OUT_SUBCODES = [
   'SPREAD_EXCEEDED',
   'SLIPPAGE_EXCEEDED',
 ] as const;
-
-export type MarketVolatilityCarveOutSubcode = (typeof MARKET_VOLATILITY_CARVE_OUT_SUBCODES)[number];
 
 /**
  * Failure-code + subcode carve-out predicate. The IP counter is unaffected.
@@ -165,14 +160,9 @@ export function shouldCarveOutNonIpCounter(code: string, meta?: SponsorFailureMe
 /**
  * Sponsor-time new-user User Vault re-query result pairs emitted via
  * `SPONSOR_DRIFT_OBSERVED`. `VAULT_STATE_INCONSISTENT` is a dual-use
- * literal — it is also a public prepare-time transport error code. The
- * transport reference remains in `errorCode.ts` / `docs/schemas/relay-api.schema.json`;
- * this module owns the sponsor-time drift subcode meaning only.
- *
- * Strict-discovery scope for the lint registry covers the sponsor-only
- * tokens new_user_vault_*, NEW_USER_VAULT_EXISTS, VAULT_QUERY_FAILED.
- * VAULT_STATE_INCONSISTENT is intentionally excluded because it has
- * additional public transport APIs.
+ * literal — it is also a public prepare-time transport error code owned by
+ * the current Host wire vocabulary in `@stelis/contracts`. This module owns
+ * the sponsor-time drift subcode meaning only.
  */
 export const VAULT_DRIFT_NEW_USER_VAULT_EXISTS = {
   stage: 'new_user_vault_exists',
@@ -188,14 +178,6 @@ export const VAULT_DRIFT_STATE_INCONSISTENT = {
   stage: 'new_user_vault_state_inconsistent',
   subcode: 'VAULT_STATE_INCONSISTENT',
 } as const;
-
-export const VAULT_DRIFT_PAIRS = [
-  VAULT_DRIFT_NEW_USER_VAULT_EXISTS,
-  VAULT_DRIFT_QUERY_FAILED,
-  VAULT_DRIFT_STATE_INCONSISTENT,
-] as const;
-
-export type VaultDriftPair = (typeof VAULT_DRIFT_PAIRS)[number];
 
 // ─────────────────────────────────────────────
 // SPONSOR_DRIFT_OBSERVED emit

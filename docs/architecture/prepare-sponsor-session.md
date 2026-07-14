@@ -425,6 +425,10 @@ lifecycle failure.
 
 The quote-stats schema has two layers:
 
+`prepare/buildRpcStats.ts` owns the typed projection of both layers. Emit sites
+spread that projection instead of copying the field set; this table documents
+the emitted contract and is not a second source parser for production code.
+
 | Layer                                 | Fields                                                                                                                                  |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | RPC dispatch counts and timing        | `quote_quantity_in_rpc_calls`, `quote_quantity_out_verify_rpc_calls`, `quote_total_rpc_calls`, `quote_rpc_total_ms`, `quote_rpc_max_ms` |

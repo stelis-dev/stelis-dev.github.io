@@ -8,7 +8,11 @@
  * Host: signAdminJwt, verifyAdminJwt, cookie builders from src/adminAuth.ts
  */
 import { Hono } from 'hono';
-import { readJsonBodyWithLimit, MAX_SMALL_REQUEST_BODY_BYTES } from '@stelis/core-api';
+import {
+  ClientIpResolutionError,
+  readJsonBodyWithLimit,
+  MAX_SMALL_REQUEST_BODY_BYTES,
+} from '@stelis/core-api';
 import { tryBodyErrorResponse } from '../bodyError.js';
 import {
   verifyAdminSignature,
@@ -32,8 +36,8 @@ import {
 } from '../adminAuth.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import type { ResolveClientIp } from '../clientIp.js';
-import { safeErrorSummary, writeAdminAuditLog } from '../adminAuditLog.js';
-import { mapError, respondMapped } from '../errorMap.js';
+import { writeAdminAuditLog } from '../adminAuditLog.js';
+import { safeErrorSummary } from '@stelis/core-api/observability';
 import { raiseAppApiAdminSessionNotBefore } from '../adminSessionNotBefore.js';
 
 const NONCE_TTL_MS = 60_000;
@@ -80,8 +84,9 @@ export function createAuthRoutes(
       const response: AdminAuthChallengeResponse = { nonce };
       return c.json(response);
     } catch (err) {
-      const mapped = mapError(err);
-      if (mapped) return respondMapped(c, mapped);
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       // eslint-disable-next-line no-console
       console.error('[app-api] /auth/nonce failed', safeErrorSummary(err));
       return c.json({ error: 'Internal server error' }, 500);
@@ -149,13 +154,17 @@ export function createAuthRoutes(
       const response: AdminAuthSuccessResponse = { ok: true };
       return c.json(response);
     } catch (err) {
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return c.json(
+          { error: 'Request body does not match the current API contract', code: 'BAD_REQUEST' },
+          400,
+        );
       }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
-      const mapped = mapError(err);
-      if (mapped) return respondMapped(c, mapped);
       try {
         if (ip !== null) {
           const r = await getAdminRedis(contextPromise);
@@ -228,13 +237,17 @@ export function createAuthRoutes(
       const response: AdminAuthSuccessResponse = { ok: true };
       return c.json(response);
     } catch (err) {
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return c.json(
+          { error: 'Request body does not match the current API contract', code: 'BAD_REQUEST' },
+          400,
+        );
       }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
-      const mapped = mapError(err);
-      if (mapped) return respondMapped(c, mapped);
       try {
         if (ip !== null) {
           const r = await getAdminRedis(contextPromise);

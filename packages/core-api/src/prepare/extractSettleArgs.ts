@@ -9,24 +9,20 @@
  * built TX Pure inputs — NOT from builder input values.
  * This enables independent L2 validation that catches builder encoding bugs.
  *
- * Argument index mapping is the canonical source in @stelis/core-relay.
- * Tests verify the indices via ARG_INDEX_MAP re-exported from there.
+ * Argument index mapping remains an implementation detail of
+ * `@stelis/core-relay`; this wrapper verifies behavior through the parser.
  */
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { MoveCallCommand, PtbCommand } from '@stelis/contracts';
 import { SETTLEMENT_SWAP_DIRECTION_FUNCTIONS, SETTLE_MODULE } from '@stelis/contracts';
-import type { SettleArgs, HostValidationEnv, ArgIndexMap } from '@stelis/core-relay';
-import { parseSettleArgs, ParseSettleArgsError, ARG_INDEX_MAP } from '@stelis/core-relay';
+import type { SettleArgs, HostValidationEnv } from '@stelis/core-relay';
+import { parseSettleArgs, ParseSettleArgsError } from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
   PaymentInputContractError,
 } from '@stelis/core-relay/server';
 import type { PaymentInputTrace } from '@stelis/core-relay/server';
 import { PrepareValidationError } from '../prepare/replay.js';
-
-// Re-export ARG_INDEX_MAP + ArgIndexMap for index-locking tests
-export { ARG_INDEX_MAP };
-export type { ArgIndexMap };
 
 export interface ExtractedSettleArgs extends SettleArgs {
   paymentInputTrace?: PaymentInputTrace;

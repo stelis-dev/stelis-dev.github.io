@@ -43,9 +43,9 @@ Tools also accept `relayApiUrl`, which overrides `STELIS_RELAY_API_URL` for that
 
 ## Environment
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `STELIS_RELAY_API_URL` | optional | Default Relay API endpoint, ending in `/relay`. |
+| Variable                    | Required | Description                                                |
+| --------------------------- | -------- | ---------------------------------------------------------- |
+| `STELIS_RELAY_API_URL`      | optional | Default Relay API endpoint, ending in `/relay`.            |
 | `STELIS_REQUEST_TIMEOUT_MS` | optional | Default HTTP timeout in milliseconds. Defaults to `20000`. |
 
 ## Tool Model
@@ -72,6 +72,9 @@ The server never stores developer JWTs, user signatures, transaction bytes, or p
 
 ## Host Errors
 
-Host failures are returned to the tool caller with the Host-provided `code`, HTTP `status`, and response `body`.
+Current closed Host failures are returned to the tool caller with the
+Host-provided `code`, HTTP `status`, and validated response `body`. A malformed,
+extended, or non-JSON remote error is reduced to a stable `HTTP_ERROR`; its raw
+body and arbitrary fields are not copied into MCP tool output.
 
 The MCP server does not retry Host errors. Agent retry and backoff policy belongs to the caller. Capacity codes include `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`, `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`.

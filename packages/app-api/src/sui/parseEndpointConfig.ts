@@ -15,37 +15,9 @@ import { resolve, dirname } from 'node:path';
 import type { RpcMetadata } from '@protobuf-ts/runtime-rpc';
 import type { SuiNetwork } from '@stelis/contracts';
 import type { SuiRpcEndpointConfig } from './failoverTransport.js';
-import { redactUrl } from './redactUrl.js';
+import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
 
 const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
-
-// ─────────────────────────────────────────────
-// Raw config types (before env resolution)
-// ─────────────────────────────────────────────
-
-/**
- * Auth config for an authenticated endpoint.
- * Secret value is resolved from the boot-snapshotted env lookup.
- */
-export interface SuiRpcEndpointAuthConfig {
-  /** HTTP header name to carry the auth token (e.g. "x-token", "Authorization"). */
-  header: string;
-  /** ENV variable name holding the secret token value. */
-  valueEnv: string;
-  /** Optional prefix prepended to the token value (e.g. "Bearer "). */
-  prefix?: string;
-}
-
-/** Raw endpoint descriptor from rpc.json (before env resolution). */
-export interface SuiRpcEndpointRawConfig {
-  url: string;
-  auth?: SuiRpcEndpointAuthConfig;
-  /** Non-secret static headers. */
-  meta?: RpcMetadata;
-  /** Allows unauthenticated loopback HTTP endpoints for local development only. */
-  localDevelopmentEndpoint?: boolean;
-  fetchInit?: Omit<RequestInit, 'body' | 'headers' | 'method' | 'signal'>;
-}
 
 // ─────────────────────────────────────────────
 // Parser
@@ -76,7 +48,7 @@ export function parseEndpointConfigJson(
     raw = JSON.parse(trimmed);
   } catch (err) {
     throw new Error(
-      `rpc.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `rpc.json is not valid JSON: ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
     );
   }
 
@@ -125,9 +97,7 @@ export function parseEndpointConfigJson(
       }
     } catch (err) {
       throw new Error(
-        `${pos}: invalid URL "${redactUrl(url)}": ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `${pos}: invalid URL "${redactEndpointUrl(url)}": ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
       );
     }
 
@@ -289,7 +259,7 @@ export function loadRpcConfig(
   try {
     raw = readFileSync(resolvedPath, 'utf-8');
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = redactSensitiveText(err instanceof Error ? err.message : String(err));
     throw new Error(
       `[app-api] Cannot read rpc.json at "${resolvedPath}": ${msg}. ` +
         `Restore the tracked packages/app-api/rpc.json config file.`,

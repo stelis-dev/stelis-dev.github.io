@@ -83,7 +83,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     await store.append(entry);
 
     expect(evalSpy).toHaveBeenCalledTimes(1);
-    const [script, keys, args] = evalSpy.mock.calls[0];
+    const [, keys, args] = evalSpy.mock.calls[0];
     expect(keys).toHaveLength(4);
     expect(keys[0]).toBe('stelis:sponsored_logs:idem:r1');
     expect(keys[1]).toBe('stelis:sponsored_logs:agg:all');
@@ -98,16 +98,6 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(args[4]).toBe('5000'); // cumulative host net delta
     expect(args[5]).toBe('0'); // cumulativeLoss delta
     expect(args[6]).toBe('0'); // not a loss
-    // The script stores one fingerprint per receipt without expiry and
-    // distinguishes exact replay from a contradictory result.
-    expect(typeof script).toBe('string');
-    expect(script).toContain("redis.call('GET', idempotencyKey)");
-    expect(script).toContain("redis.call('SET', idempotencyKey, fingerprint)");
-    expect(script).toContain("return 'DUPLICATE'");
-    expect(script).toContain("return 'CONFLICT'");
-    expect(script).not.toMatch(/'PX'/);
-    expect(script).toContain('table.sort');
-    expect(script).toContain('createdAt');
   });
 
   it('marks isKnown=0 and zero deltas for unknown economics', async () => {

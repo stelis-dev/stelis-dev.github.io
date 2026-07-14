@@ -21,5 +21,9 @@ export const MAX_GENERIC_USER_COMMANDS = 11;
 /** Sui Clock shared object ID (protocol-level constant) */
 export const SUI_CLOCK_OBJECT_ID = '0x6';
 
+/** Canonical zero Sui address used as the sender for read-only simulation. */
+export const SUI_ZERO_ADDRESS =
+  '0x0000000000000000000000000000000000000000000000000000000000000000';
+
 // requireContractId lives in @stelis/contracts as the shared
 // contract-id lookup validator.

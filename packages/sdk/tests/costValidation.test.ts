@@ -13,9 +13,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { StelisSDK, StelisSponsoredError } from '../src/sdk.js';
+import { StelisSDK } from '../src/sdk.js';
+import { StelisSponsoredError } from '../src/errors.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { makeCreditResult } from './helpers/currentFixtures.js';
 
 // ── vi.hoisted: must precede vi.mock calls (Vitest hoisting rule) ──────────────
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
@@ -24,10 +26,6 @@ const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => (
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────────────────
-vi.mock('../src/credit.js', () => ({
-  queryUserCredit: vi.fn(async () => ({ vaultObjectId: null, credit: '0', needsCreate: false })),
-}));
-
 vi.mock('../src/integrity.js', () => ({
   verifyPtbIntegrity: vi.fn(),
   StelisIntegrityError: class StelisIntegrityError extends Error {
@@ -42,6 +40,7 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const original = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...original,
+    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
   };
@@ -49,11 +48,13 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
 
 const mockPrepare = vi.fn();
 const mockSponsor = vi.fn();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function ({ endpoint }: { endpoint: string }) {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: mockPrepare,
       sponsor: mockSponsor,
       endpoint,
@@ -71,9 +72,6 @@ vi.mock('../src/client.js', () => ({
     }
   },
 }));
-
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ─────────────────────────────────────────────
 // Constants
@@ -136,9 +134,7 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -157,7 +153,7 @@ describe('StelisSDK — COST_MISMATCH cross-validation', () => {
   let sdk: StelisSDK;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPrepare.mockReset();
     mockSponsor.mockReset();
     mockExtractSettleFields.mockReset();

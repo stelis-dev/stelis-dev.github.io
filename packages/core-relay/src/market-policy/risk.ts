@@ -5,7 +5,7 @@ import { ExecutionGapExceededError, MarketQuoteUnavailableError } from './errors
 const FLOAT_SCALING = 1_000_000_000n;
 const BPS = 10_000n;
 
-export function computeIdealOutputMist(
+function computeIdealOutputMist(
   inputAmountSmallest: bigint,
   midPrice: bigint,
   swapDirection: 'baseForQuote' | 'quoteForBase',

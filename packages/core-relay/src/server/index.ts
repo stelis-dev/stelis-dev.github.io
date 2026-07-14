@@ -8,10 +8,7 @@ export { findUniqueSettleCommandIndex } from '../settleCommand.js';
 export type {
   PaymentInputTrace,
   PaymentInputIntegrityExpectation,
-  PaymentInputIntegrityResult,
-  PaymentInputIntegritySubcode,
   PaymentInputSource,
-  SettlePaymentInputContract,
 } from '../paymentInputIntegrity.js';
 
 export { base64urlDecode } from './base64url.js';

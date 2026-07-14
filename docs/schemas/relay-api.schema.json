@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Stelis API Schema File",
-  "description": "Machine-readable schema file for the Stelis relay and studio promotion routes. Use the objects under $defs for GET /relay/config, POST /relay/prepare, POST /relay/sponsor, GET /studio/promotions, GET /studio/promotions/:id, POST /studio/promotions/:id/claim, POST /studio/promotions/:id/prepare, POST /studio/promotions/:id/sponsor, and common error payloads.",
+  "description": "Machine-readable schema file for the Stelis relay and studio promotion routes. Use the objects under $defs for GET /relay/status, GET /relay/config, POST /relay/prepare, POST /relay/sponsor, GET /studio/promotions, GET /studio/promotions/:id, POST /studio/promotions/:id/claim, POST /studio/promotions/:id/prepare, POST /studio/promotions/:id/sponsor, and each route's matching *HostError definition. relayStatusHostError covers the uncoded GET /relay/status failure body.",
   "$defs": {
     "suiNetwork": {
       "type": "string",
@@ -135,6 +135,17 @@
         },
         "protocolFlatFeeMist": {
           "$ref": "#/$defs/mistString"
+        }
+      }
+    },
+    "relayStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok"],
+      "description": "GET /relay/status success response.",
+      "properties": {
+        "ok": {
+          "const": true
         }
       }
     },
@@ -321,27 +332,31 @@
         }
       }
     },
-    "relayError": {
+    "hostError": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["error"],
+      "$comment": "This body schema closes route-code and code-metadata relationships. HTTP status is not part of a JSON body; parseHostErrorResponse binds every coded response to HOST_ERROR_HTTP_STATUS and restricts uncoded responses to transport statuses.",
       "properties": {
         "error": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "code": {
-          "type": "string",
-          "description": "Optional domain error code. Uncoded transport failures and rate-limit responses omit this field. See knownPrepareErrorCode and knownSponsorErrorCode for documented current enums."
+          "$ref": "#/$defs/currentHostErrorCode",
+          "description": "Optional current Host error code. Uncoded transport failures and rate-limit responses omit this field."
         },
         "retryAfterMs": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "subcode": {
-          "type": "string"
+          "$ref": "#/$defs/currentHostErrorSubcode"
         },
         "digest": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "minSettleMist": {
           "$ref": "#/$defs/mistString"
@@ -352,9 +367,271 @@
         "isEstimate": {
           "type": "boolean"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": ["code"],
+            "properties": {
+              "code": {
+                "not": {
+                  "const": "ABUSE_BLOCKED"
+                }
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "retryAfterMs": false
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["code"],
+            "properties": {
+              "code": {
+                "$ref": "#/$defs/settlementDiagnosticHostErrorCode"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "minSettleMist": false,
+              "requiredTotalIn": false,
+              "isEstimate": false
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["code"],
+            "properties": {
+              "code": {
+                "const": "L2_EXTRACT_FAILED"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "subcode": {
+                "$ref": "#/$defs/paymentInputIntegritySubcode"
+              }
+            }
+          },
+          "else": {
+            "if": {
+              "type": "object",
+              "required": ["code"],
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/sponsorSubcodeHostErrorCode"
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "subcode": {
+                  "$ref": "#/$defs/sponsorFailureSubcode"
+                }
+              }
+            },
+            "else": {
+              "type": "object",
+              "properties": {
+                "subcode": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["code"],
+            "properties": {
+              "code": {
+                "$ref": "#/$defs/digestRequiredHostErrorCode"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "digest": {}
+            },
+            "required": ["digest"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "digest": false
+            }
+          }
+        }
+      ]
     },
-    "knownPrepareErrorCode": {
+    "relayStatusHostError": {
+      "description": "GET /relay/status uncoded internal-error body. The route emits only HTTP 500; status is enforced outside the JSON body.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": false,
+            "retryAfterMs": false
+          }
+        }
+      ]
+    },
+    "relayConfigHostError": {
+      "description": "GET /relay/config error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/relayConfigErrorCode" }
+          }
+        }
+      ]
+    },
+    "studioListHostError": {
+      "description": "GET /studio/promotions error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/studioListErrorCode" }
+          }
+        }
+      ]
+    },
+    "studioDetailHostError": {
+      "description": "GET /studio/promotions/:id error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/studioDetailErrorCode" }
+          }
+        }
+      ]
+    },
+    "studioClaimHostError": {
+      "description": "POST /studio/promotions/:id/claim error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/studioClaimErrorCode" }
+          }
+        }
+      ]
+    },
+    "relayPrepareHostError": {
+      "description": "POST /relay/prepare error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/relayPrepareErrorCode" }
+          }
+        }
+      ]
+    },
+    "relaySponsorHostError": {
+      "description": "POST /relay/sponsor error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/relaySponsorErrorCode" }
+          }
+        }
+      ]
+    },
+    "promotionPrepareHostError": {
+      "description": "POST /studio/promotions/:id/prepare error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/promotionPrepareErrorCode" }
+          }
+        }
+      ]
+    },
+    "promotionSponsorHostError": {
+      "description": "POST /studio/promotions/:id/sponsor error body. HTTP code/status binding is enforced by parseHostErrorResponse.",
+      "allOf": [
+        { "$ref": "#/$defs/hostError" },
+        {
+          "type": "object",
+          "properties": {
+            "code": { "$ref": "#/$defs/promotionSponsorErrorCode" }
+          }
+        }
+      ]
+    },
+    "relayConfigErrorCode": {
+      "type": "string",
+      "enum": ["CONFIG_UNAVAILABLE"]
+    },
+    "studioListErrorCode": {
+      "type": "string",
+      "enum": [
+        "CLIENT_IP_UNRESOLVED",
+        "AUTH_FAILED",
+        "AUTH_JWT_INVALID",
+        "AUTH_UNAVAILABLE",
+        "ABUSE_BLOCKED",
+        "BLOCK_CHECK_UNAVAILABLE"
+      ]
+    },
+    "studioDetailErrorCode": {
+      "type": "string",
+      "enum": [
+        "CLIENT_IP_UNRESOLVED",
+        "AUTH_FAILED",
+        "AUTH_JWT_INVALID",
+        "AUTH_UNAVAILABLE",
+        "ABUSE_BLOCKED",
+        "BLOCK_CHECK_UNAVAILABLE",
+        "PROMOTION_NOT_FOUND"
+      ]
+    },
+    "studioClaimErrorCode": {
+      "type": "string",
+      "enum": [
+        "CLIENT_IP_UNRESOLVED",
+        "AUTH_FAILED",
+        "AUTH_JWT_INVALID",
+        "AUTH_UNAVAILABLE",
+        "ABUSE_BLOCKED",
+        "BLOCK_CHECK_UNAVAILABLE",
+        "BAD_REQUEST",
+        "REQUEST_BODY_TOO_LARGE",
+        "PROMOTION_NOT_FOUND",
+        "PROMOTION_NOT_ACTIVE",
+        "CLAIM_DEADLINE_PASSED",
+        "PROMOTION_CAPACITY_REACHED",
+        "ALREADY_CLAIMED"
+      ]
+    },
+    "relayPrepareErrorCode": {
       "type": "string",
       "enum": [
         "BAD_REQUEST",
@@ -422,7 +699,7 @@
         "INTERNAL_ERROR"
       ]
     },
-    "knownSponsorErrorCode": {
+    "relaySponsorErrorCode": {
       "type": "string",
       "enum": [
         "BAD_REQUEST",
@@ -443,6 +720,8 @@
         "SPONSOR_PREFLIGHT_FAILED",
         "SPONSOR_ONCHAIN_FAILED",
         "SPONSOR_CONGESTION",
+        "SPONSOR_SUBMISSION_UNCERTAIN",
+        "GAS_EFFECTS_MISSING",
         "LEASE_EXPIRED",
         "SPONSOR_FAILED",
         "ABUSE_BLOCKED",
@@ -484,10 +763,12 @@
           "type": "string"
         },
         "type": {
-          "type": "string"
+          "type": "string",
+          "enum": ["gas_sponsorship"]
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "enum": ["draft", "active", "paused", "archived"]
         },
         "canClaim": {
           "type": "boolean"
@@ -500,7 +781,8 @@
         },
         "remainingParticipantSlots": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "userRemainingGasAllowanceMist": {
           "type": ["string", "null"],
@@ -590,7 +872,8 @@
           "type": "string"
         },
         "type": {
-          "type": "string"
+          "type": "string",
+          "enum": ["gas_sponsorship"]
         },
         "promotionRemainingBudgetMist": {
           "$ref": "#/$defs/mistString"
@@ -670,17 +953,6 @@
         }
       }
     },
-    "knownPromotionClaimFailureReason": {
-      "type": "string",
-      "enum": [
-        "promotion_not_found",
-        "promotion_not_active",
-        "promotion_not_started",
-        "claim_deadline_passed",
-        "max_participants_reached",
-        "already_claimed"
-      ]
-    },
     "promotionPrepareRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -757,7 +1029,7 @@
         }
       }
     },
-    "knownPromotionPrepareErrorCode": {
+    "promotionPrepareErrorCode": {
       "type": "string",
       "enum": [
         "BAD_REQUEST",
@@ -765,6 +1037,7 @@
         "CLIENT_IP_UNRESOLVED",
         "AUTH_FAILED",
         "AUTH_JWT_INVALID",
+        "AUTH_UNAVAILABLE",
         "ABUSE_BLOCKED",
         "BLOCK_CHECK_UNAVAILABLE",
         "BAD_TX_KIND",
@@ -794,19 +1067,22 @@
         "INTERNAL_ERROR"
       ]
     },
-    "knownPromotionSponsorErrorCode": {
+    "promotionSponsorErrorCode": {
       "type": "string",
-      "description": "Promotion sponsor error codes. `FundsWithdrawal(Sponsor)` rejection is a prepare-only companion guard — see `knownPromotionPrepareErrorCode` for `SPONSOR_WITHDRAWAL_FORBIDDEN`. Sponsor preconsume does not emit that code because the stored-hash-verified consume already proves the submitted bytes match the prepare commit.",
+      "description": "Promotion sponsor error codes. `FundsWithdrawal(Sponsor)` rejection is a prepare-only companion guard — see `promotionPrepareErrorCode` for `SPONSOR_WITHDRAWAL_FORBIDDEN`. Sponsor preconsume does not emit that code because the stored-hash-verified consume already proves the submitted bytes match the prepare commit.",
       "enum": [
         "BAD_REQUEST",
         "REQUEST_BODY_TOO_LARGE",
         "CLIENT_IP_UNRESOLVED",
         "AUTH_FAILED",
         "AUTH_JWT_INVALID",
+        "AUTH_UNAVAILABLE",
         "ABUSE_BLOCKED",
         "BLOCK_CHECK_UNAVAILABLE",
         "SPONSOR_CAPACITY_UNAVAILABLE",
         "SPONSOR_REFILL_ACCOUNT_UNHEALTHY",
+        "SPONSOR_CONGESTION",
+        "LEASE_EXPIRED",
         "PREPARED_TX_NOT_FOUND",
         "PREPARED_TX_EXPIRED",
         "SENDER_ADDRESS_MISMATCH",
@@ -824,9 +1100,94 @@
         "TAMPERING_DETECTED",
         "PREFLIGHT_FAILED",
         "ONCHAIN_REVERT",
+        "SPONSOR_SUBMISSION_UNCERTAIN",
         "GAS_EFFECTS_MISSING",
         "CONSUME_FAILED",
         "SPONSOR_FAILED"
+      ]
+    },
+    "settlementDiagnosticHostErrorCode": {
+      "type": "string",
+      "enum": [
+        "INSUFFICIENT_BALANCE",
+        "CLAIM_WOULD_EXCEED_MAX",
+        "INSUFFICIENT_SETTLE_INPUT",
+        "SPREAD_EXCEEDED",
+        "DRY_RUN_FAILED",
+        "SLIPPAGE_EXCEEDED"
+      ]
+    },
+    "sponsorSubcodeHostErrorCode": {
+      "type": "string",
+      "enum": [
+        "SPONSOR_PREFLIGHT_FAILED",
+        "SPONSOR_ONCHAIN_FAILED",
+        "PREFLIGHT_FAILED",
+        "ONCHAIN_REVERT"
+      ]
+    },
+    "digestRequiredHostErrorCode": {
+      "type": "string",
+      "enum": [
+        "SPONSOR_ONCHAIN_FAILED",
+        "SPONSOR_CONGESTION",
+        "SPONSOR_SUBMISSION_UNCERTAIN",
+        "GAS_EFFECTS_MISSING",
+        "ONCHAIN_REVERT",
+        "CONSUME_FAILED"
+      ]
+    },
+    "currentHostErrorCode": {
+      "anyOf": [
+        { "$ref": "#/$defs/relayConfigErrorCode" },
+        { "$ref": "#/$defs/studioListErrorCode" },
+        { "$ref": "#/$defs/studioDetailErrorCode" },
+        { "$ref": "#/$defs/studioClaimErrorCode" },
+        { "$ref": "#/$defs/relayPrepareErrorCode" },
+        { "$ref": "#/$defs/relaySponsorErrorCode" },
+        { "$ref": "#/$defs/promotionPrepareErrorCode" },
+        { "$ref": "#/$defs/promotionSponsorErrorCode" }
+      ]
+    },
+    "sponsorFailureSubcode": {
+      "type": "string",
+      "enum": [
+        "CLAIM_WOULD_EXCEED_MAX",
+        "INSUFFICIENT_SETTLE_INPUT",
+        "INSUFFICIENT_FUNDS",
+        "INVALID_RECEIPT_ID",
+        "INVALID_POLICY_HASH",
+        "SPREAD_EXCEEDED",
+        "SLIPPAGE_EXCEEDED",
+        "PAUSED",
+        "VAULT_ALREADY_REGISTERED",
+        "REPLAY_NONCE"
+      ]
+    },
+    "paymentInputIntegritySubcode": {
+      "type": "string",
+      "enum": [
+        "payment_input_missing",
+        "payment_input_invalid_shape",
+        "payment_input_source_mismatch",
+        "payment_input_swap_amount_invalid",
+        "payment_input_swap_amount_mismatch",
+        "payment_input_split_amount_mismatch",
+        "payment_input_withdrawal_amount_mismatch",
+        "payment_input_topup_amount_invalid",
+        "payment_input_base_coin_mismatch",
+        "payment_input_merge_coin_ids_mismatch",
+        "payment_input_unexpected_merge_source",
+        "payment_input_funding_use_mismatch",
+        "payment_input_redeem_use_mismatch",
+        "payment_input_redeem_amount_mismatch",
+        "payment_input_command_boundary_mismatch"
+      ]
+    },
+    "currentHostErrorSubcode": {
+      "anyOf": [
+        { "$ref": "#/$defs/sponsorFailureSubcode" },
+        { "$ref": "#/$defs/paymentInputIntegritySubcode" }
       ]
     }
   }

@@ -31,19 +31,16 @@ vi.mock('../src/integrity.js', () => ({
   },
 }));
 
-// ── Mock: credit ─────────────────────────────────────────────────────────────
-vi.mock('../src/credit.js', () => ({
-  queryUserCredit: vi.fn(async () => ({ vaultObjectId: null, credit: '0', needsCreate: false })),
-}));
-
 // ── Mock: StelisClient ────────────────────────────────────────────────────────
 const mockPromotionPrepare = vi.fn();
 const mockPromotionSponsor = vi.fn();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function ({ endpoint }: { endpoint: string }) {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: vi.fn(),
       sponsor: vi.fn(),
       promotionPrepare: mockPromotionPrepare,
@@ -65,10 +62,6 @@ vi.mock('../src/client.js', () => ({
     }
   },
 }));
-
-// ── Mock: fetch ──────────────────────────────────────────────────────────────
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
@@ -111,16 +104,12 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://studio.local/relay', { studioEndpoint: true });
 }
 
 async function createNonStudioSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://relay.local/relay');
 }
 
@@ -150,7 +139,7 @@ describe('StelisSDK.preparePromotionSponsored', () => {
   let sdk: StelisSDK;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
     mockVerifyPromotionIntegrity.mockReset();
@@ -224,7 +213,7 @@ describe('StelisSDK.sponsorPromotionSponsored', () => {
   let sdk: StelisSDK;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
     sdk = await createStudioSDK();
@@ -280,7 +269,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
   let sdk: StelisSDK;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
     sdk = await createStudioSDK();

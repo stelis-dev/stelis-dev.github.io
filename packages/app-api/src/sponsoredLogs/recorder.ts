@@ -68,7 +68,7 @@ export interface SponsoredLogsRecorderDeps {
 
 /**
  * Build the host-side recorder callback. Pass the returned function to
- * `HostRuntimeConfig.onSponsorResult` (alongside other sponsor result
+ * the `createHostContext` onSponsorResult callback (alongside other sponsor result
  * callbacks via a fan-out wrapper if multiple are needed).
  */
 export function createSponsoredLogsRecorder(
@@ -92,7 +92,7 @@ export function createSponsoredLogsRecorder(
           mode: metadata.route,
           outcome: metadata.outcome,
           receipt_id: metadata.receiptId,
-          digest: metadata.digest,
+          digest: metadata.digest ?? null,
           error: buildErr instanceof Error ? buildErr.message : String(buildErr),
         },
         'warn',
@@ -110,7 +110,7 @@ export function createSponsoredLogsRecorder(
           mode: metadata.route,
           outcome: metadata.outcome,
           receipt_id: metadata.receiptId,
-          digest: metadata.digest,
+          digest: metadata.digest ?? null,
           error: writeErr instanceof Error ? writeErr.message : String(writeErr),
         },
         'warn',
@@ -190,7 +190,7 @@ function buildLogEntry(
  *
  * Used by the host to combine the sponsor operations state callback with the
  * sponsored-execution recorder under the single
- * `HostRuntimeConfig.onSponsorResult` slot.
+ * `createHostContext` onSponsorResult callback slot.
  */
 export function fanOutSponsorResult(
   ...callbacks: readonly SponsorResultCallback[]

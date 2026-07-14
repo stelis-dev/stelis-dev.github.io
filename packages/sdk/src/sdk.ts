@@ -3,7 +3,7 @@
  *
  * Connects to a Relay API endpoint:
  *   1. GET /relay/status → health check
- *   2. GET /relay/config → Relay API config response (see connection.ts parseRelayConfigResponse for fields)
+ *   2. GET /relay/config → current Relay API config parsed by StelisClient
  *
  * Contract addresses (configId, vaultRegistryId, deepbookPackageId, deepType) are resolved
  * from SDK built-in constants in @stelis/contracts — not from the Relay API response.
@@ -14,11 +14,12 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { buildWithdrawPtb } from './ptb.js';
 import { StelisClient, StelisApiException } from './client.js';
-import { queryUserCredit, CreditQueryInconsistentStateError } from './credit.js';
+import { queryUserCredit, CreditQueryInconsistentStateError } from '@stelis/core-relay/browser';
 import { verifyPtbIntegrity, verifyPromotionPtbIntegrity } from './integrity.js';
 import { assertNoGasPreset } from '@stelis/core-relay/browser';
 import {
   computeExecutionCostClaim,
+  bindCurrentSuiResultToBytes,
   DEFAULT_GAS_MARGIN_BPS,
   encodePrepareAuthorizationMessage,
   extractSettleTransactionFieldsFromTxBytes,
@@ -27,8 +28,8 @@ import {
   validateGenericUserTransactionKind,
 } from '@stelis/core-relay/browser';
 import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
-import { fetchRelayConfig, parseRelayConfig } from './connection.js';
-import { isInfraError, normalizeApiError } from './errors.js';
+import { parseRelayConfig } from './connection.js';
+import { isInfraError, normalizeApiError, StelisSponsoredError } from './errors.js';
 import {
   bigintToSafeNumberOrNull,
   formatRatioDecimal,
@@ -51,28 +52,11 @@ import type {
   PromotionSponsorResponse,
 } from './types.js';
 import { batchGetHopMidPrices } from '@stelis/core-relay/browser';
+import { composeSettlementTokenToSuiMidPrice, DEEPBOOK_MID_PRICE_SCALING } from './swap.js';
 
-const FLOAT_SCALING = 1_000_000_000n;
 const SUI_DECIMALS = 9;
 const DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST = 5_000_000;
 const PREPARE_REQUEST_NONCE_BYTES = 16;
-
-function composePaymentToSuiMidPrice(
-  settlementSwapPath: SingleHopSettlementSwapPath,
-  hopPrices: readonly bigint[],
-): bigint {
-  const refInput = 1_000_000_000_000_000_000n;
-  let chainedOutput = refInput;
-  for (let i = 0; i < settlementSwapPath.hops.length; i++) {
-    const price = hopPrices[i] ?? 0n;
-    if (settlementSwapPath.hops[i].swapDirection === 'baseForQuote') {
-      chainedOutput = (chainedOutput * price) / FLOAT_SCALING;
-    } else {
-      chainedOutput = price > 0n ? (chainedOutput * FLOAT_SCALING) / price : 0n;
-    }
-  }
-  return (chainedOutput * FLOAT_SCALING) / refInput;
-}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -81,7 +65,7 @@ function bytesToHex(bytes: Uint8Array): string {
 function hexToBytes(hex: string, field: string): Uint8Array {
   const withoutPrefix = hex.startsWith('0x') ? hex.slice(2) : hex;
   if (!/^[0-9a-fA-F]*$/.test(withoutPrefix) || withoutPrefix.length % 2 !== 0) {
-    throw new StelisApiException('INVALID_PREPARE_RESPONSE', `${field} is not valid hex`, 502);
+    throw new StelisSponsoredError('INVALID_PREPARE_RESPONSE', `${field} is not valid hex`);
   }
   const bytes = new Uint8Array(withoutPrefix.length / 2);
   for (let i = 0; i < bytes.length; i++) {
@@ -108,9 +92,7 @@ interface WithdrawParams {
 
 export class StelisSDK {
   private _client: StelisClient;
-  private _endpoint: string;
   private _relayConfig: RelayConfig;
-  private _options: StelisConnectOptions;
   /**
    * True when studioEndpoint was explicitly true at connect time.
    * Developer JWT requests require studio mode — prevents routing to generic Hosts.
@@ -155,14 +137,11 @@ export class StelisSDK {
   }
   private constructor(
     client: StelisClient,
-    endpoint: string,
     relayConfig: RelayConfig,
     options: StelisConnectOptions = {},
   ) {
     this._client = client;
-    this._endpoint = endpoint;
     this._relayConfig = relayConfig;
-    this._options = options;
     this._studioMode = options.studioEndpoint === true;
     // Resolve contract IDs from shared @stelis/contracts constants.
     const network = relayConfig.network;
@@ -197,7 +176,7 @@ export class StelisSDK {
     await client.getStatus();
 
     // Fetch dynamic config from /relay/config.
-    const relayConfig = parseRelayConfig(await fetchRelayConfig(endpoint, opts.requestTimeouts));
+    const relayConfig = parseRelayConfig(await client.getConfig());
 
     // S-16: 2-step packageId verification
     const expectedPackageId = STELIS_CONTRACT_IDS[relayConfig.network]?.packageId;
@@ -222,7 +201,7 @@ export class StelisSDK {
       }
     }
 
-    return new StelisSDK(client, endpoint, relayConfig, opts);
+    return new StelisSDK(client, relayConfig, opts);
   }
 
   // ─────────────────────────────────────────
@@ -253,9 +232,9 @@ export class StelisSDK {
   /**
    * Query exchange rate for a settlement token.
    *
-   * DeepBook mid_price is scaled by FLOAT_SCALING (1e9) and represents
+   * DeepBook mid_price is scaled by 1e9 and represents
    * quote_smallest_units / base_smallest_units. To get human-readable price:
-   *   price_human = mid_price * base_scalar / (FLOAT_SCALING * quote_scalar)
+   *   price_human = mid_price * base_scalar / (1e9 * quote_scalar)
    *
    * For DEEP(6dec)/SUI(9dec) pool:
    *   price = mid_price * 1e6 / (1e9 * 1e9) = mid_price / 1e12
@@ -295,11 +274,11 @@ export class StelisSDK {
     //   baseForQuote: output = input × midPrice / 1e9
     //   quoteForBase: output = input × 1e9 / midPrice
     // We chain using a reference input of 1e18 (high precision bigint).
-    const composedMidPriceRaw = composePaymentToSuiMidPrice(settlementSwapPath, hopPrices);
+    const composedMidPriceRaw = composeSettlementTokenToSuiMidPrice(settlementSwapPath, hopPrices);
     const rate = bigintToSafeNumberOrNull(composedMidPriceRaw);
     const numerator =
       composedMidPriceRaw * 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
-    const denominator = FLOAT_SCALING * 10n ** BigInt(SUI_DECIMALS);
+    const denominator = DEEPBOOK_MID_PRICE_SCALING * 10n ** BigInt(SUI_DECIMALS);
     const suiPerTokenHuman = formatRatioDecimal(numerator, denominator, 4);
     const rateDisplay = `1 ${settlementSwapPath.settlementTokenSymbol} ≈ ${suiPerTokenHuman} SUI`;
     return {
@@ -414,7 +393,10 @@ export class StelisSDK {
       };
     }
 
-    const midPrice = composePaymentToSuiMidPrice(settlementSwapPath, rateResult.hopMidPrices);
+    const midPrice = composeSettlementTokenToSuiMidPrice(
+      settlementSwapPath,
+      rateResult.hopMidPrices,
+    );
     if (midPrice <= 0n) {
       return {
         displayUnit: settlementSwapPath.settlementTokenSymbol,
@@ -431,7 +413,7 @@ export class StelisSDK {
     // DeepBook executable min/lot policy is enforced server-side by /prepare;
     // this SDK path remains a non-authoritative UX preview.
     const amountSmallest =
-      (totalCostMist * FLOAT_SCALING * marginNumerator + (midPrice * 10_000n - 1n)) /
+      (totalCostMist * DEEPBOOK_MID_PRICE_SCALING * marginNumerator + (midPrice * 10_000n - 1n)) /
       (midPrice * 10_000n);
 
     const scale = 10n ** BigInt(settlementSwapPath.settlementTokenDecimals);
@@ -495,7 +477,7 @@ export class StelisSDK {
       opts.settlementToken.type,
     );
     if (!userCommandValidation.ok) {
-      throw new StelisApiException(userCommandValidation.code, userCommandValidation.message, 422);
+      throw new StelisSponsoredError(userCommandValidation.code, userCommandValidation.message);
     }
     const txKindBytesHash = bytesToHex(await sha256Bytes(kindBytes));
     const prepareAuthorizationTimestampMs = Date.now();
@@ -566,10 +548,9 @@ export class StelisSDK {
     try {
       settleFields = extractSettleTransactionFieldsFromTxBytes(prepareRes.txBytes, this._packageId);
     } catch (err) {
-      throw new StelisApiException(
+      throw new StelisSponsoredError(
         'SETTLE_TX_PARSE_FAILED',
         err instanceof Error ? err.message : 'Unable to parse settle fields from txBytes',
-        409,
       );
     }
     const orderIdHash = opts.orderId
@@ -586,7 +567,7 @@ export class StelisSDK {
       orderIdHash,
     });
     if (!settleFieldValidation.ok) {
-      throw new StelisApiException(settleFieldValidation.code, settleFieldValidation.message, 409);
+      throw new StelisSponsoredError(settleFieldValidation.code, settleFieldValidation.message);
     }
 
     // Notify gas estimate callback — totalCost in MIST + 'SUI'
@@ -745,13 +726,12 @@ export class StelisSDK {
 
     // ── Step 2: dry-run gasBudget (RPC only in try; deterministic failures outside) ──
     tx.setSender(opts.addr);
-    type SimWithEffects = import('@mysten/sui/client').SuiClientTypes.SimulateTransactionResult<{
-      effects: true;
-    }>;
-    let sim: SimWithEffects;
+    let sim: unknown;
+    let simBytes: Uint8Array;
     try {
+      simBytes = await tx.build({ client: opts.client });
       sim = await opts.client.simulateTransaction({
-        transaction: tx,
+        transaction: simBytes,
         include: { effects: true },
       });
     } catch (err) {
@@ -761,15 +741,26 @@ export class StelisSDK {
       }
       throw err;
     }
-    // Deterministic failures — outside catch so message strings can't be misclassified
-    if (sim.$kind === 'FailedTransaction')
-      throw new Error(
-        `[StelisSDK] Simulation failed: ${JSON.stringify(sim.FailedTransaction.status.error)}`,
-      );
-    const gasUsed = sim.Transaction.effects?.gasUsed;
+    // Deterministic failures — outside catch so message strings can't be misclassified.
+    const boundSimulation = bindCurrentSuiResultToBytes(sim, simBytes);
+    if (!boundSimulation) {
+      throw new Error('[StelisSDK] Simulation returned a malformed or mismatched result');
+    }
+    if (boundSimulation.outcome === 'failure') {
+      throw new Error(`[StelisSDK] Simulation failed: ${boundSimulation.errorMessage}`);
+    }
+    const simulationEffects = boundSimulation.transaction.effects;
+    const gasUsed =
+      typeof simulationEffects === 'object' &&
+      simulationEffects !== null &&
+      !Array.isArray(simulationEffects)
+        ? (simulationEffects as Record<string, unknown>).gasUsed
+        : undefined;
     if (!gasUsed)
       throw new Error('[StelisSDK] Simulation returned no gasUsed — cannot determine gas budget');
-    const { grossGas } = computeExecutionCostClaim(gasUsed);
+    const { grossGas } = computeExecutionCostClaim(
+      gasUsed as import('@stelis/core-relay/browser').SimulationGasUsed,
+    );
     const gasBudget = (grossGas * BigInt(10000 + DEFAULT_GAS_MARGIN_BPS)) / 10000n;
 
     // ── Step 3a: SUI sufficient — execute directly ────────────────────────
@@ -783,14 +774,20 @@ export class StelisSDK {
         signatures: [signature],
         include: { effects: true },
       });
-      if (res.$kind === 'FailedTransaction')
-        throw new Error(
-          `[StelisSDK] Transaction failed: ${JSON.stringify(res.FailedTransaction.status.error)}`,
-        );
+      const boundExecution = bindCurrentSuiResultToBytes(res, builtBytes);
+      if (!boundExecution) {
+        throw new Error('[StelisSDK] Transaction returned a malformed or mismatched result');
+      }
+      if (boundExecution.outcome === 'failure') {
+        throw new Error(`[StelisSDK] Transaction failed: ${boundExecution.errorMessage}`);
+      }
+      if (boundExecution.transaction.effects === undefined) {
+        throw new Error('[StelisSDK] Transaction returned no requested effects');
+      }
       return {
         path: 'sui',
-        digest: res.Transaction.digest,
-        effects: res.Transaction.effects,
+        digest: boundExecution.digest,
+        effects: boundExecution.transaction.effects,
       };
     }
 
@@ -963,8 +960,3 @@ export class StelisSDK {
     verifyPtbIntegrity(kindBytes, txBytesBase64, this._packageId);
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Re-exports from decomposed modules
-// ─────────────────────────────────────────────────────────────────────────────
-export { StelisSponsoredError } from './errors.js';

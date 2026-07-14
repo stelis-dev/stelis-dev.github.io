@@ -8,9 +8,9 @@
  * Pure function, no I/O.
  */
 
-export interface BpsValidationError {
+export interface BpsValidationError<Code extends string = string> {
   ok: false;
-  code: string;
+  code: Code;
   message: string;
 }
 
@@ -19,7 +19,7 @@ interface BpsValidationSuccess {
   value: number;
 }
 
-type BpsValidationResult = BpsValidationSuccess | BpsValidationError;
+type BpsValidationResult<Code extends string> = BpsValidationSuccess | BpsValidationError<Code>;
 
 /**
  * Validate a BPS value from untrusted input.
@@ -29,12 +29,12 @@ type BpsValidationResult = BpsValidationSuccess | BpsValidationError;
  *
  * @returns `{ ok: true, value }` on success, `{ ok: false, code, message }` on failure.
  */
-export function validateBps(
+export function validateBps<Code extends string>(
   name: string,
   value: unknown,
   cap: number,
-  code: string,
-): BpsValidationResult {
+  code: Code,
+): BpsValidationResult<Code> {
   if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10_000) {
     throw new Error(`${name} cap must be a safe integer in [0, 10000]`);
   }

@@ -22,6 +22,7 @@ import {
   type PtbCommand,
 } from '@stelis/contracts';
 import type { BuildContext, GenericPrepareBuildRequest } from '../src/prepare/build.js';
+import { bps } from '../src/internal/brand.js';
 
 // ── Mock Transaction ────────────────────────────────────────────────────────
 
@@ -30,7 +31,8 @@ const mockSetSender = vi.fn();
 const mockSetGasOwner = vi.fn();
 const mockSetGasBudget = vi.fn();
 
-vi.mock('@mysten/sui/transactions', () => {
+vi.mock('@mysten/sui/transactions', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@mysten/sui/transactions')>();
   class MockTransaction {
     private readonly commands: unknown[] = [];
     build = mockBuild;
@@ -63,7 +65,7 @@ vi.mock('@mysten/sui/transactions', () => {
       return new MockTransaction();
     }
   }
-  return { Transaction: MockTransaction };
+  return { ...original, Transaction: MockTransaction };
 });
 
 // ── Mock core-relay ────────────────────────────────────────────────────────
@@ -98,12 +100,14 @@ const mockTraceUserPrefixValue = vi.fn().mockReturnValue({
 });
 const mockValidatePaymentInputIntegrity = vi.fn().mockReturnValue({ ok: true });
 
-vi.mock('@stelis/core-relay', () => {
+vi.mock('@stelis/core-relay', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@stelis/core-relay')>();
   // Must be defined inside factory to avoid hoisting issues
   class SlippageQueryError extends Error {
     override readonly name = 'SlippageQueryError';
   }
   return {
+    ...original,
     buildSwapAndSettlePtb: (...args: unknown[]) => {
       mockBuildSwapAndSettlePtb(...args);
       const [tx, params] = args as [
@@ -264,24 +268,28 @@ import {
   runGenericPrepareBuildPipeline,
 } from '../src/prepare/build.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
+import {
+  bindGrpcResultToTransactionBytes,
+  grpcSimulationFailure,
+  grpcSimulationSuccess,
+  unknownExecutionError,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
   return {
     sui: {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        Transaction: {
-          status: { success: true },
-          effects: {
-            gasUsed: {
-              computationCost: '2000000',
-              storageCost: '500000',
-              storageRebate: '400000',
-            },
-          },
-        },
-      }),
+      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+        bindGrpcResultToTransactionBytes(
+          grpcSimulationSuccess('fixture-digest', {
+            computationCost: '2000000',
+            storageCost: '500000',
+            storageRebate: '400000',
+          }),
+          transaction,
+        ),
+      ),
     } as unknown as BuildContext['sui'],
     // Stelis abort fixtures use this active package ID. DeepBook abort tests
     // use the generated runtime identity, not deepbookPackageId below.
@@ -297,6 +305,35 @@ function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
     configVersion: 1n,
     ...overrides,
   };
+}
+
+function simulationFailure(message: string): BuildContext['sui'] {
+  return {
+    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcSimulationFailure('fixture-digest', unknownExecutionError(message)),
+        transaction,
+      ),
+    ),
+  } as unknown as BuildContext['sui'];
+}
+
+function simulationSuccessWithoutGas(): BuildContext['sui'] {
+  return {
+    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
+      const success = grpcSimulationSuccess('fixture-digest');
+      return bindGrpcResultToTransactionBytes(
+        {
+          ...success,
+          Transaction: {
+            ...success.Transaction,
+            effects: { ...success.Transaction.effects, gasUsed: undefined },
+          },
+        },
+        transaction,
+      );
+    }),
+  } as unknown as BuildContext['sui'];
 }
 
 function makeInput(
@@ -342,12 +379,13 @@ function makeInput(
       minSize: 1n,
     } as unknown as GenericPrepareBuildRequest['descriptor'],
     sponsorAddress: '0xSPONSOR',
-    slippageBps: 100,
-    gasMarginBps: 1000,
+    slippageBps: bps(100),
+    gasMarginBps: bps(1000),
     profile: 'credit_general',
     vaultObjectId: '0xVAULT',
     credit: '10000000', // 10M MIST
     receiptId: new Uint8Array(32),
+    nonce: 1n,
     policyHash: new Uint8Array(32),
     quoteTimestampMs: Date.now(),
     ...overrides,
@@ -470,7 +508,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
         profile,
         vaultObjectId,
         credit,
-        slippageBps,
+        slippageBps: bps(slippageBps),
         settlementSwapPath: {
           hops: [hop],
           settlementTokenType: swapDirection === 'baseForQuote' ? '0xBASE' : '0xQUOTE',
@@ -1004,7 +1042,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       profile: 'new_user',
       vaultObjectId: null,
       credit: '0',
-      gasMarginBps: 1000,
+      gasMarginBps: bps(1000),
     });
     mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 4_000_000n,
@@ -1025,7 +1063,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       profile: 'new_user',
       vaultObjectId: null,
       credit: '0',
-      gasMarginBps: 1000,
+      gasMarginBps: bps(1000),
     });
     mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 4_000_000n,
@@ -1231,25 +1269,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── classifyDryRunFailure: InsufficientCoinBalance in dry-run ─────────
   it('classifies InsufficientCoinBalance in dry-run as INSUFFICIENT_BALANCE', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          FailedTransaction: {
-            $kind: 'FailedTransaction',
-            status: {
-              error: { message: 'InsufficientCoinBalance in command 0' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
-    });
-    // Override to return FailedTransaction format
-    (ctx.sui.simulateTransaction as ReturnType<typeof vi.fn>).mockResolvedValue({
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        status: {
-          error: { message: 'InsufficientCoinBalance in command 0' },
-        },
-      },
+      sui: simulationFailure('InsufficientCoinBalance in command 0'),
     });
 
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1266,16 +1286,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── classifyDryRunFailure: non-balance error stays DRY_RUN_FAILED ─────
   it('classifies non-balance dry-run error as DRY_RUN_FAILED', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          $kind: 'FailedTransaction',
-          FailedTransaction: {
-            status: {
-              error: { message: 'MoveAbort in module foo' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure('MoveAbort in module foo'),
     });
 
     const input = makeInput();
@@ -1376,16 +1387,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── Transaction result with status.success === false ──────────────────
   it('DRY_RUN_FAILED when Transaction status.success is false (MoveAbort)', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: { success: false, error: { message: 'MoveAbort in settle' } },
-            effects: {
-              gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure('MoveAbort in settle'),
     });
     const input = makeInput();
 
@@ -1400,21 +1402,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('SLIPPAGE_EXCEEDED when Transaction status.success is false (DeepBook abort 12)', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: {
-              success: false,
-              error: {
-                message: formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code),
-              },
-            },
-            effects: {
-              gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code)),
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
 
@@ -1430,14 +1418,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── DRY_RUN_NO_GAS: gasUsed absent ───────────────────────────────────
   it('DRY_RUN_NO_GAS when gasUsed is missing from successful dry-run', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: { success: true },
-            effects: {}, // no gasUsed
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationSuccessWithoutGas(),
     });
     const input = makeInput();
 
@@ -1637,21 +1618,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('CLAIM_WOULD_EXCEED_MAX from pass1 dry-run (settle 101 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: {
-              success: false,
-              error: {
-                message: 'MoveAbort(0xabc::settle::settle_core, 101) in command 0',
-              },
-            },
-            effects: {
-              gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure('MoveAbort(0xabc::settle::settle_core, 101) in command 0'),
       maxClaimMist: 50_000_000n,
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1683,7 +1650,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
       const e = err as PrepareValidationError;
       expect(e.code).toBe('INSUFFICIENT_SETTLE_INPUT');
       expect(e.meta).toBeDefined();
-      expect(e.meta!.isEstimate).toBe('true'); // pass1 = estimate
+      expect(e.meta!.isEstimate).toBe(true); // pass1 = estimate
       expect(e.meta!.minSettleMist).toBeDefined();
     }
   });
@@ -1708,27 +1675,13 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
       const e = err as PrepareValidationError;
       expect(e.code).toBe('INSUFFICIENT_SETTLE_INPUT');
       expect(e.meta).toBeDefined();
-      expect(e.meta!.isEstimate).toBe('false'); // pass2 = confirmed
+      expect(e.meta!.isEstimate).toBe(false); // pass2 = confirmed
     }
   });
 
   it('INSUFFICIENT_SETTLE_INPUT from pass1 dry-run (settle 102 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: {
-              success: false,
-              error: {
-                message: 'MoveAbort(0xabc::settle::execute_settle, 102) in command 0',
-              },
-            },
-            effects: {
-              gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure('MoveAbort(0xabc::settle::execute_settle, 102) in command 0'),
       minSettleMist: 100_000n,
       protocolFlatFeeMist: 10_000n,
     });
@@ -1742,7 +1695,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
       const e = err as PrepareValidationError;
       expect(e.code).toBe('INSUFFICIENT_SETTLE_INPUT');
       expect(e.meta).toBeDefined();
-      expect(e.meta!.isEstimate).toBe('true');
+      expect(e.meta!.isEstimate).toBe(true);
     }
   });
 
@@ -1784,21 +1737,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('SPREAD_EXCEEDED from pass1 dry-run (settle 110 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: {
-              success: false,
-              error: {
-                message: 'MoveAbort(0xabc::settle::assert_spread_ok, 110) in command 0',
-              },
-            },
-            effects: {
-              gasUsed: { computationCost: '1000', storageCost: '500', storageRebate: '200' },
-            },
-          },
-        }),
-      } as unknown as BuildContext['sui'],
+      sui: simulationFailure('MoveAbort(0xabc::settle::assert_spread_ok, 110) in command 0'),
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
 
@@ -1871,7 +1810,7 @@ const isTotalInTooLow = (reason: string, packageId: string) =>
 
 function formatDeepbookAbort(
   code: number,
-  packageId = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+  packageId: string = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
   commandIndex = 0,
 ) {
   const [module, functionName] = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::');

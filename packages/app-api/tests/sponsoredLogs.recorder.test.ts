@@ -63,6 +63,11 @@ function makeMetadata(overrides: Partial<SponsorResultMetadata> = {}): SponsorRe
   return { ...base, ...overrides } as SponsorResultMetadata;
 }
 
+function withoutDigest(metadata: SponsorResultMetadata): SponsorResultMetadata {
+  const { digest: _digest, ...without } = metadata;
+  return without;
+}
+
 describe('createSponsoredLogsRecorder — outcome filter', () => {
   it('records success outcome', async () => {
     const store = new CapturingStore();
@@ -305,7 +310,7 @@ describe('createSponsoredLogsRecorder — failure semantics', () => {
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
     await expect(cb(makeMetadata())).resolves.toBeUndefined();
     const events = warnSpy.mock.calls
-      .map((c) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
+      .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const recorderFailed = events.find((e) => e.event === 'SPONSORED_LOGS_RECORDER_FAILED');
     expect(recorderFailed).toBeDefined();
@@ -319,9 +324,11 @@ describe('createSponsoredLogsRecorder — failure semantics', () => {
       store: new CapturingStore(),
       clock: () => new Date(Number.NaN),
     });
-    await expect(cb(makeMetadata({ digest: null, receiptId: 'r-build' }))).resolves.toBeUndefined();
+    await expect(
+      cb(withoutDigest(makeMetadata({ receiptId: 'r-build' }))),
+    ).resolves.toBeUndefined();
     const events = warnSpy.mock.calls
-      .map((c) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
+      .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const recorderFailed = events.find((e) => e.event === 'SPONSORED_LOGS_RECORDER_FAILED');
     expect(recorderFailed).toMatchObject({
@@ -390,7 +397,7 @@ describe('fanOutSponsorResult', () => {
       }),
     );
     const events = warnSpy.mock.calls
-      .map((c) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
+      .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const fanFailed = events.find((e) => e.event === 'SPONSOR_RESULT_CALLBACK_FAILED');
     expect(fanFailed).toBeDefined();
@@ -415,9 +422,9 @@ describe('fanOutSponsorResult', () => {
     const fanned = fanOutSponsorResult(async () => {
       throw new Error('preflight throw');
     });
-    await fanned(makeMetadata({ outcome: 'preflight_failure', digest: null }));
+    await fanned(withoutDigest(makeMetadata({ outcome: 'preflight_failure' })));
     const events = warnSpy.mock.calls
-      .map((c) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
+      .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const fanFailed = events.find((e) => e.event === 'SPONSOR_RESULT_CALLBACK_FAILED');
     expect(fanFailed).toBeDefined();

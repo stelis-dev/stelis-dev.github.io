@@ -14,6 +14,7 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { makeCreditResult } from './helpers/currentFixtures.js';
 
 const { mockExtractSettleFields, mockValidateSettleFields, mockValidateGenericUserTx } = vi.hoisted(
   () => ({
@@ -24,15 +25,7 @@ const { mockExtractSettleFields, mockValidateSettleFields, mockValidateGenericUs
 );
 
 // ── Module-level mock: queryUserCredit ─────────────────────────────────────────
-let _creditResult = { vaultObjectId: null as string | null, credit: '0', needsCreate: false };
-
-vi.mock('../src/credit.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/credit.js')>();
-  return {
-    ...actual,
-    queryUserCredit: vi.fn(async () => ({ ..._creditResult })),
-  };
-});
+let _creditResult = makeCreditResult();
 
 // ── Module-level mock: integrity (S-16) ────────────────────────────────────────
 // prepareSponsored tests verify prepare delegation, not PTB integrity.
@@ -50,6 +43,7 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
+    queryUserCredit: vi.fn(async () => ({ ..._creditResult })),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
     validateGenericUserTransactionKind: mockValidateGenericUserTx,
@@ -66,11 +60,13 @@ const mockPrepare =
     ) => Promise<RelayPrepareResponse>
   >();
 const mockSponsor = vi.fn();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function () {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: mockPrepare,
       sponsor: mockSponsor,
     };
@@ -85,10 +81,6 @@ vi.mock('../src/client.js', () => ({
     }
   },
 }));
-
-// ── Mock: fetch for StelisSDK.connect() config endpoint ─────────────────────────
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
@@ -156,13 +148,9 @@ function makeMockSuiClient(overrides?: { listCoins?: ReturnType<typeof vi.fn> })
   } as unknown as SuiGrpcClient;
 }
 
-// ── SDK factory — uses mocked StelisClient.connect ──────────────────────────────
+// ── SDK factory — uses the mocked StelisClient public boundary ─────────────────
 async function createSDK(): Promise<StelisSDK> {
-  // Mock the internal /relay/config fetch that StelisSDK.connect() uses.
-  // The StelisClient constructor is mocked — getStatus() resolves immediately.
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -181,8 +169,8 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     mockValidateGenericUserTx.mockReset();
     mockValidateGenericUserTx.mockReturnValue({ ok: true });
     prepareAuthorizationSigner.mockClear();
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: false };
-    mockFetch.mockReset();
+    _creditResult = makeCreditResult();
+    mockGetConfig.mockReset();
   });
 
   // ── 1: Calls client.prepare with correct params ──────────────────────
@@ -238,9 +226,9 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
         prepareAuthorizationSigner,
       }),
     ).rejects.toMatchObject({
+      name: 'StelisSponsoredError',
       code: 'P1_SPONSOR_WITHDRAWAL_FORBIDDEN',
       message: 'sponsor withdrawal forbidden',
-      status: 422,
     });
 
     expect(mockPrepare).not.toHaveBeenCalled();
@@ -249,7 +237,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
   // ── 2: Returns txBytes from prepare response ────────────────────────
 
-  it('returns txBytes from prepare response', async () => {
+  it('returns the Host-bound transaction bytes and policy hash', async () => {
     const sdk = await createSDK();
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
@@ -259,6 +247,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     });
 
     expect(result.txBytes).toBe('base64MockTxBytes');
+    expect(result.policyHash).toBe(MOCK_PREPARE_RESPONSE.policyHash);
   });
 
   // ── 3: Returns receiptId from prepare response ──────────────────────
@@ -347,7 +336,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
   // ── 9: Returns vaultId from queryUserCredit ─────────────────────────
 
   it('returns vaultId from queryUserCredit', async () => {
-    _creditResult = { vaultObjectId: '0xVaultObj', credit: '1000', needsCreate: false };
+    _creditResult = makeCreditResult({ vaultObjectId: '0xVaultObj', credit: '1000' });
     const sdk = await createSDK();
 
     const result = await sdk.prepareSponsored(new Transaction(), {
@@ -363,7 +352,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
   // ── 10: Returns null vaultId when no vault ──────────────────────────
 
   it('returns null vaultId for new user', async () => {
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: true };
+    _creditResult = makeCreditResult({ needsCreate: true });
     const sdk = await createSDK();
 
     const result = await sdk.prepareSponsored(new Transaction(), {
@@ -386,6 +375,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
         client: makeMockSuiClient(),
         addr: ADDR,
         settlementToken: { type: '0xunknown::token::TOKEN' },
+        prepareAuthorizationSigner,
       }),
     ).rejects.toThrow();
   });
@@ -443,13 +433,13 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     mockValidateSettleFields.mockReturnValue({ ok: true });
     mockValidateGenericUserTx.mockReset();
     mockValidateGenericUserTx.mockReturnValue({ ok: true });
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: false };
-    mockFetch.mockReset();
+    _creditResult = makeCreditResult();
+    mockGetConfig.mockReset();
   });
 
   // ── Preflight: no coin check — server handles source resolution ─────
   it('proceeds to /prepare even when no vault and no coins (server resolves from address balance)', async () => {
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: true };
+    _creditResult = makeCreditResult({ needsCreate: true });
     const sdk = await createSDK();
     const listCoins = vi.fn().mockResolvedValue({ objects: [] });
 
@@ -467,7 +457,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
 
   // ── Preflight: proceeds when coins exist ────────────────────────────
   it('proceeds to /prepare when no vault but coins exist', async () => {
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: true };
+    _creditResult = makeCreditResult({ needsCreate: true });
     const sdk = await createSDK();
     const listCoins = vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] });
 
@@ -484,7 +474,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
 
   // ── Preflight: skips coin check for credit_general ──────────────────
   it('skips preflight coin check when vault has credit', async () => {
-    _creditResult = { vaultObjectId: '0xVault', credit: '999999999', needsCreate: false };
+    _creditResult = makeCreditResult({ vaultObjectId: '0xVault', credit: '999999999' });
     const sdk = await createSDK();
     const listCoins = vi.fn();
 
@@ -503,7 +493,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
   // ── Preflight: fail-open on RPC error ───────────────────────────────
   it('proceeds to /prepare when preflight RPC fails (fail-open)', async () => {
     // queryUserCredit will throw a network error (simulated via mock)
-    const { queryUserCredit: mockQueryCredit } = await import('../src/credit.js');
+    const { queryUserCredit: mockQueryCredit } = await import('@stelis/core-relay/browser');
     const originalImpl = (mockQueryCredit as ReturnType<typeof vi.fn>).getMockImplementation();
     (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('fetch failed: network timeout'),
@@ -530,7 +520,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
 
   // ── Post-prepare vault query failure does not abort flow ──────────
   it('returns vaultId=null when post-prepare queryUserCredit fails', async () => {
-    const { queryUserCredit: mockQueryCredit } = await import('../src/credit.js');
+    const { queryUserCredit: mockQueryCredit } = await import('@stelis/core-relay/browser');
     const sdk = await createSDK();
 
     // First call (preflight) succeeds, second call (post-prepare) fails
@@ -558,7 +548,7 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
   // ── CreditQueryInconsistentStateError in preflight propagates ─────
   it('propagates CreditQueryInconsistentStateError from preflight (not swallowed as infra error)', async () => {
     const { queryUserCredit: mockQueryCredit, CreditQueryInconsistentStateError } =
-      await import('../src/credit.js');
+      await import('@stelis/core-relay/browser');
     (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new CreditQueryInconsistentStateError('vault missing', '0xVAULT', '0xUSER'),
     );

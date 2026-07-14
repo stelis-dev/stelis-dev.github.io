@@ -44,10 +44,7 @@ import { createSponsorRefillAccountDispatchLock } from './sponsor-operations/ref
 import { bootstrapSponsorOperations } from './sponsor-operations/bootstrap.js';
 import type { SponsorAvailabilityView } from './sponsor-operations/gate.js';
 import { probeAndWriteSponsorRefillAccountState } from './sponsor-operations/sponsorRefillAccountProbe.js';
-import {
-  createPrepareSettlementSwapPathDescriptorMap,
-  resolvePrepareConfig,
-} from '@stelis/core-api/prepareConfig';
+import { resolvePrepareConfig } from '@stelis/core-api/prepareConfig';
 import {
   logStructuredEvent,
   PREPARE_STORE_EVICT_CLEANUP_FAILED,
@@ -277,8 +274,6 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       input.deepbookPackageId,
       input.settlementSwapPathRegistryEntries,
     );
-    const settlementSwapPathDescriptors =
-      createPrepareSettlementSwapPathDescriptorMap(settlementSwapPaths);
     // eslint-disable-next-line no-console
     console.log(
       `[app-api] Settlement swap path registry loaded: ${settlementSwapPaths.length} path(s) — ` +
@@ -288,7 +283,6 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // ── 6. PrepareConfig ────────────────────────────────────────────
     const prepareConfig = resolvePrepareConfig({
       settlementSwapPaths,
-      descriptors: settlementSwapPathDescriptors,
       deepbookPackageId: input.deepbookPackageId,
       quotedHostFeeMist: input.quotedHostFeeMist,
     });
@@ -447,7 +441,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // Owns the durable recent-log + lifetime-aggregate projections used
     // by the admin Dashboard / Sponsored Logs page. Composed alongside the
     // sponsor operations state callback via a fan-out wrapper so both run from
-    // the single `HostRuntimeConfig.onSponsorResult` slot.
+    // the single `createHostContext` onSponsorResult callback slot.
     const sponsoredLogsStore = new RedisSponsoredLogsStore(redis);
     const sponsoredLogsRecorder = createSponsoredLogsRecorder({
       store: sponsoredLogsStore,

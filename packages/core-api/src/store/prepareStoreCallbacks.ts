@@ -24,7 +24,6 @@
  * from `packages/core-api/src/index.ts`.
  */
 import type { PreparedTxEntry } from './prepareTypes.js';
-import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import {
   PREPARE_STORE_EVICT_CALLBACK_FAILED,
@@ -90,7 +89,7 @@ export function invokeReleaseCallback(args: {
     .then(() => args.onRelease(args.sponsorAddress, args.receiptId, args.txBytesHash))
     .then(() => {
       if (!emitSuccess) return;
-      logSponsorPoolEvent(SPONSOR_POOL_LEASE_RELEASE, {
+      logStructuredEvent(SPONSOR_POOL_LEASE_RELEASE, {
         adapter: args.adapter,
         reason: args.reason,
         sponsor_address: args.sponsorAddress,
@@ -98,7 +97,7 @@ export function invokeReleaseCallback(args: {
       });
     })
     .catch((err) => {
-      logSponsorPoolEvent(
+      logStructuredEvent(
         SPONSOR_POOL_LEASE_RELEASE_FAILED,
         {
           adapter: args.adapter,

@@ -1,4 +1,6 @@
-import type { RedisClientLike, RedisSetOptions } from '../../src/store/redisClient.js';
+import type { RedisClientLike } from '../../src/store/redisClient.js';
+
+type RedisSetOptions = Parameters<RedisClientLike['set']>[2];
 
 interface FakeRedisEntry {
   value: string;

@@ -1,12 +1,22 @@
 import type { StelisMcpServerConfig } from './config.js';
 import { requestJson } from './http.js';
-import type { JsonObject } from './types.js';
 import {
+  parsePromotionClaimResponse,
+  parsePromotionDetailResponse,
+  parsePromotionListResponse,
   parsePromotionPrepareResponse,
   parsePromotionSponsorResponse,
   parseRelayConfigResponse,
   parseRelayPrepareResponse,
   parseRelaySponsorResponse,
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  RELAY_CONFIG_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
+  STUDIO_CLAIM_ERROR_CODES,
+  STUDIO_DETAIL_ERROR_CODES,
+  STUDIO_LIST_ERROR_CODES,
   type PromotionPrepareRequest,
   type PromotionSponsorRequest,
   type RelayPrepareRequest,
@@ -27,6 +37,7 @@ export async function getRelayApiConfig(
       relayApiUrl: input.relayApiUrl,
       timeoutMs: input.timeoutMs,
       path: '/config',
+      allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
     }),
   );
 }
@@ -41,6 +52,7 @@ export async function prepareSponsoredTransaction(
       timeoutMs: input.timeoutMs,
       method: 'POST',
       path: '/prepare',
+      allowedErrorCodes: RELAY_PREPARE_ERROR_CODES,
       body: omitRelayApiFields(input),
     }),
   );
@@ -56,6 +68,7 @@ export async function submitSponsoredTransaction(
       timeoutMs: input.timeoutMs,
       method: 'POST',
       path: '/sponsor',
+      allowedErrorCodes: RELAY_SPONSOR_ERROR_CODES,
       body: omitRelayApiFields(input),
     }),
   );
@@ -64,42 +77,51 @@ export async function submitSponsoredTransaction(
 export async function listPromotions(
   config: StelisMcpServerConfig,
   input: RelayApiScopedInput & { developerJwt: string },
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    base: 'studio',
-    path: '/studio/promotions',
-    headers: bearerHeader(input.developerJwt),
-  });
+): Promise<ReturnType<typeof parsePromotionListResponse>> {
+  return parsePromotionListResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      base: 'studio',
+      path: '/studio/promotions',
+      allowedErrorCodes: STUDIO_LIST_ERROR_CODES,
+      headers: bearerHeader(input.developerJwt),
+    }),
+  );
 }
 
 export async function getPromotionDetail(
   config: StelisMcpServerConfig,
   input: RelayApiScopedInput & { developerJwt: string; promotionId: string },
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    base: 'studio',
-    path: `/studio/promotions/${encodeURIComponent(input.promotionId)}`,
-    headers: bearerHeader(input.developerJwt),
-  });
+): Promise<ReturnType<typeof parsePromotionDetailResponse>> {
+  return parsePromotionDetailResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      base: 'studio',
+      path: `/studio/promotions/${encodeURIComponent(input.promotionId)}`,
+      allowedErrorCodes: STUDIO_DETAIL_ERROR_CODES,
+      headers: bearerHeader(input.developerJwt),
+    }),
+  );
 }
 
 export async function claimPromotion(
   config: StelisMcpServerConfig,
   input: RelayApiScopedInput & { developerJwt: string; promotionId: string },
-): Promise<JsonObject> {
-  return requestJson<JsonObject>(config, {
-    relayApiUrl: input.relayApiUrl,
-    timeoutMs: input.timeoutMs,
-    base: 'studio',
-    method: 'POST',
-    path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/claim`,
-    headers: bearerHeader(input.developerJwt),
-    body: {},
-  });
+): Promise<ReturnType<typeof parsePromotionClaimResponse>> {
+  return parsePromotionClaimResponse(
+    await requestJson(config, {
+      relayApiUrl: input.relayApiUrl,
+      timeoutMs: input.timeoutMs,
+      base: 'studio',
+      method: 'POST',
+      path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/claim`,
+      allowedErrorCodes: STUDIO_CLAIM_ERROR_CODES,
+      headers: bearerHeader(input.developerJwt),
+      body: {},
+    }),
+  );
 }
 
 export async function preparePromotionSponsoredTransaction(
@@ -116,6 +138,7 @@ export async function preparePromotionSponsoredTransaction(
       base: 'studio',
       method: 'POST',
       path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/prepare`,
+      allowedErrorCodes: PROMOTION_PREPARE_ERROR_CODES,
       headers: bearerHeader(input.developerJwt),
       body: {
         senderAddress: input.senderAddress,
@@ -139,6 +162,7 @@ export async function submitPromotionSponsoredTransaction(
       base: 'studio',
       method: 'POST',
       path: `/studio/promotions/${encodeURIComponent(input.promotionId)}/sponsor`,
+      allowedErrorCodes: PROMOTION_SPONSOR_ERROR_CODES,
       headers: bearerHeader(input.developerJwt),
       body: {
         receiptId: input.receiptId,

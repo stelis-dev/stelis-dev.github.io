@@ -7,7 +7,7 @@ import { RedisPrepareInflight } from '../src/store/redisPrepareInflight.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { RedisRateLimiter } from '../src/store/redisRateLimiter.js';
 import { RedisSponsorPool } from '../src/store/redisSponsorPool.js';
-import { startRealRedis, type RealRedisHandle } from './helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 const TEST_HMAC_SECRET = 'real-redis-adapter-test-hmac-secret-v1-aaaaaaaa';
 const SAMPLE_TX_BYTES = new Uint8Array([0xc0, 0xde, 0x01]);

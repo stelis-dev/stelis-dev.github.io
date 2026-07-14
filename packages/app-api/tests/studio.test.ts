@@ -25,6 +25,7 @@ const {
   MockSponsorPreflightError,
   MockSponsorOnchainError,
   MockSponsorCongestionError,
+  MockSponsorTerminalProcessingError,
   MockSponsorLeaseExpiredError,
   MockBlockCheckUnavailableError,
 } = vi.hoisted(() => {
@@ -76,7 +77,6 @@ const {
     constructor(
       public readonly code: string,
       message: string,
-      public readonly statusHint?: number,
     ) {
       super(message);
       this.name = 'SponsorValidationError';
@@ -102,9 +102,22 @@ const {
     }
   }
   class _SponsorCongestionError extends Error {
-    constructor(message: string) {
+    constructor(
+      message: string,
+      public readonly digest: string,
+    ) {
       super(message);
       this.name = 'SponsorCongestionError';
+    }
+  }
+  class _SponsorTerminalProcessingError extends Error {
+    readonly code = 'GAS_EFFECTS_MISSING' as const;
+    constructor(
+      message: string,
+      public readonly digest: string,
+    ) {
+      super(message);
+      this.name = 'SponsorTerminalProcessingError';
     }
   }
   class _SponsorLeaseExpiredError extends Error {
@@ -147,6 +160,7 @@ const {
     MockSponsorPreflightError: _SponsorPreflightError,
     MockSponsorOnchainError: _SponsorOnchainError,
     MockSponsorCongestionError: _SponsorCongestionError,
+    MockSponsorTerminalProcessingError: _SponsorTerminalProcessingError,
     MockSponsorLeaseExpiredError: _SponsorLeaseExpiredError,
     MockBlockCheckUnavailableError: _BlockCheckUnavailableError,
   };
@@ -182,6 +196,7 @@ vi.mock('@stelis/core-api', async () => {
     SponsorPreflightError: MockSponsorPreflightError,
     SponsorOnchainError: MockSponsorOnchainError,
     SponsorCongestionError: MockSponsorCongestionError,
+    SponsorTerminalProcessingError: MockSponsorTerminalProcessingError,
     SponsorLeaseExpiredError: MockSponsorLeaseExpiredError,
     BlockCheckUnavailableError: MockBlockCheckUnavailableError,
   };
@@ -191,13 +206,15 @@ vi.mock('../src/sponsor-operations/gateResponse.js', () => ({
   buildSponsorUnavailableResponse: mockBuildSponsorOperationsBlockedResponse,
 }));
 
-vi.mock('../src/developerJwtVerifyCallback.js', () => ({
-  callDeveloperVerifyApi: mockCallDeveloperVerifyApi,
-}));
+vi.mock('../src/developerJwtVerifyCallback.js', async () => {
+  const actual = await vi.importActual('../src/developerJwtVerifyCallback.js');
+  return { ...actual, callDeveloperVerifyApi: mockCallDeveloperVerifyApi };
+});
 
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import type { AppApiContext } from '../src/context.js';
+import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
 
@@ -243,6 +260,7 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
     studioGlobalAllowedTargets: studioEnabled ? new Set<string>() : null,
     developerJwtTrustConfig: studioEnabled ? TEST_TRUST_CONFIG : null,
     developerJwtVerifyUrl: null,
+    failoverTransport: new SuiRpcFailoverTransport([{ url: 'https://rpc.test.invalid' }]),
     redis: {} as never,
     sponsorOperations: {
       readState: vi.fn().mockResolvedValue({
@@ -271,6 +289,11 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
       sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
       dispose: vi.fn(),
     } as never,
+    sponsoredLogsStore: {
+      append: vi.fn().mockResolvedValue(undefined),
+      getSummary: vi.fn(),
+      getRecent: vi.fn(),
+    },
     dispose: vi.fn(),
   };
 }
@@ -362,7 +385,7 @@ describe('studio routes', () => {
       expect(res.status).toBe(401);
     });
 
-    it('returns 400 when Authorization header is malformed', async () => {
+    it('returns 401 AUTH_FAILED when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
@@ -371,7 +394,8 @@ describe('studio routes', () => {
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(401);
+      expect((await res.json()).code).toBe('AUTH_FAILED');
     });
 
     it('returns 429 when IP is blocked', async () => {
@@ -470,12 +494,12 @@ describe('studio routes', () => {
       expect(calls).toContain('promo_prepare:promotion:promo-1');
     });
 
-    it('passes PromotionPrepareError statusHint through', async () => {
+    it('derives PromotionPrepareError status from its current code', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionPrepareError } = await import('@stelis/core-api/studio');
       mockHandlePromotionPrepare.mockRejectedValueOnce(
-        new PromotionPrepareError('Test error', 'TEST_CODE', 409),
+        new PromotionPrepareError('Promotion not active', 'PROMOTION_NOT_ACTIVE'),
       );
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/prepare', {
@@ -485,14 +509,13 @@ describe('studio routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.code).toBe('TEST_CODE');
+      expect(body.code).toBe('PROMOTION_NOT_ACTIVE');
     });
 
     it('returns 503 when the sponsor operations gate is closed', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        status: 503,
         body: {
           error: 'No sponsor slots currently available',
           code: 'SPONSOR_CAPACITY_UNAVAILABLE',
@@ -513,7 +536,7 @@ describe('studio routes', () => {
       );
     });
 
-    it('returns 401 AUTH_FAILED when developer JWT verification fails', async () => {
+    it('returns 401 AUTH_JWT_INVALID when local developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Invalid signature'));
@@ -526,6 +549,43 @@ describe('studio routes', () => {
       expect(res.status).toBe(401);
       const body = await res.json();
       expect(body.code).toBe('AUTH_JWT_INVALID');
+    });
+
+    it('returns 401 AUTH_JWT_INVALID when the developer callback explicitly rejects the JWT', async () => {
+      const ctx = createMockCtx(true);
+      ctx.studioGlobalAllowedTargets = new Set<string>();
+      ctx.developerJwtVerifyUrl = 'https://developer.example.test/verify';
+      const { DeveloperVerifyRejectedError } = await import('../src/developerJwtVerifyCallback.js');
+      mockCallDeveloperVerifyApi.mockRejectedValueOnce(
+        new DeveloperVerifyRejectedError('developer callback denied the JWT'),
+      );
+      const app = makeApp(ctx);
+      const res = await app.request('/studio/promotions/promo-1/prepare', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
+        body: JSON.stringify(VALID_PREPARE_BODY),
+      });
+      expect(res.status).toBe(401);
+      expect((await res.json()).code).toBe('AUTH_JWT_INVALID');
+    });
+
+    it('returns 503 AUTH_UNAVAILABLE when the developer callback cannot establish a verdict', async () => {
+      const ctx = createMockCtx(true);
+      ctx.studioGlobalAllowedTargets = new Set<string>();
+      ctx.developerJwtVerifyUrl = 'https://developer.example.test/verify';
+      const { DeveloperVerifyUnavailableError } =
+        await import('../src/developerJwtVerifyCallback.js');
+      mockCallDeveloperVerifyApi.mockRejectedValueOnce(
+        new DeveloperVerifyUnavailableError('developer callback timed out'),
+      );
+      const app = makeApp(ctx);
+      const res = await app.request('/studio/promotions/promo-1/prepare', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
+        body: JSON.stringify(VALID_PREPARE_BODY),
+      });
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe('AUTH_UNAVAILABLE');
     });
 
     it('returns 422 when handler throws PrepareValidationError (DRY_RUN_FAILED)', async () => {
@@ -587,7 +647,6 @@ describe('studio routes', () => {
         new PromotionPrepareError(
           'TX contains FundsWithdrawal(Sponsor) — rejected to protect sponsor funds',
           'SPONSOR_WITHDRAWAL_FORBIDDEN',
-          403,
         ),
       );
       const app = makeApp(ctx);
@@ -646,7 +705,6 @@ describe('studio routes', () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        status: 503,
         headers: {},
         body: {
           error: 'No sponsor slots currently available',
@@ -674,7 +732,7 @@ describe('studio routes', () => {
       expect(res.status).toBe(401);
     });
 
-    it('returns 400 when Authorization header is malformed', async () => {
+    it('returns 401 AUTH_FAILED when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
@@ -683,7 +741,8 @@ describe('studio routes', () => {
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(401);
+      expect((await res.json()).code).toBe('AUTH_FAILED');
     });
 
     it('returns 429 when IP is blocked', async () => {
@@ -778,7 +837,7 @@ describe('studio routes', () => {
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
-        new PromotionSponsorError('TX reverted', 'ONCHAIN_REVERT', 422),
+        new PromotionSponsorError('TX reverted', 'ONCHAIN_REVERT', { digest: '0xreverted' }),
       );
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
@@ -789,12 +848,12 @@ describe('studio routes', () => {
       expect(res.status).toBe(422);
     });
 
-    it('passes PromotionSponsorError statusHint through', async () => {
+    it('derives PromotionSponsorError status from its current code', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
-        new PromotionSponsorError('Budget exhausted', 'BUDGET_EXHAUSTED', 409),
+        new PromotionSponsorError('Promotion not active', 'PROMOTION_NOT_ACTIVE'),
       );
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
@@ -804,7 +863,7 @@ describe('studio routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.code).toBe('BUDGET_EXHAUSTED');
+      expect(body.code).toBe('PROMOTION_NOT_ACTIVE');
     });
 
     // A classified sponsor failure subcode reaches the route JSON body alongside
@@ -819,9 +878,7 @@ describe('studio routes', () => {
         new PromotionSponsorError(
           'Transaction reverted on-chain: MoveAbort vault 1',
           'ONCHAIN_REVERT',
-          422,
-          null,
-          'REPLAY_NONCE',
+          { digest: '0xreverted', subcode: 'REPLAY_NONCE' },
         ),
       );
       const app = makeApp(ctx);
@@ -841,11 +898,7 @@ describe('studio routes', () => {
       ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
-        new PromotionSponsorError(
-          'Preflight simulation failed: unrecognized',
-          'PREFLIGHT_FAILED',
-          422,
-        ),
+        new PromotionSponsorError('Preflight simulation failed: unrecognized', 'PREFLIGHT_FAILED'),
       );
       const app = makeApp(ctx);
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
@@ -863,7 +916,6 @@ describe('studio routes', () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        status: 503,
         body: {
           error: 'No sponsor slots currently available',
           code: 'SPONSOR_CAPACITY_UNAVAILABLE',
@@ -880,7 +932,7 @@ describe('studio routes', () => {
       expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
-    it('returns 401 AUTH_FAILED when developer JWT verification fails', async () => {
+    it('returns 401 AUTH_JWT_INVALID when local developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
       ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Expired token'));

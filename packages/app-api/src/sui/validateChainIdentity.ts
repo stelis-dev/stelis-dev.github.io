@@ -9,18 +9,9 @@
  */
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { GrpcWebFetchTransport } from '@protobuf-ts/grpcweb-transport';
+import { SUI_CHAIN_IDENTIFIERS, type SuiNetwork } from '@stelis/contracts';
 import type { SuiRpcEndpointConfig } from './failoverTransport.js';
-import { redactUrl } from './redactUrl.js';
-
-/**
- * Canonical chain identifiers per network.
- *
- * See CHAIN_IDS.md for the verification methodology.
- */
-const CANONICAL_CHAIN_IDS: Record<string, string> = {
-  testnet: '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD',
-  mainnet: '4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S',
-};
+import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
 
 export interface ChainIdentityResult {
   chainIdentifier: string;
@@ -42,10 +33,10 @@ export interface ChainIdentityResult {
  * @throws Error on mismatch, all-failed, or unknown network mapping
  */
 export async function validateChainIdentity(
-  network: 'testnet' | 'mainnet',
+  network: SuiNetwork,
   endpoints: SuiRpcEndpointConfig[],
 ): Promise<ChainIdentityResult> {
-  const expectedChainId = CANONICAL_CHAIN_IDS[network];
+  const expectedChainId = SUI_CHAIN_IDENTIFIERS[network];
   if (!expectedChainId) {
     throw new Error(`[app-api] No canonical chainIdentifier for network "${network}".`);
   }
@@ -70,7 +61,7 @@ export async function validateChainIdentity(
         return {
           url: ep.url,
           chainIdentifier: null,
-          error: err instanceof Error ? err.message : String(err),
+          error: redactSensitiveText(err instanceof Error ? err.message : String(err)),
         };
       }
     }),
@@ -87,12 +78,12 @@ export async function validateChainIdentity(
     // eslint-disable-next-line no-console
     console.warn(
       `[app-api] Chain identity probe failed for ${failed.length}/${results.length} endpoint(s): ` +
-        failed.map((r) => `${redactUrl(r.url)}: ${r.error}`).join('; '),
+        failed.map((r) => `${redactEndpointUrl(r.url)}: ${r.error}`).join('; '),
     );
   }
 
   if (successful.length === 0) {
-    const errorSummary = results.map((r) => `${redactUrl(r.url)}: ${r.error}`).join('; ');
+    const errorSummary = results.map((r) => `${redactEndpointUrl(r.url)}: ${r.error}`).join('; ');
     throw new Error(
       `[app-api] Chain identity validation failed: no endpoint responded. ${errorSummary}`,
     );
@@ -102,7 +93,7 @@ export async function validateChainIdentity(
   const chainIds = new Set(successful.map((r) => r.chainIdentifier));
   if (chainIds.size > 1) {
     const mismatchSummary = successful
-      .map((r) => `${redactUrl(r.url)}=${r.chainIdentifier}`)
+      .map((r) => `${redactEndpointUrl(r.url)}=${r.chainIdentifier}`)
       .join(', ');
     throw new Error(
       `[app-api] Chain identity mismatch across endpoints: ${mismatchSummary}. ` +

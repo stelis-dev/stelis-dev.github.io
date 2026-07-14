@@ -14,6 +14,40 @@ export interface PreparePassRpcStats {
   quote: QuoteRpcStats;
 }
 
+/** Current structured-log projection for one quote-stat snapshot. */
+export interface QuoteRpcStatsLogFields {
+  readonly quote_quantity_in_rpc_calls: number;
+  readonly quote_quantity_out_verify_rpc_calls: number;
+  readonly quote_total_rpc_calls: number;
+  readonly quote_rpc_total_ms: number;
+  readonly quote_rpc_max_ms: number;
+  readonly quote_quantity_in_logical_calls: number;
+  readonly quote_quantity_out_verify_logical_calls: number;
+  readonly quote_cache_hits: number;
+  readonly quote_rpc_stats_complete: boolean;
+}
+
+/**
+ * Project the internal quote counters to their one structured-log shape.
+ * Individual quote snapshots do not include the separately tracked mid-price RPC.
+ */
+export function quoteRpcStatsLogFields(
+  stats: QuoteRpcStats,
+  complete: boolean,
+): QuoteRpcStatsLogFields {
+  return {
+    quote_quantity_in_rpc_calls: stats.quantityInCalls,
+    quote_quantity_out_verify_rpc_calls: stats.quantityOutVerifyCalls,
+    quote_total_rpc_calls: stats.quantityInCalls + stats.quantityOutVerifyCalls,
+    quote_rpc_total_ms: stats.totalDurationMs,
+    quote_rpc_max_ms: stats.maxDurationMs,
+    quote_quantity_in_logical_calls: stats.quantityInLogicalCalls,
+    quote_quantity_out_verify_logical_calls: stats.quantityOutVerifyLogicalCalls,
+    quote_cache_hits: stats.cacheHits,
+    quote_rpc_stats_complete: complete,
+  };
+}
+
 export function emptyQuoteRpcStats(): QuoteRpcStats {
   return {
     quantityInCalls: 0,
@@ -63,7 +97,7 @@ export function absorbPassRpcStats(acc: BuildRpcAccumulator, passStats: PrepareP
   acc.midPriceTotalMs += passStats.midPriceTotalMs;
 }
 
-export function summarizeRpcStats(acc: BuildRpcAccumulator): {
+export interface BuildRpcSummary {
   quoteQuantityInCalls: number;
   quoteQuantityOutVerifyCalls: number;
   quoteTotalRpcCalls: number;
@@ -72,7 +106,9 @@ export function summarizeRpcStats(acc: BuildRpcAccumulator): {
   quoteQuantityInLogicalCalls: number;
   quoteQuantityOutVerifyLogicalCalls: number;
   quoteCacheHits: number;
-} {
+}
+
+export function summarizeRpcStats(acc: BuildRpcAccumulator): BuildRpcSummary {
   const quoteQuantityInCalls =
     acc.pass1Quote.quantityInCalls +
     acc.pass1_5Quote.quantityInCalls +
@@ -112,5 +148,23 @@ export function summarizeRpcStats(acc: BuildRpcAccumulator): {
     quoteQuantityInLogicalCalls,
     quoteQuantityOutVerifyLogicalCalls,
     quoteCacheHits,
+  };
+}
+
+/** Project the complete request-level summary to the same log vocabulary. */
+export function buildRpcSummaryLogFields(
+  summary: BuildRpcSummary,
+  complete: boolean,
+): QuoteRpcStatsLogFields {
+  return {
+    quote_quantity_in_rpc_calls: summary.quoteQuantityInCalls,
+    quote_quantity_out_verify_rpc_calls: summary.quoteQuantityOutVerifyCalls,
+    quote_total_rpc_calls: summary.quoteTotalRpcCalls,
+    quote_rpc_total_ms: summary.quoteRpcTotalMs,
+    quote_rpc_max_ms: summary.quoteRpcMaxMs,
+    quote_quantity_in_logical_calls: summary.quoteQuantityInLogicalCalls,
+    quote_quantity_out_verify_logical_calls: summary.quoteQuantityOutVerifyLogicalCalls,
+    quote_cache_hits: summary.quoteCacheHits,
+    quote_rpc_stats_complete: complete,
   };
 }

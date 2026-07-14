@@ -1,11 +1,12 @@
 /**
  * SDK error types and normalization.
  *
- * StelisSponsoredError — user-facing error from executeSponsored.
+ * StelisSponsoredError — user-facing Host normalization or SDK-local sponsored-flow validation.
  * normalizeApiError   — maps StelisApiException → StelisSponsoredError.
  * isInfraError        — classifies transient network/RPC errors.
  */
 import { StelisApiException } from './client.js';
+import type { HostErrorMeta } from '@stelis/contracts';
 
 /**
  * Returns true for transient network/infrastructure errors that may resolve
@@ -29,21 +30,22 @@ export function isInfraError(err: unknown): boolean {
 }
 
 /**
- * User-friendly error thrown by `executeSponsored`.
+ * User-friendly error thrown by sponsored-flow orchestration and local validation.
  *
  * Codes:
  * - `INSUFFICIENT_FUNDS` — balance or settle input too low.
  * - `TRANSACTION_FAILED` — dry-run simulation failure.
  * - `EXECUTION_FAILED` — sponsor preflight / on-chain revert.
- * - *(passthrough)* — any other server error code.
+ * - *(passthrough)* — a current Host code or SDK-local validation code without a
+ *   user-facing normalization above.
  */
 export class StelisSponsoredError extends Error {
   constructor(
     public readonly code: string,
     message: string,
     public readonly cause?: Error,
-    /** Server-side diagnostic meta (minSettleMist, requiredTotalIn, subcode, etc.) */
-    public readonly meta?: Record<string, unknown>,
+    /** Closed current Host error fields (minSettleMist, subcode, etc.). */
+    public readonly meta?: HostErrorMeta,
   ) {
     super(message);
     this.name = 'StelisSponsoredError';
@@ -51,7 +53,7 @@ export class StelisSponsoredError extends Error {
 }
 
 /**
- * Map a StelisApiException from the server into a user-friendly
+ * Map a current Host StelisApiException into a user-friendly
  * StelisSponsoredError with a normalized code and message.
  */
 export function normalizeApiError(err: StelisApiException): StelisSponsoredError {
@@ -72,9 +74,15 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
   // INSUFFICIENT_SETTLE_INPUT (settle.move ETotalInTooLow, S-3 floor) and
   // INSUFFICIENT_FUNDS (settle.move EInsufficientFunds, S-4 non-loss) are
   // both user-visible exhaustion classes; collapse to INSUFFICIENT_FUNDS.
+  const ownsSponsorSubcode =
+    err.code === 'SPONSOR_PREFLIGHT_FAILED' ||
+    err.code === 'SPONSOR_ONCHAIN_FAILED' ||
+    err.code === 'PREFLIGHT_FAILED' ||
+    err.code === 'ONCHAIN_REVERT';
   if (
-    err.meta?.subcode === 'INSUFFICIENT_SETTLE_INPUT' ||
-    err.meta?.subcode === 'INSUFFICIENT_FUNDS'
+    ownsSponsorSubcode &&
+    (err.meta?.subcode === 'INSUFFICIENT_SETTLE_INPUT' ||
+      err.meta?.subcode === 'INSUFFICIENT_FUNDS')
   ) {
     return new StelisSponsoredError(
       'INSUFFICIENT_FUNDS',
@@ -83,7 +91,7 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
       err.meta,
     );
   }
-  if (err.meta?.subcode === 'SPREAD_EXCEEDED') {
+  if (ownsSponsorSubcode && err.meta?.subcode === 'SPREAD_EXCEEDED') {
     return new StelisSponsoredError(
       'TRANSACTION_FAILED',
       'Market spread too wide for safe execution. Please try again later.',
@@ -91,7 +99,7 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
       err.meta,
     );
   }
-  if (err.meta?.subcode === 'SLIPPAGE_EXCEEDED') {
+  if (ownsSponsorSubcode && err.meta?.subcode === 'SLIPPAGE_EXCEEDED') {
     return new StelisSponsoredError(
       'TRANSACTION_FAILED',
       'Price moved beyond slippage tolerance. Please try a smaller amount.',
@@ -99,7 +107,7 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
       err.meta,
     );
   }
-  if (err.meta?.subcode === 'CLAIM_WOULD_EXCEED_MAX') {
+  if (ownsSponsorSubcode && err.meta?.subcode === 'CLAIM_WOULD_EXCEED_MAX') {
     return new StelisSponsoredError(
       'TRANSACTION_FAILED',
       'Transaction exceeds safety limits. Please try a smaller amount.',
@@ -113,7 +121,6 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
     err.code === 'CLAIM_WOULD_EXCEED_MAX' ||
     err.code === 'SLIPPAGE_QUERY_FAILED' ||
     err.code === 'SLIPPAGE_CONVERGENCE_FAILED' ||
-    err.code === 'SWAP_AMOUNT_OVERFLOW' ||
     err.code === 'SPREAD_EXCEEDED'
   ) {
     return new StelisSponsoredError(
@@ -141,6 +148,6 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
       err.meta,
     );
   }
-  // Passthrough — preserve original code
+  // Preserve a current Host code, or UNKNOWN for an invalid/uncoded Host response.
   return new StelisSponsoredError(err.code, err.message, err, err.meta);
 }

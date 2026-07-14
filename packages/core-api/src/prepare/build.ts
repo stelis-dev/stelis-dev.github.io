@@ -46,7 +46,7 @@ import {
 } from '@stelis/core-relay/server';
 import type { QuoteRpcStats, QuoteCache } from '@stelis/core-relay/server';
 import { resolvePaymentSource } from './coinSelection.js';
-import { PrepareValidationError } from './replay.js';
+import { PrepareValidationError, type PrepareErrorMeta } from './replay.js';
 import {
   classifyDryRunFailure,
   safeBuild,
@@ -66,6 +66,7 @@ import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_BUILD_STAGE } from '../observability/events.js';
 import { createHash } from 'crypto';
 import { mist, unBps, type Mist } from '../internal/brand.js';
+import { parseCurrentSuiTerminalForBytes } from '../session/sessionPrimitives.js';
 import type {
   BuildContext,
   GenericPrepareBuildOutput,
@@ -78,9 +79,11 @@ export type {
 } from './buildTypes.js';
 import {
   absorbPassRpcStats,
+  buildRpcSummaryLogFields,
   emptyBuildRpcAccumulator,
   emptyPreparePassRpcStats,
   emptyQuoteRpcStats,
+  quoteRpcStatsLogFields,
   summarizeRpcStats,
   type BuildRpcAccumulator,
   type PreparePassRpcStats,
@@ -146,7 +149,7 @@ function buildSettleMeta(
   ctx: BuildContext,
   claimEstimate: bigint,
   isEstimate: boolean,
-): Record<string, string> {
+): PrepareErrorMeta {
   return _buildSettleMeta(
     ctx.minSettleMist,
     ctx.quotedHostFeeMist,
@@ -187,47 +190,31 @@ type CreditProbeMeasurement =
 
 function extractSuccessfulDryRunGas(
   simResult: unknown,
+  dryRunBytes: Uint8Array,
   stelisPackageId: string,
   commands: readonly PtbCommand[],
-  meta: Record<string, string>,
+  meta: PrepareErrorMeta,
 ): SimulationGasUsed {
-  const simTx = (
-    simResult as {
-      Transaction?: {
-        status?: { success?: boolean; error?: { message?: string } };
-        effects?: { gasUsed?: SimulationGasUsed };
-      };
-    }
-  ).Transaction;
-  if (!simTx) {
-    const simFailed = simResult as unknown as {
-      $kind?: string;
-      FailedTransaction?: { status?: { error?: { message?: string } } };
-    };
-    if (simFailed.$kind === 'FailedTransaction') {
-      const reason = simFailed.FailedTransaction?.status?.error?.message ?? 'unknown';
-      throw classifyDryRunFailure(reason, stelisPackageId, commands, meta);
-    }
-    throw new PrepareValidationError('DRY_RUN_FAILED', 'Dry-run returned no transaction result');
+  const terminal = parseCurrentSuiTerminalForBytes(simResult, dryRunBytes);
+  if (!terminal) {
+    throw new PrepareValidationError(
+      'DRY_RUN_FAILED',
+      'Dry-run returned a malformed terminal result',
+    );
   }
-
-  if (!simTx.status?.success) {
-    const reason = (simTx.status as { error?: { message?: string } })?.error?.message ?? 'unknown';
-    throw classifyDryRunFailure(reason, stelisPackageId, commands, meta);
+  if (terminal.kind === 'failure') {
+    throw classifyDryRunFailure(terminal.error.message, stelisPackageId, commands, meta);
   }
-
-  const gasUsed = simTx.effects?.gasUsed;
-  if (!gasUsed) {
+  if (!terminal.gasUsed) {
     throw new PrepareValidationError('DRY_RUN_NO_GAS', 'Dry-run returned no gas usage');
   }
-
-  return gasUsed as SimulationGasUsed;
+  return terminal.gasUsed;
 }
 
 async function dryRunForGas(
   ctx: BuildContext,
   tx: Transaction,
-  meta: Record<string, string>,
+  meta: PrepareErrorMeta,
   completedStage: string,
   pass: 'credit_preswap' | 'pass1',
   failureContext: { poolId: string; settlementTokenSymbol: string },
@@ -243,10 +230,6 @@ async function dryRunForGas(
   // complete yet (pass1.5 / pass2 unstarted, or credit-only path with no
   // remaining quote work).
   //
-  // Quote-stat fields and the marker are inlined at each emit site rather than
-  // spread from a shared object so `scripts/check-prepare-stage-schema.mjs`
-  // can detect them via direct field-name regex (the lint does not follow
-  // `...identifier` spreads).
   const poolId = failureContext.poolId;
   const settlementTokenSymbol = failureContext.settlementTokenSymbol;
   const commands = convertSdkCommands(tx.getData().commands as unknown[]);
@@ -260,15 +243,7 @@ async function dryRunForGas(
       pool_id: poolId,
       settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-      quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
-      quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
-      quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,
-      quote_rpc_total_ms: quoteStats.totalDurationMs,
-      quote_rpc_max_ms: quoteStats.maxDurationMs,
-      quote_quantity_in_logical_calls: quoteStats.quantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: quoteStats.quantityOutVerifyLogicalCalls,
-      quote_cache_hits: quoteStats.cacheHits,
-      quote_rpc_stats_complete: false,
+      ...quoteRpcStatsLogFields(quoteStats, false),
       phase_complete: false,
     });
     throw err;
@@ -286,15 +261,7 @@ async function dryRunForGas(
       pool_id: poolId,
       settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-      quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
-      quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
-      quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,
-      quote_rpc_total_ms: quoteStats.totalDurationMs,
-      quote_rpc_max_ms: quoteStats.maxDurationMs,
-      quote_quantity_in_logical_calls: quoteStats.quantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: quoteStats.quantityOutVerifyLogicalCalls,
-      quote_cache_hits: quoteStats.cacheHits,
-      quote_rpc_stats_complete: false,
+      ...quoteRpcStatsLogFields(quoteStats, false),
       phase_complete: false,
     });
     throw err;
@@ -308,7 +275,7 @@ async function dryRunForGas(
   });
 
   try {
-    return extractSuccessfulDryRunGas(simResult, ctx.packageId, commands, meta);
+    return extractSuccessfulDryRunGas(simResult, dryRunBytes, ctx.packageId, commands, meta);
   } catch (err) {
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
@@ -317,15 +284,7 @@ async function dryRunForGas(
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       has_transaction: Boolean(simResult.Transaction),
       completed_stage_emitted: true,
-      quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
-      quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
-      quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,
-      quote_rpc_total_ms: quoteStats.totalDurationMs,
-      quote_rpc_max_ms: quoteStats.maxDurationMs,
-      quote_quantity_in_logical_calls: quoteStats.quantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: quoteStats.quantityOutVerifyLogicalCalls,
-      quote_cache_hits: quoteStats.cacheHits,
-      quote_rpc_stats_complete: false,
+      ...quoteRpcStatsLogFields(quoteStats, false),
       phase_complete: false,
     });
     throw err;
@@ -518,15 +477,7 @@ async function solveSwapForClaim(
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
       settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
       target_output_mist: targetOutputMist.toString(),
-      quote_quantity_in_rpc_calls: stats.quantityInCalls,
-      quote_quantity_out_verify_rpc_calls: stats.quantityOutVerifyCalls,
-      quote_total_rpc_calls: stats.quantityInCalls + stats.quantityOutVerifyCalls,
-      quote_quantity_in_logical_calls: stats.quantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: stats.quantityOutVerifyLogicalCalls,
-      quote_cache_hits: stats.cacheHits,
-      quote_rpc_total_ms: stats.totalDurationMs,
-      quote_rpc_max_ms: stats.maxDurationMs,
-      quote_rpc_stats_complete: false,
+      ...quoteRpcStatsLogFields(stats, false),
     });
     return normalizeMarketPolicyError(err, input.descriptor, stage);
   }
@@ -841,15 +792,7 @@ async function buildFinalGenericPrepareResult(
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
       settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
-      quote_quantity_in_rpc_calls: rpcSummary.quoteQuantityInCalls,
-      quote_quantity_out_verify_rpc_calls: rpcSummary.quoteQuantityOutVerifyCalls,
-      quote_total_rpc_calls: rpcSummary.quoteTotalRpcCalls,
-      quote_rpc_total_ms: rpcSummary.quoteRpcTotalMs,
-      quote_rpc_max_ms: rpcSummary.quoteRpcMaxMs,
-      quote_quantity_in_logical_calls: rpcSummary.quoteQuantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: rpcSummary.quoteQuantityOutVerifyLogicalCalls,
-      quote_cache_hits: rpcSummary.quoteCacheHits,
-      quote_rpc_stats_complete: true,
+      ...buildRpcSummaryLogFields(rpcSummary, true),
       phase_complete: false,
       ...buildBfqFloorPayload(pass2ExecutionQuote, input.settlementSwapPath.hops[0]?.swapDirection),
     });
@@ -873,27 +816,7 @@ async function buildFinalGenericPrepareResult(
     gross_gas_mist: grossGas.toString(),
     effective_profile: effectiveProfile,
     payment_input_source: paymentInputSource,
-    // RPC dispatch counts. Cache hits do NOT increment these.
-    quote_quantity_in_rpc_calls: rpcSummary.quoteQuantityInCalls,
-    quote_quantity_out_verify_rpc_calls: rpcSummary.quoteQuantityOutVerifyCalls,
-    quote_total_rpc_calls: rpcSummary.quoteTotalRpcCalls,
-    quote_rpc_total_ms: rpcSummary.quoteRpcTotalMs,
-    quote_rpc_max_ms: rpcSummary.quoteRpcMaxMs,
-    // Logical solve counts (cache hit + miss). Equal to RPC counts when no
-    // cache fires; strictly greater when the cache absorbs identical-target
-    // dispatches across pass1 / pass1.5 / pass2.
-    quote_quantity_in_logical_calls: rpcSummary.quoteQuantityInLogicalCalls,
-    quote_quantity_out_verify_logical_calls: rpcSummary.quoteQuantityOutVerifyLogicalCalls,
-    // Cache hit count summed across both primitives. Equals
-    //   (logical_in - rpc_in) + (logical_out_verify - rpc_out_verify).
-    // Stays at 0 when the cache is empty or every solve produces a unique
-    // (hop, direction, argument) tuple.
-    quote_cache_hits: rpcSummary.quoteCacheHits,
-    // Symmetry marker with `quote_rpc_failed` (which carries `false`):
-    // success-aggregate emits all four RPC dimensions (mid_price, quantity_in,
-    // quantity_out_verify) summed over the request, so this is the complete
-    // count.
-    quote_rpc_stats_complete: true,
+    ...buildRpcSummaryLogFields(rpcSummary, true),
     ...buildBfqFloorPayload(pass2ExecutionQuote, input.settlementSwapPath.hops[0]?.swapDirection),
   });
 
@@ -1470,19 +1393,7 @@ async function runPreparePass(
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
       pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
       settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
-      quote_quantity_in_rpc_calls: quoteStats.quantityInCalls,
-      quote_quantity_out_verify_rpc_calls: quoteStats.quantityOutVerifyCalls,
-      quote_total_rpc_calls: quoteStats.quantityInCalls + quoteStats.quantityOutVerifyCalls,
-      // Post-solve failure carries the same logical / cache_hits fields as
-      // `quote_rpc_failed` and `two_pass_complete` so the payload shape stays
-      // consistent across all three quote-stats emit sites
-      // (`quote_rpc_stats_complete: false` flags partial state).
-      quote_quantity_in_logical_calls: quoteStats.quantityInLogicalCalls,
-      quote_quantity_out_verify_logical_calls: quoteStats.quantityOutVerifyLogicalCalls,
-      quote_cache_hits: quoteStats.cacheHits,
-      quote_rpc_total_ms: quoteStats.totalDurationMs,
-      quote_rpc_max_ms: quoteStats.maxDurationMs,
-      quote_rpc_stats_complete: false,
+      ...quoteRpcStatsLogFields(quoteStats, false),
       ...buildBfqFloorPayload(executionQuote, settlementSwapPath.hops[0]?.swapDirection),
     });
     throw err;

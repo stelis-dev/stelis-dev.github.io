@@ -250,8 +250,8 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     if (limit <= 0) return [];
     // mode-filtered reads must scan the full retained list so that a
     // matching row outside the first `limit * k` window is not silently
-    // hidden. Memory adapter walks the entire retained list; this
-    // adapter mirrors that contract to avoid host-visible drift.
+    // hidden. Scan the entire retained list before applying the mode
+    // filter and caller limit.
     const fetchCount = mode === 'all' ? limit : this.recentCap;
     const result = await this.client.eval(LRANGE_SCRIPT, [RECENT_KEY], [fetchCount.toString()]);
     if (!Array.isArray(result)) {

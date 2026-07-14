@@ -1,56 +1,56 @@
 {
-    "name": "@stelis/core-relay",
-    "version": "0.1.0",
-    "private": true,
-    "description": "Stelis Host validation & quote library (pure TS, framework-independent)",
-    "keywords": [
-        "stelis",
-        "sui",
-        "relay",
-        "validation",
-        "gas-estimation",
-        "sponsored-transactions"
-    ],
-    "homepage": "https://github.com/stelis-dev/stelis/tree/main/packages/core-relay",
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/stelis-dev/stelis.git",
-        "directory": "packages/core-relay"
+  "name": "@stelis/core-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stelis Host validation & quote library (pure TS, framework-independent)",
+  "keywords": [
+    "stelis",
+    "sui",
+    "relay",
+    "validation",
+    "gas-estimation",
+    "sponsored-transactions"
+  ],
+  "homepage": "https://github.com/stelis-dev/stelis/tree/main/packages/core-relay",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stelis-dev/stelis.git",
+    "directory": "packages/core-relay"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
-    "type": "module",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "exports": {
-        ".": {
-            "types": "./dist/index.d.ts",
-            "import": "./dist/index.js"
-        },
-        "./server": {
-            "types": "./dist/server/index.d.ts",
-            "import": "./dist/server/index.js"
-        },
-        "./browser": {
-            "types": "./dist/browser.d.ts",
-            "import": "./dist/browser.js"
-        }
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
     },
-    "scripts": {
-        "build": "tsc",
-        "test": "vitest run",
-        "test:watch": "vitest",
-        "typecheck": "tsc --noEmit"
-    },
-    "devDependencies": {
-        "@types/node": "^22.0.0",
-        "typescript": "^5.4.0",
-        "vitest": "^4.1.8"
-    },
-    "files": [
-        "dist"
-    ],
-    "license": "MIT",
-    "dependencies": {
-        "@mysten/sui": "^2.4.0",
-        "@stelis/contracts": "*"
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
     }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.check.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.8"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@mysten/sui": "^2.4.0",
+    "@stelis/contracts": "*"
+  }
 }

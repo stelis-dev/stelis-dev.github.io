@@ -38,20 +38,25 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 
 ## Responsibility Split
 
-| Boundary                    | Responsibility                                                                                                                                 |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **You prepare**             | wallet bridge, prepare authorization signer, transaction signer, user-intent PTB, endpoint choice, and approval policy                          |
-| **Stelis provides**         | the shipped `StelisSDK`, runtime capability discovery through `supportedSettlementSwapPaths`, and prepare/sponsor orchestration helpers                      |
+| Boundary                    | Responsibility                                                                                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **You prepare**             | wallet bridge, prepare authorization signer, transaction signer, user-intent PTB, endpoint choice, and approval policy                                                 |
+| **Stelis provides**         | the shipped `StelisSDK`, runtime capability discovery through `supportedSettlementSwapPaths`, and prepare/sponsor orchestration helpers                                |
 | **Shared boundary**         | choose `settlementToken` from `supportedSettlementSwapPaths`, sign the prepare authorization message, sign the returned `txBytes`, and treat `receiptId` as single-use |
-| **Out of scope for Stelis** | wallet custody, MCP runtime, agent autonomy, and human approval UX                                                                             |
+| **Out of scope for Stelis** | wallet custody, MCP runtime, agent autonomy, and human approval UX                                                                                                     |
 
 > The SDK does not retry Host errors. It returns Host failures as
-> `StelisApiException` or `StelisSponsoredError`, preserving a Host domain code
-> when one is present and using `UNKNOWN` for uncoded transport responses.
+> `StelisApiException` or `StelisSponsoredError`, preserving a current Host
+> domain code only when that code belongs to the route that returned it. It uses
+> `UNKNOWN` for uncoded transport responses, non-current codes, and codes emitted
+> by the wrong route.
 > Retry/backoff policy belongs on your side. Capacity codes include
 > `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`,
 > `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`.
-> Rate-limit metadata such as `retryAfterMs` is preserved on the exception.
+> Only the current closed metadata fields (`retryAfterMs`, `subcode`, `digest`,
+> `minSettleMist`, `requiredTotalIn`, `isEstimate`) are preserved. A malformed
+> or extended remote error body is reported as `UNKNOWN`; arbitrary remote
+> fields and non-JSON body text are never copied into the exception.
 > Missing token support is resolved by the Host operator updating `packages/app-api/settlement-swap-paths.json` on a product-owned `Studio` or `Host` deployment, not by SDK customization.
 
 ## Purpose
@@ -73,6 +78,8 @@ The supported npm entry points are:
 - `StelisSDK.executeSponsored()`
 - `StelisSDK.executeSuiFirst()`
 - `StelisSDK.estimateGas()`
+- `StelisSDK.getExchangeRate()` — read the current settlement-token/SUI rate through the connected Host network
+- `StelisSDK.getSettlementSwapPathForSettlementToken()` — resolve one Host-advertised current settlement swap path by exact coin type
 - `StelisSDK.buildWithdrawPtb()` — build a vault withdrawal PTB
 - `StelisSDK.prepareSponsored()` — advanced 2-step flow (prepare → sign → sponsor)
 - `StelisSDK.executePromotionSponsored()` — promotion-specific execution (studio mode)
@@ -85,12 +92,14 @@ The supported npm entry points are:
 - `getPromotionUserState()` — standalone server-to-server promotion detail
 - `checkSettlementSwapPathLiquidity()` — DeepBook pool liquidity check
 - `queryUserCredit()` — on-chain vault/credit lookup
+- `parseRelayConfigResponse()` — strict parser for the current Host config wire shape
 - `STELIS_CONTRACT_IDS`, `DEEPBOOK_IDS` — built-in on-chain contract IDs
 - exported response, config, and promotion types
 
 The server-only entry point `@stelis/sdk/server` exports:
 
 - `verifySettleEventAgainstExpected()` — verify an on-chain `SettleEvent` against backend-owned expected fields
+- `verifySettleEventInTransaction()` — apply the same verification to an already fetched current transaction result
 - `extractSettleEvents()` — extract decoded `SettleEvent` summaries for reconciliation scans
 - `ExpectedSettleEventFields`, `VerifiedSettleEvent`, and `ExtractedSettleEventSummary`
 
@@ -420,6 +429,12 @@ const settlement = await verifySettleEventAgainstExpected(suiClient, sponsorDige
 console.log(settlement.orderIdHash);
 ```
 
+If the backend already fetched the current transaction result with events, use
+`verifySettleEventInTransaction(result, sponsorDigest, expected)` to avoid a
+second RPC read. It requires the exact successful Sui result union, matching
+digest, and requested events before applying the same compiled-schema and
+application-field checks.
+
 Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans only. Its warning logger is required because the returned array contains successful summaries only:
 
 ```typescript
@@ -604,6 +619,7 @@ For npm consumers, the stable public path remains:
 import type {
   StelisConnectOptions,
   StelisRequestTimeouts,
+  SettlementToken,
   ExecuteSponsoredOptions,
   ExecuteSponsoredResult,
   GasEstimateResult,
@@ -665,14 +681,14 @@ Choose monorepo source helpers instead when:
 | Code | Constant                 | Description                                                                         |
 | ---- | ------------------------ | ----------------------------------------------------------------------------------- |
 | 100  | `EPaused`                | Settlement is paused by admin                                                       |
-| 101  | `EClaimTooHigh`          | execution cost claim exceeds maximum allowed                                               |
+| 101  | `EClaimTooHigh`          | execution cost claim exceeds maximum allowed                                        |
 | 102  | `ETotalInTooLow`         | SUI from swap below settlement minimum (swap amount too small or no pool liquidity) |
-| 103  | `EInsufficientFunds`     | Not enough funds for execution cost claim + fees                                           |
+| 103  | `EInsufficientFunds`     | Not enough funds for execution cost claim + fees                                    |
 | 104  | `EInvalidReceiptId`      | Receipt ID invalid or malformed                                                     |
 | 105  | `EInvalidPolicyHash`     | Policy hash mismatch                                                                |
 | 106  | `EConfigVersionMismatch` | L2 tamper detection: config version mismatch                                        |
 | 107  | `EProtocolFeeMismatch`   | L2 tamper detection: protocol fee mismatch                                          |
-| 108  | `EHostFeeCapExceeded` | L2 tamper detection: host fee cap exceeded                                       |
+| 108  | `EHostFeeCapExceeded`    | L2 tamper detection: host fee cap exceeded                                          |
 | 109  | `EInvalidOrderIdHash`    | L2 tamper detection: order ID hash invalid                                          |
 | 110  | `ESpreadTooWide`         | Spread guard: bid-ask spread exceeds max or book is empty/crossed                   |
 
@@ -718,11 +734,7 @@ settlement swap path liquidity is checked via mid-price query instead.)
 ```typescript
 import { checkSettlementSwapPathLiquidity } from '@stelis/sdk';
 
-const status = await checkSettlementSwapPathLiquidity(
-  suiClient,
-  deepbookPkgId,
-  settlementSwapPath,
-);
+const status = await checkSettlementSwapPathLiquidity(suiClient, deepbookPkgId, settlementSwapPath);
 // status.hasLiquidity  → boolean
 // status.status        → 'ok' | 'no_orders'
 // status.midPrice      → JSON-safe display number, or null if outside safe range

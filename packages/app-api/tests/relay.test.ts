@@ -57,6 +57,7 @@ import { createRelayRoutes } from '../src/routes/relay.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import { buildSponsorUnavailableResponse } from '../src/sponsor-operations/gateResponse.js';
 import type { AppApiContext } from '../src/context.js';
+import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
 
@@ -163,6 +164,12 @@ function createMockCtx(): AppApiContext {
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
+    failoverTransport: new SuiRpcFailoverTransport([{ url: 'https://rpc.test.invalid' }]),
+    sponsoredLogsStore: {
+      append: vi.fn().mockResolvedValue(undefined),
+      getSummary: vi.fn(),
+      getRecent: vi.fn(),
+    },
     dispose: vi.fn(),
   };
 }
@@ -370,7 +377,6 @@ describe('relay routes', () => {
         const coreApi = await import('@stelis/core-api');
         vi.mocked(buildSponsorUnavailableResponse).mockReturnValueOnce({
           body: { error, code },
-          status: 503,
           headers: {},
         });
 
@@ -395,10 +401,7 @@ describe('relay routes', () => {
     it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
       const coreApi = await import('@stelis/core-api');
       resolveClientIp.mockImplementationOnce(() => {
-        const err = new Error('Client IP could not be resolved');
-        err.name = 'ClientIpResolutionError';
-        (err as { code?: string }).code = 'CLIENT_IP_UNRESOLVED';
-        throw err;
+        throw new coreApi.ClientIpResolutionError('Client IP could not be resolved');
       });
 
       const res = await app.request('/relay/prepare', {
@@ -451,7 +454,7 @@ describe('relay routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.code).toBe('BAD_REQUEST');
-      expect(body.error).toContain('Invalid senderAddress');
+      expect(body.error).toBe('senderAddress must be a valid Sui address');
     });
 
     it('canonicalizes short senderAddress before passing to handlePrepare', async () => {
@@ -872,7 +875,6 @@ describe('relay routes', () => {
         const coreApi = await import('@stelis/core-api');
         vi.mocked(buildSponsorUnavailableResponse).mockReturnValueOnce({
           body: { error, code },
-          status: 503,
           headers: {},
         });
 
@@ -893,10 +895,7 @@ describe('relay routes', () => {
     it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
       const coreApi = await import('@stelis/core-api');
       resolveClientIp.mockImplementationOnce(() => {
-        const err = new Error('Client IP could not be resolved');
-        err.name = 'ClientIpResolutionError';
-        (err as { code?: string }).code = 'CLIENT_IP_UNRESOLVED';
-        throw err;
+        throw new coreApi.ClientIpResolutionError('Client IP could not be resolved');
       });
 
       const res = await app.request('/relay/sponsor', {
@@ -1005,13 +1004,12 @@ describe('relay routes', () => {
       expect(res.status).toBe(422);
     });
 
-    it('returns 500 + SPONSOR_FAILED on post-submit SponsorValidationError(statusHint=500)', async () => {
-      // Post-submit internal failure: handleSponsor throws SponsorValidationError
-      // with code=SPONSOR_FAILED and statusHint=500 when execution succeeded
-      // but effects are missing `gasUsed` (Sui gRPC edge case). Locks the
+    it('returns 500 + GAS_EFFECTS_MISSING with the submitted digest on terminal processing failure', async () => {
+      // Post-submit terminal failure: execution succeeded but effects are missing
+      // `gasUsed` (Sui gRPC edge case). Locks the
       // route-level invariant:
-      //   errorMap projects this to HTTP 500 with code=SPONSOR_FAILED,
-      //   without exposing the internal execution digest.
+      //   errorMap projects the contracts-owned code/status and preserves the
+      //   submitted digest so callers can reconcile the known on-chain result.
       //
       // Slot state refresh after this path is owned by the
       // sponsor-terminal host callback inside `handleSponsor`. The
@@ -1021,10 +1019,9 @@ describe('relay routes', () => {
       // (core-api); the route does not fire a wake signal of its own.
       const coreApi = await import('@stelis/core-api');
       vi.mocked(coreApi.handleSponsor).mockRejectedValueOnce(
-        new coreApi.SponsorValidationError(
-          'SPONSOR_FAILED',
+        new coreApi.SponsorTerminalProcessingError(
           'Execution succeeded but gasUsed missing — cannot verify economics. Digest: 0xdigest_exec_no_gas',
-          500,
+          '0xdigest_exec_no_gas',
         ),
       );
 
@@ -1035,15 +1032,15 @@ describe('relay routes', () => {
       });
       expect(res.status).toBe(500);
       const body = await res.json();
-      expect(body.code).toBe('SPONSOR_FAILED');
+      expect(body.code).toBe('GAS_EFFECTS_MISSING');
       expect(body.error).toBe('Internal server error');
-      expect(JSON.stringify(body)).not.toContain('0xdigest_exec_no_gas');
+      expect(body.digest).toBe('0xdigest_exec_no_gas');
     });
 
     it('returns 503 + SPONSOR_CONGESTION on SponsorCongestionError', async () => {
       const coreApi = await import('@stelis/core-api');
       vi.mocked(coreApi.handleSponsor).mockRejectedValueOnce(
-        new coreApi.SponsorCongestionError('shared object congestion'),
+        new coreApi.SponsorCongestionError('shared object congestion', '0xdigest_congested'),
       );
 
       const res = await app.request('/relay/sponsor', {
@@ -1054,6 +1051,7 @@ describe('relay routes', () => {
       expect(res.status).toBe(503);
       const body = await res.json();
       expect(body.code).toBe('SPONSOR_CONGESTION');
+      expect(body.digest).toBe('0xdigest_congested');
     });
 
     it('returns 503 + LEASE_EXPIRED + Retry-After:1 on SponsorLeaseExpiredError', async () => {
@@ -1071,22 +1069,6 @@ describe('relay routes', () => {
       const body = await res.json();
       expect(body.code).toBe('LEASE_EXPIRED');
       expect(res.headers.get('Retry-After')).toBe('1');
-    });
-
-    it('returns 429 + PREPARE_STUDIO_USER_QUOTA_EXCEEDED on PrepareStudioUserQuotaError', async () => {
-      const coreApi = await import('@stelis/core-api');
-      vi.mocked(coreApi.handlePrepare).mockRejectedValueOnce(
-        new coreApi.PrepareStudioUserQuotaError('0xABC', 3),
-      );
-
-      const res = await app.request('/relay/prepare', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(prepareBody({ senderAddress: '0xABC' })),
-      });
-      expect(res.status).toBe(429);
-      const body = await res.json();
-      expect(body.code).toBe('PREPARE_STUDIO_USER_QUOTA_EXCEEDED');
     });
 
     it('returns 429 + PREPARE_SENDER_QUOTA_EXCEEDED on PrepareSenderQuotaError', async () => {

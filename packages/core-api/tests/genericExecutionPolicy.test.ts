@@ -16,12 +16,16 @@ import {
   type GenericExecutionPolicyOptions,
   type GenericExecutionPolicyState,
   type GenericSponsorErrorFactory,
+  type RevalidateGenericResult,
 } from '../src/session/sponsoredExecution/genericExecutionPolicy.js';
-import { runPrepareStateMachine } from '../src/session/sponsoredExecution/runner.js';
+import {
+  runPrepareStateMachine,
+  type PrepareStateMachineHost,
+} from '../src/session/sponsoredExecution/runner.js';
 import type {
   PostConsumeSponsorContext,
   PreConsumeSponsorContext,
-} from '../src/session/sponsoredExecution/index.js';
+} from '../src/session/sponsoredExecution/executionPolicy.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
 import { SenderSignatureError } from '../src/session/sessionPrimitives.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
@@ -52,9 +56,9 @@ class TestSponsorError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly statusHint?: number,
     readonly subcode?: string,
     readonly digest?: string,
+    readonly gasUsed?: unknown,
   ) {
     super(message);
     this.name = 'TestSponsorError';
@@ -62,14 +66,17 @@ class TestSponsorError extends Error {
 }
 
 const errors: GenericSponsorErrorFactory = {
-  sponsorValidation: (code, message, statusHint) => new TestSponsorError(code, message, statusHint),
+  sponsorValidation: (code, message) => new TestSponsorError(code, message),
   sponsorBlocked: (retryAfterMs) =>
     new TestSponsorError('BLOCKED', `blocked:${retryAfterMs ?? 'none'}`),
   sponsorPreflight: (reason, subcode) =>
-    new TestSponsorError('SPONSOR_PREFLIGHT_FAILED', reason, undefined, subcode),
-  sponsorOnchain: (digest, reason, subcode) =>
-    new TestSponsorError('SPONSOR_ONCHAIN_FAILED', reason, undefined, subcode, digest),
-  sponsorCongestion: (message) => new TestSponsorError('SPONSOR_CONGESTION', message),
+    new TestSponsorError('SPONSOR_PREFLIGHT_FAILED', reason, subcode),
+  sponsorOnchain: (digest, reason, subcode, gasUsed) =>
+    new TestSponsorError('SPONSOR_ONCHAIN_FAILED', reason, subcode, digest, gasUsed),
+  sponsorCongestion: (message, digest) =>
+    new TestSponsorError('SPONSOR_CONGESTION', message, undefined, digest),
+  sponsorTerminalProcessing: (message, digest) =>
+    new TestSponsorError('GAS_EFFECTS_MISSING', message, undefined, digest),
 };
 
 function makePrepared(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
@@ -178,10 +185,6 @@ function makePrepareOptions(
         senderAddress: SENDER,
         settlementTokenType: SETTLEMENT_TOKEN_TYPE,
         clientIp: '127.0.0.1',
-        txKindBytesHash: 'a'.repeat(64),
-        prepareAuthorizationTimestampMs: 1,
-        prepareAuthorizationRequestNonce: 'nonce',
-        prepareAuthorizationSignature: 'signature',
       },
       config: {
         deepbookPackageId: `0x${'77'.repeat(32)}`,
@@ -193,6 +196,74 @@ function makePrepareOptions(
     },
     deps: input.deps,
   };
+}
+
+function makeRevalidation(nonce: bigint): RevalidateGenericResult {
+  return {
+    builtTx: {} as Transaction,
+    commands: creditSettlementCommands(),
+    freshConfig: {
+      packageId: STELIS_PACKAGE_ID,
+      configId: `0x${'44'.repeat(32)}`,
+      maxClaimMist: 50_000_000n,
+      minSettleMist: 1_000n,
+      maxHostFeeMist: 100_000n,
+      protocolFlatFeeMist: 10n,
+      configVersion: 1n,
+      maxSpreadBps: 500n,
+    },
+    settleArgs: {
+      configObjectId: `0x${'44'.repeat(32)}`,
+      registryObjectId: `0x${'55'.repeat(32)}`,
+      settlementPayoutRecipient: `0x${'33'.repeat(32)}`,
+      executionCostClaim: 5_000n,
+      policyHash: new Uint8Array(32),
+      quotedHostFeeMist: 100n,
+      expectedProtocolFeeMist: 10n,
+      expectedConfigVersion: 1n,
+      orderIdHash: new Uint8Array(32).fill(1),
+      nonce,
+      receiptId: new Uint8Array(32),
+      simGasReported: 1_000n,
+      gasVarianceFixedMist: 100n,
+      slippageBufferMist: 0n,
+      quoteTimestampMs: 1n,
+    },
+    isNewUserSettle: false,
+  };
+}
+
+function makeUnreachedPrepareHost() {
+  return {
+    inflightLimiter: {
+      inflight: 0,
+      capacity: 1,
+      tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
+    },
+    sponsorPool: {
+      size: 1,
+      primaryAddress: SPONSOR,
+      checkout: vi.fn(),
+      commit: vi.fn(),
+      checkin: vi.fn(),
+      leaseStatus: vi.fn().mockResolvedValue({
+        leasedSlots: 0,
+        freeSlots: 1,
+        slots: [{ address: SPONSOR, leased: false }],
+      }),
+      addresses: vi.fn().mockReturnValue([SPONSOR]),
+      sign: vi.fn().mockResolvedValue({ signature: 'unused' }),
+    },
+    prepareStore: {
+      store: vi.fn(),
+      consume: vi.fn(),
+      peek: vi.fn(),
+      evictPreparedEntry: vi.fn(),
+      checkUserQuota: vi.fn().mockResolvedValue('ok' as const),
+      reserveNonce: vi.fn(),
+      releaseReservation: vi.fn(),
+    },
+  } satisfies PrepareStateMachineHost;
 }
 
 function makePostCtx(): PostConsumeSponsorContext {
@@ -266,20 +337,7 @@ function seedSponsorState(
     txSender: SENDER,
     peeked: makePrepared(),
     prepared: makePrepared(),
-    revalidation: {
-      builtTx: {} as Transaction,
-      commands: creditSettlementCommands(),
-      freshConfig: {
-        protocolFlatFeeMist: 10n,
-      } as NonNullable<GenericExecutionPolicyState['sponsor']>['revalidation']['freshConfig'],
-      settleArgs: {
-        nonce: 7n,
-        executionCostClaim: 5_000n,
-        quotedHostFeeMist: 100n,
-        orderIdHash: new Uint8Array(32).fill(1),
-      } as NonNullable<GenericExecutionPolicyState['sponsor']>['revalidation']['settleArgs'],
-      isNewUserSettle: false,
-    },
+    revalidation: makeRevalidation(7n),
     gasBudget: 10_000n,
     preflightGasUsed: GAS_USED,
     sponsorResultOutcome: 'internal_error',
@@ -322,21 +380,7 @@ describe('createGenericExecutionPolicy', () => {
         },
       }),
     );
-    const host = {
-      inflightLimiter: {
-        tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
-      },
-      sponsorPool: {
-        checkout: vi.fn(),
-        commit: vi.fn(),
-        checkin: vi.fn(),
-      },
-      prepareStore: {
-        reserveNonce: vi.fn(),
-        releaseReservation: vi.fn(),
-        store: vi.fn(),
-      },
-    };
+    const host = makeUnreachedPrepareHost();
     const preparedDraftFields = vi.fn();
     const projectResponse = vi.fn();
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -355,10 +399,8 @@ describe('createGenericExecutionPolicy', () => {
 
       expect(err).toBeInstanceOf(PrepareValidationError);
       expect((err as PrepareValidationError).code).toBe('UNACCOUNTABLE_WITHDRAWAL');
-      expect((err as PrepareValidationError).statusHint).toBeUndefined();
       expect(getFailurePolicy('UNACCOUNTABLE_WITHDRAWAL')).toMatchObject({
         classification: 'manipulation',
-        httpStatus: 422,
         abuseImpact: { ip: 'skip', subject: 'skip' },
       });
       expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
@@ -399,21 +441,7 @@ describe('createGenericExecutionPolicy', () => {
         },
       }),
     );
-    const host = {
-      inflightLimiter: {
-        tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
-      },
-      sponsorPool: {
-        checkout: vi.fn(),
-        commit: vi.fn(),
-        checkin: vi.fn(),
-      },
-      prepareStore: {
-        reserveNonce: vi.fn(),
-        releaseReservation: vi.fn(),
-        store: vi.fn(),
-      },
-    };
+    const host = makeUnreachedPrepareHost();
 
     const err = await runPrepareStateMachine(
       host,
@@ -439,7 +467,7 @@ describe('createGenericExecutionPolicy', () => {
   });
 
   test('does not widen the package main barrel', async () => {
-    const mainBarrel = await import('@stelis/core-api');
+    const mainBarrel = await import('../src/index.js');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'createGenericExecutionPolicy')).toBe(
       false,
     );
@@ -639,13 +667,7 @@ describe('generic sponsor postconsume hooks', () => {
       makeSponsorOptions({
         deps: {
           checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
-          revalidateGenericSponsorPolicy: vi.fn(async () => ({
-            builtTx: {} as Transaction,
-            commands: creditSettlementCommands(),
-            freshConfig: { protocolFlatFeeMist: 10n },
-            settleArgs: { nonce: 7n },
-            isNewUserSettle: false,
-          })),
+          revalidateGenericSponsorPolicy: vi.fn(async () => makeRevalidation(7n)),
           verifyGasOwner: vi.fn(() => ({ owner: SPONSOR, budget: 10_000n })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
@@ -671,13 +693,7 @@ describe('generic sponsor postconsume hooks', () => {
       makeSponsorOptions({
         deps: {
           checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
-          revalidateGenericSponsorPolicy: vi.fn(async () => ({
-            builtTx: {} as Transaction,
-            commands: creditSettlementCommands(),
-            freshConfig: { protocolFlatFeeMist: 10n },
-            settleArgs: { nonce: 8n },
-            isNewUserSettle: false,
-          })),
+          revalidateGenericSponsorPolicy: vi.fn(async () => makeRevalidation(8n)),
           verifyGasOwner: vi.fn(() => ({ owner: SPONSOR, budget: 10_000n })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
@@ -697,7 +713,7 @@ describe('generic sponsor postconsume hooks', () => {
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          runPreflight: vi.fn(async () => ({ success: false, reason: 'MoveAbort(110)' })),
+          runPreflight: vi.fn(async () => ({ success: false as const, reason: 'MoveAbort(110)' })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
         },

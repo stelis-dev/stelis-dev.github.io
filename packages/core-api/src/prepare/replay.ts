@@ -11,6 +11,7 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { fromBase64 } from '@mysten/sui/utils';
+import type { RelayPrepareErrorCode } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -66,15 +67,28 @@ export async function deserializeUserTxKind(
 // Error type
 // ─────────────────────────────────────────────
 
-/** Thrown when /prepare rejects due to validation (→ HTTP 422 by default). */
+/** Thrown when /prepare rejects with a current contracts-owned code or internal diagnostic. */
+export type PrepareErrorMeta = Readonly<Record<string, string | boolean>>;
+
+/**
+ * Closed internal-only invariant vocabulary. These codes may classify a
+ * prepare pipeline failure for operator/test diagnostics, but the Host error
+ * mapper deliberately rejects them because they are not current Relay API
+ * codes.
+ */
+export type PrepareInternalDiagnosticCode =
+  | 'INVALID_AMOUNT'
+  | 'INVALID_AMOUNT_FORMAT'
+  | 'INVALID_BALANCE_FORMAT';
+
+export type PrepareValidationCode = RelayPrepareErrorCode | PrepareInternalDiagnosticCode;
+
 export class PrepareValidationError extends Error {
   constructor(
-    public readonly code: string,
+    public readonly code: PrepareValidationCode,
     message: string,
-    /** Optional diagnostic fields surfaced in the HTTP response body. */
-    public readonly meta?: Record<string, string>,
-    /** Override the fallback HTTP status when the failure is not a validation issue. */
-    public readonly statusHint?: number,
+    /** Internal diagnostics; failure policy owns the closed public projection. */
+    public readonly meta?: PrepareErrorMeta,
   ) {
     super(message);
     this.name = 'PrepareValidationError';

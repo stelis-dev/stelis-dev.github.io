@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { raiseAdminSessionNotBefore } from '../src/admin/adminSessionNotBefore.js';
-import { startRealRedis, type RealRedisHandle } from './helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 const KEY = 'stelis:test:admin:not_before';
 

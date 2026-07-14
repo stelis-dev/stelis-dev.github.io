@@ -30,9 +30,10 @@ vi.mock('@stelis/core-api/studio', async () => {
   };
 });
 
-vi.mock('../src/developerJwtVerifyCallback.js', () => ({
-  callDeveloperVerifyApi: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock('../src/developerJwtVerifyCallback.js', async () => {
+  const actual = await vi.importActual('../src/developerJwtVerifyCallback.js');
+  return { ...actual, callDeveloperVerifyApi: vi.fn().mockResolvedValue(undefined) };
+});
 
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
@@ -275,6 +276,8 @@ describe('studio promotion routes', () => {
       vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 5000,
+        current: 21,
+        limit: 20,
       });
 
       const res = await app.request(`/studio/promotions/${record.promotionId}`, {
@@ -326,19 +329,16 @@ describe('studio promotion routes', () => {
       expect(res.status).toBe(503);
     });
 
-    // Claim keeps generic JWT verification failures on the route-outer
-    // 500 path instead of remapping them to 401 AUTH_JWT_INVALID.
-    it('returns 500 on generic JWT verification failure (not 401 AUTH_JWT_INVALID)', async () => {
+    it('classifies local JWT rejection consistently on the claim route', async () => {
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('kid not trusted'));
       const res = await app.request('/studio/promotions/some-id/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-jwt' },
         body: JSON.stringify({}),
       });
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(401);
       const body = await res.json();
-      expect(body.code).toBeUndefined();
-      expect(body.error).toBe('Internal server error');
+      expect(body.code).toBe('AUTH_JWT_INVALID');
     });
 
     it('returns 404 for nonexistent promotion', async () => {
@@ -348,6 +348,7 @@ describe('studio promotion routes', () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(404);
+      expect((await res.clone().json()).code).toBe('PROMOTION_NOT_FOUND');
     });
 
     it('returns 201 on successful claim', async () => {
@@ -369,7 +370,7 @@ describe('studio promotion routes', () => {
       assertNestedObjectKeys(body, 'entitlement', 'promotionEntitlement');
     });
 
-    it('returns 409 promotion_not_started when startAt is in the future', async () => {
+    it('returns PROMOTION_NOT_ACTIVE when startAt is in the future', async () => {
       const future = new Date(Date.now() + 86_400_000).toISOString();
       const record = await ctx.promotionStore!.create({ ...BASE_PROMO, startAt: future });
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
@@ -381,7 +382,10 @@ describe('studio promotion routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.error).toBe('promotion_not_started');
+      expect(body).toMatchObject({
+        code: 'PROMOTION_NOT_ACTIVE',
+        error: 'Promotion has not started',
+      });
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when abuse-block adapter throws during claim', async () => {
@@ -443,7 +447,7 @@ describe('studio promotion routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.error).toBe('already_claimed');
+      expect(body).toMatchObject({ code: 'ALREADY_CLAIMED', error: 'Promotion already claimed' });
     });
 
     it('returns 409 when max participants reached', async () => {
@@ -466,7 +470,10 @@ describe('studio promotion routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.error).toBe('max_participants_reached');
+      expect(body).toMatchObject({
+        code: 'PROMOTION_CAPACITY_REACHED',
+        error: 'Promotion participant capacity has been reached',
+      });
     });
 
     it('returns 409 when promotion not active (paused)', async () => {
@@ -480,7 +487,10 @@ describe('studio promotion routes', () => {
       });
       expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body.error).toBe('promotion_not_active');
+      expect(body).toMatchObject({
+        code: 'PROMOTION_NOT_ACTIVE',
+        error: 'Promotion is not active',
+      });
     });
 
     it('returns 429 when IP is blocked', async () => {

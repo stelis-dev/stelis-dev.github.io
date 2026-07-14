@@ -36,16 +36,12 @@ export async function verifyPrepareAuthorization(
     throw new PrepareValidationError(
       'PREPARE_AUTH_NONCE_INVALID',
       `prepareAuthorizationRequestNonce must be 1-${MAX_PREPARE_REQUEST_NONCE_BYTES} UTF-8 bytes`,
-      undefined,
-      400,
     );
   }
   if (!Number.isSafeInteger(params.prepareAuthorizationTimestampMs)) {
     throw new PrepareValidationError(
       'PREPARE_AUTH_TIMESTAMP_INVALID',
       'prepareAuthorizationTimestampMs must be a safe integer',
-      undefined,
-      400,
     );
   }
 
@@ -60,8 +56,6 @@ export async function verifyPrepareAuthorization(
     throw new PrepareValidationError(
       'PREPARE_AUTH_TIMESTAMP_INVALID',
       'prepare authorization timestamp is too far in the future',
-      undefined,
-      400,
     );
   }
 
@@ -138,8 +132,6 @@ function normalizeHashHex(value: string): string {
     throw new PrepareValidationError(
       'PREPARE_AUTH_TX_KIND_HASH_INVALID',
       'txKindBytesHash must be a 32-byte hex string',
-      undefined,
-      400,
     );
   }
   return withoutPrefix.toLowerCase();

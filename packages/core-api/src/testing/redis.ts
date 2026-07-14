@@ -1,6 +1,13 @@
+/**
+ * @stelis/core-api/testing/redis — real Redis test infrastructure.
+ *
+ * This explicit test-only subpath is the single owner of the Redis process
+ * used by core-api and app-api conformance suites. Production code must not
+ * import it; the package-boundary gate permits it only from workspace tests.
+ */
 import { createRequire } from 'node:module';
-import { wrapRedisClient } from '../../src/store/redisClient.js';
-import type { RawRedisClient, RedisClientLike } from '../../src/store/redisClient.js';
+import { wrapRedisClient } from '../store/redisClient.js';
+import type { RawRedisClient, RedisClientLike } from '../store/redisClient.js';
 
 const require = createRequire(import.meta.url);
 
@@ -24,13 +31,7 @@ export interface RealRedisHandle {
   stop(): Promise<void>;
 }
 
-/**
- * Starts a real Redis-compatible process for conformance tests.
- *
- * Startup failures are test failures. FakeRedisClient remains useful for
- * unit branch coverage, but this helper is the production Redis semantics
- * authority used by `npm --workspace @stelis/core-api run test:redis`.
- */
+/** Start an isolated Redis-compatible process for conformance tests. */
 export async function startRealRedis(): Promise<RealRedisHandle> {
   const redisModule = require('redis') as RedisModule;
   const redisMemoryServerModule = require('redis-memory-server') as RedisMemoryServerModule;

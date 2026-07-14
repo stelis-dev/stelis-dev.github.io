@@ -49,7 +49,6 @@ npm test
 ```bash
 npm run lint
 npm run typecheck
-npm run check:prepare-stage-schema
 ```
 
 ## Run the API Host

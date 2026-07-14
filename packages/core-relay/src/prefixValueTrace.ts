@@ -7,7 +7,7 @@
  */
 import type { Transaction } from '@mysten/sui/transactions';
 import { normalizeStructTag, normalizeSuiObjectId } from '@mysten/sui/utils';
-import { decodeExactPureU64Base64 } from './decodePureU64.js';
+import { decodeExactPureU64Base64 } from './decodeU64.js';
 import { extractObjectIdFromInput } from './ptbInputUtils.js';
 
 const DECIMAL_U64_RE = /^(?:0|[1-9]\d*)$/;

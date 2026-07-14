@@ -1,0 +1,65 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  callDeveloperVerifyApi,
+  DeveloperVerifyRejectedError,
+  DeveloperVerifyUnavailableError,
+} from '../src/developerJwtVerifyCallback.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+function response(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('developer JWT verification callback contract', () => {
+  it('accepts only an explicit current positive verdict', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ valid: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      callDeveloperVerifyApi('developer-jwt', 'https://developer.example.test/verify'),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://developer.example.test/verify',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ jwt: 'developer-jwt' }),
+      }),
+    );
+  });
+
+  it('classifies an explicit negative verdict as credential rejection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(response({ valid: false, reason: 'session revoked' })),
+    );
+
+    await expect(
+      callDeveloperVerifyApi('developer-jwt', 'https://developer.example.test/verify'),
+    ).rejects.toBeInstanceOf(DeveloperVerifyRejectedError);
+  });
+
+  it.each([{}, { valid: 'true' }, { valid: true, reason: 1 }, { valid: true, legacy: true }, []])(
+    'classifies a non-current response shape as verifier unavailability',
+    async (body) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(body)));
+
+      await expect(
+        callDeveloperVerifyApi('developer-jwt', 'https://developer.example.test/verify'),
+      ).rejects.toBeInstanceOf(DeveloperVerifyUnavailableError);
+    },
+  );
+
+  it('classifies transport failure as verifier unavailability', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network unavailable')));
+
+    await expect(
+      callDeveloperVerifyApi('developer-jwt', 'https://developer.example.test/verify'),
+    ).rejects.toBeInstanceOf(DeveloperVerifyUnavailableError);
+  });
+});

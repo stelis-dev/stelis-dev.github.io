@@ -62,15 +62,6 @@ export function swapDemoRejectReason(
 }
 
 /**
- * Check whether the selected settlement swap path supports the sandbox
- * direct-swap demo.
- * Thin wrapper over `swapDemoRejectReason` for boolean call sites.
- */
-export function isSwapDemoSupported(settlementSwapPath: SingleHopSettlementSwapPath): boolean {
-  return swapDemoRejectReason(settlementSwapPath) === null;
-}
-
-/**
  * Human-readable explanation for why a settlement swap path is rejected by the
  * sandbox demo.
  * Returns null when the demo is supported.
@@ -85,25 +76,4 @@ export function getSwapDemoRejectMessage(
   }
   // reason === 'fee_bearing'
   return `Direct swap demo is available for whitelisted settlement swap paths only (feeBps = 0). This path charges ${settlementSwapPath.hops[0].feeBps} bps under DeepBook's input-fee economics, which requires additional direct-swap fee accounting beyond the sandbox demo.`;
-}
-
-/**
- * Return the DeepBook swap function for the sandbox "SUI → Token" direct swap.
- * This is the INVERSE of the settlement direction:
- * - baseForQuote (Pool<Token, SUI>): demo = swap_exact_quote_for_base
- * - quoteForBase (Pool<SUI, Token>): demo = swap_exact_base_for_quote
- *
- * Only valid for 1-hop settlement swap paths. Throws when hop count is not 1.
- */
-export function getSandboxSwapTarget(
-  settlementSwapPath: SingleHopSettlementSwapPath,
-): 'swap_exact_quote_for_base' | 'swap_exact_base_for_quote' {
-  if (settlementSwapPath.hops.length !== 1) {
-    throw new Error(
-      `Sandbox direct-swap demo requires exactly 1 hop (got ${settlementSwapPath.hops.length})`,
-    );
-  }
-  return settlementSwapPath.hops[0].swapDirection === 'baseForQuote'
-    ? 'swap_exact_quote_for_base'
-    : 'swap_exact_base_for_quote';
 }

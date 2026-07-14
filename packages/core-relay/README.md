@@ -67,13 +67,13 @@ directly.
 
 ```typescript
 import {
-  validatePtbStructure,
+  validateGenericSettlementTransaction,
   validateSettleArgs,
   validateNonlossSponsor,
 } from '@stelis/core-relay';
 
-// L1: PTB structure
-const l1 = validatePtbStructure(commands, env);
+// L1: final Host-built transaction structure
+const l1 = validateGenericSettlementTransaction(finalTx, env);
 // → { ok: true } | { ok: false, code: 'L1_NO_SETTLE' | 'L1_MULTIPLE_SETTLE' | ... }
 
 // L2: settle arguments
@@ -122,50 +122,56 @@ SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.quoteForBase.withVault; // 'swap_and_settle_
 
 For user-supplied transaction-kind bytes, see [User TransactionKind rules](../../docs/api.md#user-transactionkind-rules). The P1 rules reject settlement calls before the Host appends one. The L1 rules below validate the final Host-built transaction, which must contain exactly one allowed settlement call.
 
-| Command                                         | Policy                                      |
-| ----------------------------------------------- | ------------------------------------------- |
+| Command                                         | Policy                                                           |
+| ----------------------------------------------- | ---------------------------------------------------------------- |
 | `{pkg}::settle::swap_and_settle_new_user_bfq`   | ✅ Exactly 1 required (settlement swap direction `baseForQuote`) |
 | `{pkg}::settle::swap_and_settle_with_vault_bfq` | ✅ Exactly 1 required (settlement swap direction `baseForQuote`) |
 | `{pkg}::settle::swap_and_settle_new_user_qfb`   | ✅ Exactly 1 required (settlement swap direction `quoteForBase`) |
 | `{pkg}::settle::swap_and_settle_with_vault_qfb` | ✅ Exactly 1 required (settlement swap direction `quoteForBase`) |
-| `{pkg}::settle::settle_with_credit`             | ✅ Exactly 1 required                       |
-| `{pkg}::settle::*` (other)                      | ❌ `L1_UNAUTHORIZED_STELIS_CALL`            |
-| External package MoveCalls                      | ✅ Allowed (arbitrary)                      |
-| `Publish` / `Upgrade`                           | ❌ `L1_FORBIDDEN_COMMAND`                   |
-| Any command with `GasCoin` reference            | ❌ `L1_GASCOIN_FORBIDDEN`                   |
+| `{pkg}::settle::settle_with_credit`             | ✅ Exactly 1 required                                            |
+| `{pkg}::settle::*` (other)                      | ❌ `L1_UNAUTHORIZED_STELIS_CALL`                                 |
+| External package MoveCalls                      | ✅ Allowed (arbitrary)                                           |
+| `Publish` / `Upgrade`                           | ❌ `L1_FORBIDDEN_COMMAND`                                        |
+| Any command with `GasCoin` reference            | ❌ `L1_GASCOIN_FORBIDDEN`                                        |
 
 ## Error Codes
 
-| Layer | Code                          | Description                                                       |
-| ----- | ----------------------------- | ----------------------------------------------------------------- |
-| P1    | `P1_TOO_MANY_COMMANDS`        | User TransactionKind command count exceeds 11                     |
-| P1    | `P1_GASCOIN_FORBIDDEN`        | User TransactionKind references GasCoin                           |
-| P1    | `P1_USER_SETTLE_FORBIDDEN`    | User TransactionKind calls a settlement entrypoint                |
-| P1    | `P1_UNAUTHORIZED_STELIS_CALL` | User TransactionKind calls a non-entrypoint Stelis function       |
-| P1    | `P1_FORBIDDEN_COMMAND`        | User TransactionKind contains Publish/Upgrade                     |
-| P1    | `P1_SPONSOR_WITHDRAWAL_FORBIDDEN` | User TransactionKind contains FundsWithdrawal(Sponsor)        |
-| P1    | `UNACCOUNTABLE_WITHDRAWAL`    | User TransactionKind contains same-token FundsWithdrawal(Sender) that cannot be safely accounted |
-| L1    | `L1_NO_SETTLE`                | No settle or swap_and_settle call found                           |
-| L1    | `L1_MULTIPLE_SETTLE`          | More than one swap_and_settle call                                |
-| L1    | `L1_FORBIDDEN_COMMAND`        | Contains Publish/Upgrade                                          |
-| L1    | `L1_UNAUTHORIZED_STELIS_CALL` | Stelis package call other than swap*and_settle*\*                 |
-| L1    | `L1_TOO_MANY_COMMANDS`        | Final command count exceeds 16                                    |
-| L1    | `L1_GASCOIN_FORBIDDEN`        | Command references GasCoin (S-15)                                 |
-| L2    | `L2_WRONG_CONFIG`             | Config object ID mismatch                                         |
-| L2    | `L2_WRONG_REGISTRY`           | VaultRegistry object ID mismatch                                  |
-| L2    | `L2_WRONG_RECIPIENT`          | settlement payout recipient address mismatch                               |
-| L2    | `L2_EXCESSIVE_CLAIM`          | executionCostClaim > maxClaimMist                                       |
-| L2    | `L2_HOST_FEE_CAP`          | quotedHostFeeMist > config.maxHostFeeMist                   |
-| L2    | `L2_PROTOCOL_FEE_MISMATCH`    | expected_protocol_fee_mist does not match config                  |
-| L2    | `L2_CONFIG_VERSION_MISMATCH`  | expected_config_version does not match config                     |
-| L2    | `L2_SETTLEMENT_SWAP_PATH_INTEGRITY`          | Settlement swap path metadata is malformed                        |
-| L2    | `L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED`     | No configured settlement swap paths are available                 |
-| L2    | `L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH`       | Requested settlement swap path is not configured                  |
-| L2    | `L2_POLICY_HASH_MISMATCH`     | Submitted policy hash does not match Host policy                  |
-| L2    | `L2_ORDER_ID_HASH_MISMATCH`   | Submitted order ID hash does not match expected hash              |
-| L3    | `L3_NONLOSS_VIOLATION`        | executionCostClaim < simGas + gasVarianceFixedMist + slippageBufferMist |
-| L3    | `L3_GAS_BUDGET_EXCEEDED`      | gasBudget > maxClaimMist                                          |
-| L3    | `L3_SIM_GAS_OUT_OF_RANGE`     | simGas > maxClaimMist                                             |
+The validator implementations own when these codes are emitted;
+`@stelis/contracts` owns the subset exposed through the current Host wire
+contract. This table documents their current meanings and is not a second
+runtime registry.
+
+| Layer | Code                                     | Description                                                                                                                          |
+| ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| P1    | `P1_TOO_MANY_COMMANDS`                   | User TransactionKind command count exceeds 11                                                                                        |
+| P1    | `P1_GASCOIN_FORBIDDEN`                   | User TransactionKind references GasCoin                                                                                              |
+| P1    | `P1_USER_SETTLE_FORBIDDEN`               | User TransactionKind calls a settlement entrypoint                                                                                   |
+| P1    | `P1_UNAUTHORIZED_STELIS_CALL`            | User TransactionKind calls a Stelis function other than allowed `vault::withdraw`; settlement entries use `P1_USER_SETTLE_FORBIDDEN` |
+| P1    | `P1_FORBIDDEN_COMMAND`                   | User TransactionKind contains Publish/Upgrade                                                                                        |
+| P1    | `P1_SPONSOR_WITHDRAWAL_FORBIDDEN`        | User TransactionKind contains FundsWithdrawal(Sponsor)                                                                               |
+| P1    | `UNACCOUNTABLE_WITHDRAWAL`               | User TransactionKind contains same-token FundsWithdrawal(Sender) that cannot be safely accounted                                     |
+| L1    | `L1_NO_SETTLE`                           | No settle or swap_and_settle call found                                                                                              |
+| L1    | `L1_MULTIPLE_SETTLE`                     | More than one allowed settlement entry call                                                                                          |
+| L1    | `L1_FORBIDDEN_COMMAND`                   | Contains Publish/Upgrade                                                                                                             |
+| L1    | `L1_UNAUTHORIZED_STELIS_CALL`            | Stelis package call other than an allowed settlement entry or `vault::withdraw`                                                      |
+| L1    | `L1_TOO_MANY_COMMANDS`                   | Final command count exceeds 16                                                                                                       |
+| L1    | `L1_GASCOIN_FORBIDDEN`                   | Command references GasCoin (S-15)                                                                                                    |
+| L2    | `L2_WRONG_CONFIG`                        | Config object ID mismatch                                                                                                            |
+| L2    | `L2_WRONG_REGISTRY`                      | VaultRegistry object ID mismatch                                                                                                     |
+| L2    | `L2_WRONG_RECIPIENT`                     | settlement payout recipient address mismatch                                                                                         |
+| L2    | `L2_EXCESSIVE_CLAIM`                     | executionCostClaim > maxClaimMist                                                                                                    |
+| L2    | `L2_HOST_FEE_CAP`                        | quotedHostFeeMist > config.maxHostFeeMist                                                                                            |
+| L2    | `L2_PROTOCOL_FEE_MISMATCH`               | expected_protocol_fee_mist does not match config                                                                                     |
+| L2    | `L2_CONFIG_VERSION_MISMATCH`             | expected_config_version does not match config                                                                                        |
+| L2    | `L2_CREDIT_SLIPPAGE_NONZERO`             | Credit-only settlement carries a non-zero slippage buffer                                                                            |
+| L2    | `L2_SETTLEMENT_SWAP_PATH_INTEGRITY`      | Settlement swap path metadata is malformed                                                                                           |
+| L2    | `L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED` | No configured settlement swap paths are available                                                                                    |
+| L2    | `L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH`   | Requested settlement swap path is not configured                                                                                     |
+| L2    | `L2_POLICY_HASH_MISMATCH`                | Submitted policy hash does not match Host policy                                                                                     |
+| L2    | `L2_ORDER_ID_HASH_MISMATCH`              | Submitted order ID hash does not match expected hash                                                                                 |
+| L3    | `L3_NONLOSS_VIOLATION`                   | executionCostClaim < simGas + gasVarianceFixedMist + slippageBufferMist                                                              |
+| L3    | `L3_GAS_BUDGET_EXCEEDED`                 | gasBudget > maxClaimMist                                                                                                             |
+| L3    | `L3_SIM_GAS_OUT_OF_RANGE`                | simGas > maxClaimMist                                                                                                                |
 
 For swap settlements, dust prevention (`totalIn < minSettleMist`) is not a sponsor-time L3 code. `totalIn` is a runtime value not visible at sponsor time, so the on-chain `S-3` (`ETotalInTooLow`) assert remains that path's dust defense and is reported as `SPONSOR_ONCHAIN_FAILED` if it fires. The Host planner applies the threshold before choosing credit-only settlement; `settle_with_credit` intentionally disables the on-chain `S-3` guard.
 

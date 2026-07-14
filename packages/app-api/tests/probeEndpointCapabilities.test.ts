@@ -13,6 +13,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { probeEndpointCapabilities } from '../src/sui/probeEndpointCapabilities.js';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { TransactionDataBuilder } from '@mysten/sui/transactions';
 
 const CONFIG_ID = '0x' + '1'.repeat(64);
 const DEEP_TYPE = '0x' + 'de'.repeat(32) + '::deep::DEEP';
@@ -26,6 +27,21 @@ const OPTS = {
 
 /** Stub probe-tx bytes (not a real transaction — tests only inspect the simulate call shape). */
 const FAKE_PROBE_TX_BYTES = new Uint8Array([1, 2, 3, 4]);
+const FAKE_PROBE_DIGEST = TransactionDataBuilder.getDigestFromBytes(FAKE_PROBE_TX_BYTES);
+
+function successfulProbeResult(digest = FAKE_PROBE_DIGEST) {
+  return {
+    $kind: 'Transaction' as const,
+    Transaction: {
+      digest,
+      status: { success: true as const, error: null },
+      effects: {
+        transactionDigest: digest,
+        status: { success: true as const, error: null },
+      },
+    },
+  };
+}
 
 function makeClient(overrides: {
   getObject?: ReturnType<typeof vi.fn>;
@@ -37,7 +53,7 @@ function makeClient(overrides: {
     getCoinMetadata:
       overrides.getCoinMetadata ?? vi.fn().mockResolvedValue({ coinMetadata: { symbol: 'DEEP' } }),
     simulateTransaction:
-      overrides.simulateTransaction ?? vi.fn().mockResolvedValue({ Transaction: {} }),
+      overrides.simulateTransaction ?? vi.fn().mockResolvedValue(successfulProbeResult()),
   } as unknown as SuiGrpcClient;
 }
 
@@ -94,6 +110,54 @@ describe('probeEndpointCapabilities', () => {
     });
     const result = await probeEndpointCapabilities(client, OPTS_WITH_BUILDER);
     expect(result).toEqual({ ok: false, reason: 'protocol error' });
+  });
+
+  it('rejects an internally valid simulation result for a different transaction', async () => {
+    const client = makeClient({
+      simulateTransaction: vi.fn().mockResolvedValue(successfulProbeResult('other-digest')),
+    });
+    const result = await probeEndpointCapabilities(client, OPTS_WITH_BUILDER);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'simulateTransaction returned a malformed or mismatched result',
+    });
+  });
+
+  it('rejects a bound failed simulation instead of treating RPC availability as capability', async () => {
+    const client = makeClient({
+      simulateTransaction: vi.fn().mockResolvedValue({
+        $kind: 'FailedTransaction',
+        FailedTransaction: {
+          digest: FAKE_PROBE_DIGEST,
+          status: {
+            success: false,
+            error: { $kind: 'Unknown', message: 'probe transaction failed', Unknown: null },
+          },
+        },
+      }),
+    });
+    const result = await probeEndpointCapabilities(client, OPTS_WITH_BUILDER);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'simulateTransaction failed: probe transaction failed',
+    });
+  });
+
+  it('rejects a successful terminal that omits the requested effects capability', async () => {
+    const client = makeClient({
+      simulateTransaction: vi.fn().mockResolvedValue({
+        $kind: 'Transaction',
+        Transaction: {
+          digest: FAKE_PROBE_DIGEST,
+          status: { success: true, error: null },
+        },
+      }),
+    });
+    const result = await probeEndpointCapabilities(client, OPTS_WITH_BUILDER);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'simulateTransaction returned no requested effects',
+    });
   });
 
   it('stops at probe 1 when getObject throws (does not run later probes)', async () => {

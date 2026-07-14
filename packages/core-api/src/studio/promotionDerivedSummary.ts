@@ -14,9 +14,20 @@
  * @module promotionDerivedSummary
  */
 
+import type {
+  PromotionListItem,
+  PromotionUnavailableReason,
+  UserPromotionDetail,
+} from '@stelis/contracts';
 import type { Entitlement, Promotion } from './domain.js';
 import { computeTotalRequiredBudgetMist } from './domain.js';
 import { checkPromotionTemporalGate } from './validation.js';
+
+export type {
+  PromotionListItem,
+  PromotionUnavailableReason,
+  UserPromotionDetail,
+} from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Admin Summary (promotion-level)
@@ -86,35 +97,6 @@ export function computePromotionAdminSummary(
 // Service User Detail (user-level read model)
 // ─────────────────────────────────────────────
 
-export type UnavailableReason =
-  | 'not_claimed'
-  | 'promotion_unavailable'
-  | 'promotion_not_started'
-  | 'claim_deadline_passed'
-  | 'use_window_expired'
-  | 'allowance_exhausted'
-  | 'action_in_flight';
-
-/**
- * User-level read model for a specific promotion.
- */
-export interface UserPromotionDetail {
-  /** Has the user claimed this promotion? */
-  claimStatus: 'claimed' | 'not_claimed';
-  /** User's remaining gas allowance in MIST. null if not claimed. */
-  userRemainingGasAllowanceMist: string | null;
-  /** Promotion claim deadline. */
-  claimDeadlineAt: string | null;
-  /** Post-claim use window end. null = unlimited. */
-  useUntilAt: string | null;
-  /** Can the user claim this promotion now? */
-  canClaim: boolean;
-  /** Can the user use a sponsored action now? */
-  canUseSponsoredAction: boolean;
-  /** Reason why sponsored action is unavailable. null if available. */
-  unavailableReason: UnavailableReason | null;
-}
-
 /**
  * Compute user promotion detail from stored data.
  *
@@ -145,7 +127,7 @@ export function computeUserPromotionDetail(
     const temporalOk = temporal === null;
     const canClaim = temporalOk && !claimDeadlinePassed && slotsAvailable;
 
-    let unavailableReason: UnavailableReason;
+    let unavailableReason: PromotionUnavailableReason;
     if (temporal) {
       unavailableReason =
         temporal.code === 'PROMOTION_NOT_STARTED'
@@ -174,7 +156,7 @@ export function computeUserPromotionDetail(
     : false;
 
   let canUseSponsoredAction = true;
-  let unavailableReason: UnavailableReason | null = null;
+  let unavailableReason: PromotionUnavailableReason | null = null;
 
   // Promotion-level gate: non-active promotion OR not-yet-started window
   // blocks sponsored actions for claimed users. Consistent with prepare/
@@ -208,33 +190,6 @@ export function computeUserPromotionDetail(
 // ─────────────────────────────────────────────
 // Service User Promotion List Item
 // ─────────────────────────────────────────────
-
-/**
- * List item for service-user promotion discovery.
- *
- * List minimum fields:
- *   promotionId, displayName, canClaim, canUseSponsoredAction,
- *   promotionRemainingBudgetMist, remainingParticipantSlots,
- *   userRemainingGasAllowanceMist, unavailableReason
- */
-export interface PromotionListItem {
-  promotionId: string;
-  displayName: string;
-  type: Promotion['type'];
-  status: Promotion['status'];
-  /** Can the user claim this promotion now? */
-  canClaim: boolean;
-  /** Can the user use a sponsored action now? */
-  canUseSponsoredAction: boolean;
-  /** Remaining promotion budget in MIST. */
-  promotionRemainingBudgetMist: string;
-  /** Remaining participant slots under the finite promotion cap. */
-  remainingParticipantSlots: number;
-  /** User's remaining gas allowance. null if not claimed. */
-  userRemainingGasAllowanceMist: string | null;
-  /** Why the user cannot use sponsored actions. null if available. */
-  unavailableReason: UnavailableReason | null;
-}
 
 /**
  * Compute a promotion list item for a specific user.

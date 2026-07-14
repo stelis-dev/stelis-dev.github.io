@@ -16,11 +16,11 @@ import {
   type PrepareStateMachineHost,
   type PrepareStateMachineRequest,
 } from '../src/session/sponsoredExecution/runner.js';
+import type { GasBoundBuildResult } from '../src/session/sponsoredExecution/reservationHandles.js';
 import type {
-  GasBoundBuildResult,
   PolicyHooks,
   SponsoredExecutionPolicy,
-} from '../src/session/sponsoredExecution/index.js';
+} from '../src/session/sponsoredExecution/executionPolicy.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
@@ -56,7 +56,7 @@ function recordHook(trace: Trace, name: string, failAtHook?: string): void {
   if (failAtHook === name) throw new Error(`policy fault at ${name}`);
 }
 
-function makeMockHooks(trace: Trace, options: PolicyOptions = {}): PolicyHooks {
+function makeMockHooks(trace: Trace, options: PolicyOptions = {}): PolicyHooks<'promotion'> {
   const buildResult = options.buildResult ?? TEST_BUILD_RESULT;
   const hook = (name: string) => () => recordHook(trace, name, options.failAtHook);
   return {
@@ -605,19 +605,8 @@ describe('runPrepareStateMachine cleanup and admission failures', () => {
 });
 
 describe('runPrepareStateMachine module API', () => {
-  test('directory internal barrel exposes runner symbols', async () => {
-    const barrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
-      string,
-      unknown
-    >;
-    expect(barrel.runPrepareStateMachine).toBeDefined();
-    expect(barrel.RunnerHostMisconfiguredError).toBeDefined();
-    expect(barrel.RunnerSponsorSlotExhaustedError).toBeDefined();
-    expect(barrel.RunnerLedgerReservationRejectedError).toBeDefined();
-  });
-
   test('package main barrel does not re-export runner symbols', async () => {
-    const mainBarrel = await import('@stelis/core-api');
+    const mainBarrel = await import('../src/index.js');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'runPrepareStateMachine')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'RunnerHostMisconfiguredError')).toBe(
       false,

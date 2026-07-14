@@ -40,14 +40,16 @@ All configuration is injected by the Host layer (app-api).
 
 ## Coordination adapters — Host-injected only
 
-`createHostContext()` requires every coordination adapter
-(`sponsorPool`, `prepareStore`, `prepareInflightLimiter`,
-`rateLimiter`, `abuseBlocker`) to be injected by the caller. There is
+The `HostRuntimeConfig` type in [`src/context.ts`](./src/context.ts) is the
+implementation authority. `createHostContext()` currently requires every
+coordination adapter (`sponsorPool`, `prepareStore`,
+`prepareRequestNonceStore`, `prepareInflightLimiter`, `rateLimiter`,
+`abuseBlocker`) to be injected by the caller. There is
 no in-memory runtime default: missing inputs fail closed at context
 construction time. Production Hosts (`app-api`) inject the
 Redis-backed adapters described in [`docs/operations.md → Sponsor Operations`](../../docs/operations.md#sponsor-operations). Memory
-adapters (`MemoryPrepareStore`, `MemoryPrepareInflight`,
-`MemoryRateLimiter`, `MemoryAbuseBlocker`, in-memory `SponsorPool`)
+adapters (`MemoryPrepareStore`, `MemoryPrepareRequestNonceStore`,
+`MemoryPrepareInflight`, `MemoryRateLimiter`, `MemoryAbuseBlocker`, in-memory `SponsorPool`)
 remain in the source tree as test-only fixtures and are not exported
 from this package's main barrel.
 

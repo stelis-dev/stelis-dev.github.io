@@ -22,55 +22,26 @@
  */
 
 // ── Constants (browser-safe, core-relay-interior) ───────────────────────────
-export { MAX_FINAL_COMMANDS, SUI_CLOCK_OBJECT_ID } from './constants.js';
+export { SUI_CLOCK_OBJECT_ID, SUI_ZERO_ADDRESS } from './constants.js';
 
 // ── Hash utilities (browser-safe, uses SubtleCrypto) ────────────────────────
 export { sha256Bytes } from './hash.js';
 
-// ── Prepare authorization message (browser-safe) ────────────────────────────
-export {
-  serializePrepareAuthorizationMessage,
-  encodePrepareAuthorizationMessage,
-  hashPrepareAuthorizationMessage,
-  PrepareAuthorizationMessageError,
-} from './prepareAuthorization.js';
+// ── Sui RPC request/result identity binding ─────────────────────────────────
+export { bindCurrentSuiResultToBytes, bindCurrentSuiResultToDigest } from './suiResultBinding.js';
 
-// ── Server-interior types (kept in core-relay) ──────────────────────────────
-export type {
-  OnchainConfig,
-  AllowedSettlementSwapPath,
-  HostValidationEnv,
-  ValidationResult,
-  SettleArgs,
-} from './types.js';
-export { ok, fail } from './types.js';
+// ── Prepare authorization message (browser-safe) ────────────────────────────
+export { encodePrepareAuthorizationMessage } from './prepareAuthorization.js';
 
 // ── Validation ──────────────────────────────────────────────────────────────
-export { validatePtbStructure, validateSettleArgs, isMoveCall } from './validate/static.js';
+export { isMoveCall } from './validate/static.js';
 export { validateGenericUserTransactionKind } from './validate/transactionKind.js';
-export { validateNonlossSponsor } from './validate/nonloss.js';
-export type { SponsorNonlossContext } from './validate/nonloss.js';
 
 export { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from './ptb/builders.js';
-export type {
-  SwapAndSettleCommonParams,
-  SwapAndSettleWithVaultParams,
-  SwapAndSettleParams,
-  SettleWithCreditPtbParams,
-} from './ptb/builders.js';
 
 // ── Gas estimation ──────────────────────────────────────────────────────────
-export {
-  computeExecutionCostClaim,
-  GAS_VARIANCE_FIXED_MIST,
-  CONVERGENCE_TOLERANCE_BPS,
-  DEFAULT_GAS_MARGIN_BPS,
-} from './gasEstimate.js';
-export type {
-  SimulationGasUsed,
-  ExecutionCostClaimEstimate,
-  ComputeExecutionCostClaimOpts,
-} from './gasEstimate.js';
+export { computeExecutionCostClaim, DEFAULT_GAS_MARGIN_BPS } from './gasEstimate.js';
+export type { SimulationGasUsed } from './gasEstimate.js';
 
 // ── Credit query ────────────────────────────────────────────────────────────
 export { queryUserCredit, CreditQueryInconsistentStateError } from './creditQuery.js';
@@ -92,7 +63,6 @@ export { convertSdkCommands } from './convert.js';
 // ── Structural command comparator (S-16 integrity) ──────────────────────────
 // Used by SDK integrity verification.
 export { integrityCompare } from './integrityCompare.js';
-export type { IntegrityVerdict } from './integrityCompare.js';
 
 // ── GasCoin reference detection (S-15/S-16) ─────────────────────────────────
 export { containsGasCoinReference } from './validate/static.js';
@@ -100,28 +70,18 @@ export { containsGasCoinReference } from './validate/static.js';
 // ── PTB input object ID extraction (integrity + prefix value tracing) ────────
 export { extractObjectIdFromInput } from './ptbInputUtils.js';
 
+// ── Canonical BCS scalar decoding ──────────────────────────────────────────
+// App-web consumes this exact-width authority for DeepBook view results.
+export { decodeExactU64Bytes } from './decodeU64.js';
+
 // ── tx gas preset guard ─────────────────────────────────────────────────────
 export { assertNoGasPreset } from './validate/txGuard.js';
 
-// ── Settle fee extractor ────────────────────────────────────────────────────
-export { extractCostFromTxBytes } from './settleArgsCost.js';
-export type { SettleArgsCost } from './settleArgsCost.js';
-
 // ── Fail-closed settle field extractor ──────────────────────────────────────
 export {
-  extractSettleTransactionFieldsFromData,
   extractSettleTransactionFieldsFromTxBytes,
   validateSettleTransactionFields,
-  SettleTransactionFieldsError,
 } from './settleTransactionFields.js';
-export type {
-  SettleTransactionFields,
-  ExpectedSettleTransactionFields,
-} from './settleTransactionFields.js';
-
-// ── Full settle arg parser ──────────────────────────────────────────────────
-export { parseSettleArgs, ParseSettleArgsError, ARG_INDEX_MAP } from './parseSettleArgs.js';
-export type { ArgIndexMap } from './parseSettleArgs.js';
 
 // NOTE: `computePolicyHash` / `PolicyFields` were moved out of this
 // package because policy hashing is server-only. The current owner is

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
+import { ClientIpResolutionError } from '@stelis/core-api';
 import { buildSponsorRefillAccountWithdrawMessage } from '@stelis/contracts';
 import { PromotionCurrentConflictError } from '@stelis/core-api/studio';
 
@@ -56,6 +57,7 @@ import { createAdminRoutes, type AdminRoutesRuntimeInput } from '../src/routes/a
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../src/sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
+import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const ADMIN_ADDRESS = '0x' + 'a'.repeat(64);
 
@@ -79,10 +81,7 @@ function createAdminRuntime(
 }
 
 function clientIpResolutionError(): Error {
-  return Object.assign(new Error('Client IP could not be resolved'), {
-    name: 'ClientIpResolutionError',
-    code: 'CLIENT_IP_UNRESOLVED',
-  });
+  return new ClientIpResolutionError('Client IP could not be resolved');
 }
 
 function createMockCtx(): AppApiContext {
@@ -145,20 +144,9 @@ function createMockCtx(): AppApiContext {
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
-    failoverTransport: {
-      getAdminSnapshot: vi.fn().mockReturnValue({
-        endpoints: [
-          {
-            url: 'https://fullnode.testnet.sui.io:443',
-            role: 'primary',
-            status: 'healthy',
-            cooldownRemainingMs: 0,
-          },
-        ],
-        totalEndpoints: 1,
-        healthyEndpoints: 1,
-      }),
-    },
+    failoverTransport: new SuiRpcFailoverTransport([
+      { url: 'https://fullnode.testnet.sui.io:443' },
+    ]),
     redis: mockRedis as never,
     sponsorOperations: {
       // Default returns a healthy single-slot state. Individual tests
@@ -529,9 +517,7 @@ describe('admin routes', () => {
       });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(mockRedis.set).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
@@ -643,9 +629,7 @@ describe('admin routes', () => {
       });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(mockCheckAndIncrementAdminOperationAttempt).not.toHaveBeenCalled();
       expect(mockReadJsonBodyWithLimit).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
@@ -667,7 +651,7 @@ describe('admin routes', () => {
       });
       expect(res.status).toBe(422);
       const body = await res.json();
-      expect(body.error).toContain('InsufficientGas');
+      expect(body.error).toBe('Withdrawal failed');
     });
 
     it('returns a stable pending code without hiding the durable operation identity', async () => {
@@ -935,9 +919,7 @@ describe('admin routes', () => {
       });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(mockReadJsonBodyWithLimit).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
@@ -1750,7 +1732,7 @@ describe('admin routes', () => {
           path: '/api/promotions/conflict',
           body: null,
         },
-      ])('maps a $label current-record race to stable 409 conflict', async (testCase) => {
+      ] as const)('maps a $label current-record race to stable 409 conflict', async (testCase) => {
         const conflict = new PromotionCurrentConflictError('conflict', testCase.label);
         (mockCtx.promotionStore as unknown as Record<string, unknown>)[testCase.storeMethod] = vi
           .fn()

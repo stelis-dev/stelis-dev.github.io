@@ -1,10 +1,6 @@
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import { SETTLEMENT_SWAP_DIRECTION_VECTORS } from '@stelis/contracts';
 import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
-import type {
-  StaticSettlementSwapPathDescriptor,
-  StaticSettlementSwapPathDescriptorMap,
-} from '@stelis/core-relay/server';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import type { PrepareHandlerConfig } from './handlers/prepare.js';
 
@@ -52,7 +48,7 @@ export function parseHostFeeEnv(envValue: string | undefined): bigint {
  * it does not re-verify the boot invariants. The SDK runs an equivalent
  * client-side check over the same settlement swap path table.
  */
-export function deriveAllowedSettlementSwapPaths(
+function deriveAllowedSettlementSwapPaths(
   settlementSwapPaths: SingleHopSettlementSwapPath[],
 ): AllowedSettlementSwapPath[] {
   assertUniqueSettlementTokenTypes(settlementSwapPaths);
@@ -97,119 +93,6 @@ function assertUniqueSettlementTokenTypes(
   }
 }
 
-function assertDescriptorMatchesSettlementSwapPath(
-  settlementSwapPath: SingleHopSettlementSwapPath,
-  descriptor: StaticSettlementSwapPathDescriptor | undefined,
-): void {
-  if (!descriptor) {
-    throw new Error(
-      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${settlementSwapPath.settlementTokenType}`,
-    );
-  }
-  const mismatch = (field: string, expected: unknown, actual: unknown): Error =>
-    new Error(
-      `[PREPARE_CONFIG] StaticSettlementSwapPathDescriptor mismatch for ${settlementSwapPath.settlementTokenSymbol}: ` +
-        `${field} expected ${String(expected)}, got ${String(actual)}`,
-    );
-
-  if (descriptor.settlementTokenType !== settlementSwapPath.settlementTokenType) {
-    throw mismatch(
-      'settlementTokenType',
-      settlementSwapPath.settlementTokenType,
-      descriptor.settlementTokenType,
-    );
-  }
-  if (descriptor.settlementTokenSymbol !== settlementSwapPath.settlementTokenSymbol) {
-    throw mismatch(
-      'settlementTokenSymbol',
-      settlementSwapPath.settlementTokenSymbol,
-      descriptor.settlementTokenSymbol,
-    );
-  }
-  if (descriptor.settlementTokenDecimals !== settlementSwapPath.settlementTokenDecimals) {
-    throw mismatch(
-      'settlementTokenDecimals',
-      settlementSwapPath.settlementTokenDecimals,
-      descriptor.settlementTokenDecimals,
-    );
-  }
-  if (descriptor.effectiveFeeRateBps !== settlementSwapPath.effectiveFeeRateBps) {
-    throw mismatch(
-      'effectiveFeeRateBps',
-      settlementSwapPath.effectiveFeeRateBps,
-      descriptor.effectiveFeeRateBps,
-    );
-  }
-  if (descriptor.settlementSwapDirection !== settlementSwapPath.settlementSwapDirection) {
-    throw mismatch(
-      'settlementSwapDirection',
-      settlementSwapPath.settlementSwapDirection,
-      descriptor.settlementSwapDirection,
-    );
-  }
-  if (descriptor.lotSize !== settlementSwapPath.lotSize) {
-    throw mismatch('lotSize', settlementSwapPath.lotSize.toString(), descriptor.lotSize.toString());
-  }
-  if (descriptor.minSize !== settlementSwapPath.minSize) {
-    throw mismatch('minSize', settlementSwapPath.minSize.toString(), descriptor.minSize.toString());
-  }
-  if (descriptor.hops.length !== settlementSwapPath.hops.length) {
-    throw mismatch('hops.length', settlementSwapPath.hops.length, descriptor.hops.length);
-  }
-  for (let i = 0; i < settlementSwapPath.hops.length; i++) {
-    const expected = settlementSwapPath.hops[i];
-    const actual = descriptor.hops[i];
-    if (!actual) throw mismatch(`hops[${i}]`, JSON.stringify(expected), 'missing');
-    if (actual.poolId !== expected.poolId) {
-      throw mismatch(`hops[${i}].poolId`, expected.poolId, actual.poolId);
-    }
-    if (actual.baseType !== expected.baseType) {
-      throw mismatch(`hops[${i}].baseType`, expected.baseType, actual.baseType);
-    }
-    if (actual.quoteType !== expected.quoteType) {
-      throw mismatch(`hops[${i}].quoteType`, expected.quoteType, actual.quoteType);
-    }
-    if (actual.swapDirection !== expected.swapDirection) {
-      throw mismatch(`hops[${i}].swapDirection`, expected.swapDirection, actual.swapDirection);
-    }
-    if (actual.feeBps !== expected.feeBps) {
-      throw mismatch(`hops[${i}].feeBps`, expected.feeBps, actual.feeBps);
-    }
-  }
-}
-
-function assertSettlementSwapPathDescriptorCoverage(
-  settlementSwapPaths: readonly SingleHopSettlementSwapPath[],
-  descriptors: StaticSettlementSwapPathDescriptorMap,
-): void {
-  const expectedTokens = new Set(
-    settlementSwapPaths.map((settlementSwapPath) => settlementSwapPath.settlementTokenType),
-  );
-  for (const settlementSwapPath of settlementSwapPaths) {
-    assertDescriptorMatchesSettlementSwapPath(
-      settlementSwapPath,
-      descriptors.get(settlementSwapPath.settlementTokenType),
-    );
-  }
-  for (const tokenType of descriptors.keys()) {
-    if (!expectedTokens.has(tokenType)) {
-      throw new Error(
-        `[PREPARE_CONFIG] Unexpected StaticSettlementSwapPathDescriptor for ${tokenType}`,
-      );
-    }
-  }
-}
-
-/**
- * Build the static settlement swap path descriptor map from host-loaded settlement swap paths.
- * `core-api` owns the descriptor shape because prepare handlers consume it.
- */
-export function createPrepareSettlementSwapPathDescriptorMap(
-  settlementSwapPaths: readonly SingleHopSettlementSwapPath[],
-): StaticSettlementSwapPathDescriptorMap {
-  return createStaticSettlementSwapPathDescriptorMap(settlementSwapPaths);
-}
-
 /**
  * Build a PrepareHandlerConfig from resolved runtime values.
  *
@@ -220,7 +103,6 @@ export function createPrepareSettlementSwapPathDescriptorMap(
  */
 export function resolvePrepareConfig(opts: {
   settlementSwapPaths: SingleHopSettlementSwapPath[];
-  descriptors: StaticSettlementSwapPathDescriptorMap;
   deepbookPackageId: string;
   /**
    * Host-quoted fee per TX (MIST) — from HOST_FEE_MIST env var.
@@ -228,13 +110,16 @@ export function resolvePrepareConfig(opts: {
    */
   quotedHostFeeMist?: bigint;
 }): PrepareHandlerConfig {
-  assertSettlementSwapPathDescriptorCoverage(opts.settlementSwapPaths, opts.descriptors);
+  const allowedSettlementSwapPaths = deriveAllowedSettlementSwapPaths(opts.settlementSwapPaths);
+  const settlementSwapPathDescriptors = createStaticSettlementSwapPathDescriptorMap(
+    opts.settlementSwapPaths,
+  );
 
   return {
     deepbookPackageId: opts.deepbookPackageId,
     supportedSettlementSwapPaths: opts.settlementSwapPaths,
-    settlementSwapPathDescriptors: opts.descriptors,
-    allowedSettlementSwapPaths: deriveAllowedSettlementSwapPaths(opts.settlementSwapPaths),
+    settlementSwapPathDescriptors,
+    allowedSettlementSwapPaths,
     quotedHostFeeMist: opts.quotedHostFeeMist ?? 0n,
   };
 }

@@ -20,6 +20,7 @@ import {
   computePromotionListItem,
   computeUserPromotionDetail,
   handlePromotionClaim,
+  type ClaimFailureReason,
   handlePromotionPrepare,
   type PromotionPrepareContext,
   handlePromotionSponsor,
@@ -35,8 +36,16 @@ import {
 } from '@stelis/core-api';
 import {
   HostWireParseError,
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  STUDIO_CLAIM_ERROR_CODES,
+  STUDIO_DETAIL_ERROR_CODES,
+  STUDIO_LIST_ERROR_CODES,
   parsePromotionPrepareRequest,
   parsePromotionSponsorRequest,
+  type PromotionClaimResponse,
+  type PromotionDetailResponse,
+  type PromotionListResponse,
   type PromotionPrepareResponse,
   type PromotionSponsorResponse,
 } from '@stelis/contracts';
@@ -44,7 +53,8 @@ import type { AppApiContext } from '../context.js';
 import type { ResolveClientIp } from '../clientIp.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { runStudioAuth } from '../middleware/studioAuth.js';
-import { mapError, respondMapped } from '../errorMap.js';
+import { codedHostError, mapError, respondMapped, uncodedHostError } from '../errorMap.js';
+import { safeErrorSummary } from '@stelis/core-api/observability';
 
 export function createStudioRoutes(
   contextPromise: Promise<AppApiContext>,
@@ -52,17 +62,40 @@ export function createStudioRoutes(
 ) {
   const app = new Hono();
 
+  const claimFailures = {
+    promotion_not_found: { code: 'PROMOTION_NOT_FOUND', message: 'Promotion not found' },
+    promotion_not_active: { code: 'PROMOTION_NOT_ACTIVE', message: 'Promotion is not active' },
+    promotion_not_started: { code: 'PROMOTION_NOT_ACTIVE', message: 'Promotion has not started' },
+    claim_deadline_passed: {
+      code: 'CLAIM_DEADLINE_PASSED',
+      message: 'Promotion claim deadline has passed',
+    },
+    max_participants_reached: {
+      code: 'PROMOTION_CAPACITY_REACHED',
+      message: 'Promotion participant capacity has been reached',
+    },
+    already_claimed: { code: 'ALREADY_CLAIMED', message: 'Promotion already claimed' },
+  } as const satisfies Record<ClaimFailureReason, { code: string; message: string }>;
+
   // ── GET /studio/promotions — developer-JWT principal promotion list ──
   // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.get('/promotions', async (c) => {
     try {
       const ctx = await contextPromise;
       if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Promotion system not available (studio not enabled)' },
+            STUDIO_LIST_ERROR_CODES,
+            503,
+          ),
+        );
       }
 
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_list',
+        allowedErrorCodes: STUDIO_LIST_ERROR_CODES,
       });
       if (!auth.ok) return auth.response;
       const { identity } = auth;
@@ -86,11 +119,15 @@ export function createStudioRoutes(
         }),
       );
 
-      return c.json({ promotions: items });
+      const response = { promotions: items } satisfies PromotionListResponse;
+      return c.json(response);
     } catch (err) {
-      const mapped = mapError(err);
+      const mapped = mapError(err, STUDIO_LIST_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondMapped(
+        c,
+        uncodedHostError({ error: 'Internal server error' }, STUDIO_LIST_ERROR_CODES, 500),
+      );
     }
   });
 
@@ -100,11 +137,19 @@ export function createStudioRoutes(
     try {
       const ctx = await contextPromise;
       if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Promotion system not available (studio not enabled)' },
+            STUDIO_DETAIL_ERROR_CODES,
+            503,
+          ),
+        );
       }
 
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_detail',
+        allowedErrorCodes: STUDIO_DETAIL_ERROR_CODES,
       });
       if (!auth.ok) return auth.response;
       const { identity } = auth;
@@ -113,7 +158,13 @@ export function createStudioRoutes(
       const promotionId = c.req.param('id');
       const promotion = await ctx.promotionStore.get(promotionId);
       if (!promotion) {
-        return c.json({ error: 'Promotion not found' }, 404);
+        return respondMapped(
+          c,
+          codedHostError(
+            { error: 'Promotion not found', code: 'PROMOTION_NOT_FOUND' },
+            STUDIO_DETAIL_ERROR_CODES,
+          ),
+        );
       }
 
       const [entitlement, claimedCount, budgetSummary] = await Promise.all([
@@ -124,35 +175,45 @@ export function createStudioRoutes(
 
       const detail = computeUserPromotionDetail(promotion, entitlement, claimedCount);
 
-      return c.json({
+      const response = {
         promotionId: promotion.promotionId,
         displayName: promotion.displayName,
         type: promotion.type,
         promotionRemainingBudgetMist: budgetSummary.availableMist.toString(),
         detail,
-      });
+      } satisfies PromotionDetailResponse;
+      return c.json(response);
     } catch (err) {
-      const mapped = mapError(err);
+      const mapped = mapError(err, STUDIO_DETAIL_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondMapped(
+        c,
+        uncodedHostError({ error: 'Internal server error' }, STUDIO_DETAIL_ERROR_CODES, 500),
+      );
     }
   });
 
   // ── POST /studio/promotions/:id/claim — claim a promotion ────────
   // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
-  // Claim uses a distinct JWT failure contract: non-DeveloperJwtAuthError
-  // maps to 500 `{ error: 'Internal server error' }` (no `code` field).
   app.post('/promotions/:id/claim', async (c) => {
     try {
       const ctx = await contextPromise;
       // 503 guards first — infrastructure/availability failures outrank
       // auth and rate-limit.
       if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Promotion system not available (studio not enabled)' },
+            STUDIO_CLAIM_ERROR_CODES,
+            503,
+          ),
+        );
       }
 
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_claim',
+        allowedErrorCodes: STUDIO_CLAIM_ERROR_CODES,
       });
       if (!auth.ok) return auth.response;
       const { identity, ip } = auth;
@@ -188,31 +249,27 @@ export function createStudioRoutes(
           );
         }
 
-        const statusMap: Record<string, number> = {
-          promotion_not_found: 404,
-          promotion_not_active: 409,
-          promotion_not_started: 409,
-          claim_deadline_passed: 409,
-          max_participants_reached: 409,
-          already_claimed: 409,
-        };
-        return c.json(
-          { error: result.reason },
-          (statusMap[result.reason] ?? 500) as 404 | 409 | 500,
+        const failure = claimFailures[result.reason];
+        return respondMapped(
+          c,
+          codedHostError({ error: failure.message, code: failure.code }, STUDIO_CLAIM_ERROR_CODES),
         );
       }
 
-      return c.json({ entitlement: result.entitlement }, 201);
+      const response = { entitlement: result.entitlement } satisfies PromotionClaimResponse;
+      return c.json(response, 201);
     } catch (err) {
-      const mapped = mapError(err);
+      const mapped = mapError(err, STUDIO_CLAIM_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondMapped(
+        c,
+        uncodedHostError({ error: 'Internal server error' }, STUDIO_CLAIM_ERROR_CODES, 500),
+      );
     }
   });
 
   // ── POST /studio/promotions/:id/prepare ────────────────────────────
   // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
-  // Prepare escalates unknown JWT errors to 401 AUTH_JWT_INVALID.
   app.post('/promotions/:id/prepare', async (c) => {
     try {
       const ctx = await contextPromise;
@@ -220,13 +277,34 @@ export function createStudioRoutes(
       // 503 guards first — infrastructure/availability failures outrank
       // auth and rate-limit.
       if (!ctx.studio) {
-        return c.json({ error: 'Studio mode is not enabled on this server' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Studio mode is not enabled on this server' },
+            PROMOTION_PREPARE_ERROR_CODES,
+            503,
+          ),
+        );
       }
       if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Promotion system not available' },
+            PROMOTION_PREPARE_ERROR_CODES,
+            503,
+          ),
+        );
       }
       if (!ctx.studioGlobalAllowedTargets) {
-        return c.json({ error: 'Global target policy not configured' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Global target policy not configured' },
+            PROMOTION_PREPARE_ERROR_CODES,
+            503,
+          ),
+        );
       }
 
       const [sponsorOperationsState, slotLeases] = await Promise.all([
@@ -239,12 +317,15 @@ export function createStudioRoutes(
       });
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return c.json(blocked.body, blocked.status);
+        return respondMapped(
+          c,
+          codedHostError(blocked.body, PROMOTION_PREPARE_ERROR_CODES, blocked.headers),
+        );
       }
 
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_prepare',
-        unknownJwtErrorAs401: true,
+        allowedErrorCodes: PROMOTION_PREPARE_ERROR_CODES,
       });
       if (!auth.ok) return auth.response;
       const { identity, ip } = auth;
@@ -276,22 +357,33 @@ export function createStudioRoutes(
       return c.json(result);
     } catch (err) {
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return respondMapped(
+          c,
+          codedHostError(
+            {
+              error: 'Request body does not match the current API contract',
+              code: 'BAD_REQUEST',
+            },
+            PROMOTION_PREPARE_ERROR_CODES,
+          ),
+        );
       }
-      const mapped = mapError(err);
+      const mapped = mapError(err, PROMOTION_PREPARE_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
-      console.error(
-        '[app-api /studio/promotions/:id/prepare] 500 error:',
-        err instanceof Error ? err.message : err,
+      console.error('[app-api /studio/promotions/:id/prepare] 500 error:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError(
+          { error: 'Internal server error', code: 'INTERNAL_ERROR' },
+          PROMOTION_PREPARE_ERROR_CODES,
+        ),
       );
-      return c.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, 500);
     }
   });
 
   // ── POST /studio/promotions/:id/sponsor ───────────────────────────
   // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
-  // Sponsor escalates unknown JWT errors to 401 AUTH_JWT_INVALID.
   app.post('/promotions/:id/sponsor', async (c) => {
     try {
       const ctx = await contextPromise;
@@ -299,25 +391,49 @@ export function createStudioRoutes(
       // 503 guards first — infrastructure/availability failures outrank
       // auth and rate-limit.
       if (!ctx.studio) {
-        return c.json({ error: 'Studio mode is not enabled on this server' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Studio mode is not enabled on this server' },
+            PROMOTION_SPONSOR_ERROR_CODES,
+            503,
+          ),
+        );
       }
       if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Promotion system not available' },
+            PROMOTION_SPONSOR_ERROR_CODES,
+            503,
+          ),
+        );
       }
       if (!ctx.studioGlobalAllowedTargets) {
-        return c.json({ error: 'Global target policy not configured' }, 503);
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Global target policy not configured' },
+            PROMOTION_SPONSOR_ERROR_CODES,
+            503,
+          ),
+        );
       }
 
       const sponsorOperationsState = await ctx.sponsorOperations.readState();
       const blocked = buildSponsorUnavailableResponse(sponsorOperationsState);
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return c.json(blocked.body, blocked.status);
+        return respondMapped(
+          c,
+          codedHostError(blocked.body, PROMOTION_SPONSOR_ERROR_CODES, blocked.headers),
+        );
       }
 
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_sponsor',
-        unknownJwtErrorAs401: true,
+        allowedErrorCodes: PROMOTION_SPONSOR_ERROR_CODES,
       });
       if (!auth.ok) return auth.response;
       const { identity, ip } = auth;
@@ -360,16 +476,28 @@ export function createStudioRoutes(
       return c.json(sponsorResult);
     } catch (err) {
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return respondMapped(
+          c,
+          codedHostError(
+            {
+              error: 'Request body does not match the current API contract',
+              code: 'BAD_REQUEST',
+            },
+            PROMOTION_SPONSOR_ERROR_CODES,
+          ),
+        );
       }
-      const mapped = mapError(err);
+      const mapped = mapError(err, PROMOTION_SPONSOR_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
-      console.error(
-        '[app-api /studio/promotions/:id/sponsor] 500 error:',
-        err instanceof Error ? err.message : err,
+      console.error('[app-api /studio/promotions/:id/sponsor] 500 error:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError(
+          { error: 'Internal server error', code: 'SPONSOR_FAILED' },
+          PROMOTION_SPONSOR_ERROR_CODES,
+        ),
       );
-      return c.json({ error: 'Internal server error', code: 'SPONSOR_FAILED' }, 500);
     }
   });
 

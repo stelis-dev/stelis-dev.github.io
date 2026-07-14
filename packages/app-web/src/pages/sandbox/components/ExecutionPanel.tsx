@@ -4,7 +4,6 @@ import { ConnectCredit } from './ConnectCredit';
 import { SwapForm } from './SwapForm';
 import { TransferForm } from './TransferForm';
 import { SettlementSwapPathSelector } from './SettlementSwapPathSelector';
-import { CodePanel } from './CodePanel';
 import type { SandboxStep } from '../types';
 import { useAppConfig } from '../../../AppConfigContext';
 
@@ -98,5 +97,3 @@ export function ExecutionPanel({
     </WalletProvider>
   );
 }
-
-export { CodePanel };

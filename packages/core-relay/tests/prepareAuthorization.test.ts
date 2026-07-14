@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PrepareAuthorizationFields } from '@stelis/contracts';
 import {
-  hashPrepareAuthorizationMessage,
   PrepareAuthorizationMessageError,
   serializePrepareAuthorizationMessage,
 } from '../src/prepareAuthorization.js';
@@ -22,12 +21,8 @@ const BASE_FIELDS: PrepareAuthorizationFields = {
   requestNonce: 'request-nonce-1',
 };
 
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 describe('prepare authorization message', () => {
-  it('serializes the same canonical message for equivalent input fields', async () => {
+  it('serializes the same canonical message for equivalent input fields', () => {
     const sameFields: PrepareAuthorizationFields = {
       requestNonce: BASE_FIELDS.requestNonce,
       timestampMs: BASE_FIELDS.timestampMs,
@@ -44,19 +39,15 @@ describe('prepare authorization message', () => {
     expect(serializePrepareAuthorizationMessage(BASE_FIELDS)).toBe(
       serializePrepareAuthorizationMessage(sameFields),
     );
-    expect(hex(await hashPrepareAuthorizationMessage(BASE_FIELDS))).toBe(
-      hex(await hashPrepareAuthorizationMessage(sameFields)),
-    );
   });
 
-  it('changes the hash when txKindBytesHash changes', async () => {
-    const first = await hashPrepareAuthorizationMessage(BASE_FIELDS);
-    const second = await hashPrepareAuthorizationMessage({
+  it('includes a changed txKindBytesHash in the canonical message', () => {
+    const first = serializePrepareAuthorizationMessage(BASE_FIELDS);
+    const second = serializePrepareAuthorizationMessage({
       ...BASE_FIELDS,
       txKindBytesHash: 'cd'.repeat(32),
     });
-
-    expect(hex(first)).not.toBe(hex(second));
+    expect(first).not.toBe(second);
   });
 
   it('keeps requestNonce separate from the relay-assigned settlement nonce', () => {

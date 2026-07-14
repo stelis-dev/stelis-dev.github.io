@@ -8,6 +8,7 @@ import {
 } from '../src/paymentInputIntegrity.js';
 import { extractSettlePaymentInputContract } from '../src/server/index.js';
 import { buildSettleWithCreditPtb, buildSwapAndSettlePtb } from '../src/ptb/builders.js';
+import { isMoveCall } from '../src/validate/static.js';
 import { settlementParameterIndex, type MoveCallCommand, type PtbCommand } from '@stelis/contracts';
 
 const PKG = '0x' + '1'.repeat(64);
@@ -62,7 +63,7 @@ function getCommands(buildFn: (tx: Transaction) => void): {
 function findSettleCommand(commands: PtbCommand[]): MoveCallCommand {
   const settle = commands.find(
     (cmd): cmd is MoveCallCommand =>
-      cmd.kind === 'MoveCall' && cmd.packageId === PKG && cmd.module === 'settle',
+      isMoveCall(cmd) && cmd.packageId === PKG && cmd.module === 'settle',
   );
   if (!settle) {
     throw new Error('Missing settle command');
@@ -174,7 +175,7 @@ describe('paymentInputIntegrity extraction', () => {
       );
 
       expect(() => extractPaymentInputTrace(commands, patchedInputs, settle)).toThrow(
-        `Pure u64 must be exactly 8 bytes, got ${width}`,
+        `u64 BCS value must be exactly 8 bytes, got ${width}`,
       );
     });
   }
@@ -239,7 +240,10 @@ describe('paymentInputIntegrity extraction', () => {
     });
     const withdrawalInput = inputs.find(
       (input): input is Record<string, unknown> =>
-        typeof input === 'object' && input !== null && input['$kind'] === 'FundsWithdrawal',
+        typeof input === 'object' &&
+        input !== null &&
+        '$kind' in input &&
+        input.$kind === 'FundsWithdrawal',
     );
     expect(withdrawalInput).toBeDefined();
     const payload = withdrawalInput!.FundsWithdrawal as {
@@ -662,9 +666,7 @@ describe('paymentInputIntegrity extraction', () => {
     );
     const extraRedeem = invalid.commands.find(
       (command): command is MoveCallCommand =>
-        command.kind === 'MoveCall' &&
-        command.module === 'coin' &&
-        command.function === 'redeem_funds',
+        isMoveCall(command) && command.module === 'coin' && command.function === 'redeem_funds',
     );
     expect(extraWithdrawal).toBeDefined();
     expect(extraRedeem).toBeDefined();

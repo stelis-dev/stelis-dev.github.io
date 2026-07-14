@@ -23,6 +23,7 @@ function view(overrides: Partial<SponsorAvailabilityView> = {}): SponsorAvailabi
         refillOperationId: null,
         refillOperationSequence: null,
         refillOperationState: null,
+        refillRequiredSourceBalanceMist: null,
       },
     ],
     sponsorRefillAccount: {
@@ -126,6 +127,7 @@ describe('sponsor operations gate', () => {
               refillOperationId: null,
               refillOperationSequence: null,
               refillOperationState: null,
+              refillRequiredSourceBalanceMist: null,
             },
           ],
           sponsorRefillAccount: {

@@ -28,8 +28,11 @@ vi.mock('../src/redisClient.js', () => ({
   createRedisClient: state.createRedisClient,
 }));
 
-vi.mock('../src/sui/index.js', () => ({
+vi.mock('../src/sui/parseEndpointConfig.js', () => ({
   loadRpcConfig: state.loadRpcConfig,
+}));
+
+vi.mock('../src/sui/createSuiClient.js', () => ({
   createSuiClient: state.createSuiClient,
 }));
 

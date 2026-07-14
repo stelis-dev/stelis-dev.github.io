@@ -39,7 +39,7 @@ import {
   type PrepareStoreAdapter,
 } from './prepareTypes.js';
 import type { RedisClientLike } from './redisClient.js';
-import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
+import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE } from '../observability/events.js';
 import {
   invokeEvictCallback,
@@ -601,7 +601,7 @@ function parseStoreEvictedEntries(value: unknown): StoreEvictedEntry[] {
 
 function logUnrecoverableStoreEvictionResult(): void {
   try {
-    logSponsorPoolEvent(
+    logStructuredEvent(
       SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE,
       {
         adapter: 'redis-prepare',
@@ -888,7 +888,7 @@ export class RedisPrepareStore implements PrepareStoreAdapter {
       // separate structured event so operators can correlate with
       // lease-TTL reclamation without conflating failure families.
       try {
-        logSponsorPoolEvent(
+        logStructuredEvent(
           SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE,
           {
             adapter: 'redis-prepare',

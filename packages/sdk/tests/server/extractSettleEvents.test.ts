@@ -7,27 +7,20 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { extractSettleEvents } from '../../src/server/extractSettleEvents.js';
-import { SettleEventBcs } from '../../src/server/settleEventDecoder.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { serializeSettleEventBcs } from '../helpers/settleEventBcs.js';
 
 const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 const SETTLE_EVENT_TYPE = `${PACKAGE_ID}::events::SettleEvent`;
 const USER = `0x${'ab'.repeat(32)}`;
 
-function createMockSettleEventBcs(
-  overrides: {
-    receiptId?: number[];
-    user?: string;
-    orderIdHash?: number[];
-    execTimestampMs?: bigint;
-  } = {},
-): Uint8Array {
-  return SettleEventBcs.serialize({
-    receipt_id: overrides.receiptId ?? Array.from({ length: 32 }, (_, i) => i),
+function createMockSettleEventBcs(): Uint8Array {
+  return serializeSettleEventBcs({
+    receipt_id: Uint8Array.from({ length: 32 }, (_, i) => i),
     nonce: 1n,
-    policy_hash: Array.from({ length: 32 }, () => 0),
+    policy_hash: new Uint8Array(32),
     quote_timestamp_ms: 1000n,
-    exec_timestamp_ms: overrides.execTimestampMs ?? 2000n,
+    exec_timestamp_ms: 2000n,
     sim_gas_reported: 100n,
     gas_variance_fixed_mist: 10n,
     slippage_buffer_mist: 5n,
@@ -39,10 +32,10 @@ function createMockSettleEventBcs(
     total_in: 1000n,
     surplus_credited: 0n,
     config_version: 1n,
-    user: overrides.user ?? USER,
+    user: USER,
     settlement_payout_recipient: `0x${'cc'.repeat(32)}`,
-    order_id_hash: overrides.orderIdHash ?? Array.from({ length: 32 }, () => 0xff),
-  }).toBytes();
+    order_id_hash: new Uint8Array(32).fill(0xff),
+  });
 }
 
 function createEvent(bcs: Uint8Array, eventType = SETTLE_EVENT_TYPE) {
@@ -113,9 +106,10 @@ describe('extractSettleEvents', () => {
   it('normally skips a successful transaction with no canonical SettleEvent', async () => {
     const logger = vi.fn();
     const client = createMockClient({
-      digest2: successfulTransaction([
-        createEvent(new Uint8Array(), `${PACKAGE_ID}::events::OtherEvent`),
-      ]),
+      digest2: successfulTransaction(
+        [createEvent(new Uint8Array(), `${PACKAGE_ID}::events::OtherEvent`)],
+        'digest2',
+      ),
     });
 
     const results = await extractSettleEvents(client, ['digest2'], logger);
@@ -164,7 +158,9 @@ describe('extractSettleEvents', () => {
   it('skips duplicate SettleEvents and reports the count boundary', async () => {
     const logger = vi.fn();
     const event = createEvent(createMockSettleEventBcs());
-    const client = createMockClient({ duplicate: successfulTransaction([event, event]) });
+    const client = createMockClient({
+      duplicate: successfulTransaction([event, event], 'duplicate'),
+    });
 
     const results = await extractSettleEvents(client, ['duplicate'], logger);
 
@@ -178,7 +174,7 @@ describe('extractSettleEvents', () => {
     withTrailingByte.set(canonical);
     const logger = vi.fn();
     const client = createMockClient({
-      malformed: successfulTransaction([createEvent(withTrailingByte)]),
+      malformed: successfulTransaction([createEvent(withTrailingByte)], 'malformed'),
     });
 
     const results = await extractSettleEvents(client, ['malformed'], logger);
@@ -186,5 +182,15 @@ describe('extractSettleEvents', () => {
     expect(results).toEqual([]);
     expect(logger).toHaveBeenCalledWith(expect.stringContaining('invalid SettleEvent BCS'));
     expect(logger).toHaveBeenCalledWith(expect.stringContaining('not canonical'));
+  });
+
+  it('skips an internally valid result for a different requested digest', async () => {
+    const logger = vi.fn();
+    const client = createMockClient({
+      requested: successfulTransaction([createEvent(createMockSettleEventBcs())], 'different'),
+    });
+
+    await expect(extractSettleEvents(client, ['requested'], logger)).resolves.toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('malformed or mismatched result'));
   });
 });

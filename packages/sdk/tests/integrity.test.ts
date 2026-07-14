@@ -17,7 +17,7 @@ import {
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   SUI_TYPE,
 } from '@stelis/contracts';
-import type { PtbCommand, MoveCallCommand, OtherCommand } from '@stelis/contracts';
+import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
 import {
   verifyPrefix,
   verifySuffix,
@@ -33,6 +33,7 @@ const PKG = '0x' + '1'.repeat(64);
 const SUI_FRAMEWORK = SUI_TYPE.split('::')[0]; // 0x0...002
 const BFQ_NEW_USER = SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser;
 const BFQ_WITH_VAULT = SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.withVault;
+type OtherCommand = Exclude<PtbCommand, MoveCallCommand>;
 
 // ── PtbCommand factories ───────────────────────────────────────────────────────
 
@@ -443,7 +444,7 @@ describe('S-16: fromKind/from command serialization', () => {
 
 // ── Input verification ─────────────────────────────────────────────────
 // Tests verify normalizeInput cross-type equivalence and verifyInputs prefix.
-// Source: integrity.ts extractObjectId / normalizeInput / verifyInputs
+// Source: integrity.ts extractObjectIdFromInput / normalizeInput / verifyInputs
 
 const OBJ_A = '0x' + 'a'.repeat(64);
 const OBJ_B = '0x' + 'b'.repeat(64);

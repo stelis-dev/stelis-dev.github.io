@@ -18,7 +18,7 @@
  *     exact-key enforcement.
  *
  * Tests under `packages/*\/tests/**` are explicitly allowed to reach the
- * `__testingReservationHandleInternals` re-export.
+ * `__testingReservationHandleInternals` direct owner export.
  */
 import { describe, test, expect } from 'vitest';
 import {
@@ -67,39 +67,22 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
     // The constructors accept a `unique symbol` typed factory key. A forged
     // symbol passed via `unknown` cast is the only way to even reach the
     // constructor body, and the runtime identity check rejects it.
-    const fakeKey = Symbol('fake') as unknown as Parameters<
-      typeof SponsorSlotReservationHandleImpl
-    >[0];
-    expect(() => new SponsorSlotReservationHandleImpl(fakeKey, '0xS', '0xR')).toThrow(
-      ReservationHandleConstructionError,
-    );
-    expect(() => new NonceReservationHandleImpl(fakeKey, 1n, '0xS', '0xR')).toThrow(
-      ReservationHandleConstructionError,
-    );
-    expect(() => new LedgerReservationHandleImpl(fakeKey, '0xR', 'p1', 'u1', 1_000n)).toThrow(
-      ReservationHandleConstructionError,
-    );
-  });
-
-  test('the directory-internal index.ts barrel does NOT re-export the raw factory key, factory, or impl classes', async () => {
-    const internalBarrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
-      string,
-      unknown
-    >;
-    // Public mint helpers must be present.
-    expect(internalBarrel.reconstructReservationHandles).toBeDefined();
-    expect(internalBarrel.createGasBoundBuildInput).toBeDefined();
-    // Raw construction API must NOT be reachable through the internal barrel.
-    expect(internalBarrel.RESERVATION_HANDLE_FACTORY_KEY).toBeUndefined();
-    expect(internalBarrel.internalReservationHandleFactory).toBeUndefined();
-    expect(internalBarrel.SponsorSlotReservationHandleImpl).toBeUndefined();
-    expect(internalBarrel.NonceReservationHandleImpl).toBeUndefined();
-    expect(internalBarrel.LedgerReservationHandleImpl).toBeUndefined();
-    expect(internalBarrel.__testingReservationHandleInternals).toBeUndefined();
+    const fakeKey = Symbol('fake');
+    // Reflect.construct deliberately crosses the compile-time factory-key gate so
+    // this test can exercise the separate runtime identity guard.
+    expect(() =>
+      Reflect.construct(SponsorSlotReservationHandleImpl, [fakeKey, '0xS', '0xR']),
+    ).toThrow(ReservationHandleConstructionError);
+    expect(() =>
+      Reflect.construct(NonceReservationHandleImpl, [fakeKey, 1n, '0xS', '0xR']),
+    ).toThrow(ReservationHandleConstructionError);
+    expect(() =>
+      Reflect.construct(LedgerReservationHandleImpl, [fakeKey, '0xR', 'p1', 'u1', 1_000n]),
+    ).toThrow(ReservationHandleConstructionError);
   });
 
   test('the package main barrel does NOT re-export any SponsoredExecution API', async () => {
-    const mainBarrel = await import('@stelis/core-api');
+    const mainBarrel = await import('../src/index.js');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'reconstructReservationHandles')).toBe(
       false,
     );
@@ -108,6 +91,12 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
     );
     expect(
       Object.prototype.hasOwnProperty.call(mainBarrel, 'createSponsoredExecutionPolicyRegistry'),
+    ).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(mainBarrel, 'SponsorSlotReservationHandleImpl'),
+    ).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(mainBarrel, '__testingReservationHandleInternals'),
     ).toBe(false);
   });
 });
@@ -226,7 +215,7 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
     }
     // The TypeScript type `GasBoundBuildReservationHandles` does not name
     // `ledgerReservation` at all, so a getter for it would compile-error.
-    expect((ev as Record<string, unknown>).ledgerReservation).toBeUndefined();
+    expect((ev as unknown as Record<string, unknown>).ledgerReservation).toBeUndefined();
   });
 
   test('SponsorResultReservationHandles carries ledgerReservation but NOT nonce', () => {
@@ -237,7 +226,7 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
       receiptId: '0xR',
     });
     const ev: SponsorResultReservationHandles = { sponsorSlot: slot };
-    expect((ev as Record<string, unknown>).nonce).toBeUndefined();
+    expect((ev as unknown as Record<string, unknown>).nonce).toBeUndefined();
   });
 });
 
@@ -466,12 +455,15 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
       ...makeNoopPolicy('promotion'),
       discriminator: 'generic',
     };
+    // Deliberately cross the static registry boundary to exercise its runtime
+    // discriminator-mismatch guard.
+    const tamperedRegistry = {
+      generic,
+      promotion: tamperedPromotion,
+    } as unknown as Parameters<typeof createSponsoredExecutionPolicyRegistry>[0];
     let caught: unknown;
     try {
-      createSponsoredExecutionPolicyRegistry({
-        generic,
-        promotion: tamperedPromotion,
-      });
+      createSponsoredExecutionPolicyRegistry(tamperedRegistry);
       expect.fail('expected throw on discriminator mismatch');
     } catch (err) {
       caught = err;

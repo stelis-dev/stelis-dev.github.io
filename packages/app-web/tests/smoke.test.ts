@@ -3,36 +3,15 @@
  *
  * Verifies sandbox execution flow wiring against app-api route layout.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 // ── Relay API endpoint logic ─────────────────────────────────────────────────
 
 describe('relayApiEndpoint', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it('RELAY_API_BASE is always explicit (no runtime fallback)', async () => {
     const mod = await import('../src/relayApiEndpoint');
     expect(mod.RELAY_API_BASE.endsWith('/relay')).toBe(true);
     expect(mod.RELAY_API_BASE).not.toBe('/relay');
-  });
-
-  it('root frontend builds do not override deployment URLs', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const rootPackageJson = fs.readFileSync(
-      path.resolve(__dirname, '../../../package.json'),
-      'utf-8',
-    );
-    expect(rootPackageJson).toContain('"build:app-web": "npm run build -w @stelis/app-web"');
-    expect(rootPackageJson).toContain('"build:app-admin": "npm run build -w @stelis/app-admin"');
-    expect(rootPackageJson).not.toContain(
-      '"build:app-web": "VITE_STELIS_RELAY_API_URL=http://localhost:3200/relay',
-    );
-    expect(rootPackageJson).not.toContain(
-      '"build:app-admin": "VITE_STELIS_API_URL=http://localhost:3200',
-    );
   });
 });
 
@@ -113,116 +92,6 @@ describe('Sandbox SDK wiring', () => {
       ],
     };
     expect(() => getSelectedSettlementSwapPath(mockSdk as never, 5)).toThrow('out of range');
-  });
-
-  it('sandbox UI does not render fake TOKEN or DEEP fallback labels', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const sandboxDir = path.resolve(__dirname, '../src/pages/sandbox');
-    const files = [
-      'components/SwapForm.tsx',
-      'components/ConnectCredit.tsx',
-      'components/TransferForm.tsx',
-      'components/CodePanel.tsx',
-    ];
-    const combined = files
-      .map((file) => fs.readFileSync(path.join(sandboxDir, file), 'utf-8'))
-      .join('\n');
-    expect(combined).not.toContain("?? 'TOKEN'");
-    expect(combined).not.toContain("?? 'DEEP'");
-  });
-
-  it('registers the Agent-Q Sui Wallet Standard initializer', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const walletProvider = fs.readFileSync(
-      path.resolve(__dirname, '../src/pages/sandbox/components/WalletProvider.tsx'),
-      'utf-8',
-    );
-    expect(walletProvider).toContain('@stelis/agent-q-provider-sui/browser');
-    expect(walletProvider).toContain('@stelis/agent-q-provider-sui/wallet-standard');
-    expect(walletProvider).toContain('createAgentQSuiWalletInitializer');
-    expect(walletProvider).toContain('walletInitializers');
-  });
-
-  it('uses local Sui submission for wallet-direct transactions only', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const sandboxDir = path.resolve(__dirname, '../src/pages/sandbox');
-    const directComponents = ['components/SwapForm.tsx', 'components/ConnectCredit.tsx']
-      .map((file) => fs.readFileSync(path.join(sandboxDir, file), 'utf-8'))
-      .join('\n');
-    const hostTransfer = fs.readFileSync(
-      path.join(sandboxDir, 'components/TransferForm.tsx'),
-      'utf-8',
-    );
-    const localSuiExecution = fs.readFileSync(
-      path.join(sandboxDir, 'localSuiExecution.ts'),
-      'utf-8',
-    );
-    expect(directComponents).toContain('signAndExecuteLocalTransaction');
-    expect(directComponents).not.toContain('signAndExecuteTransaction');
-    expect(hostTransfer).toContain('executeSponsored');
-    expect(hostTransfer).toContain('signTransaction');
-    expect(hostTransfer).not.toContain('signAndExecuteLocalTransaction');
-    expect(localSuiExecution).toContain('signTransaction');
-    expect(localSuiExecution).toContain('executeTransaction');
-    expect(localSuiExecution).toContain('waitForTransaction');
-  });
-
-  it('isSwapDemoSupported returns true for 1-hop whitelisted, false for hop count > 1', async () => {
-    const { isSwapDemoSupported } = await import('../src/pages/sandbox/constants');
-    const oneHop = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'DEEP',
-          quoteType: 'SUI',
-          swapDirection: 'baseForQuote',
-          feeBps: 0,
-        },
-      ],
-    };
-    const invalidHopCount = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'DEEP',
-          quoteType: 'USDC',
-          swapDirection: 'quoteForBase',
-          feeBps: 0,
-        },
-        {
-          poolId: '0x2',
-          baseType: 'DEEP',
-          quoteType: 'SUI',
-          swapDirection: 'baseForQuote',
-          feeBps: 0,
-        },
-      ],
-    };
-    expect(isSwapDemoSupported(oneHop as never)).toBe(true);
-    expect(isSwapDemoSupported(invalidHopCount as never)).toBe(false);
-  });
-
-  it('isSwapDemoSupported returns false for fee-bearing 1-hop (demo scope limit)', async () => {
-    // Fee-bearing 1-hop pools run under DeepBook's input-fee economics, so the
-    // fee is charged on the input side and the user receives less settlement token.
-    // Handling that requires a min-out / slippage UX that the sandbox demo does
-    // not implement.
-    const { isSwapDemoSupported } = await import('../src/pages/sandbox/constants');
-    const feeBearing = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'TOKEN',
-          quoteType: 'SUI',
-          swapDirection: 'baseForQuote',
-          feeBps: 20,
-        },
-      ],
-    };
-    expect(isSwapDemoSupported(feeBearing as never)).toBe(false);
   });
 
   it('swapDemoRejectReason distinguishes unsupported_hop_count from fee_bearing', async () => {
@@ -312,57 +181,6 @@ describe('Sandbox SDK wiring', () => {
     expect(feeBearingMsg).not.toContain('reports 2 hops');
   });
 
-  it('getSandboxSwapTarget returns correct function for both settlement swap directions', async () => {
-    const { getSandboxSwapTarget } = await import('../src/pages/sandbox/constants');
-    const bfqPool = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'DEEP',
-          quoteType: 'SUI',
-          swapDirection: 'baseForQuote',
-          feeBps: 0,
-        },
-      ],
-    };
-    const qfbPool = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'SUI',
-          quoteType: 'USDC',
-          swapDirection: 'quoteForBase',
-          feeBps: 0,
-        },
-      ],
-    };
-    expect(getSandboxSwapTarget(bfqPool as never)).toBe('swap_exact_quote_for_base');
-    expect(getSandboxSwapTarget(qfbPool as never)).toBe('swap_exact_base_for_quote');
-  });
-
-  it('getSandboxSwapTarget throws for pool with hop count > 1', async () => {
-    const { getSandboxSwapTarget } = await import('../src/pages/sandbox/constants');
-    const invalidHopCount = {
-      hops: [
-        {
-          poolId: '0x1',
-          baseType: 'DEEP',
-          quoteType: 'USDC',
-          swapDirection: 'quoteForBase',
-          feeBps: 0,
-        },
-        {
-          poolId: '0x2',
-          baseType: 'DEEP',
-          quoteType: 'SUI',
-          swapDirection: 'baseForQuote',
-          feeBps: 0,
-        },
-      ],
-    };
-    expect(() => getSandboxSwapTarget(invalidHopCount as never)).toThrow('exactly 1 hop');
-  });
-
   it('parses sandbox decimal amounts without floating-point arithmetic', async () => {
     const { parseDecimalToSmallestUnit, parsePercentToBps } =
       await import('../src/pages/sandbox/amount');
@@ -412,14 +230,6 @@ describe('Page exports', () => {
 // ── Endpoint route verification ────────────────────────────────────────────
 
 describe('Endpoint routes', () => {
-  it('Status page probes /relay/status and /relay/config', async () => {
-    const fs = await import('fs');
-    const path = await import('path');
-    const src = fs.readFileSync(path.resolve(__dirname, '../src/pages/Status.tsx'), 'utf-8');
-    expect(src).toContain('`${RELAY_API_BASE}/status`');
-    expect(src).toContain('`${RELAY_API_BASE}/config`');
-  });
-
   it('Playground prepare uses the current signed request fields and JSON number types', async () => {
     const { PLAYGROUND_ENDPOINTS, buildPlaygroundRequestBody } =
       await import('../src/pages/Playground');

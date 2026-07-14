@@ -9,6 +9,7 @@
  * argument shape.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { TransactionDataBuilder } from '@mysten/sui/transactions';
 import type { DeepBookPoolHop } from '@stelis/contracts';
 import { SlippageQueryError } from '../src/deepbookErrors.js';
 
@@ -22,7 +23,8 @@ const mockState = vi.hoisted(() => ({
   }>,
 }));
 
-vi.mock('@mysten/sui/transactions', () => {
+vi.mock('@mysten/sui/transactions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@mysten/sui/transactions')>();
   class MockTransaction {
     moveCall(arg: { target: string; typeArguments?: unknown[]; arguments?: unknown[] }) {
       mockState.moveCalls.push({
@@ -44,6 +46,7 @@ vi.mock('@mysten/sui/transactions', () => {
     }
   }
   return {
+    ...actual,
     Transaction: MockTransaction,
   };
 });
@@ -77,16 +80,26 @@ function makeHop(swapDirection: 'baseForQuote' | 'quoteForBase' = 'baseForQuote'
 }
 
 function make3TupleResult(baseOut: bigint, quoteOut: bigint, deepReq: bigint) {
+  return makeSimulationResult([
+    {
+      returnValues: [
+        { bcs: encodeU64LE(baseOut) },
+        { bcs: encodeU64LE(quoteOut) },
+        { bcs: encodeU64LE(deepReq) },
+      ],
+    },
+  ]);
+}
+
+function makeSimulationResult(commandResults: unknown[]) {
+  const digest = TransactionDataBuilder.getDigestFromBytes(new Uint8Array([0xaa, 0xbb]));
   return {
-    commandResults: [
-      {
-        returnValues: [
-          { bcs: encodeU64LE(baseOut) },
-          { bcs: encodeU64LE(quoteOut) },
-          { bcs: encodeU64LE(deepReq) },
-        ],
-      },
-    ],
+    $kind: 'Transaction' as const,
+    Transaction: {
+      digest,
+      status: { success: true as const, error: null },
+    },
+    commandResults,
   };
 }
 
@@ -138,8 +151,8 @@ describe('getQuantityOut — success decode + direction', () => {
 
   it('throws SlippageQueryError when BCS buffer is too short', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               { bcs: new Uint8Array([1, 2, 3]) }, // 3 bytes, not 8
@@ -147,8 +160,8 @@ describe('getQuantityOut — success decode + direction', () => {
               { bcs: encodeU64LE(50n) },
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     await expect(
@@ -163,8 +176,8 @@ describe('getQuantityOut — success decode + direction', () => {
 
   it('throws SlippageQueryError when fewer than 3 return values', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               { bcs: encodeU64LE(100n) },
@@ -172,8 +185,8 @@ describe('getQuantityOut — success decode + direction', () => {
               // Missing 3rd element
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     await expect(
@@ -278,8 +291,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
 
   it('throws SlippageQueryError when BCS buffer is too short', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               { bcs: encodeU64LE(100n) },
@@ -287,8 +300,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
               { bcs: encodeU64LE(50n) },
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     await expect(
@@ -303,8 +316,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
 
   it('throws SlippageQueryError when fewer than 3 return values', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               { bcs: encodeU64LE(100n) },
@@ -312,8 +325,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
               // Missing 3rd element (deep_required)
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     await expect(
@@ -328,8 +341,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
 
   it('throws SlippageQueryError when BCS field is missing at index', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               { bcs: encodeU64LE(100n) },
@@ -339,8 +352,8 @@ describe('getInputForTargetOutput — success decode + direction', () => {
               { bcs: encodeU64LE(50n) },
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     await expect(
@@ -444,16 +457,16 @@ describe('simulateTransaction-rejection path (Transaction.build mocked)', () => 
   it('getInputForTargetOutput: pre-existing SlippageQueryError (decode-time) is rethrown unwrapped', async () => {
     // commandResults too short triggers the inner `rv.length < 3` SlippageQueryError;
     // the catch block must rethrow it as-is, NOT wrap it again with "RPC failed:".
-    const simulateTransaction = vi.fn().mockResolvedValue({
-      commandResults: [
+    const simulateTransaction = vi.fn().mockResolvedValue(
+      makeSimulationResult([
         {
           returnValues: [
             { bcs: encodeU64LE(1n) },
             // missing positions 1 and 2
           ],
         },
-      ],
-    });
+      ]),
+    );
     const mockClient = { simulateTransaction };
 
     let thrown: unknown = null;
@@ -479,13 +492,13 @@ describe('getHopMidPriceRaw — success decode', () => {
   it('returns decoded bigint mid-price', async () => {
     const expectedMidPrice = 27_000_000_000n;
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [{ bcs: encodeU64LE(expectedMidPrice) }],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     const result = await getHopMidPriceRaw(
@@ -498,9 +511,7 @@ describe('getHopMidPriceRaw — success decode', () => {
 
   it('returns null when commandResults are empty', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [],
-      }),
+      simulateTransaction: vi.fn().mockResolvedValue(makeSimulationResult([])),
     };
 
     const result = await getHopMidPriceRaw(
@@ -513,8 +524,8 @@ describe('getHopMidPriceRaw — success decode', () => {
 
   it('returns null when BCS is missing', async () => {
     const mockClient = {
-      simulateTransaction: vi.fn().mockResolvedValue({
-        commandResults: [
+      simulateTransaction: vi.fn().mockResolvedValue(
+        makeSimulationResult([
           {
             returnValues: [
               {
@@ -522,8 +533,8 @@ describe('getHopMidPriceRaw — success decode', () => {
               },
             ],
           },
-        ],
-      }),
+        ]),
+      ),
     };
 
     const result = await getHopMidPriceRaw(
@@ -532,6 +543,24 @@ describe('getHopMidPriceRaw — success decode', () => {
       makeHop(),
     );
     expect(result).toBeNull();
+  });
+
+  it('rejects command results attached to a different transaction digest', async () => {
+    const resultForAnotherTransaction = makeSimulationResult([
+      { returnValues: [{ bcs: encodeU64LE(27_000_000_000n) }] },
+    ]);
+    resultForAnotherTransaction.Transaction.digest = 'different-digest';
+    const mockClient = {
+      simulateTransaction: vi.fn().mockResolvedValue(resultForAnotherTransaction),
+    };
+
+    await expect(
+      getHopMidPriceRaw(
+        mockClient as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
+        '0xdeepbook',
+        makeHop(),
+      ),
+    ).rejects.toThrow(/malformed or mismatched simulation result/);
   });
 
   it('throws SlippageQueryError when simulateTransaction rejects (RPC failure)', async () => {

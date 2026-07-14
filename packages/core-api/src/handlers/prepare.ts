@@ -16,11 +16,10 @@ import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
 import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import type { HostContext } from '../context.js';
 import { checkBlockedRequest } from '../abuseBlocking.js';
-import { PREPARE_TTL_MS } from '../preparePolicy.js';
 import { PrepareValidationError } from '../prepare/replay.js';
 import { verifyPrepareAuthorization } from '../prepare/prepareAuthorization.js';
 import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
-import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
+import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_SLOT_EXHAUSTED } from '../observability/events.js';
 import {
   buildGenericPreparedDraftFields,
@@ -31,13 +30,6 @@ import {
   runPrepareStateMachine,
   RunnerSponsorSlotExhaustedError,
 } from '../session/sponsoredExecution/runner.js';
-
-export { PREPARE_TTL_MS };
-
-export function buildExecutionPathKey(er: AllowedSettlementSwapPath | undefined): string {
-  if (er) return `${er.tokenType}:${er.hops.join(',')}:${er.settlementSwapDirection}`;
-  return 'credit';
-}
 
 // ─────────────────────────────────────────────
 // Types
@@ -131,12 +123,7 @@ export async function handlePrepare(
     address: params.senderAddress,
   });
   if (blockedBySender.blocked) {
-    throw new PrepareValidationError(
-      'ABUSE_BLOCKED',
-      'Request temporarily blocked',
-      undefined,
-      429,
-    );
+    throw new PrepareValidationError('ABUSE_BLOCKED', 'Request temporarily blocked');
   }
 
   const options = {
@@ -165,7 +152,7 @@ export async function handlePrepare(
     );
   } catch (err) {
     if (err instanceof RunnerSponsorSlotExhaustedError) {
-      logSponsorPoolEvent(PREPARE_SLOT_EXHAUSTED, {
+      logStructuredEvent(PREPARE_SLOT_EXHAUSTED, {
         route: 'generic',
         pool_size: ctx.sponsorPool.size,
       });
@@ -178,8 +165,6 @@ export async function handlePrepare(
       throw new PrepareValidationError(
         'SPONSOR_LEASE_COMMIT_FAILED',
         `sponsor lease commit failed: ${err.message}`,
-        undefined,
-        500,
       );
     }
     throw err;

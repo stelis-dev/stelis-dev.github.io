@@ -1,17 +1,15 @@
 /**
  * Sponsored execution store contract.
  *
- * Two adapters implement this contract:
- *   - MemorySponsoredLogsStore (tests + local dev).
- *   - RedisSponsoredLogsStore  (production).
+ * RedisSponsoredLogsStore implements this contract for the deployed Host.
  *
  * Adapter semantics:
  *   - `append` identifies one sponsored execution by `receiptId`.
  *     An exact result replay is a no-op; a different result for the same
  *     receipt is a conflict and MUST NOT mutate either projection.
  *     The recorded receipt fingerprint MUST persist for the adapter's
- *     full lifetime (Redis: no TTL; memory: unbounded map; DB-style
- *     stores: unique receipt constraint plus current-result fingerprint).
+ *     full lifetime (Redis: no TTL; DB-style stores: unique receipt
+ *     constraint plus current-result fingerprint).
  *     `receiptId` is non-null by `SponsoredExecutionLogEntry` contract
  *     (the recorder is invoked from `finally` after `consume()`, where
  *     the sponsor result callback contract guarantees a non-null receiptId).

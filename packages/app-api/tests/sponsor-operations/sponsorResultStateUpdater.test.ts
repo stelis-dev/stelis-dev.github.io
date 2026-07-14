@@ -18,6 +18,13 @@ function metadata(outcome: SponsorResultMetadata['outcome']): SponsorResultMetad
     outcome,
     executionStage: 'on_chain',
     route: 'generic',
+    receiptId: 'receipt-1',
+    senderAddress: '0xsender',
+    executionPathKey: 'generic-execution-path',
+    orderIdHash: null,
+    promotionId: null,
+    userId: null,
+    economics: { economicsStatus: 'unknown', failureReason: null },
   };
 }
 

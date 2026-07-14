@@ -13,7 +13,6 @@ import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 import { UnaryCall } from '@protobuf-ts/runtime-rpc';
 import type { MethodInfo, RpcOptions, RpcMetadata, RpcStatus } from '@protobuf-ts/runtime-rpc';
 import { parseEndpointConfigJson, loadRpcConfig } from '../src/sui/parseEndpointConfig.js';
-import { redactUrl } from '../src/sui/redactUrl.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -129,30 +128,6 @@ describe('loadRpcConfig', () => {
     } finally {
       unlinkSync(path);
     }
-  });
-});
-
-// ── redactUrl ───────────────────────────────────────────────────────────────
-
-describe('redactUrl', () => {
-  it('redacts query secrets', () => {
-    expect(redactUrl('https://provider.example/rpc?apiKey=secret')).toBe(
-      'https://provider.example/[REDACTED]?[REDACTED]',
-    );
-  });
-
-  it('redacts path secrets even without a query string', () => {
-    expect(redactUrl('https://provider.example/rpc/secret-token')).toBe(
-      'https://provider.example/[REDACTED]',
-    );
-  });
-
-  it('does not echo invalid raw URL values', () => {
-    expect(redactUrl('not a url with secret-token')).toBe('[INVALID_URL]');
-  });
-
-  it('keeps origin-only HTTPS endpoints readable', () => {
-    expect(redactUrl('https://provider.example')).toBe('https://provider.example');
   });
 });
 

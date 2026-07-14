@@ -5,6 +5,7 @@
  * Separate file to avoid mock conflicts with transport tests.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 
 const mockGetChainIdentifier = vi.fn();
 
@@ -22,21 +23,21 @@ vi.mock('@protobuf-ts/grpcweb-transport', () => ({
 
 import { validateChainIdentity } from '../src/sui/validateChainIdentity.js';
 
-const TESTNET_CHAIN_ID = '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD';
-
 describe('validateChainIdentity', () => {
   beforeEach(() => {
     mockGetChainIdentifier.mockReset();
   });
 
   it('passes when all endpoints return the correct testnet chainId', async () => {
-    mockGetChainIdentifier.mockResolvedValue({ chainIdentifier: TESTNET_CHAIN_ID });
+    mockGetChainIdentifier.mockResolvedValue({
+      chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+    });
 
     const result = await validateChainIdentity('testnet', [
       { url: 'https://a.com' },
       { url: 'https://b.com' },
     ]);
-    expect(result.chainIdentifier).toBe(TESTNET_CHAIN_ID);
+    expect(result.chainIdentifier).toBe(SUI_CHAIN_IDENTIFIERS.testnet);
     expect(result.endpointResults).toHaveLength(2);
   });
 
@@ -45,7 +46,7 @@ describe('validateChainIdentity', () => {
     mockGetChainIdentifier.mockImplementation(() => {
       call++;
       return Promise.resolve({
-        chainIdentifier: call === 1 ? TESTNET_CHAIN_ID : 'WRONG',
+        chainIdentifier: call === 1 ? SUI_CHAIN_IDENTIFIERS.testnet : 'WRONG',
       });
     });
 
@@ -75,14 +76,14 @@ describe('validateChainIdentity', () => {
     mockGetChainIdentifier.mockImplementation(() => {
       call++;
       if (call === 1) return Promise.reject(new Error('down'));
-      return Promise.resolve({ chainIdentifier: TESTNET_CHAIN_ID });
+      return Promise.resolve({ chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet });
     });
 
     const result = await validateChainIdentity('testnet', [
       { url: 'https://down.com' },
       { url: 'https://ok.com' },
     ]);
-    expect(result.chainIdentifier).toBe(TESTNET_CHAIN_ID);
+    expect(result.chainIdentifier).toBe(SUI_CHAIN_IDENTIFIERS.testnet);
     expect(result.endpointResults[0].error).toBeTruthy();
     expect(result.endpointResults[1].error).toBeNull();
   });

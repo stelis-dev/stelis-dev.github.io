@@ -11,7 +11,7 @@ import { Transaction } from '@mysten/sui/transactions';
 // withdraw() PTB builder
 // ─────────────────────────────────────────────
 
-export interface WithdrawPtbParams {
+interface WithdrawPtbParams {
   packageId: string;
   vaultId: string;
   /** Address to receive the withdrawn coin */

@@ -30,7 +30,10 @@ import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64 } from '@mysten/sui/utils';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
-import { grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
+import {
+  bindGrpcResultToTransactionBytes,
+  grpcSimulationSuccess,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -92,7 +95,11 @@ async function buildCommandCountTxKindBytes(commandCount: number): Promise<strin
 
 function createMockSui() {
   return {
-    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
+    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
+        transaction,
+      ),
   } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 }
 
@@ -108,7 +115,11 @@ function createMockSui() {
  */
 function createMockSuiWithCore() {
   return {
-    simulateTransaction: async () => grpcSimulationSuccess('mock-digest', SIMULATION_GAS_USED),
+    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
+        transaction,
+      ),
     core: {
       // Returns undefined → Transaction.build() falls back to coreClientResolveTransactionPlugin,
       // which then calls the other core methods below for gas-price / gas-payment / expiration resolution.
@@ -317,7 +328,6 @@ describe('handlePromotionPrepare', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('BAD_TX_KIND');
-      expect((err as PromotionPrepareError).statusHint).toBe(400);
     }
     expect(inflightSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
@@ -346,7 +356,6 @@ describe('handlePromotionPrepare', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('BAD_TX_KIND');
-      expect((err as PromotionPrepareError).statusHint).toBe(400);
     }
     expect(inflightSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
@@ -378,7 +387,6 @@ describe('handlePromotionPrepare', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('BAD_TX_KIND');
-      expect((err as PromotionPrepareError).statusHint).toBe(400);
     }
     expect(inflightSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
@@ -416,7 +424,6 @@ describe('handlePromotionPrepare', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('GASCOIN_FORBIDDEN');
-      expect((err as PromotionPrepareError).statusHint).toBe(403);
     }
     expect(inflightSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
@@ -446,7 +453,6 @@ describe('handlePromotionPrepare', () => {
         }),
       ).rejects.toMatchObject({
         code: 'BAD_REQUEST',
-        statusHint: 400,
         message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
       });
       expect(inflightSpy).not.toHaveBeenCalled();
@@ -470,7 +476,7 @@ describe('handlePromotionPrepare', () => {
         verifiedIdentity: buildIdentity(),
         clientIp: '127.0.0.1',
       }),
-    ).rejects.toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+    ).rejects.toMatchObject({ code: 'DISALLOWED_TARGET' });
   });
 
   test('allows 16 Promotion commands through request validation to inflight admission', async () => {
@@ -509,6 +515,9 @@ describe('handlePromotionPrepare', () => {
     seed.withdrawal({ amount: 999_999_999n, type: '0x2::sui::SUI' });
     const kindBytes = await seed.build({ onlyTransactionKind: true });
     const decoded = bcs.TransactionKind.parse(kindBytes);
+    if (!decoded.ProgrammableTransaction) {
+      throw new Error('test fixture must decode as ProgrammableTransaction');
+    }
     const fw = decoded.ProgrammableTransaction.inputs[0] as {
       FundsWithdrawal: { withdrawFrom: Record<string, unknown> };
     };
@@ -570,8 +579,7 @@ describe('handlePromotionPrepare', () => {
       expect.unreachable('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
-      expect((err as PromotionPrepareError).code).toBe('PROMOTION_NOT_STARTED');
-      expect((err as PromotionPrepareError).statusHint).toBe(409);
+      expect((err as PromotionPrepareError).code).toBe('PROMOTION_NOT_ACTIVE');
     }
   });
 

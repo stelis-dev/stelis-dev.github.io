@@ -4,11 +4,12 @@ import { findSettleCommand } from './settleCommand.js';
 import {
   SETTLEMENT_ENTRY_FUNCTIONS,
   settlementParameterIndex,
+  type PaymentInputIntegritySubcode,
   type SettleVariantClass,
 } from '@stelis/contracts';
 import type { MoveCallCommand, PtbCommand } from '@stelis/contracts';
 import type { SettleArgs } from './types.js';
-import { decodeExactPureU64Base64 } from './decodePureU64.js';
+import { decodeExactPureU64Base64 } from './decodeU64.js';
 import { extractObjectIdFromInput } from './ptbInputUtils.js';
 import { normalizeMoveStructType, resolveFundsWithdrawalSource } from './prefixValueTrace.js';
 
@@ -114,23 +115,6 @@ export type PaymentInputTrace =
       senderWithdrawals: readonly PaymentInputSenderWithdrawal[];
       senderRedeems: readonly PaymentInputSenderRedeem[];
     });
-
-export type PaymentInputIntegritySubcode =
-  | 'payment_input_missing'
-  | 'payment_input_invalid_shape'
-  | 'payment_input_source_mismatch'
-  | 'payment_input_swap_amount_invalid'
-  | 'payment_input_swap_amount_mismatch'
-  | 'payment_input_split_amount_mismatch'
-  | 'payment_input_withdrawal_amount_mismatch'
-  | 'payment_input_topup_amount_invalid'
-  | 'payment_input_base_coin_mismatch'
-  | 'payment_input_merge_coin_ids_mismatch'
-  | 'payment_input_unexpected_merge_source'
-  | 'payment_input_funding_use_mismatch'
-  | 'payment_input_redeem_use_mismatch'
-  | 'payment_input_redeem_amount_mismatch'
-  | 'payment_input_command_boundary_mismatch';
 
 export type PaymentInputIntegrityResult =
   | { ok: true }

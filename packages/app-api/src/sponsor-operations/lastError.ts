@@ -1,3 +1,5 @@
+import { redactSensitiveText } from '@stelis/core-api/observability';
+
 const MAX_SPONSOR_OPERATIONS_LAST_ERROR_BYTES = 512;
 
 function stringifyError(error: unknown): string {
@@ -14,7 +16,7 @@ function stringifyError(error: unknown): string {
  *   without cutting a code point
  */
 export function normalizeSponsorOperationsLastError(error: unknown): string {
-  const message = stringifyError(error);
+  const message = redactSensitiveText(stringifyError(error));
   if (message === '') return '';
 
   const encoder = new TextEncoder();

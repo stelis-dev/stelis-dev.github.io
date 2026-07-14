@@ -595,7 +595,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     });
 
     raw.reservedGasMist = '01500000';
-    await redis.set(key, JSON.stringify(raw), { PX: 65_000 });
+    await redis.set(key, JSON.stringify(raw), { px: 65_000 });
     await expect(store.consume(entry.receiptId, entry.txBytesHash)).rejects.toThrow(
       /canonical unsigned decimal/,
     );
@@ -628,7 +628,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       await redis.set(
         `stelis:prepare:${receiptId}`,
         JSON.stringify({ ...malformed[i], receiptId }),
-        { PX: 65_000 },
+        { px: 65_000 },
       );
       await expect(store.peek(receiptId)).rejects.toThrow();
     }
@@ -645,11 +645,11 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const raw = JSON.parse((await redis.get(entryKey))!);
     raw.receiptId = 'forged-receipt';
     raw.senderAddress = { malformed: true };
-    await redis.set(entryKey, JSON.stringify(raw), { PX: 65_000 });
+    await redis.set(entryKey, JSON.stringify(raw), { px: 65_000 });
     await redis.set(
       `stelis:prepare:ip:${clientIp}`,
       JSON.stringify([true, { pid: { malformed: true }, t: 'bad' }]),
-      { PX: 120_000 },
+      { px: 120_000 },
     );
 
     await expect(store.consume(receiptId, txBytesHash)).rejects.toThrow(
@@ -672,7 +672,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
       const rawJson = await redis.get(`stelis:prepare:${receiptId}`);
       const parsed = JSON.parse(rawJson!);
       parsed.nonce = malformed[i];
-      await redis.set(`stelis:prepare:${receiptId}`, JSON.stringify(parsed), { PX: 65_000 });
+      await redis.set(`stelis:prepare:${receiptId}`, JSON.stringify(parsed), { px: 65_000 });
 
       await expect(store.consume(receiptId, txBytesHash)).rejects.toThrow();
       expect(mockOnRelease).toHaveBeenCalledTimes(i + 1);
@@ -693,7 +693,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     // The only generic-mode BigInt field is `nonce`; it is the canonical
     // corruption target for this test.
     parsed.nonce = 'not-a-number';
-    await redis.set('stelis:prepare:corrupt-bi', JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set('stelis:prepare:corrupt-bi', JSON.stringify(parsed), { px: 65_000 });
 
     await expect(store.consume('corrupt-bi', 'hash-corrupt-bi')).rejects.toThrow();
     expect(mockOnRelease).toHaveBeenCalledWith('slot-corrupt-bi', 'corrupt-bi', 'hash-corrupt-bi');
@@ -710,7 +710,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const rawJson = await redis.get('stelis:prepare:peek-bad');
     const parsed = JSON.parse(rawJson!);
     parsed.unexpected = true;
-    await redis.set('stelis:prepare:peek-bad', JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set('stelis:prepare:peek-bad', JSON.stringify(parsed), { px: 65_000 });
 
     await expect(store.peek('peek-bad')).rejects.toThrow(/unexpected field/);
   });
@@ -728,7 +728,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const rawJson = await redis.get('stelis:prepare:evict-test');
     const parsed = JSON.parse(rawJson!);
     parsed.unexpected = true;
-    await redis.set('stelis:prepare:evict-test', JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set('stelis:prepare:evict-test', JSON.stringify(parsed), { px: 65_000 });
 
     await store.evictPreparedEntry('evict-test');
 
@@ -747,11 +747,11 @@ describe('RedisPrepareStore — Redis-specific', () => {
     const raw = JSON.parse((await redis.get(entryKey))!);
     raw.receiptId = 'forged-evict-receipt';
     raw.clientIp = { malformed: true };
-    await redis.set(entryKey, JSON.stringify(raw), { PX: 65_000 });
+    await redis.set(entryKey, JSON.stringify(raw), { px: 65_000 });
     await redis.set(
       `stelis:prepare:sender:${senderAddress}`,
       JSON.stringify([null, { pid: [], t: 'bad' }]),
-      { PX: 120_000 },
+      { px: 120_000 },
     );
 
     await store.evictPreparedEntry(receiptId);
@@ -763,7 +763,7 @@ describe('RedisPrepareStore — Redis-specific', () => {
   });
 
   it('evictPreparedEntry does not throw when raw JSON is malformed', async () => {
-    await redis.set('stelis:prepare:garbled', 'not-json-at-all', { PX: 65_000 });
+    await redis.set('stelis:prepare:garbled', 'not-json-at-all', { px: 65_000 });
 
     await expect(store.evictPreparedEntry('garbled')).resolves.toBeUndefined();
     expect(mockOnRelease).not.toHaveBeenCalled();
@@ -851,7 +851,7 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
       orderId: null,
       mode: 'generic',
     });
-    await redis.set('stelis:prepare:exp-1', entryJson, { PX: 65_000 });
+    await redis.set('stelis:prepare:exp-1', entryJson, { px: 65_000 });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await store.consume('exp-1', 'hash-exp')).toBe('expired');
@@ -907,7 +907,7 @@ describe('RedisPrepareStore — _onRelease rejection emits SPONSOR_POOL_LEASE_RE
     const raw = await redis.get('stelis:prepare:raw-1');
     const parsed = JSON.parse(raw!);
     parsed.unexpected = true;
-    await redis.set('stelis:prepare:raw-1', JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set('stelis:prepare:raw-1', JSON.stringify(parsed), { px: 65_000 });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -1011,7 +1011,7 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
       orderId: null,
       mode: 'generic',
     });
-    await redis.set('stelis:prepare:exp-s1', entryJson, { PX: 65_000 });
+    await redis.set('stelis:prepare:exp-s1', entryJson, { px: 65_000 });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await store.consume('exp-s1', 'hash-exp-s')).toBe('expired');
@@ -1063,7 +1063,7 @@ describe('RedisPrepareStore — _onRelease synchronous throw emits SPONSOR_POOL_
     const raw = await redis.get('stelis:prepare:raw-s1');
     const parsed = JSON.parse(raw!);
     parsed.unexpected = true;
-    await redis.set('stelis:prepare:raw-s1', JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set('stelis:prepare:raw-s1', JSON.stringify(parsed), { px: 65_000 });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -1137,7 +1137,7 @@ describe('RedisPrepareStore — raw-entry slot-info unrecoverable emits SPONSOR_
       clientIp: '10.0.0.9',
       senderAddress: '0xSI',
     });
-    await redis.set('stelis:prepare:slot-info-1', rawEntry, { PX: 65_000 });
+    await redis.set('stelis:prepare:slot-info-1', rawEntry, { px: 65_000 });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -1295,7 +1295,7 @@ describe('RedisPrepareStore — _onEntryEvict failures emit PREPARE_STORE_EVICT_
       orderId: null,
       mode: 'generic',
     });
-    return redis.set(`stelis:prepare:${entryId}`, entryJson, { PX: 65_000 }).then(() => undefined);
+    return redis.set(`stelis:prepare:${entryId}`, entryJson, { px: 65_000 }).then(() => undefined);
   }
 
   it('consume() expired — sync throw emits warn', async () => {

@@ -1,4 +1,5 @@
 import { Transaction } from '@mysten/sui/transactions';
+import type { PromotionSponsorErrorCode } from '@stelis/contracts';
 import { convertSdkCommands, MAX_FINAL_COMMANDS } from '@stelis/core-relay';
 import type { PromotionPreparedTxEntry } from '../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
@@ -26,8 +27,7 @@ import {
 export class PromotionSponsorPolicyError extends Error {
   constructor(
     message: string,
-    public readonly code: string,
-    public readonly statusHint: number = 400,
+    public readonly code: PromotionSponsorErrorCode,
   ) {
     super(message);
     this.name = 'PromotionSponsorPolicyError';
@@ -184,14 +184,12 @@ export async function validatePromotionPreconsumePolicy(
     throw new PromotionSponsorPolicyError(
       'Verified identity senderAddress does not match prepared senderAddress',
       'SENDER_ADDRESS_MISMATCH',
-      403,
     );
   }
   if (input.verifiedIdentity.userId !== peeked.userId) {
     throw new PromotionSponsorPolicyError(
       'Verified identity userId does not match prepared userId',
       'USER_ID_MISMATCH',
-      403,
     );
   }
 
@@ -208,7 +206,6 @@ export async function validatePromotionPreconsumePolicy(
     throw new PromotionSponsorPolicyError(
       `Malformed txBytes — cannot deserialize TransactionKind: ${err instanceof Error ? err.message : String(err)}`,
       'BAD_REQUEST',
-      400,
     );
   }
   const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
@@ -233,7 +230,6 @@ export async function validatePromotionPreconsumePolicy(
     throw new PromotionSponsorPolicyError(
       `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
       'BAD_REQUEST',
-      400,
     );
   }
 
@@ -260,13 +256,11 @@ function sponsorPolicyErrorForPtbStructure(f: PtbStructureFailure): PromotionSpo
       return new PromotionSponsorPolicyError(
         `Forbidden command kind "${f.kind}" in promotion TX — only MoveCall is allowed`,
         'FORBIDDEN_COMMAND',
-        403,
       );
     case 'GASCOIN_FORBIDDEN':
       return new PromotionSponsorPolicyError(
         'MoveCall references GasCoin — rejected to protect sponsor funds',
         'GASCOIN_FORBIDDEN',
-        403,
       );
   }
 }
@@ -275,7 +269,6 @@ function sponsorPolicyErrorForTargetPolicy(f: TargetPolicyFailure): PromotionSpo
   return new PromotionSponsorPolicyError(
     `Disallowed MoveCall targets at sponsor time: ${f.disallowedTargets.join(', ')}`,
     'DISALLOWED_TARGET',
-    403,
   );
 }
 
@@ -286,21 +279,18 @@ function sponsorPolicyErrorForEligibility(f: EligibilityFailure): PromotionSpons
       return new PromotionSponsorPolicyError(
         'Promotion not found or not active at sponsor time',
         'PROMOTION_NOT_ACTIVE',
-        409,
       );
     case 'PROMOTION_NOT_STARTED':
       return new PromotionSponsorPolicyError(
         `Promotion has not started yet (starts at ${f.startAt})`,
-        'PROMOTION_NOT_STARTED',
-        409,
+        'PROMOTION_NOT_ACTIVE',
       );
     case 'NOT_CLAIMED':
-      return new PromotionSponsorPolicyError('User not claimed', 'NOT_CLAIMED', 403);
+      return new PromotionSponsorPolicyError('User not claimed', 'NOT_CLAIMED');
     case 'USE_WINDOW_EXPIRED':
       return new PromotionSponsorPolicyError(
         `Use window expired at ${f.useUntilAt}`,
         'USE_WINDOW_EXPIRED',
-        403,
       );
   }
 }

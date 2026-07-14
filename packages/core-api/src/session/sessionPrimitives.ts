@@ -10,11 +10,12 @@
  */
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { verifyTransactionSignature } from '@mysten/sui/verify';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SuiClientTypes } from '@mysten/sui/client';
+import { bindCurrentSuiResultToBytes, bindCurrentSuiResultToDigest } from '@stelis/core-relay';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_CHECKIN_FAILED } from '../observability/events.js';
 import type { SponsorPoolAdapter } from '../context.js';
@@ -197,18 +198,22 @@ export class GasOwnerMismatchError extends Error {
 type RuntimeRecord = Record<string, unknown>;
 type CurrentExecutionErrorKind = SuiClientTypes.ExecutionError['$kind'];
 
-const CURRENT_EXECUTION_ERROR_KINDS = [
-  'MoveAbort',
-  'SizeError',
-  'CommandArgumentError',
-  'TypeArgumentError',
-  'PackageUpgradeError',
-  'IndexError',
-  'CoinDenyListError',
-  'CongestedObjects',
-  'ObjectIdError',
-  'Unknown',
-] as const satisfies readonly CurrentExecutionErrorKind[];
+const CURRENT_EXECUTION_ERROR_KIND = {
+  MoveAbort: true,
+  SizeError: true,
+  CommandArgumentError: true,
+  TypeArgumentError: true,
+  PackageUpgradeError: true,
+  IndexError: true,
+  CoinDenyListError: true,
+  CongestedObjects: true,
+  ObjectIdError: true,
+  Unknown: true,
+} as const satisfies Record<CurrentExecutionErrorKind, true>;
+
+const CURRENT_EXECUTION_ERROR_KINDS = Object.keys(
+  CURRENT_EXECUTION_ERROR_KIND,
+) as CurrentExecutionErrorKind[];
 
 type NormalizedExecutionError = {
   readonly kind: CurrentExecutionErrorKind;
@@ -219,7 +224,7 @@ type NormalizedExecutionStatus =
   | { readonly success: true; readonly error: null }
   | { readonly success: false; readonly error: NormalizedExecutionError };
 
-export type ParsedSuiTransactionResult =
+type ParsedSuiTransactionResult =
   | {
       readonly kind: 'success';
       readonly digest: string;
@@ -238,28 +243,8 @@ function isRuntimeRecord(value: unknown): value is RuntimeRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function rejectUnknownExecutionErrorKind(_kind: never): false {
-  return false;
-}
-
 function isCurrentExecutionErrorKind(value: unknown): value is CurrentExecutionErrorKind {
-  if (typeof value !== 'string') return false;
-  const kind = value as CurrentExecutionErrorKind;
-  switch (kind) {
-    case 'MoveAbort':
-    case 'SizeError':
-    case 'CommandArgumentError':
-    case 'TypeArgumentError':
-    case 'PackageUpgradeError':
-    case 'IndexError':
-    case 'CoinDenyListError':
-    case 'CongestedObjects':
-    case 'ObjectIdError':
-    case 'Unknown':
-      return true;
-    default:
-      return rejectUnknownExecutionErrorKind(kind);
-  }
+  return typeof value === 'string' && Object.hasOwn(CURRENT_EXECUTION_ERROR_KIND, value);
 }
 
 function readCurrentExecutionError(value: unknown): NormalizedExecutionError | null {
@@ -349,7 +334,7 @@ function readTerminalPayload(
   };
 }
 
-export function parseSuiTransactionResult(value: unknown): ParsedSuiTransactionResult | null {
+function parseCurrentSuiTerminal(value: unknown): ParsedSuiTransactionResult | null {
   if (!isRuntimeRecord(value)) return null;
 
   if (value.$kind === 'Transaction') {
@@ -380,23 +365,35 @@ export function parseSuiTransactionResult(value: unknown): ParsedSuiTransactionR
   return null;
 }
 
+/**
+ * Parse a current Sui terminal result and bind it to the transaction bytes
+ * that produced the RPC request.
+ *
+ * `parseCurrentSuiTerminal()` proves only that the returned terminal union
+ * is internally self-consistent. That is not enough at an execution boundary:
+ * an internally valid result for a different transaction must never drive
+ * sponsor accounting, lease release, or a public response. This helper is the
+ * single authority for that request/result binding.
+ */
+export function parseCurrentSuiTerminalForBytes(
+  value: unknown,
+  txBytes: Uint8Array,
+): ParsedSuiTransactionResult | null {
+  if (!bindCurrentSuiResultToBytes(value, txBytes)) return null;
+  return parseCurrentSuiTerminal(value);
+}
+
+/** Bind a current Sui terminal result to a digest-owned lookup request. */
+export function parseCurrentSuiTerminalForDigest(
+  value: unknown,
+  expectedDigest: string,
+): ParsedSuiTransactionResult | null {
+  if (!bindCurrentSuiResultToDigest(value, expectedDigest)) return null;
+  return parseCurrentSuiTerminal(value);
+}
+
 function isConfirmedCongestion(kind: CurrentExecutionErrorKind): boolean {
-  switch (kind) {
-    case 'CongestedObjects':
-      return true;
-    case 'MoveAbort':
-    case 'SizeError':
-    case 'CommandArgumentError':
-    case 'TypeArgumentError':
-    case 'PackageUpgradeError':
-    case 'IndexError':
-    case 'CoinDenyListError':
-    case 'ObjectIdError':
-    case 'Unknown':
-      return false;
-    default:
-      return rejectUnknownExecutionErrorKind(kind);
-  }
+  return kind === 'CongestedObjects';
 }
 
 /**
@@ -412,7 +409,7 @@ export async function runPreflight(
     transaction: txBytes,
     include: { effects: true },
   });
-  const terminal = parseSuiTransactionResult(simResult);
+  const terminal = parseCurrentSuiTerminalForBytes(simResult, txBytes);
   if (!terminal) {
     return { success: false, reason: 'Simulation returned malformed terminal result' };
   }
@@ -462,11 +459,13 @@ export async function runPreflight(
  */
 export class SponsorPostSignatureUncertaintyError extends Error {
   readonly executionStage = 'after_sponsor_signature' as const;
+  readonly expectedDigest: string;
   override readonly cause: unknown;
-  constructor(cause: unknown) {
+  constructor(expectedDigest: string, cause: unknown) {
     const msg = cause instanceof Error ? cause.message : String(cause);
     super(msg);
     this.name = 'SponsorPostSignatureUncertaintyError';
+    this.expectedDigest = expectedDigest;
     this.cause = cause;
   }
 }
@@ -479,6 +478,11 @@ export async function signAndSubmit(
   txBytes: Uint8Array,
   userSignature: string,
 ): Promise<ExecResult> {
+  // Derive the Sui transaction identity before issuing the sponsor signature.
+  // Every terminal response and every post-signature uncertainty record below
+  // is bound to this exact signed transaction identity.
+  const expectedDigest = TransactionDataBuilder.getDigestFromBytes(txBytes);
+
   // Pool throws SponsorLeaseExpiredError directly if the committed HMAC
   // lease proof for (receiptId, sponsorAddress, hash(txBytes)) does not match
   // the Redis value — including the case where `entry.txBytesHash` was
@@ -496,7 +500,7 @@ export async function signAndSubmit(
       include: { effects: true, events: true },
     });
 
-    const terminal = parseSuiTransactionResult(execResult);
+    const terminal = parseCurrentSuiTerminalForDigest(execResult, expectedDigest);
     if (!terminal) {
       throw new Error('Transaction execution returned malformed terminal result');
     }
@@ -533,7 +537,7 @@ export async function signAndSubmit(
     if (submitErr instanceof SponsorPostSignatureUncertaintyError) {
       throw submitErr;
     }
-    throw new SponsorPostSignatureUncertaintyError(submitErr);
+    throw new SponsorPostSignatureUncertaintyError(expectedDigest, submitErr);
   }
 }
 

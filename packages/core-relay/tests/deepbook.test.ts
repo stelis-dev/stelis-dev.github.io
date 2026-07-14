@@ -23,6 +23,7 @@ vi.mock('@mysten/sui/transactions', () => {
 });
 
 import { getHopMidPriceRaw, getQuantityOut, getInputForTargetOutput } from '../src/deepbook.js';
+import { decodeExactU64Bytes } from '../src/decodeU64.js';
 import { SlippageQueryError } from '../src/deepbookErrors.js';
 
 // ─────────────────────────────────────────────
@@ -42,8 +43,8 @@ const MOCK_POOL: SingleHopSettlementSwapPath = {
   settlementTokenType: '0x::deep::DEEP',
   settlementTokenSymbol: 'DEEP',
   settlementTokenDecimals: 6,
-  lotSize: 1000,
-  minSize: 10000,
+  lotSize: 1000n,
+  minSize: 10000n,
   effectiveFeeRateBps: 0,
   settlementSwapDirection: 'baseForQuote',
 };
@@ -158,8 +159,8 @@ describe('getInputForTargetOutput', () => {
 });
 
 // ─────────────────────────────────────────────
-// decodeLittleEndianU64Raw — BCS length guard
-// (tested indirectly through encodeU64LE contract)
+// Shared exact u64 decoder — BCS width contract
+// (DeepBook translates failures into SlippageQueryError at its boundary.)
 // ─────────────────────────────────────────────
 
 describe('BCS u64 encoding contract', () => {
@@ -169,22 +170,21 @@ describe('BCS u64 encoding contract', () => {
     expect(encodeU64LE(18_446_744_073_709_551_615n).length).toBe(8); // u64 max
   });
 
-  it('encodeU64LE roundtrips correctly for known values', () => {
+  it('the shared decoder roundtrips known little-endian u64 values', () => {
     const values = [0n, 1n, 255n, 27_000_000_000n, 18_446_744_073_709_551_615n];
     for (const v of values) {
-      const encoded = encodeU64LE(v);
-      // Manual decode to verify encode correctness
-      let decoded = 0n;
-      for (let i = 0; i < 8; i++) {
-        decoded |= BigInt(encoded[i]) << BigInt(i * 8);
-      }
-      expect(decoded).toBe(v);
+      expect(decodeExactU64Bytes(encodeU64LE(v))).toBe(v);
     }
+  });
+
+  it('the shared decoder rejects both truncation and trailing bytes', () => {
+    expect(() => decodeExactU64Bytes(new Uint8Array(7))).toThrow('exactly 8 bytes, got 7');
+    expect(() => decodeExactU64Bytes(new Uint8Array(9))).toThrow('exactly 8 bytes, got 9');
   });
 
   it('correctly decodes a known mid_price value (27 SUI/DEEP)', () => {
     // This proves the encode/decode contract matches DeepBook's BCS format.
-    // getHopMidPriceRaw and batchGetHopMidPrices use decodeLittleEndianU64Raw internally.
+    // DeepBook consumers use the shared exact u64 decoder internally.
     const midPrice = 27_000_000_000n;
     const encoded = encodeU64LE(midPrice);
 
@@ -192,11 +192,6 @@ describe('BCS u64 encoding contract', () => {
     expect(encoded[0]).toBe(0x00); // least significant byte
     expect(encoded.length).toBe(8);
 
-    // Verify roundtrip
-    let decoded = 0n;
-    for (let i = 0; i < 8; i++) {
-      decoded |= BigInt(encoded[i]) << BigInt(i * 8);
-    }
-    expect(decoded).toBe(midPrice);
+    expect(decodeExactU64Bytes(encoded)).toBe(midPrice);
   });
 });

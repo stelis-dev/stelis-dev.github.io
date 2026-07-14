@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SponsorSlotLeaseSummary } from '@stelis/contracts';
 import type { SponsorLease, SponsorPoolAdapter, SponsorPoolOptions } from '../context.js';
-import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
+import { logStructuredEvent } from '../structuredEventLog.js';
 import {
   SPONSOR_POOL_LEASE_CHECKIN,
   SPONSOR_POOL_LEASE_CHECKOUT,
@@ -290,7 +290,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     ]);
 
     if (result === null || result === false) {
-      logSponsorPoolEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
+      logStructuredEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
         adapter: 'redis',
         pool_size: this.size,
       });
@@ -313,7 +313,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     }
 
     this._cursor = (startCursor + oneBasedOffset) % this._addresses.length;
-    logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
+    logStructuredEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
       adapter: 'redis',
       sponsor_address: sponsorAddress,
       pool_size: this.size,
@@ -342,7 +342,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
       [reservedProof, committedProof, String(this._leaseTtlMs)],
     )) as string | null;
     if (result === 'OK') {
-      logSponsorPoolEvent(SPONSOR_POOL_LEASE_COMMITTED, {
+      logStructuredEvent(SPONSOR_POOL_LEASE_COMMITTED, {
         adapter: 'redis',
         sponsor_address: sponsorAddress,
       });
@@ -380,7 +380,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
       [expected],
     )) as string | null;
     if (result === 'OK') {
-      logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKIN, {
+      logStructuredEvent(SPONSOR_POOL_LEASE_CHECKIN, {
         adapter: 'redis',
         sponsor_address: sponsorAddress,
         stage: txBytesHash === null ? 'reserved' : 'committed',
@@ -417,7 +417,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     if (!keypair) {
       throw new Error(`RedisSponsorPool: unknown sponsor address ${sponsorAddress}`);
     }
-    logSponsorPoolEvent(SPONSOR_POOL_SIGN, {
+    logStructuredEvent(SPONSOR_POOL_SIGN, {
       adapter: 'redis',
       sponsor_address: sponsorAddress,
       tx_bytes_len: txBytes.length,

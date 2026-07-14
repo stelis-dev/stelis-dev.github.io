@@ -20,7 +20,7 @@
 import { GrpcWebFetchTransport } from '@protobuf-ts/grpcweb-transport';
 import { logStructuredEvent } from '@stelis/core-api/observability';
 import { UnaryCall } from '@protobuf-ts/runtime-rpc';
-import { redactUrl } from './redactUrl.js';
+import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
 import type {
   RpcTransport,
   MethodInfo,
@@ -107,7 +107,6 @@ export class SuiRpcFailoverTransport implements RpcTransport {
   private readonly _endpoints: EndpointState[];
   private readonly _cooldownMs: number;
   private readonly _onFailover: (event: FailoverEvent) => void;
-  private _cursor = 0;
 
   /**
    * @param endpoints  Endpoint descriptors (at least 1). First = primary (write target).
@@ -161,7 +160,7 @@ export class SuiRpcFailoverTransport implements RpcTransport {
     const endpoints = this._endpoints.map((ep, idx) => {
       const inCooldown = ep.cooldownUntil > now;
       return {
-        url: redactUrl(ep.url),
+        url: redactEndpointUrl(ep.url),
         role: (idx === 0 ? 'primary' : 'secondary') as 'primary' | 'secondary',
         status: (inCooldown ? 'cooldown' : 'healthy') as 'healthy' | 'cooldown',
         cooldownRemainingMs: inCooldown ? ep.cooldownUntil - now : 0,
@@ -221,8 +220,8 @@ export class SuiRpcFailoverTransport implements RpcTransport {
         selected.cooldownUntil = Date.now() + this._cooldownMs;
         this._onFailover({
           type: 'ENDPOINT_COOLDOWN',
-          fromUrl: redactUrl(selected.url),
-          error: err instanceof Error ? err.message : String(err),
+          fromUrl: redactEndpointUrl(selected.url),
+          error: redactSensitiveText(err instanceof Error ? err.message : String(err)),
           method: method.name,
         });
       }
@@ -355,9 +354,7 @@ function safeDecodeUri(s: string): string {
 
 function defaultLogger(event: FailoverEvent): void {
   const level = event.type === 'ALL_EXHAUSTED' ? 'error' : 'warn';
-  // Name is bounded by FailoverEvent.type literal union — concrete set:
-  // { SUI_RPC_FAILOVER, SUI_RPC_ENDPOINT_COOLDOWN, SUI_RPC_ALL_EXHAUSTED }.
-  // All three are registered in @stelis/core-api/observability/events.ts.
-  // The public operations summary is in docs/operations.md#observability.
+  // Name is bounded by the FailoverEvent.type literal union. The public
+  // operations summary lists the resulting three names.
   logStructuredEvent(`SUI_RPC_${event.type}`, { ...event }, level);
 }

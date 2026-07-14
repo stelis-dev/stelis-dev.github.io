@@ -1,14 +1,16 @@
 # Canonical Sui Chain Identifiers
 
-These values are used by `validateChainIdentity.ts` to verify that configured
-RPC endpoints connect to the correct network at boot time.
+The runtime source of truth is `SUI_CHAIN_IDENTIFIERS` in
+`@stelis/contracts`. `validateChainIdentity.ts` consumes that table to verify
+that configured RPC endpoints connect to the correct network at boot time;
+manual deployed-Host tests consume the same table before submitting.
 
 ## Values
 
-| Network  | chainIdentifier (Base58)                             |
-|----------|------------------------------------------------------|
-| testnet  | `69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD`     |
-| mainnet  | `4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S`      |
+| Network | chainIdentifier (Base58)                       |
+| ------- | ---------------------------------------------- |
+| testnet | `69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD` |
+| mainnet | `4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S` |
 
 ## What is chainIdentifier?
 

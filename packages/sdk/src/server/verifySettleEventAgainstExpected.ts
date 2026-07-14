@@ -7,9 +7,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { SuiClientTypes } from '@mysten/sui/client';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { ExpectedSettleEventFields } from '@stelis/contracts';
 import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
+import { bindCurrentSuiResultToDigest } from '@stelis/core-relay/browser';
 import {
   decodeSettleEvent,
   SETTLE_EVENT_TYPE,
@@ -84,51 +86,35 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): {
   return { receiptId, orderIdHash, user: normalizedUser };
 }
 
-// ─────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────
+function malformedTransactionResult(digest: string): never {
+  throw new Error(`[Stelis] Transaction ${digest} returned a malformed or mismatched result`);
+}
 
-/**
- * Verify an on-chain SettleEvent against application-owned expected values.
- *
- * Required expected values:
- *   - receiptId
- *   - user
- *   - exactly one of orderId or orderIdHash
- *
- * Optional amount fields are compared when provided:
- *   - executionCostClaimMist
- *   - quotedHostFeeMist
- *   - protocolFeeMist
- *
- * @param client - SuiGrpcClient instance from `@mysten/sui/grpc`
- * @param digest - Transaction digest to verify
- * @param expected - Application-owned fields to compare with the on-chain event
- * @returns Decoded SettleEvent after every expected field matches
- * @throws Error if expected fields are missing, transaction data is missing, no
- * SettleEvent exists, BCS decoding fails, or any expected field mismatches
- */
-export async function verifySettleEventAgainstExpected(
-  client: SuiGrpcClient,
+function verifiedSuccessPayload(
+  result: SuiClientTypes.TransactionResult<{ events: true }>,
   digest: string,
-  expected: ExpectedSettleEventFields,
-): Promise<VerifiedSettleEvent> {
-  const validatedExpected = validateExpectedFields(expected);
+): SuiClientTypes.Transaction<{ events: true }> {
+  const bound = bindCurrentSuiResultToDigest(result, digest);
+  if (!bound) malformedTransactionResult(digest);
 
-  const result = await client.getTransaction({
-    digest,
-    include: { events: true },
-  });
-
-  if (result.$kind === 'FailedTransaction') {
-    const reason = result.FailedTransaction.status.error?.message ?? 'unknown execution failure';
-    throw new Error(`[Stelis] Transaction ${digest} failed: ${reason}`);
+  if (bound.outcome === 'failure') {
+    throw new Error(`[Stelis] Transaction ${digest} failed: ${bound.errorMessage}`);
   }
 
-  const events = result.Transaction.events;
-  if (!Array.isArray(events)) {
+  if (!Array.isArray(bound.transaction.events)) {
     throw new Error(`[Stelis] Transaction ${digest} did not include requested events`);
   }
+
+  return bound.transaction as unknown as SuiClientTypes.Transaction<{ events: true }>;
+}
+
+function verifySettleEvent(
+  payload: SuiClientTypes.Transaction<{ events: true }>,
+  digest: string,
+  expected: ExpectedSettleEventFields,
+  validatedExpected: ReturnType<typeof validateExpectedFields>,
+): VerifiedSettleEvent {
+  const events = payload.events;
   if (events.length === 0) {
     throw new Error(`[Stelis] No events found in transaction ${digest}`);
   }
@@ -199,4 +185,59 @@ export async function verifySettleEventAgainstExpected(
   }
 
   return verified;
+}
+
+// ─────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────
+
+/**
+ * Verify a SettleEvent in an already fetched current Sui transaction result.
+ *
+ * The requested digest must match the result payload. Only the current
+ * successful `Transaction` union with an actual events array is accepted.
+ */
+export function verifySettleEventInTransaction(
+  result: SuiClientTypes.TransactionResult<{ events: true }>,
+  digest: string,
+  expected: ExpectedSettleEventFields,
+): VerifiedSettleEvent {
+  const validatedExpected = validateExpectedFields(expected);
+  const payload = verifiedSuccessPayload(result, digest);
+  return verifySettleEvent(payload, digest, expected, validatedExpected);
+}
+
+/**
+ * Verify an on-chain SettleEvent against application-owned expected values.
+ *
+ * Required expected values:
+ *   - receiptId
+ *   - user
+ *   - exactly one of orderId or orderIdHash
+ *
+ * Optional amount fields are compared when provided:
+ *   - executionCostClaimMist
+ *   - quotedHostFeeMist
+ *   - protocolFeeMist
+ *
+ * @param client - SuiGrpcClient instance from `@mysten/sui/grpc`
+ * @param digest - Transaction digest to verify
+ * @param expected - Application-owned fields to compare with the on-chain event
+ * @returns Decoded SettleEvent after every expected field matches
+ * @throws Error if expected fields are missing, transaction data is missing, no
+ * SettleEvent exists, BCS decoding fails, or any expected field mismatches
+ */
+export async function verifySettleEventAgainstExpected(
+  client: SuiGrpcClient,
+  digest: string,
+  expected: ExpectedSettleEventFields,
+): Promise<VerifiedSettleEvent> {
+  const validatedExpected = validateExpectedFields(expected);
+
+  const result = await client.getTransaction({
+    digest,
+    include: { events: true },
+  });
+  const payload = verifiedSuccessPayload(result, digest);
+  return verifySettleEvent(payload, digest, expected, validatedExpected);
 }

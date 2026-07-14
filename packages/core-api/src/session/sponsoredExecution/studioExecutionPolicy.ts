@@ -22,11 +22,14 @@ import {
 } from '@stelis/core-relay';
 import type { OnchainConfig } from '@stelis/core-relay';
 import { PrepareValidationError, deserializeUserTxKind } from '../../prepare/replay.js';
-import {
-  classifySponsorFailureSubcode,
-  type SponsorFailureSubcode,
-} from '../../prepare/prepareErrors.js';
+import { classifySponsorFailureSubcode } from '../../prepare/prepareErrors.js';
+import type {
+  PromotionPrepareErrorCode,
+  PromotionSponsorErrorCode,
+  SponsorFailureSubcode,
+} from '@stelis/contracts';
 import { PrepareStudioUserQuotaError } from '../../store/prepareErrors.js';
+import { SponsorLeaseExpiredError } from '../../store/sponsorPoolErrors.js';
 import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../../store/abuseBlockTypes.js';
 import { logStructuredEvent } from '../../structuredEventLog.js';
@@ -77,7 +80,7 @@ import { mist, type Mist } from '../../internal/brand.js';
 import {
   extractTxSender,
   GasOwnerMismatchError,
-  parseSuiTransactionResult,
+  parseCurrentSuiTerminalForBytes,
   runPreflight,
   SenderSignatureError,
   signAndSubmit,
@@ -93,12 +96,14 @@ import type {
   GasBoundBuildInput,
   GasBoundBuildResult,
   LedgerReservationReconstructionInputs,
+} from './reservationHandles.js';
+import type {
   SponsoredExecutionPolicy,
   PostConsumeSponsorContext,
   PromotionPrepareChainSnapshot,
   PreConsumeSponsorContext,
   SharedPostconsumeReconstruction,
-} from './index.js';
+} from './executionPolicy.js';
 import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from './runner.js';
 
 // -------------------------------------------------------------
@@ -140,18 +145,17 @@ export interface StudioSponsorPolicyParams {
 }
 
 export interface StudioPrepareErrorFactory {
-  prepare(message: string, code: string, statusHint?: number): Error;
+  prepare(message: string, code: PromotionPrepareErrorCode): Error;
+}
+
+export interface StudioSponsorErrorMeta {
+  readonly gasUsed?: GasUsedFields | null;
+  readonly digest?: string;
+  readonly subcode?: SponsorFailureSubcode;
 }
 
 export interface StudioSponsorErrorFactory {
-  sponsor(
-    message: string,
-    code: string,
-    statusHint?: number,
-    gasUsed?: GasUsedFields | null,
-    subcode?: SponsorFailureSubcode,
-  ): Error;
-  sponsorCongestion(message: string): Error;
+  sponsor(message: string, code: PromotionSponsorErrorCode, meta?: StudioSponsorErrorMeta): Error;
 }
 
 export interface StudioExecutionPolicyOptions {
@@ -341,7 +345,6 @@ export function createStudioSponsorConsumeAdapter(input: {
       input.errors.sponsor(
         'Unknown or expired receipt ID - retry promotion prepare',
         'PREPARED_TX_NOT_FOUND',
-        404,
       ),
     onExpired: async () => {
       await getDeps(input).releaseLedgerReservationWithLog(
@@ -352,7 +355,6 @@ export function createStudioSponsorConsumeAdapter(input: {
       return input.errors.sponsor(
         'Prepared transaction expired - retry promotion prepare',
         'PREPARED_TX_EXPIRED',
-        410,
       );
     },
     onHashMismatch: async () => {
@@ -377,7 +379,6 @@ export function createStudioSponsorConsumeAdapter(input: {
       return input.errors.sponsor(
         'txBytes hash mismatch - possible tampering',
         'TAMPERING_DETECTED',
-        422,
       );
     },
     onCorrupt: ({ receiptId, err, stage }) =>
@@ -396,8 +397,7 @@ export function createStudioSponsorConsumeAdapter(input: {
         );
         throw input.errors.sponsor(
           'Consumed entry is not promotion mode - data race or store corruption',
-          'MODE_MISMATCH',
-          500,
+          'SPONSOR_FAILED',
         );
       }
       requireSponsorState(input.state).prepared = entry;
@@ -492,7 +492,6 @@ async function runStudioRequestValidation(
     throw prepare.errors.prepare(
       'Verified identity senderAddress does not match request senderAddress',
       'SENDER_ADDRESS_MISMATCH',
-      403,
     );
   }
 
@@ -512,7 +511,7 @@ async function runStudioRequestValidation(
     state.kindTx = await d.deserializeUserTxKind(prepare.params.txKindBytes, options.context.sui);
   } catch (err) {
     if (err instanceof PrepareValidationError) {
-      throw prepare.errors.prepare(err.message, 'BAD_TX_KIND', 400);
+      throw prepare.errors.prepare(err.message, 'BAD_TX_KIND');
     }
     throw err;
   }
@@ -529,7 +528,6 @@ async function runStudioRequestValidation(
     throw prepare.errors.prepare(
       'TX contains FundsWithdrawal(Sponsor) - rejected to protect sponsor funds',
       'SPONSOR_WITHDRAWAL_FORBIDDEN',
-      403,
     );
   }
 
@@ -541,7 +539,6 @@ async function runStudioRequestValidation(
     throw prepare.errors.prepare(
       `Disallowed MoveCall targets: ${targetFailure.disallowedTargets.join(', ')}`,
       'DISALLOWED_TARGET',
-      403,
     );
   }
 
@@ -550,7 +547,6 @@ async function runStudioRequestValidation(
     throw prepare.errors.prepare(
       `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
       'BAD_REQUEST',
-      400,
     );
   }
 
@@ -596,7 +592,7 @@ async function runStudioGasBoundBuild(
     transaction: dryRunBytes,
     include: { effects: true },
   });
-  const simGasUsed = readDryRunGasUsed(simResult);
+  const simGasUsed = readDryRunGasUsed(simResult, dryRunBytes, prepare.errors);
   const { simGas } = computeExecutionCostClaim(simGasUsed);
   const reserveAmount: Mist = mist(simGas + GAS_VARIANCE_FIXED_MIST);
 
@@ -604,7 +600,6 @@ async function runStudioGasBoundBuild(
     throw prepare.errors.prepare(
       `Estimated gas ${reserveAmount} exceeds per-TX cap ${config.maxClaimMist}`,
       'GAS_EXCEEDS_TX_CAP',
-      422,
     );
   }
 
@@ -652,23 +647,17 @@ async function runStudioDecodeSponsorSubmission(
     throw sponsor.errors.sponsor(
       'Unknown or expired receipt ID - retry promotion prepare',
       'PREPARED_TX_NOT_FOUND',
-      404,
     );
   }
   state.peeked = peeked;
 
   if (peeked.mode !== 'promotion') {
-    throw sponsor.errors.sponsor(
-      'Receipt was not created via promotion prepare',
-      'MODE_MISMATCH',
-      422,
-    );
+    throw sponsor.errors.sponsor('Receipt was not created via promotion prepare', 'MODE_MISMATCH');
   }
   if (peeked.promotionId !== sponsor.params.promotionId) {
     throw sponsor.errors.sponsor(
       `Receipt promotionId "${peeked.promotionId}" does not match path "${sponsor.params.promotionId}"`,
       'PROMOTION_ID_MISMATCH',
-      422,
     );
   }
   state.peekedPromotion = peeked;
@@ -687,7 +676,7 @@ async function runStudioDecodeSponsorSubmission(
     state.builtTxForValidation = builtTx;
   } catch (err) {
     if (err instanceof PromotionSponsorPolicyError) {
-      throw sponsor.errors.sponsor(err.message, err.code, err.statusHint);
+      throw sponsor.errors.sponsor(err.message, err.code);
     }
     throw err;
   }
@@ -710,7 +699,7 @@ async function runStudioUserSignatureValidation(
     state.txSender = extractTxSender(builtTx);
   } catch (err) {
     if (err instanceof SenderSignatureError) {
-      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID', 422);
+      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID');
     }
     throw err;
   }
@@ -731,7 +720,6 @@ async function runStudioUserSignatureValidation(
     throw sponsor.errors.sponsor(
       'canonical tx.sender does not match prepared senderAddress',
       'SENDER_SIGNATURE_INVALID',
-      422,
     );
   }
 
@@ -750,7 +738,7 @@ async function runStudioUserSignatureValidation(
           detail: 'sender_signature_invalid',
         },
       );
-      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID', 422);
+      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID');
     }
     throw err;
   }
@@ -788,7 +776,7 @@ async function runStudioSharedPostconsumeChecks(
         clientIp: ctx.clientIp,
       });
       setUnknownTerminal(state, 'validation_failure', err.message);
-      throw sponsor.errors.sponsor(err.message, 'REPREPARE_REQUIRED', 422);
+      throw sponsor.errors.sponsor(err.message, 'REPREPARE_REQUIRED');
     }
     throw err;
   }
@@ -810,7 +798,7 @@ async function runStudioSharedPostconsumeChecks(
     });
     const message = `Gas budget drift: built tx budget ${gasBudget} mismatches reserved ${prepared.reservedGasMist}`;
     setUnknownTerminal(state, 'validation_failure', message);
-    throw sponsor.errors.sponsor(message, 'REPREPARE_REQUIRED', 422);
+    throw sponsor.errors.sponsor(message, 'REPREPARE_REQUIRED');
   }
 
   return {};
@@ -852,7 +840,7 @@ async function runStudioPolicyPostconsumeChecks(
     });
     const message = 'Promotion ledger reservation no longer matches the consumed prepared entry';
     setUnknownTerminal(state, 'validation_failure', message);
-    throw sponsor.errors.sponsor(message, 'REPREPARE_REQUIRED', 422);
+    throw sponsor.errors.sponsor(message, 'REPREPARE_REQUIRED');
   }
 
   return {
@@ -906,9 +894,7 @@ async function runStudioPreflight(
     throw sponsor.errors.sponsor(
       `Preflight simulation failed: ${preflight.reason}`,
       'PREFLIGHT_FAILED',
-      422,
-      null,
-      subcode,
+      { subcode },
     );
   }
 }
@@ -939,7 +925,9 @@ async function classifyStudioSponsorResult(
       );
       setUnknownTerminal(state, 'congestion', `congestion: ${result.reason}`);
       state.sponsorResultDigest = result.digest;
-      throw sponsor.errors.sponsorCongestion(result.reason);
+      throw sponsor.errors.sponsor(result.reason, 'SPONSOR_CONGESTION', {
+        digest: result.digest,
+      });
     }
 
     const classifiedSubcode = d.classifySponsorFailureSubcode(
@@ -1024,9 +1012,7 @@ async function classifyStudioSponsorResult(
     throw sponsor.errors.sponsor(
       `Transaction reverted on-chain: ${result.reason}`,
       'ONCHAIN_REVERT',
-      422,
-      result.gasUsed,
-      classifiedSubcode,
+      { gasUsed: result.gasUsed, digest: result.digest, subcode: classifiedSubcode },
     );
   }
 
@@ -1068,7 +1054,7 @@ async function classifyStudioSponsorResult(
     throw sponsor.errors.sponsor(
       `Execution succeeded but gasUsed missing - cannot determine actual gas. Digest: ${result.digest}`,
       'GAS_EFFECTS_MISSING',
-      500,
+      { digest: result.digest },
     );
   }
 
@@ -1126,7 +1112,7 @@ async function classifyStudioSponsorResult(
     throw sponsor.errors.sponsor(
       `Budget consume failed after successful TX: ${consumeFailure}. Digest: ${result.digest}`,
       'CONSUME_FAILED',
-      500,
+      { digest: result.digest },
     );
   }
 
@@ -1254,6 +1240,9 @@ async function handleStudioSignAndSubmitThrow(
       'validation_failure',
       err instanceof Error ? err.message : 'validation_failure',
     );
+    if (err instanceof SponsorLeaseExpiredError) {
+      return sponsor.errors.sponsor(err.message, 'LEASE_EXPIRED');
+    }
     return err;
   }
 
@@ -1266,7 +1255,7 @@ async function handleStudioSignAndSubmitThrow(
       promotionId: sponsor.params.promotionId,
       userId: identity.userId,
       senderAddress: peekedPromotion.senderAddress,
-      txDigest: null,
+      txDigest: err.expectedDigest,
     },
   );
   await appendFailedUsageRow(options.context.usageStore, {
@@ -1274,7 +1263,7 @@ async function handleStudioSignAndSubmitThrow(
     receiptId: sponsor.params.receiptId,
     userId: identity.userId,
     senderAddress: peekedPromotion.senderAddress,
-    txDigest: null,
+    txDigest: err.expectedDigest,
     reservedGasMist: prepared.reservedGasMist,
     consumedGasMist: consumeOutcome.ok ? prepared.reservedGasMist : 0n,
     releasedGasMist: 0n,
@@ -1288,6 +1277,7 @@ async function handleStudioSignAndSubmitThrow(
       userId: identity.userId,
       senderAddress: peekedPromotion.senderAddress,
       sponsorAddress: prepared.sponsorAddress,
+      txDigest: err.expectedDigest,
       reservedMist: prepared.reservedGasMist.toString(),
       submittedAt: new Date().toISOString(),
       error: err.message,
@@ -1296,7 +1286,7 @@ async function handleStudioSignAndSubmitThrow(
     'error',
   );
   state.sponsorResultOutcome = 'internal_error';
-  state.sponsorResultDigest = undefined;
+  state.sponsorResultDigest = err.expectedDigest;
   state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
     unknownSponsoredExecutionEconomics(
       consumeOutcome.ok
@@ -1378,7 +1368,6 @@ async function handleStudioCorruptPreparedEntry(
   return errors.sponsor(
     'Unknown or expired receipt ID - retry promotion prepare',
     'PREPARED_TX_NOT_FOUND',
-    404,
   );
 }
 
@@ -1391,13 +1380,11 @@ function promotionPrepareErrorForPtbStructure(
       return errors.prepare(
         `Forbidden command kind "${failure.kind}" in promotion TX - only MoveCall is allowed`,
         'FORBIDDEN_COMMAND',
-        403,
       );
     case 'GASCOIN_FORBIDDEN':
       return errors.prepare(
         'MoveCall references GasCoin - rejected to protect sponsor funds',
         'GASCOIN_FORBIDDEN',
-        403,
       );
   }
 }
@@ -1408,43 +1395,38 @@ function promotionPrepareErrorForEligibility(
 ): Error {
   switch (failure.code) {
     case 'PROMOTION_NOT_FOUND':
-      return errors.prepare('Promotion not found', 'PROMOTION_NOT_FOUND', 404);
+      return errors.prepare('Promotion not found', 'PROMOTION_NOT_FOUND');
     case 'PROMOTION_NOT_ACTIVE':
-      return errors.prepare('Promotion is not active', 'PROMOTION_NOT_ACTIVE', 409);
+      return errors.prepare('Promotion is not active', 'PROMOTION_NOT_ACTIVE');
     case 'PROMOTION_NOT_STARTED':
       return errors.prepare(
         `Promotion has not started yet (starts at ${failure.startAt})`,
-        'PROMOTION_NOT_STARTED',
-        409,
+        'PROMOTION_NOT_ACTIVE',
       );
     case 'NOT_CLAIMED':
       return errors.prepare(
         'User must claim the promotion before requesting a sponsored action.',
         'NOT_CLAIMED',
-        403,
       );
     case 'USE_WINDOW_EXPIRED':
-      return errors.prepare(
-        `Use window expired at ${failure.useUntilAt}`,
-        'USE_WINDOW_EXPIRED',
-        403,
-      );
+      return errors.prepare(`Use window expired at ${failure.useUntilAt}`, 'USE_WINDOW_EXPIRED');
   }
 }
 
-function readDryRunGasUsed(simResult: unknown): GasUsedFields {
-  const terminal = parseSuiTransactionResult(simResult);
+function readDryRunGasUsed(
+  simResult: unknown,
+  txBytes: Uint8Array,
+  errors: StudioPrepareErrorFactory,
+): GasUsedFields {
+  const terminal = parseCurrentSuiTerminalForBytes(simResult, txBytes);
   if (!terminal) {
-    throw new PrepareValidationError(
-      'DRY_RUN_FAILED',
-      'Dry-run returned a malformed terminal result',
-    );
+    throw errors.prepare('Dry-run returned a malformed terminal result', 'DRY_RUN_FAILED');
   }
   if (terminal.kind === 'failure') {
-    throw new PrepareValidationError('DRY_RUN_FAILED', `Dry-run failed: ${terminal.error.message}`);
+    throw errors.prepare(`Dry-run failed: ${terminal.error.message}`, 'DRY_RUN_FAILED');
   }
   if (!terminal.gasUsed) {
-    throw new PrepareValidationError('DRY_RUN_NO_GAS', 'Dry-run returned no gas usage');
+    throw errors.prepare('Dry-run returned no gas usage', 'DRY_RUN_NO_GAS');
   }
   return terminal.gasUsed;
 }

@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   MemoryPromotionUsageStore,
   type PromotionUsageStoreAdapter,
-  type CreateUsageEventInput,
 } from '../src/studio/promotionUsageStore.js';
+import type { CreateUsageEventInput } from '../src/studio/domain.js';
 
 // ─────────────────────────────────────────────
 // Constants

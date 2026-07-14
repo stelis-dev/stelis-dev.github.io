@@ -87,6 +87,13 @@ describe('checkSettlementSwapPathLiquidity', () => {
     expect(result.priceDisplay).toBeNull();
   });
 
+  it('rejects a price vector that does not cover the complete path', async () => {
+    _hopPrices = [];
+    await expect(checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL)).rejects.toThrow(
+      'exactly one price per hop',
+    );
+  });
+
   // ── mid_price > 0 → ok ────────────────────────────────────────────
   it('returns ok when midPrice is positive', async () => {
     _hopPrices = [27_000_000_000n];

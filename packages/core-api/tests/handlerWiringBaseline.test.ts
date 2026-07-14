@@ -33,7 +33,7 @@ import {
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   SLIPPAGE_CAP_BPS,
 } from '@stelis/contracts';
-import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
 
 // ─── Module mocks ──────────────────────────────────────────────────────────
@@ -85,9 +85,13 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
+import type { ExtractedSettleArgs } from '../src/prepare/extractSettleArgs.js';
 import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
-import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
+import type {
+  PaymentInputTrace,
+  StaticSettlementSwapPathDescriptorMap,
+} from '@stelis/core-relay/server';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -148,7 +152,7 @@ const COIN_OBJECT_PAYMENT_EVIDENCE = {
   fundingInputUses: [{ commandIndex: 0, inputIndex: 0, occurrences: 1 }],
   senderWithdrawals: [],
   senderRedeems: [],
-};
+} satisfies PaymentInputTrace;
 
 const ADDRESS_BALANCE_PAYMENT_EVIDENCE = {
   settleVariantClass: 'with_vault' as const,
@@ -161,13 +165,13 @@ const ADDRESS_BALANCE_PAYMENT_EVIDENCE = {
   withdrawalInputIndex: 0,
   senderWithdrawals: [{ inputIndex: 0, amount: 500_000n }],
   senderRedeems: [{ commandIndex: 0, inputIndex: 0, amount: 500_000n }],
-};
+} satisfies PaymentInputTrace;
 
 const CREDIT_ONLY_PAYMENT_EVIDENCE = {
   settleVariantClass: 'credit' as const,
   source: 'none_credit_only' as const,
   paymentCoinRefKind: 'none' as const,
-};
+} satisfies PaymentInputTrace;
 
 const SUPPORTED_POOL = {
   hops: [
@@ -284,10 +288,9 @@ function policyHashBytes(): Uint8Array {
   return Uint8Array.from(Buffer.from(hex.replace('0x', ''), 'hex'));
 }
 
-function mockSettleArgs(paymentInputTrace: unknown) {
-  const variantClass = (paymentInputTrace as { settleVariantClass?: unknown }).settleVariantClass;
-  const isCreditOnly = variantClass === 'credit';
-  vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
+function mockSettleArgs(paymentInputTrace: PaymentInputTrace): void {
+  const isCreditOnly = paymentInputTrace.settleVariantClass === 'credit';
+  const settleArgs: ExtractedSettleArgs = {
     configObjectId: '0xCONFIG',
     registryObjectId: '0xREGISTRY',
     settlementPayoutRecipient: '0xPAYOUT',
@@ -311,8 +314,8 @@ function mockSettleArgs(paymentInputTrace: unknown) {
           settlementSwapDirection: SUPPORTED_POOL.settlementSwapDirection,
         },
     paymentInputTrace,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any);
+  };
+  vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(settleArgs);
 }
 
 const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>

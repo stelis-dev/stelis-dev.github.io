@@ -22,11 +22,6 @@
  * Internal module. Not re-exported from the package barrel.
  */
 
-// Type-only imports of reservation handle types route through the directory's
-// public barrel `./index.js` rather than the raw `./reservationHandles.js` module.
-// This is the same API external consumers use. The cycle is type-only and therefore
-// erased at compile time — `index.js` runtime-imports `executionPolicy.js`
-// but `executionPolicy.js` carries no runtime back-edge to `index.js`.
 import type { PrepareState, SponsorState, SponsoredExecutionState } from './states.js';
 import type {
   GasBoundBuildInput,
@@ -36,7 +31,7 @@ import type {
   NonceReservationHandle,
   NonceReconstructionInputs,
   SponsorSlotReservationHandle,
-} from './index.js';
+} from './reservationHandles.js';
 import type { ExecResult } from '../sessionTypes.js';
 import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
 

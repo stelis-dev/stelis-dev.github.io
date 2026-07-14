@@ -24,13 +24,13 @@ import {
   PromotionSponsorError,
   type PromotionSponsorContext,
 } from '../src/studio/sponsorPromotionSponsoredHandler.js';
-import { SponsorCongestionError, SponsorLeaseExpiredError } from '../src/handlers/sponsor.js';
+import { SponsorLeaseExpiredError } from '../src/handlers/sponsor.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { SponsorPool } from '../src/context.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase64, toHex, toBase58 } from '@mysten/sui/utils';
 import type {
   PromotionPreparedTxDraft,
@@ -42,6 +42,7 @@ import type {
   SponsorResultMetadata,
 } from '../src/handlers/sponsorResult.js';
 import {
+  bindGrpcResultToTransactionBytes,
   congestedObjectsExecutionError,
   grpcExecutionFailure,
   grpcExecutionSuccess,
@@ -66,6 +67,8 @@ const TEST_DEEPBOOK_PACKAGE_ID = '0xdef';
 const SPONSOR_KP = Ed25519Keypair.generate();
 const USER_KP = Ed25519Keypair.generate();
 const USER_ADDR = USER_KP.toSuiAddress();
+const suiDigest = (txBytes: Uint8Array): string =>
+  TransactionDataBuilder.getDigestFromBytes(txBytes);
 // 32+ char HMAC secret for the in-memory sponsor pool lease proofs.
 const TEST_HMAC_SECRET = 'sponsor-promotion-test-hmac-secret-000';
 
@@ -156,18 +159,20 @@ function createMockSui(opts?: {
       : { computationCost: '1000000', storageCost: '500000', storageRebate: '200000' };
 
   return {
-    simulateTransaction: async () => {
+    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) => {
       if (opts?.simFail) {
         const reason = opts.simFailReason ?? 'sim-error';
-        return grpcSimulationFailure(
-          'mock-simulation-failure',
-          moveAbortExecutionError(reason),
-          gasCost,
+        return bindGrpcResultToTransactionBytes(
+          grpcSimulationFailure('fixture-digest', moveAbortExecutionError(reason), gasCost),
+          transaction,
         );
       }
-      return grpcSimulationSuccess('mock-digest', gasCost);
+      return bindGrpcResultToTransactionBytes(
+        grpcSimulationSuccess('fixture-digest', gasCost),
+        transaction,
+      );
     },
-    executeTransaction: async () => {
+    executeTransaction: async ({ transaction }: { transaction: Uint8Array }) => {
       if (opts?.submitThrows) {
         throw new Error(opts.submitThrowMessage ?? 'rpc transport error');
       }
@@ -176,31 +181,39 @@ function createMockSui(opts?: {
         const error = opts.execCongestion
           ? congestedObjectsExecutionError(reason)
           : moveAbortExecutionError(reason);
-        const failed = grpcExecutionFailure('tx-digest-revert', error, gasCost);
-        if (opts.revertWithGasUsed || opts.execCongestion) return failed;
-        return {
-          ...failed,
-          FailedTransaction: {
-            ...failed.FailedTransaction,
+        const failed = grpcExecutionFailure('fixture-digest', error, gasCost);
+        if (opts.revertWithGasUsed || opts.execCongestion) {
+          return bindGrpcResultToTransactionBytes(failed, transaction);
+        }
+        return bindGrpcResultToTransactionBytes(
+          {
+            ...failed,
+            FailedTransaction: {
+              ...failed.FailedTransaction,
+              effects: {
+                ...failed.FailedTransaction.effects,
+                gasUsed: {},
+              },
+            },
+          },
+          transaction,
+        );
+      }
+      const success = grpcExecutionSuccess('fixture-digest', gasCost);
+      if (!opts?.noGasUsed) return bindGrpcResultToTransactionBytes(success, transaction);
+      return bindGrpcResultToTransactionBytes(
+        {
+          ...success,
+          Transaction: {
+            ...success.Transaction,
             effects: {
-              ...failed.FailedTransaction.effects,
+              ...success.Transaction.effects,
               gasUsed: {},
             },
           },
-        };
-      }
-      const success = grpcExecutionSuccess('tx-digest-abc', gasCost);
-      if (!opts?.noGasUsed) return success;
-      return {
-        ...success,
-        Transaction: {
-          ...success.Transaction,
-          effects: {
-            ...success.Transaction.effects,
-            gasUsed: {},
-          },
         },
-      };
+        transaction,
+      );
     },
   } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
 }
@@ -318,8 +331,12 @@ async function setup(opts?: {
     ? ({
         append: async (row: import('../src/studio/domain.js').CreateUsageEventInput) => {
           usageRows.push(row);
+          return { ...row, createdAt: new Date().toISOString() };
         },
-      } as import('../src/studio/promotionUsageStore.js').PromotionUsageStoreAdapter)
+        getByReceipt: async () => [],
+        getByUser: async () => [],
+        getByPromotion: async () => [],
+      } satisfies import('../src/studio/promotionUsageStore.js').PromotionUsageStoreAdapter)
     : undefined;
 
   const ctx: PromotionSponsorContext = {
@@ -518,7 +535,7 @@ describe('handlePromotionSponsor', () => {
       clientIp: '127.0.0.1',
     });
 
-    expect(result.digest).toBe('tx-digest-abc');
+    expect(result.digest).toBe(suiDigest(signed.txBytes));
     // After success the reservation is consumed, not released
     // by the rejected attacker. `activeReservationReceiptId` is cleared
     // by the success path, not by the preconsume reject above.
@@ -622,6 +639,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('REPREPARE_REQUIRED');
+    expect((err as PromotionSponsorError).meta).toEqual({});
 
     // No abuse recorded — post-consume drift, stored-hash-verified internal state.
     await expect(ctx.abuseBlocker.checkIp('127.0.0.1')).resolves.toMatchObject({
@@ -875,7 +893,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('PREFLIGHT_FAILED');
-    expect((err as PromotionSponsorError).subcode).toBeUndefined();
+    expect((err as PromotionSponsorError).meta.subcode).toBeUndefined();
 
     const preflightCalls = recordSpy.mock.calls.filter((args) => args[2] === 'PREFLIGHT_FAILED');
     expect(preflightCalls.length).toBe(1);
@@ -889,9 +907,9 @@ describe('handlePromotionSponsor', () => {
   });
 
   // Unclassified promotion preflight failure keeps `simulation_failed` in
-  // abuse meta but does NOT expose it as `PromotionSponsorError.subcode`.
+  // abuse meta but does NOT expose it as `PromotionSponsorError.meta.subcode`.
   // Public subcode is reserved for recognized `SponsorFailureSubcode` values.
-  test('keeps unclassified preflight failure subcode internal (PromotionSponsorError.subcode undefined)', async () => {
+  test('keeps unclassified preflight failure subcode internal (public meta.subcode undefined)', async () => {
     const { ctx, signed, receiptId } = await setup({
       simFail: true,
       simFailReason: 'unrecognized RPC error string',
@@ -909,7 +927,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('PREFLIGHT_FAILED');
-    expect((err as PromotionSponsorError).subcode).toBeUndefined();
+    expect((err as PromotionSponsorError).meta.subcode).toBeUndefined();
 
     const preflightCalls = recordSpy.mock.calls.filter((args) => args[2] === 'PREFLIGHT_FAILED');
     expect(preflightCalls.length).toBe(1);
@@ -941,7 +959,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('ONCHAIN_REVERT');
-    expect((err as PromotionSponsorError).subcode).toBeUndefined();
+    expect((err as PromotionSponsorError).meta.subcode).toBeUndefined();
 
     const onchainCalls = recordSpy.mock.calls.filter((args) => args[2] === 'ONCHAIN_REVERT');
     expect(onchainCalls.length).toBe(1);
@@ -956,8 +974,8 @@ describe('handlePromotionSponsor', () => {
 
   // Unclassified on-chain revert keeps the `'onchain_revert'` fallback
   // literal in abuse meta only — the fallback literal is never exposed
-  // as a public `subcode` on `PromotionSponsorError`.
-  test('falls back to onchain_revert subcode in abuse meta and keeps PromotionSponsorError.subcode undefined', async () => {
+  // as a public `meta.subcode` on `PromotionSponsorError`.
+  test('falls back to onchain_revert subcode in abuse meta and keeps public meta.subcode undefined', async () => {
     const { ctx, signed, receiptId } = await setup({ execFail: true });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
@@ -972,7 +990,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('ONCHAIN_REVERT');
-    expect((err as PromotionSponsorError).subcode).toBeUndefined();
+    expect((err as PromotionSponsorError).meta.subcode).toBeUndefined();
 
     const onchainCalls = recordSpy.mock.calls.filter((args) => args[2] === 'ONCHAIN_REVERT');
     expect(onchainCalls.length).toBe(1);
@@ -985,14 +1003,21 @@ describe('handlePromotionSponsor', () => {
     recordSpy.mockRestore();
   });
 
-  test('congestion throws SponsorCongestionError, releases reservation, and does NOT record abuse', async () => {
+  test('congestion returns SPONSOR_CONGESTION with digest, releases reservation, and does NOT record abuse', async () => {
     const { ctx, signed, receiptId, executionLedger } = await setup();
     const abuseBlocker = ctx.abuseBlocker;
 
     // Only the current SDK CongestedObjects terminal kind proves that the
     // sponsor-signed transaction was cancelled before on-chain execution.
-    (ctx.sui as unknown as { executeTransaction: unknown }).executeTransaction = async () =>
-      grpcExecutionFailure('congestion-digest', congestedObjectsExecutionError());
+    (ctx.sui as unknown as { executeTransaction: unknown }).executeTransaction = async ({
+      transaction,
+    }: {
+      transaction: Uint8Array;
+    }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcExecutionFailure('fixture-digest', congestedObjectsExecutionError()),
+        transaction,
+      );
 
     const recordSpy = vi.spyOn(abuseBlocker, 'recordSponsorFailure');
 
@@ -1005,7 +1030,11 @@ describe('handlePromotionSponsor', () => {
       clientIp: '127.0.0.1',
     }).catch((e: unknown) => e);
 
-    expect((err as Error).name).toBe('SponsorCongestionError');
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_CONGESTION');
+    expect((err as PromotionSponsorError).meta).toEqual({
+      digest: suiDigest(signed.txBytes),
+    });
 
     // Reservation was released.
     const ent = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
@@ -1044,7 +1073,6 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('REPREPARE_REQUIRED');
-    expect((err as PromotionSponsorError).statusHint).toBe(422);
 
     // Reservation was released (defense-in-depth drift cleanup).
     const ent = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
@@ -1063,7 +1091,7 @@ describe('handlePromotionSponsor', () => {
       clientIp: '127.0.0.1',
     });
 
-    expect(result.digest).toBe('tx-digest-abc');
+    expect(result.digest).toBe(suiDigest(signed.txBytes));
     expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
   });
 
@@ -1089,7 +1117,7 @@ describe('handlePromotionSponsor', () => {
         clientIp: '127.0.0.1',
       });
 
-      expect(result.digest).toBe('tx-digest-abc');
+      expect(result.digest).toBe(suiDigest(signed.txBytes));
       expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
 
       const recorderFailed = warnSpy.mock.calls
@@ -1108,7 +1136,7 @@ describe('handlePromotionSponsor', () => {
       expect(recorderFailed!['promotionId']).toBe(TEST_PROMO_ID);
       expect(recorderFailed!['receiptId']).toBe(receiptId);
       expect(recorderFailed!['userId']).toBe(TEST_USER_ID);
-      expect(recorderFailed!['digest']).toBe('tx-digest-abc');
+      expect(recorderFailed!['digest']).toBe(suiDigest(signed.txBytes));
       expect(recorderFailed!['error']).toBe('usage-store-unreachable');
     } finally {
       warnSpy.mockRestore();
@@ -1127,7 +1155,7 @@ describe('handlePromotionSponsor', () => {
       clientIp: '127.0.0.1',
     });
 
-    expect(result.digest).toBe('tx-digest-abc');
+    expect(result.digest).toBe(suiDigest(signed.txBytes));
     expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
   });
 
@@ -1204,16 +1232,17 @@ describe('handlePromotionSponsor', () => {
       executeTransaction: vi.fn().mockRejectedValue(new Error('connection refused')),
     } as unknown as typeof ctx.sui;
 
-    await expect(
-      handlePromotionSponsor(ctx, {
-        promotionId: TEST_PROMO_ID,
-        receiptId,
-        txBytes: signed.txBytesBase64,
-        userSignature: signed.userSignature,
-        verifiedIdentity: buildIdentity(),
-        clientIp: '127.0.0.1',
-      }),
-    ).rejects.toThrow(/connection refused/);
+    const err = await handlePromotionSponsor(ctx, {
+      promotionId: TEST_PROMO_ID,
+      receiptId,
+      txBytes: signed.txBytesBase64,
+      userSignature: signed.userSignature,
+      verifiedIdentity: buildIdentity(),
+      clientIp: '127.0.0.1',
+    }).catch((cause: unknown) => cause);
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
+    expect((err as PromotionSponsorError).meta.digest).toBe(suiDigest(signed.txBytes));
 
     const ent = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
     expect(ent).not.toBeNull();
@@ -1241,7 +1270,7 @@ describe('handlePromotionSponsor', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect((err as PromotionSponsorError).code).toBe('USER_ID_MISMATCH');
-      expect((err as PromotionSponsorError).statusHint).toBe(403);
+      expect((err as PromotionSponsorError).meta).toEqual({});
     }
   });
 
@@ -1262,7 +1291,7 @@ describe('handlePromotionSponsor', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect((err as PromotionSponsorError).code).toBe('SENDER_ADDRESS_MISMATCH');
-      expect((err as PromotionSponsorError).statusHint).toBe(403);
+      expect((err as PromotionSponsorError).meta).toEqual({});
     }
 
     // Preserve-on-preconsume-reject: a leaked receiptId cannot destroy the
@@ -1370,8 +1399,8 @@ describe('handlePromotionSponsor', () => {
       expect.unreachable('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionSponsorError);
-      expect((err as PromotionSponsorError).code).toBe('PROMOTION_NOT_STARTED');
-      expect((err as PromotionSponsorError).statusHint).toBe(409);
+      expect((err as PromotionSponsorError).code).toBe('PROMOTION_NOT_ACTIVE');
+      expect((err as PromotionSponsorError).meta).toEqual({});
     }
   });
 
@@ -1737,7 +1766,7 @@ describe('handlePromotionSponsor', () => {
     return { txBytes, txBytesBase64: toBase64(txBytes), userSignature: sig.signature };
   }
 
-  test('recorder degradation: DISALLOWED_TARGET preserves 403 and emits recorder-failed warn', async () => {
+  test('recorder degradation: DISALLOWED_TARGET remains authoritative and emits recorder-failed warn', async () => {
     const { ctx, receiptId, signed } = await setup();
     ctx.globalAllowedTargets = new Set<string>();
 
@@ -1758,7 +1787,7 @@ describe('handlePromotionSponsor', () => {
 
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect((err as PromotionSponsorError).code).toBe('DISALLOWED_TARGET');
-      expect((err as PromotionSponsorError).statusHint).toBe(403);
+      expect((err as PromotionSponsorError).meta).toEqual({});
 
       const abuseCalls = recordSpy.mock.calls.filter((a) => a[2] === 'PROMO_DISALLOWED_TARGET');
       expect(abuseCalls.length).toBe(1);
@@ -1795,8 +1824,7 @@ describe('handlePromotionSponsor', () => {
   // txBytes. No extra pool slot is required.
   async function runPreconsumeRecorderCase(opts: {
     buildSubmission: () => Promise<{ txBytesBase64: string; userSignature: string }>;
-    expectedCode: string;
-    expectedStatusHint: number;
+    expectedCode: PromotionSponsorError['code'];
     expectedAbuseCode: string;
     expectedWarnDetail?: string;
   }) {
@@ -1819,7 +1847,7 @@ describe('handlePromotionSponsor', () => {
 
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect((err as PromotionSponsorError).code).toBe(opts.expectedCode);
-      expect((err as PromotionSponsorError).statusHint).toBe(opts.expectedStatusHint);
+      expect((err as PromotionSponsorError).meta).toEqual({});
 
       const abuseCalls = recordSpy.mock.calls.filter((a) => a[2] === opts.expectedAbuseCode);
       expect(abuseCalls.length).toBe(1);
@@ -1854,11 +1882,10 @@ describe('handlePromotionSponsor', () => {
     }
   }
 
-  test('recorder degradation: FORBIDDEN_COMMAND preserves 403 and emits recorder-failed warn', async () => {
+  test('recorder degradation: FORBIDDEN_COMMAND remains authoritative and emits recorder-failed warn', async () => {
     await runPreconsumeRecorderCase({
       buildSubmission: buildForbiddenCommandTx,
       expectedCode: 'FORBIDDEN_COMMAND',
-      expectedStatusHint: 403,
       expectedAbuseCode: 'PROMO_FORBIDDEN_COMMAND',
     });
   });
@@ -1882,7 +1909,7 @@ describe('handlePromotionSponsor', () => {
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect(err).toMatchObject({
         code: 'BAD_REQUEST',
-        statusHint: 400,
+        meta: {},
         message: `Promotion transaction must contain 1 to 16 commands; received ${commandCount}`,
       });
       expect(recordSpy).not.toHaveBeenCalled();
@@ -1906,20 +1933,20 @@ describe('handlePromotionSponsor', () => {
     }).catch((error: unknown) => error);
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect(err).toMatchObject({ code: 'DISALLOWED_TARGET', statusHint: 403 });
+    expect(err).toMatchObject({ code: 'DISALLOWED_TARGET', meta: {} });
     expect(
       recordSpy.mock.calls.filter((call) => call[2] === 'PROMO_DISALLOWED_TARGET'),
     ).toHaveLength(1);
     expect(await ctx.prepareStore.peek(receiptId)).not.toBeNull();
   });
 
-  test('malformed txBytes (valid base64, invalid BCS) returns BAD_REQUEST/400 and preserves prepared entry', async () => {
+  test('malformed txBytes (valid base64, invalid BCS) returns BAD_REQUEST and preserves prepared entry', async () => {
     const { ctx, receiptId } = await setup();
 
     // Garbage bytes: base64 decode succeeds (so `decodeTxBytes` passes),
     // but `Transaction.from()` BCS deserialization fails. Must be
-    // classified as 400 BAD_REQUEST rather than falling through to the
-    // route-level 500 SPONSOR_FAILED catch.
+    // classified as BAD_REQUEST rather than falling through to the
+    // unknown-failure SPONSOR_FAILED catch.
     const garbageTxBytes = toBase64(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
     const userSig = await USER_KP.signTransaction(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
 
@@ -1934,7 +1961,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('BAD_REQUEST');
-    expect((err as PromotionSponsorError).statusHint).toBe(400);
+    expect((err as PromotionSponsorError).meta).toEqual({});
 
     // Preserve-on-preconsume contract: a malformed submission is not
     // a tampering signal for the prepared entry, and the stored hash match
@@ -1944,7 +1971,7 @@ describe('handlePromotionSponsor', () => {
     expect(stillPeeked).not.toBeNull();
   });
 
-  test('GASCOIN_FORBIDDEN: real SDK MoveCall(... tx.gas ...) rejects preconsume with 403 and preserves prepared entry', async () => {
+  test('GASCOIN_FORBIDDEN: real SDK MoveCall(... tx.gas ...) rejects preconsume and preserves prepared entry', async () => {
     const { ctx, receiptId } = await setup();
     const gasCoin = await buildGasCoinForbiddenTx();
 
@@ -1959,7 +1986,7 @@ describe('handlePromotionSponsor', () => {
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('GASCOIN_FORBIDDEN');
-    expect((err as PromotionSponsorError).statusHint).toBe(403);
+    expect((err as PromotionSponsorError).meta).toEqual({});
 
     // Preserve-on-preconsume contract: S1 policy failures reject before
     // the stored hash match, so the prepared entry and its reservation are
@@ -1969,26 +1996,24 @@ describe('handlePromotionSponsor', () => {
     expect(stillPeeked).not.toBeNull();
   });
 
-  test('recorder degradation: GASCOIN_FORBIDDEN preserves 403 and emits recorder-failed warn', async () => {
+  test('recorder degradation: GASCOIN_FORBIDDEN remains authoritative and emits recorder-failed warn', async () => {
     await runPreconsumeRecorderCase({
       buildSubmission: buildGasCoinForbiddenTx,
       expectedCode: 'GASCOIN_FORBIDDEN',
-      expectedStatusHint: 403,
       expectedAbuseCode: 'PROMO_GASCOIN_FORBIDDEN',
     });
   });
 
-  test('recorder degradation: canonical sender mismatch preserves SENDER_SIGNATURE_INVALID/422', async () => {
+  test('recorder degradation: canonical sender mismatch preserves SENDER_SIGNATURE_INVALID', async () => {
     await runPreconsumeRecorderCase({
       buildSubmission: buildCanonicalSenderMismatchTx,
       expectedCode: 'SENDER_SIGNATURE_INVALID',
-      expectedStatusHint: 422,
       expectedAbuseCode: 'PROMO_SENDER_SIGNATURE_INVALID',
       expectedWarnDetail: 'canonical_sender_mismatch',
     });
   });
 
-  test('recorder degradation: invalid user signature preserves SENDER_SIGNATURE_INVALID/422', async () => {
+  test('recorder degradation: invalid user signature preserves SENDER_SIGNATURE_INVALID', async () => {
     const { ctx, signed, receiptId } = await setup();
     const wrongKp = Ed25519Keypair.generate();
     const wrongSig = await wrongKp.signTransaction(signed.txBytes);
@@ -2010,7 +2035,7 @@ describe('handlePromotionSponsor', () => {
 
       expect(err).toBeInstanceOf(PromotionSponsorError);
       expect((err as PromotionSponsorError).code).toBe('SENDER_SIGNATURE_INVALID');
-      expect((err as PromotionSponsorError).statusHint).toBe(422);
+      expect((err as PromotionSponsorError).meta).toEqual({});
 
       const abuseCalls = recordSpy.mock.calls.filter(
         (a) => a[2] === 'PROMO_SENDER_SIGNATURE_INVALID',
@@ -2097,7 +2122,7 @@ describe('handlePromotionSponsor', () => {
       outcome: 'success',
       executionStage: 'on_chain',
       route: 'promotion',
-      digest: 'tx-digest-abc',
+      digest: suiDigest(signed.txBytes),
     });
     // Promotion allowance consumption is entitlement accounting, not a
     // transfer that recovers the Host's gas payment.
@@ -2200,7 +2225,7 @@ describe('handlePromotionSponsor', () => {
     });
 
     // Primary response preserved despite the throwing callback.
-    expect(result.digest).toBe('tx-digest-abc');
+    expect(result.digest).toBe(suiDigest(signed.txBytes));
 
     const callbackFailedLog = consoleWarnSpy.mock.calls
       .map((args: unknown[]) => {
@@ -2218,7 +2243,7 @@ describe('handlePromotionSponsor', () => {
     // operators can correlate this emit with host-side projection
     // failures (`SPONSORED_LOGS_RECORDER_FAILED` / `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`).
     expect(callbackFailedLog!['source']).toBe('sponsor_handler');
-    expect(callbackFailedLog!['digest']).toBe('tx-digest-abc');
+    expect(callbackFailedLog!['digest']).toBe(suiDigest(signed.txBytes));
 
     consoleWarnSpy.mockRestore();
   });
@@ -2259,8 +2284,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
       clientIp: '127.0.0.1',
     }).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('rpc transport error');
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
+    expect((err as PromotionSponsorError).meta.digest).toBe(suiDigest(signed.txBytes));
 
     // Ledger consume path: entitlement.consumedGasAllowanceMist advanced
     // by the full reserved amount. Release would have left consumed=0.
@@ -2273,7 +2299,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const failedRow = usageRows.find((r) => r.failureReason === 'post_signature_uncertainty');
     expect(failedRow).toBeDefined();
     expect(failedRow!.result).toBe('failed');
-    expect(failedRow!.txDigest).toBeNull();
+    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
     expect(failedRow!.consumedGasMist).toBe('2000000');
     expect(failedRow!.releasedGasMist).toBe('0');
 
@@ -2291,6 +2317,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(reconLog!['promotionId']).toBe(TEST_PROMO_ID);
     expect(reconLog!['userId']).toBe(TEST_USER_ID);
     expect(reconLog!['receiptId']).toBe(receiptId);
+    expect(reconLog!['txDigest']).toBe(suiDigest(signed.txBytes));
     expect(reconLog!['reservedMist']).toBe('2000000');
     expect(reconLog!['consumeOutcome']).toBe('ok');
 
@@ -2333,13 +2360,13 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(failedRow!.result).toBe('failed');
     expect(failedRow!.consumedGasMist).toBe('1300000');
     expect(failedRow!.releasedGasMist).toBe('700000');
-    expect(failedRow!.txDigest).toBe('tx-digest-revert');
+    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
 
     expect(sponsorResults).toHaveLength(1);
     expect(sponsorResults[0]).toMatchObject({
       outcome: 'onchain_revert',
       executionStage: 'on_chain',
-      digest: 'tx-digest-revert',
+      digest: suiDigest(signed.txBytes),
       economics: {
         economicsStatus: 'known',
         recoveredGasMist: '0',
@@ -2388,7 +2415,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(failedRow).toBeDefined();
     expect(failedRow!.consumedGasMist).toBe('0');
     expect(failedRow!.releasedGasMist).toBe('2000000');
-    expect(failedRow!.txDigest).toBe('tx-digest-revert');
+    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
     // Negative regression: must not have written the gas-unknown variant.
     expect(usageRows.find((r) => r.failureReason === 'onchain_revert_gas_unknown')).toBeUndefined();
   });
@@ -2445,7 +2472,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const failedRow = usageRows.find((r) => r.failureReason === 'gas_used_missing');
     expect(failedRow).toBeDefined();
     expect(failedRow!.consumedGasMist).toBe('2000000');
-    expect(failedRow!.txDigest).toBe('tx-digest-abc');
+    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
   });
 
   test('post-signature uncertainty and post-submit loss paths never invoke ledger.release()', async () => {
@@ -2463,7 +2490,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
       {
         label: 'post-signature uncertainty',
         opts: { submitThrows: true, withUsageCapture: true },
-        expectedCode: '__throw__', // not a PromotionSponsorError; raw rethrow
+        expectedCode: 'SPONSOR_SUBMISSION_UNCERTAIN',
       },
       {
         label: 'on-chain revert with gasUsed',
@@ -2632,8 +2659,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
       clientIp: '127.0.0.1',
     }).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('rpc transport error');
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
+    expect((err as PromotionSponsorError).meta.digest).toBe(suiDigest(signed.txBytes));
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe('internal_error');
@@ -2678,8 +2706,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
       clientIp: '127.0.0.1',
     }).catch((cause: unknown) => cause);
 
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('malformed terminal result');
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
+    expect((err as PromotionSponsorError).meta.digest).toBe(suiDigest(signed.txBytes));
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       outcome: 'internal_error',
@@ -2914,7 +2943,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
       clientIp: '127.0.0.1',
     }).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(SponsorLeaseExpiredError);
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('LEASE_EXPIRED');
+    expect((err as PromotionSponsorError).meta).toEqual({});
 
     // Active reservation released → consumed stays at 0; allowance
     // restored via the pre-submit release path, not via reaper.
@@ -2973,7 +3004,11 @@ describe('post-signature/post-submit ledger consume policy', () => {
       clientIp: '127.0.0.1',
     }).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(SponsorCongestionError);
+    expect(err).toBeInstanceOf(PromotionSponsorError);
+    expect((err as PromotionSponsorError).code).toBe('SPONSOR_CONGESTION');
+    expect((err as PromotionSponsorError).meta).toEqual({
+      digest: suiDigest(signed.txBytes),
+    });
     const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
     // Release path → consumed stays at 0 (allowance restored).
     expect(entitlement!.consumedGasAllowanceMist).toBe('0');

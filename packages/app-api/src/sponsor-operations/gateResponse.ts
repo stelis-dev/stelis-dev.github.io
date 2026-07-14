@@ -1,8 +1,8 @@
 /**
  * [app-api] Sponsor operations 503 response builder.
  *
- * Thin adapter over `evaluateSponsorAvailability`. Returns the 503 body +
- * status + headers when the gate denies, or `null` when the gate admits
+ * Thin adapter over `evaluateSponsorAvailability`. Returns the coded body +
+ * headers when the gate denies, or `null` when the gate admits
  * the request. Prepare routes pass a lease snapshot to require one free
  * healthy sponsor slot; sponsor routes do not, because they complete an
  * existing leased prepare receipt.
@@ -12,7 +12,7 @@
  *   - `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` — `availableSlots === 0` with sponsor refill account unhealthy
  */
 
-import type { SponsorAvailabilityErrorCode } from '@stelis/contracts';
+import type { HostErrorResponse, SponsorAvailabilityErrorCode } from '@stelis/contracts';
 import {
   evaluateSponsorAvailability,
   type SponsorAvailabilityOptions,
@@ -26,11 +26,7 @@ const ERROR_MESSAGES: Record<SponsorAvailabilityErrorCode, string> = {
 };
 
 export interface SponsorOperationsBlockedResponse {
-  readonly body: {
-    readonly error: string;
-    readonly code: SponsorAvailabilityErrorCode;
-  };
-  readonly status: 503;
+  readonly body: HostErrorResponse & { readonly code: SponsorAvailabilityErrorCode };
   readonly headers: Record<string, string>;
 }
 
@@ -45,7 +41,6 @@ export function buildSponsorUnavailableResponse(
       error: ERROR_MESSAGES[decision.errorCode],
       code: decision.errorCode,
     },
-    status: 503,
     headers: {},
   };
 }

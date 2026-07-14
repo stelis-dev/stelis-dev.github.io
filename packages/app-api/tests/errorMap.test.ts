@@ -1,293 +1,239 @@
-/**
- * errorMap unit tests — handwritten expected-table for each error class
- * in scope.
- *
- * Covers the 13 error classes handled by
- * `packages/app-api/src/errorMap.ts`:
- *   - `RequestBodyTooLargeError`
- *   - `RequestBodyParseError`
- *   - `PrepareOverloadError`
- *   - `PrepareValidationError` (statusHint override + meta spread)
- *   - `PrepareStudioUserQuotaError`
- *   - `SponsorValidationError` (statusHint override)
- *   - `SponsorPreflightError` (optional subcode)
- *   - `SponsorOnchainError` (digest + optional subcode)
- *   - `SponsorCongestionError`
- *   - `SponsorLeaseExpiredError`
- *   - `PromotionPrepareError` (statusHint-driven)
- *   - `PromotionSponsorError` (statusHint-driven)
- *   - `DeveloperJwtAuthError` (statusHint-driven)
- *
- * Unknown values and plain `Error` instances must return `null` so callers
- * can fall through to their own 500 fallback.
- */
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
-  RequestBodyTooLargeError,
-  RequestBodyParseError,
   PrepareOverloadError,
   PrepareValidationError,
-  PrepareStudioUserQuotaError,
-  SponsorValidationError,
-  SponsorPreflightError,
-  SponsorOnchainError,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
   SponsorCongestionError,
   SponsorLeaseExpiredError,
+  SponsorOnchainError,
+  SponsorPreflightError,
+  SponsorSubmissionUncertainError,
+  SponsorTerminalProcessingError,
+  SponsorValidationError,
 } from '@stelis/core-api';
 import { PromotionPrepareError, PromotionSponsorError } from '@stelis/core-api/studio';
-import { DeveloperJwtAuthError } from '../src/middleware/studioAuth.js';
-import { mapError } from '../src/errorMap.js';
+import {
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
+} from '@stelis/contracts';
+import { codedHostError, mapError, uncodedHostError } from '../src/errorMap.js';
 
-describe('errorMap — RequestBodyTooLargeError', () => {
-  it('maps to 413 with code REQUEST_BODY_TOO_LARGE', () => {
-    const m = mapError(new RequestBodyTooLargeError(96 * 1024));
-    expect(m).toEqual({
-      status: 413,
-      body: expect.objectContaining({ code: 'REQUEST_BODY_TOO_LARGE' }),
+const mapRelayPrepare = (error: unknown) => mapError(error, RELAY_PREPARE_ERROR_CODES);
+const mapRelaySponsor = (error: unknown) => mapError(error, RELAY_SPONSOR_ERROR_CODES);
+const mapPromotionPrepare = (error: unknown) => mapError(error, PROMOTION_PREPARE_ERROR_CODES);
+const mapPromotionSponsor = (error: unknown) => mapError(error, PROMOTION_SPONSOR_ERROR_CODES);
+
+describe('contracts-owned Host error projection', () => {
+  it('derives statuses from current codes across error classes', () => {
+    expect(mapRelayPrepare(new RequestBodyTooLargeError(1))?.status).toBe(413);
+    expect(mapRelayPrepare(new RequestBodyParseError())?.status).toBe(400);
+    expect(mapRelayPrepare(new PrepareValidationError('NO_SPONSOR_SLOT', 'busy'))?.status).toBe(
+      503,
+    );
+    expect(
+      mapRelaySponsor(new SponsorValidationError('PREPARED_TX_EXPIRED', 'expired'))?.status,
+    ).toBe(410);
+    expect(
+      mapPromotionPrepare(new PromotionPrepareError('not found', 'PROMOTION_NOT_FOUND'))?.status,
+    ).toBe(404);
+    expect(
+      mapPromotionSponsor(new PromotionSponsorError('mismatch', 'PROMOTION_ID_MISMATCH'))?.status,
+    ).toBe(403);
+  });
+
+  it('keeps fixed operational headers without changing code-owned status', () => {
+    expect(mapRelayPrepare(new PrepareOverloadError(10, 10))).toMatchObject({
+      status: 503,
+      headers: { 'Retry-After': '2' },
+      body: { code: 'PREPARE_OVERLOADED' },
     });
-    expect(m?.headers).toBeUndefined();
+    expect(mapRelaySponsor(new SponsorLeaseExpiredError('slot-1'))).toMatchObject({
+      status: 503,
+      headers: { 'Retry-After': '1' },
+      body: { code: 'LEASE_EXPIRED' },
+    });
+  });
+
+  it('rejects a current code outside the active route', () => {
+    expect(
+      mapError(
+        new PrepareValidationError('INSUFFICIENT_BALANCE', 'prepare only'),
+        RELAY_SPONSOR_ERROR_CODES,
+      ),
+    ).toBeNull();
   });
 });
 
-describe('errorMap — RequestBodyParseError', () => {
-  it('maps to 400 with code BAD_REQUEST', () => {
-    const m = mapError(new RequestBodyParseError());
-    expect(m?.status).toBe(400);
-    expect(m?.body.code).toBe('BAD_REQUEST');
-    expect(m?.headers).toBeUndefined();
-  });
-});
-
-describe('errorMap — PrepareOverloadError', () => {
-  it('maps to 503 with fixed Retry-After: 2 and code PREPARE_OVERLOADED', () => {
-    const m = mapError(new PrepareOverloadError(10, 10));
-    expect(m?.status).toBe(503);
-    expect(m?.headers).toEqual({ 'Retry-After': '2' });
-    expect(m?.body.code).toBe('PREPARE_OVERLOADED');
-  });
-});
-
-describe('errorMap — PrepareValidationError', () => {
-  it('defaults to 422 when statusHint is absent', () => {
-    const m = mapError(new PrepareValidationError('INSUFFICIENT_BALANCE', 'fail'));
-    expect(m?.status).toBe(422);
-    expect(m?.body.code).toBe('INSUFFICIENT_BALANCE');
-    expect(m?.headers).toBeUndefined();
-  });
-
-  it('spreads meta fields into the body', () => {
-    const meta = { minSettleMist: '1000', requiredTotalIn: '2000', isEstimate: 'true' };
-    const m = mapError(new PrepareValidationError('INSUFFICIENT_SETTLE_INPUT', 'too low', meta));
-    expect(m?.body).toMatchObject({
+describe('code-bound metadata', () => {
+  it('projects only the settlement diagnostics allowed by the primary code', () => {
+    const mapped = mapRelayPrepare(
+      new PrepareValidationError('INSUFFICIENT_SETTLE_INPUT', 'too low', {
+        minSettleMist: '1000',
+        requiredTotalIn: '2000',
+        isEstimate: true,
+        digest: 'must-not-leak',
+        endpoint: 'https://secret.example',
+      }),
+    );
+    expect(mapped?.body).toEqual({
+      error: 'Request rejected',
       code: 'INSUFFICIENT_SETTLE_INPUT',
       minSettleMist: '1000',
       requiredTotalIn: '2000',
-      isEstimate: 'true',
+      isEstimate: true,
     });
   });
 
-  it('honors statusHint override', () => {
-    const m = mapError(new PrepareValidationError('BAD_REQUEST', 'override', undefined, 400));
-    expect(m?.status).toBe(400);
-    expect(m?.body.code).toBe('BAD_REQUEST');
+  it('fails closed when selected diagnostics are not canonical wire values', () => {
+    expect(
+      mapRelayPrepare(
+        new PrepareValidationError('INSUFFICIENT_SETTLE_INPUT', 'too low', {
+          minSettleMist: '01',
+        }),
+      ),
+    ).toBeNull();
   });
 
-  it('sanitizes 5xx message and meta fields', () => {
-    const m = mapError(
-      new PrepareValidationError(
-        'SPONSOR_LEASE_COMMIT_FAILED',
-        'lease commit failed for sponsor 0x1 redis key sponsor:lease:secret',
-        { sponsorAddress: '0x1', redisKey: 'sponsor:lease:secret' },
-        500,
-      ),
-    );
-    expect(m?.status).toBe(500);
-    expect(m?.body).toEqual({
-      error: 'Internal server error',
-      code: 'SPONSOR_LEASE_COMMIT_FAILED',
+  it('binds sponsor subcodes to their owning primary codes', () => {
+    expect(
+      mapRelaySponsor(new SponsorPreflightError('simulation failed', 'INSUFFICIENT_SETTLE_INPUT'))
+        ?.body,
+    ).toMatchObject({
+      code: 'SPONSOR_PREFLIGHT_FAILED',
+      subcode: 'INSUFFICIENT_SETTLE_INPUT',
     });
-  });
-});
-
-describe('errorMap — PrepareStudioUserQuotaError', () => {
-  it('maps to 429 with class-provided code', () => {
-    const m = mapError(new PrepareStudioUserQuotaError('0xabc', 3));
-    expect(m?.status).toBe(429);
-    expect(m?.body.code).toBe('PREPARE_STUDIO_USER_QUOTA_EXCEEDED');
-    expect(m?.headers).toBeUndefined();
-  });
-});
-
-describe('errorMap — SponsorValidationError', () => {
-  it('defaults to 422 when statusHint is absent', () => {
-    const m = mapError(new SponsorValidationError('PREPARED_TX_NOT_FOUND', 'missing'));
-    expect(m?.status).toBe(422);
-    expect(m?.body.code).toBe('PREPARED_TX_NOT_FOUND');
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('preflight', 'PREFLIGHT_FAILED', {
+          subcode: 'REPLAY_NONCE',
+        }),
+      )?.body,
+    ).toMatchObject({ code: 'PREFLIGHT_FAILED', subcode: 'REPLAY_NONCE' });
   });
 
-  it('honors statusHint override (e.g. 410 for expired)', () => {
-    const m = mapError(new SponsorValidationError('PREPARED_TX_EXPIRED', 'expired', 410));
-    expect(m?.status).toBe(410);
-    expect(m?.body.code).toBe('PREPARED_TX_EXPIRED');
-  });
-
-  it('sanitizes 5xx message fields', () => {
-    const m = mapError(
-      new SponsorValidationError(
-        'SPONSOR_FAILED',
-        'Execution succeeded but gasUsed missing. Digest: 0xdigest_exec_no_gas signer=0xabc',
-        500,
-      ),
-    );
-    expect(m?.status).toBe(500);
-    expect(m?.body).toEqual({ error: 'Internal server error', code: 'SPONSOR_FAILED' });
-  });
-});
-
-describe('errorMap — SponsorPreflightError', () => {
-  it('maps to 422 with fixed code SPONSOR_PREFLIGHT_FAILED, omits subcode when absent', () => {
-    const m = mapError(new SponsorPreflightError('dry-run failed'));
-    expect(m?.status).toBe(422);
-    expect(m?.body).toMatchObject({ code: 'SPONSOR_PREFLIGHT_FAILED' });
-    expect(m?.body.subcode).toBeUndefined();
-  });
-
-  it('includes subcode when provided', () => {
-    const m = mapError(
-      new SponsorPreflightError('insufficient settle input', 'INSUFFICIENT_SETTLE_INPUT'),
-    );
-    expect(m?.body.subcode).toBe('INSUFFICIENT_SETTLE_INPUT');
-  });
-});
-
-describe('errorMap — SponsorOnchainError', () => {
-  it('maps to 422 with digest + fixed code', () => {
-    const m = mapError(new SponsorOnchainError('0xDIGEST', 'MoveAbort'));
-    expect(m?.status).toBe(422);
-    expect(m?.body).toMatchObject({
+  it('requires and preserves a digest for every known post-signature terminal error', () => {
+    expect(mapRelaySponsor(new SponsorOnchainError('0xdigest', 'MoveAbort'))?.body).toMatchObject({
       code: 'SPONSOR_ONCHAIN_FAILED',
-      digest: '0xDIGEST',
+      digest: '0xdigest',
     });
-    expect(m?.body.subcode).toBeUndefined();
+    expect(
+      mapRelaySponsor(new SponsorCongestionError('shared-object congestion', '0xcongestion'))?.body,
+    ).toEqual({
+      error: 'Internal server error',
+      code: 'SPONSOR_CONGESTION',
+      digest: '0xcongestion',
+    });
+    expect(
+      mapRelaySponsor(
+        new SponsorTerminalProcessingError('effects missing', '0xsuccessful-terminal'),
+      )?.body,
+    ).toEqual({
+      error: 'Internal server error',
+      code: 'GAS_EFFECTS_MISSING',
+      digest: '0xsuccessful-terminal',
+    });
+    expect(
+      mapRelaySponsor(
+        new SponsorSubmissionUncertainError('0xsubmitted-unknown', new Error('rpc timeout')),
+      )?.body,
+    ).toEqual({
+      error: 'Internal server error',
+      code: 'SPONSOR_SUBMISSION_UNCERTAIN',
+      digest: '0xsubmitted-unknown',
+    });
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('reverted', 'ONCHAIN_REVERT', {
+          digest: '0xpromotion',
+          subcode: 'SPREAD_EXCEEDED',
+        }),
+      )?.body,
+    ).toMatchObject({
+      code: 'ONCHAIN_REVERT',
+      digest: '0xpromotion',
+      subcode: 'SPREAD_EXCEEDED',
+    });
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('congested', 'SPONSOR_CONGESTION', {
+          digest: '0xpromotion-congestion',
+        }),
+      )?.body,
+    ).toMatchObject({ code: 'SPONSOR_CONGESTION', digest: '0xpromotion-congestion' });
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('effects missing', 'GAS_EFFECTS_MISSING', {
+          digest: '0xpromotion-success',
+        }),
+      )?.body,
+    ).toMatchObject({ code: 'GAS_EFFECTS_MISSING', digest: '0xpromotion-success' });
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('consume failed', 'CONSUME_FAILED', {
+          digest: '0xpromotion-consume',
+        }),
+      )?.body,
+    ).toMatchObject({ code: 'CONSUME_FAILED', digest: '0xpromotion-consume' });
+    expect(
+      mapPromotionSponsor(
+        new PromotionSponsorError('submission uncertain', 'SPONSOR_SUBMISSION_UNCERTAIN', {
+          digest: '0xpromotion-unknown',
+        }),
+      )?.body,
+    ).toMatchObject({
+      code: 'SPONSOR_SUBMISSION_UNCERTAIN',
+      digest: '0xpromotion-unknown',
+    });
   });
 
-  it('includes subcode when provided', () => {
-    const m = mapError(new SponsorOnchainError('0xDIGEST2', 'spread', 'SPREAD_EXCEEDED'));
-    expect(m?.body).toMatchObject({ digest: '0xDIGEST2', subcode: 'SPREAD_EXCEEDED' });
+  it.each([
+    'ONCHAIN_REVERT',
+    'SPONSOR_CONGESTION',
+    'SPONSOR_SUBMISSION_UNCERTAIN',
+    'GAS_EFFECTS_MISSING',
+    'CONSUME_FAILED',
+  ] as const)('rejects %s without its required digest', (code) => {
+    expect(mapPromotionSponsor(new PromotionSponsorError('terminal failure', code))).toBeNull();
   });
 });
 
-describe('errorMap — SponsorCongestionError', () => {
-  it('maps to 503 with fixed code SPONSOR_CONGESTION', () => {
-    const m = mapError(new SponsorCongestionError('cancelled'));
-    expect(m?.status).toBe(503);
-    expect(m?.body.code).toBe('SPONSOR_CONGESTION');
-    expect(m?.body.error).toBe('Internal server error');
-    expect(m?.headers).toBeUndefined();
-  });
-});
-
-describe('errorMap — SponsorLeaseExpiredError', () => {
-  it('maps to 503 with fixed Retry-After: 1 and code LEASE_EXPIRED', () => {
-    const m = mapError(new SponsorLeaseExpiredError('slot-1'));
-    expect(m?.status).toBe(503);
-    expect(m?.headers).toEqual({ 'Retry-After': '1' });
-    expect(m?.body.code).toBe('LEASE_EXPIRED');
-    expect(JSON.stringify(m?.body)).not.toContain('slot-1');
-  });
-});
-
-describe('errorMap — PromotionPrepareError', () => {
-  it('uses the class default statusHint (400)', () => {
-    const m = mapError(new PromotionPrepareError('bad tx', 'BAD_TX_KIND'));
-    expect(m?.status).toBe(400);
-    expect(m?.body.code).toBe('BAD_TX_KIND');
-  });
-
-  it('honors explicit statusHint override (422)', () => {
-    const m = mapError(new PromotionPrepareError('gas cap', 'GAS_EXCEEDS_TX_CAP', 422));
-    expect(m?.status).toBe(422);
-    expect(m?.body.code).toBe('GAS_EXCEEDS_TX_CAP');
-  });
-});
-
-describe('errorMap — PromotionSponsorError', () => {
-  it('uses the class default statusHint (400)', () => {
-    const m = mapError(new PromotionSponsorError('bad', 'BAD_REQUEST'));
-    expect(m?.status).toBe(400);
-    expect(m?.body.code).toBe('BAD_REQUEST');
-  });
-
-  it('honors explicit statusHint override (403)', () => {
-    const m = mapError(new PromotionSponsorError('mismatch', 'SENDER_ADDRESS_MISMATCH', 403));
-    expect(m?.status).toBe(403);
-    expect(m?.body.code).toBe('SENDER_ADDRESS_MISMATCH');
-  });
-
-  // Classified sponsor failure subcode is exposed in the response body for
-  // promotion sponsor errors, mirroring `SponsorPreflightError` /
-  // `SponsorOnchainError`.
-  it('includes subcode when classified PREFLIGHT_FAILED carries it', () => {
-    const m = mapError(
-      new PromotionSponsorError(
-        'Preflight simulation failed: MoveAbort vault 1',
-        'PREFLIGHT_FAILED',
-        422,
-        null,
-        'REPLAY_NONCE',
+describe('direct Host response serializer', () => {
+  it('derives coded status and rejects route overreach', () => {
+    expect(
+      codedHostError(
+        { error: 'not found', code: 'PROMOTION_NOT_FOUND' },
+        PROMOTION_PREPARE_ERROR_CODES,
+      ).status,
+    ).toBe(404);
+    expect(() =>
+      codedHostError(
+        { error: 'not found', code: 'PROMOTION_NOT_FOUND' },
+        RELAY_SPONSOR_ERROR_CODES,
       ),
-    );
-    expect(m?.status).toBe(422);
-    expect(m?.body).toMatchObject({ code: 'PREFLIGHT_FAILED', subcode: 'REPLAY_NONCE' });
+    ).toThrow(/not valid for this route/);
   });
 
-  it('includes subcode when classified ONCHAIN_REVERT carries it', () => {
-    const m = mapError(
-      new PromotionSponsorError(
-        'Transaction reverted on-chain: SPREAD',
-        'ONCHAIN_REVERT',
-        422,
-        null,
-        'SPREAD_EXCEEDED',
-      ),
-    );
-    expect(m?.body).toMatchObject({ code: 'ONCHAIN_REVERT', subcode: 'SPREAD_EXCEEDED' });
-  });
-
-  // Omits subcode when undefined (unclassified preflight/on-chain).
-  // Unclassified fallback literals (`simulation_failed`, `onchain_revert`)
-  // never reach `PromotionSponsorError.subcode`; they remain in abuse meta.
-  it('omits subcode when unclassified (PREFLIGHT_FAILED without subcode)', () => {
-    const m = mapError(new PromotionSponsorError('Preflight failed', 'PREFLIGHT_FAILED', 422));
-    expect(m?.body.code).toBe('PREFLIGHT_FAILED');
-    expect(m?.body.subcode).toBeUndefined();
-  });
-
-  it('omits subcode when unclassified (ONCHAIN_REVERT without subcode)', () => {
-    const m = mapError(new PromotionSponsorError('Reverted on-chain', 'ONCHAIN_REVERT', 422));
-    expect(m?.body.code).toBe('ONCHAIN_REVERT');
-    expect(m?.body.subcode).toBeUndefined();
+  it('allows uncoded transport failures but not uncoded domain statuses', () => {
+    expect(uncodedHostError({ error: 'unavailable' }, RELAY_PREPARE_ERROR_CODES, 503)).toEqual({
+      status: 503,
+      body: { error: 'unavailable' },
+    });
+    expect(() =>
+      // The cast deliberately probes the runtime boundary.
+      uncodedHostError({ error: 'not found' }, RELAY_PREPARE_ERROR_CODES, 404 as 500),
+    ).toThrow(/domain-status response must carry a current code/);
   });
 });
 
-describe('errorMap — DeveloperJwtAuthError', () => {
-  it('uses the required statusHint (401)', () => {
-    const m = mapError(new DeveloperJwtAuthError('jwt invalid', 401));
-    expect(m?.status).toBe(401);
-    expect(m?.body.code).toBe('AUTH_FAILED');
-  });
-});
-
-describe('errorMap — unknown error passes through', () => {
-  it('returns null for plain Error', () => {
-    expect(mapError(new Error('unexpected'))).toBeNull();
-  });
-
-  it('returns null for non-Error values', () => {
-    expect(mapError('oops')).toBeNull();
-    expect(mapError(42)).toBeNull();
-    expect(mapError(undefined)).toBeNull();
-    expect(mapError(null)).toBeNull();
-    expect(mapError({ code: 'FAKE' })).toBeNull();
+describe('unknown internal errors', () => {
+  it('does not publish internal diagnostic codes or arbitrary values', () => {
+    expect(
+      mapRelayPrepare(new PrepareValidationError('INVALID_AMOUNT', 'internal invariant')),
+    ).toBeNull();
+    expect(mapRelayPrepare(new Error('unexpected'))).toBeNull();
+    expect(mapRelayPrepare({ code: 'FAKE' })).toBeNull();
   });
 });

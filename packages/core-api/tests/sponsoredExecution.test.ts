@@ -132,9 +132,11 @@ describe('sponsoredExecution — unknown economics', () => {
     const u = unknownSponsoredExecutionEconomics('reason');
     // Type-level: unknown variant has no recoveredGasMist / paid / net fields.
     // Runtime: recorder consumers check economicsStatus before reading numbers.
-    expect((u as Record<string, unknown>).recoveredGasMist).toBeUndefined();
-    expect((u as Record<string, unknown>).hostPaidGasMist).toBeUndefined();
-    expect((u as Record<string, unknown>).hostNetMist).toBeUndefined();
+    // Deliberately inspect forbidden keys on a closed domain variant.
+    const raw = u as unknown as Record<string, unknown>;
+    expect(raw.recoveredGasMist).toBeUndefined();
+    expect(raw.hostPaidGasMist).toBeUndefined();
+    expect(raw.hostNetMist).toBeUndefined();
   });
 
   it('SERIALIZED_UNKNOWN_ECONOMICS is a frozen serialized-shape default', () => {

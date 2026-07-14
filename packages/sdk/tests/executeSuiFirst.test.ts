@@ -19,11 +19,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { MockInstance } from 'vitest';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { makeCreditResult } from './helpers/currentFixtures.js';
 
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
   mockExtractSettleFields: vi.fn(),
@@ -41,15 +42,11 @@ vi.mock('../src/integrity.js', () => ({
   },
 }));
 
-// ── Mock: credit ──────────────────────────────────────────────────────────────
-vi.mock('../src/credit.js', () => ({
-  queryUserCredit: vi.fn(async () => ({ vaultObjectId: null, credit: '0', needsCreate: false })),
-}));
-
 vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
+    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
   };
@@ -58,11 +55,13 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
 // ── Mock: StelisClient ─────────────────────────────────────────────────────────
 const mockPrepare = vi.fn();
 const mockSponsor = vi.fn();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function ({ endpoint }: { endpoint: string }) {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: mockPrepare,
       sponsor: mockSponsor,
       endpoint,
@@ -79,10 +78,6 @@ vi.mock('../src/client.js', () => ({
     }
   },
 }));
-
-// ── Mock: fetch ───────────────────────────────────────────────────────────────
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
@@ -134,13 +129,24 @@ const MOCK_SIM_GAS_USED = {
   storageRebate: '0',
 };
 const EXPECTED_GAS_BUDGET = 1_100_000n; // 1_000_000 * 1.1
+const MOCK_BUILD_BYTES = new Uint8Array([1, 2, 3, 4]);
+const MOCK_BUILD_DIGEST = TransactionDataBuilder.getDigestFromBytes(MOCK_BUILD_BYTES);
 
-function makeSimSuccess() {
+function executionError(message: string) {
+  return { $kind: 'Unknown' as const, message, Unknown: null };
+}
+
+function makeSimSuccess(digest = MOCK_BUILD_DIGEST) {
   return {
     $kind: 'Transaction' as const,
     Transaction: {
-      digest: 'simDigest',
-      effects: { gasUsed: MOCK_SIM_GAS_USED },
+      digest,
+      status: { success: true as const, error: null },
+      effects: {
+        transactionDigest: digest,
+        status: { success: true as const, error: null },
+        gasUsed: MOCK_SIM_GAS_USED,
+      },
     },
     FailedTransaction: undefined,
     commandResults: undefined,
@@ -159,7 +165,14 @@ function makeSuiClient(
   const simResult = overrides.simResult ?? makeSimSuccess();
   const execResult = overrides.execResult ?? {
     $kind: 'Transaction',
-    Transaction: { digest: '0xDIGEST_SUI', effects: { status: { success: true } } },
+    Transaction: {
+      digest: MOCK_BUILD_DIGEST,
+      status: { success: true, error: null },
+      effects: {
+        transactionDigest: MOCK_BUILD_DIGEST,
+        status: { success: true, error: null },
+      },
+    },
   };
   return {
     getBalance: vi.fn().mockResolvedValue({ balance: { balance: balanceMist } }),
@@ -172,9 +185,7 @@ function makeSuiClient(
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -187,7 +198,7 @@ describe('StelisSDK.executeSuiFirst', () => {
   let buildSpy: MockInstance<typeof Transaction.prototype.build>;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPrepare.mockReset();
     mockSponsor.mockReset();
     mockExtractSettleFields.mockReset();
@@ -197,7 +208,11 @@ describe('StelisSDK.executeSuiFirst', () => {
     sdk = await createSDK();
     // Spy on Transaction.prototype.build to avoid real gRPC calls in unit tests
     const validKindBytes = await new Transaction().build({ onlyTransactionKind: true });
-    buildSpy = vi.spyOn(Transaction.prototype, 'build').mockResolvedValue(validKindBytes);
+    buildSpy = vi
+      .spyOn(Transaction.prototype, 'build')
+      .mockImplementation(async (options?: { onlyTransactionKind?: boolean }) =>
+        options?.onlyTransactionKind ? validKindBytes : MOCK_BUILD_BYTES,
+      );
   });
 
   afterEach(() => {
@@ -246,7 +261,7 @@ describe('StelisSDK.executeSuiFirst', () => {
     const result = await sdk.executeSuiFirst(new Transaction(), defaultOpts(client));
 
     expect(result.path).toBe('sui');
-    expect(result.digest).toBe('0xDIGEST_SUI');
+    expect(result.digest).toBe(MOCK_BUILD_DIGEST);
     expect(mockSponsor).not.toHaveBeenCalled();
   });
 
@@ -348,7 +363,10 @@ describe('StelisSDK.executeSuiFirst', () => {
     const client = makeSuiClient({
       simResult: {
         $kind: 'FailedTransaction',
-        FailedTransaction: { status: { error: 'InsufficientGas' } },
+        FailedTransaction: {
+          digest: MOCK_BUILD_DIGEST,
+          status: { success: false, error: executionError('InsufficientGas') },
+        },
         Transaction: undefined,
         commandResults: undefined,
       },
@@ -364,7 +382,14 @@ describe('StelisSDK.executeSuiFirst', () => {
     const client = makeSuiClient({
       simResult: {
         $kind: 'Transaction',
-        Transaction: { digest: 'simDigest', effects: {} }, // no gasUsed
+        Transaction: {
+          digest: MOCK_BUILD_DIGEST,
+          status: { success: true, error: null },
+          effects: {
+            transactionDigest: MOCK_BUILD_DIGEST,
+            status: { success: true, error: null },
+          },
+        }, // no gasUsed
         FailedTransaction: undefined,
         commandResults: undefined,
       },
@@ -374,17 +399,62 @@ describe('StelisSDK.executeSuiFirst', () => {
     );
   });
 
+  it('rejects a self-consistent simulation result for another transaction', async () => {
+    const client = makeSuiClient({ simResult: makeSimSuccess('different-digest') });
+    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
+      'Simulation returned a malformed or mismatched result',
+    );
+    expect(mockSponsor).not.toHaveBeenCalled();
+  });
+
   // ── 12: SUI execution FailedTransaction → throw ───────────────────────────
   it('throws when direct SUI executeTransaction returns FailedTransaction', async () => {
     const client = makeSuiClient({
       execResult: {
         $kind: 'FailedTransaction',
-        FailedTransaction: { status: { error: 'MoveAbort' } },
+        FailedTransaction: {
+          digest: MOCK_BUILD_DIGEST,
+          status: { success: false, error: executionError('MoveAbort') },
+        },
         Transaction: undefined,
       },
     });
     await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
       'Transaction failed',
+    );
+  });
+
+  it('rejects a self-consistent direct execution result for another transaction', async () => {
+    const client = makeSuiClient({
+      execResult: {
+        $kind: 'Transaction',
+        Transaction: {
+          digest: 'different-digest',
+          status: { success: true, error: null },
+          effects: {
+            transactionDigest: 'different-digest',
+            status: { success: true, error: null },
+          },
+        },
+      },
+    });
+    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
+      'Transaction returned a malformed or mismatched result',
+    );
+  });
+
+  it('rejects a direct execution result that omits requested effects', async () => {
+    const client = makeSuiClient({
+      execResult: {
+        $kind: 'Transaction',
+        Transaction: {
+          digest: MOCK_BUILD_DIGEST,
+          status: { success: true, error: null },
+        },
+      },
+    });
+    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
+      'Transaction returned no requested effects',
     );
   });
 

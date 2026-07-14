@@ -110,7 +110,6 @@ vi.mock('../src/sponsor-operations/accountSpend.js', () => ({
 }));
 
 vi.mock('@stelis/core-api/prepareConfig', () => ({
-  createPrepareSettlementSwapPathDescriptorMap: vi.fn().mockReturnValue(new Map()),
   resolvePrepareConfig: vi.fn().mockReturnValue({
     supportedSettlementSwapPaths: [],
     deepbookPackageId: '0xDEEPBOOK',

@@ -22,7 +22,6 @@ import type {
   SingleHopSettlementSwapPath,
   SettlementSwapDirection,
 } from '@stelis/contracts';
-import type { PaymentInputSource } from '@stelis/core-relay/server';
 
 // ─────────────────────────────────────────────
 // FundingResolution — exact payment materialization
@@ -133,25 +132,4 @@ export interface SettlePlanAuditFields {
   readonly quoteTimestampMs: number;
   readonly policyHash: Uint8Array;
   readonly orderIdHash: Uint8Array;
-}
-
-// ─────────────────────────────────────────────
-// CompiledPreparePtb — compiler output
-// ─────────────────────────────────────────────
-
-/**
- * Output of the PtbCompiler.
- *
- * Contains the materialized transaction bytes and all metrics needed
- * for the prepare response and store entry.
- */
-export interface CompiledPreparePtb {
-  /** Serialized transaction bytes (ready for signing). */
-  readonly txBytes: Uint8Array;
-  /** SHA-256 hex hash of txBytes (tamper-proof tracking). */
-  readonly txBytesHash: string;
-  /** Settlement profile used. */
-  readonly profile: SettleProfile;
-  /** Payment source actually used. */
-  readonly paymentInputSource: PaymentInputSource;
 }

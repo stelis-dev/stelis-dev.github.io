@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { RedisClientLike, RedisSetOptions } from '@stelis/core-api';
+import type { RedisClientLike } from '@stelis/core-api';
+
+type RedisSetOptions = Parameters<RedisClientLike['set']>[2];
 import {
   createSponsorRefillAccountDispatchLock,
   sponsorRefillAccountDispatchLockKey,

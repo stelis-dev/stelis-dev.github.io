@@ -11,6 +11,19 @@ export * from './browser.js';
 
 // ── Server-side only (not in browser barrel) ─────────────────────────────────
 
+export { MAX_FINAL_COMMANDS } from './constants.js';
+export type {
+  AllowedSettlementSwapPath,
+  OnchainConfig,
+  HostValidationEnv,
+  SettleArgs,
+} from './types.js';
+export { validateSettleArgs } from './validate/static.js';
+export { validateNonlossSponsor } from './validate/nonloss.js';
+export { CONVERGENCE_TOLERANCE_BPS, GAS_VARIANCE_FIXED_MIST } from './gasEstimate.js';
+export type { ExecutionCostClaimEstimate } from './gasEstimate.js';
+export { parseSettleArgs, ParseSettleArgsError } from './parseSettleArgs.js';
+
 // Shared cross-package economic caps live in @stelis/contracts. Import
 // GAS_MARGIN_CAP_BPS from that package directly when needed.
 
@@ -30,14 +43,3 @@ export {
   containsSponsorWithdrawal,
 } from './prefixValueTrace.js';
 export type { PrefixValueTrace } from './prefixValueTrace.js';
-
-// Transport error-code unions: type-only re-export so the server-side failure
-// policy (`packages/core-api/src/failures.ts`) can narrow `FailureCode` against
-// the schema-locked response contracts. Runtime tuples (`KNOWN_*_ERROR_CODES`)
-// remain internal to this package; tests reach them via relative import.
-export type {
-  KnownPrepareErrorCode,
-  KnownSponsorErrorCode,
-  KnownPromotionPrepareErrorCode,
-  KnownPromotionSponsorErrorCode,
-} from './errorCode.js';

@@ -52,9 +52,10 @@ import {
   SETTLE_FUNCTIONS,
   SETTLE_MODULE,
   VAULT_ABORT,
+  type SponsorFailureSubcode,
 } from '@stelis/contracts';
 import type { MoveCallCommand, PtbCommand } from '@stelis/contracts';
-import { PrepareValidationError } from './replay.js';
+import { PrepareValidationError, type PrepareErrorMeta } from './replay.js';
 
 // ---------------------------------------------------------------------------
 // Settle/vault/deepbook abort detection (package-bound)
@@ -445,18 +446,6 @@ export function isDeepbookMinOutNotMet(reason: string, commandIndex: number): bo
   );
 }
 
-export type SponsorFailureSubcode =
-  | 'CLAIM_WOULD_EXCEED_MAX'
-  | 'INSUFFICIENT_SETTLE_INPUT'
-  | 'INSUFFICIENT_FUNDS'
-  | 'INVALID_RECEIPT_ID'
-  | 'INVALID_POLICY_HASH'
-  | 'SPREAD_EXCEEDED'
-  | 'SLIPPAGE_EXCEEDED'
-  | 'PAUSED'
-  | 'VAULT_ALREADY_REGISTERED'
-  | 'REPLAY_NONCE';
-
 /**
  * Classify settle/vault/deepbook aborts into sponsor-level subcodes.
  *
@@ -600,7 +589,7 @@ function classifyKnownPrepareFailure(
   reason: string,
   stelisPackageId: string,
   scope: SponsorFailureCommandScope,
-  meta?: Record<string, string>,
+  meta?: PrepareErrorMeta,
 ): PrepareValidationError | null {
   if (reason.includes('InsufficientCoinBalance')) {
     return new PrepareValidationError(
@@ -674,7 +663,7 @@ export function classifyDryRunFailure(
   reason: string,
   stelisPackageId: string,
   commands: readonly PtbCommand[],
-  meta?: Record<string, string>,
+  meta?: PrepareErrorMeta,
 ): PrepareValidationError {
   const known = classifyKnownPrepareFailure(
     reason,
@@ -707,7 +696,7 @@ export async function safeBuild(
   tx: Transaction,
   client: SuiGrpcClient,
   stelisPackageId: string,
-  meta?: Record<string, string>,
+  meta?: PrepareErrorMeta,
 ): Promise<Uint8Array> {
   const commands = convertSdkCommands(tx.getData().commands as unknown[]);
   const scope = { kind: 'settlement', commands } as const;
@@ -744,12 +733,12 @@ export function buildSettleMeta(
   protocolFlatFeeMist: bigint,
   claimEstimate: bigint,
   isEstimate: boolean,
-): Record<string, string> {
+): PrepareErrorMeta {
   const totalNeeded = claimEstimate + quotedHostFeeMist + protocolFlatFeeMist;
   const required = minSettleMist > totalNeeded ? minSettleMist : totalNeeded;
   return {
     minSettleMist: minSettleMist.toString(),
     requiredTotalIn: required.toString(),
-    isEstimate: String(isEstimate),
+    isEstimate,
   };
 }

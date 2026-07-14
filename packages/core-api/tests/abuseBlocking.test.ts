@@ -29,6 +29,7 @@ import {
   BlockCheckUnavailableError,
   checkBlockedRequest,
   recordSponsorFailureForAbuse,
+  toBlockedError,
 } from '../src/abuseBlocking.js';
 import {
   runAbuseBlockerConformanceTests,
@@ -145,6 +146,15 @@ const redisFactory: AbuseBlockerFactory = (config) => {
 
 describe('RedisAbuseBlocker — shared conformance', () => {
   runAbuseBlockerConformanceTests(redisFactory);
+});
+
+describe('blocked response projection', () => {
+  it('omits an unavailable retry duration instead of emitting an invalid undefined wire field', () => {
+    expect(toBlockedError({ blocked: true })).toEqual({
+      error: 'Request temporarily blocked',
+      code: 'ABUSE_BLOCKED',
+    });
+  });
 });
 
 // ─────────────────────────────────────────────

@@ -21,6 +21,9 @@ import {
 import {
   GAS_MARGIN_CAP_BPS,
   HostWireParseError,
+  RELAY_CONFIG_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
   SLIPPAGE_CAP_BPS,
   parseRelayPrepareRequest,
   parseRelaySponsorRequest,
@@ -33,9 +36,10 @@ import type { AppApiContext } from '../context.js';
 import type { ResolveClientIp } from '../clientIp.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { canonicalizeAddress } from '@stelis/core-api';
-import { mapError, respondMapped } from '../errorMap.js';
+import { codedHostError, mapError, respondMapped, uncodedHostError } from '../errorMap.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
+import { safeErrorSummary } from '@stelis/core-api/observability';
 
 export function createRelayRoutes(
   contextPromise: Promise<AppApiContext>,
@@ -49,7 +53,7 @@ export function createRelayRoutes(
       const result = await handleStatus();
       return c.json(result);
     } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondMapped(c, uncodedHostError({ error: 'Internal server error' }, [], 500));
     }
   });
 
@@ -81,13 +85,16 @@ export function createRelayRoutes(
       return c.json(response);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error('[/relay/config] getConfig() failed:', err);
-      return c.json(
-        {
-          error: 'Relay config unavailable',
-          code: 'CONFIG_UNAVAILABLE',
-        },
-        503,
+      console.error('[/relay/config] getConfig() failed:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError(
+          {
+            error: 'Relay config unavailable',
+            code: 'CONFIG_UNAVAILABLE',
+          },
+          RELAY_CONFIG_ERROR_CODES,
+        ),
       );
     }
   });
@@ -115,27 +122,34 @@ export function createRelayRoutes(
       });
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return c.json(blocked.body, blocked.status);
+        return respondMapped(
+          c,
+          codedHostError(blocked.body, RELAY_PREPARE_ERROR_CODES, blocked.headers),
+        );
       }
 
       // IP-level block check
       const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
       if (blockedByIp.blocked) {
-        return c.json(toBlockedError(blockedByIp), {
-          status: 429,
-          headers: { 'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs) },
-        });
+        return respondMapped(
+          c,
+          codedHostError(toBlockedError(blockedByIp), RELAY_PREPARE_ERROR_CODES, {
+            'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs),
+          }),
+        );
       }
 
       // Rate limit
       const rl = await host.rateLimiter.check(`prepare:client-ip:${ip}`);
       if (!rl.allowed) {
-        return c.json(
-          { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
-          {
-            status: 429,
-            headers: { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
-          },
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
+            RELAY_PREPARE_ERROR_CODES,
+            429,
+            { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
+          ),
         );
       }
 
@@ -148,9 +162,15 @@ export function createRelayRoutes(
       try {
         canonicalSender = canonicalizeAddress(body.senderAddress, 'senderAddress');
       } catch {
-        return c.json(
-          { error: `Invalid senderAddress: ${body.senderAddress}`, code: 'BAD_REQUEST' },
-          400,
+        return respondMapped(
+          c,
+          codedHostError(
+            {
+              error: 'senderAddress must be a valid Sui address',
+              code: 'BAD_REQUEST',
+            },
+            RELAY_PREPARE_ERROR_CODES,
+          ),
         );
       }
 
@@ -166,7 +186,12 @@ export function createRelayRoutes(
           SLIPPAGE_CAP_BPS,
           'INVALID_SLIPPAGE_BPS',
         );
-        if (!v.ok) return c.json({ error: v.message, code: v.code }, 422);
+        if (!v.ok) {
+          return respondMapped(
+            c,
+            codedHostError({ error: v.message, code: v.code }, RELAY_PREPARE_ERROR_CODES),
+          );
+        }
         slippageBps = v.value;
       }
       let gasMarginBps: number | undefined;
@@ -177,7 +202,12 @@ export function createRelayRoutes(
           GAS_MARGIN_CAP_BPS,
           'INVALID_GAS_MARGIN_BPS',
         );
-        if (!v.ok) return c.json({ error: v.message, code: v.code }, 422);
+        if (!v.ok) {
+          return respondMapped(
+            c,
+            codedHostError({ error: v.message, code: v.code }, RELAY_PREPARE_ERROR_CODES),
+          );
+        }
         gasMarginBps = v.value;
       }
 
@@ -202,14 +232,28 @@ export function createRelayRoutes(
       return c.json(result);
     } catch (err) {
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return respondMapped(
+          c,
+          codedHostError(
+            {
+              error: 'Request body does not match the current API contract',
+              code: 'BAD_REQUEST',
+            },
+            RELAY_PREPARE_ERROR_CODES,
+          ),
+        );
       }
-      const mapped = mapError(err);
+      const mapped = mapError(err, RELAY_PREPARE_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
-      console.error('[prepare] 500 error:', err instanceof Error ? err.message : err);
-      if (err instanceof Error && err.stack) console.error(err.stack); // eslint-disable-line no-console
-      return c.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, 500);
+      console.error('[prepare] 500 error:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError(
+          { error: 'Internal server error', code: 'INTERNAL_ERROR' },
+          RELAY_PREPARE_ERROR_CODES,
+        ),
+      );
     }
   });
 
@@ -227,27 +271,34 @@ export function createRelayRoutes(
       const blocked = buildSponsorUnavailableResponse(sponsorOperationsState);
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return c.json(blocked.body, blocked.status);
+        return respondMapped(
+          c,
+          codedHostError(blocked.body, RELAY_SPONSOR_ERROR_CODES, blocked.headers),
+        );
       }
 
       // IP-level block check
       const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
       if (blockedByIp.blocked) {
-        return c.json(toBlockedError(blockedByIp), {
-          status: 429,
-          headers: { 'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs) },
-        });
+        return respondMapped(
+          c,
+          codedHostError(toBlockedError(blockedByIp), RELAY_SPONSOR_ERROR_CODES, {
+            'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs),
+          }),
+        );
       }
 
       // Rate limit
       const rl = await host.rateLimiter.check(`sponsor:client-ip:${ip}`);
       if (!rl.allowed) {
-        return c.json(
-          { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
-          {
-            status: 429,
-            headers: { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
-          },
+        return respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
+            RELAY_SPONSOR_ERROR_CODES,
+            429,
+            { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
+          ),
         );
       }
 
@@ -269,25 +320,41 @@ export function createRelayRoutes(
       return c.json(sponsorResult);
     } catch (err) {
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return respondMapped(
+          c,
+          codedHostError(
+            {
+              error: 'Request body does not match the current API contract',
+              code: 'BAD_REQUEST',
+            },
+            RELAY_SPONSOR_ERROR_CODES,
+          ),
+        );
       }
       // SponsorBlockedError carries a dynamic retryAfterMs that must be
       // projected into both the body (via toBlockedError) and the
       // Retry-After header; stays route-local.
       if (err instanceof SponsorBlockedError) {
-        return c.json(toBlockedError({ blocked: true, retryAfterMs: err.retryAfterMs }), {
-          status: 429,
-          headers: { 'Retry-After': formatRetryAfterSeconds(err.retryAfterMs) },
-        });
+        return respondMapped(
+          c,
+          codedHostError(
+            toBlockedError({ blocked: true, retryAfterMs: err.retryAfterMs }),
+            RELAY_SPONSOR_ERROR_CODES,
+            { 'Retry-After': formatRetryAfterSeconds(err.retryAfterMs) },
+          ),
+        );
       }
-      const mapped = mapError(err);
+      const mapped = mapError(err, RELAY_SPONSOR_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
-      console.error(
-        '[app-api /relay/sponsor] 500 error:',
-        err instanceof Error ? err.message : err,
+      console.error('[app-api /relay/sponsor] 500 error:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError(
+          { error: 'Internal server error', code: 'SPONSOR_FAILED' },
+          RELAY_SPONSOR_ERROR_CODES,
+        ),
       );
-      return c.json({ error: 'Internal server error', code: 'SPONSOR_FAILED' }, 500);
     }
   });
 

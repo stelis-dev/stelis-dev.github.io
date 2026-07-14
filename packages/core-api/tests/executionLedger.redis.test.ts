@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RedisPromotionExecutionLedger } from '../src/studio/executionLedgerRedis.js';
 import { RedisPromotionStore } from '../src/studio/promotionStore.js';
 import { runLedgerConformanceTests } from './executionLedger.conformance.js';
-import { startRealRedis, type RealRedisHandle } from './helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 describe('RedisPromotionExecutionLedger — real Redis conformance', () => {
   let redis: RealRedisHandle | null = null;

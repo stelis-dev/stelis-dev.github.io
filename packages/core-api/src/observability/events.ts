@@ -1,17 +1,14 @@
 /**
- * Structured-event names for all stdout-path observability events
- * emitted by this repository.
+ * Static structured-event names owned by `@stelis/core-api`.
  *
- * Scope: events emitted via `logStructuredEvent` / `logSponsorPoolEvent`
- * (server-interior sinks at `../structuredEventLog.ts` /
- * `../sponsorPoolEventLog.ts`). Redis-backed admin audit logs written
+ * Scope: events emitted via the server-interior sink at
+ * `../structuredEventLog.ts`. Redis-backed admin audit logs written
  * by `packages/app-api/src/adminAuditLog.ts` are a separate observability
  * path and are out of scope for this file.
  *
- * The public operations summary is in `docs/operations.md#observability`.
- * This file remains the runtime event-name list. Do not mention a separate
- * event registry document or registry-check script unless those files exist
- * in this repository.
+ * The app-api Sui failover transport additionally emits a typed, endpoint-
+ * scoped event family at its owning boundary. The complete operator-facing
+ * summary is in `docs/operations.md#observability`.
  */
 
 // ─────────────────────────────────────────────
@@ -118,18 +115,3 @@ export const PROMOTION_EXECUTION_LEDGER_REAPER_ERROR = 'PROMOTION_EXECUTION_LEDG
 // ─────────────────────────────────────────────
 
 export const REDIS_SCAN_UNAVAILABLE = 'REDIS_SCAN_UNAVAILABLE';
-
-// ─────────────────────────────────────────────
-// Sui RPC transport (bounded dynamic family)
-// ─────────────────────────────────────────────
-
-/**
- * Emitter: `packages/app-api/src/sui/failoverTransport.ts:358`.
- * Name set is bounded at compile time by the `FailoverEvent.type`
- * literal union at `failoverTransport.ts:94`. The emitter builds the
- * name via `` `SUI_RPC_${event.type}` `` from the typed union, so the
- * name set is exactly the three constants below.
- */
-export const SUI_RPC_FAILOVER = 'SUI_RPC_FAILOVER';
-export const SUI_RPC_ENDPOINT_COOLDOWN = 'SUI_RPC_ENDPOINT_COOLDOWN';
-export const SUI_RPC_ALL_EXHAUSTED = 'SUI_RPC_ALL_EXHAUSTED';

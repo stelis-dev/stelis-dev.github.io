@@ -27,14 +27,17 @@
  *   - CoinMetadata: SuiGrpcClient.getCoinMetadata()
  */
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiClientTypes } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SingleHopSettlementSwapPath, DeepBookPoolHop, SuiNetwork } from '@stelis/contracts';
 import { SUI_TYPE, settlementSwapDirectionFromSwapDirections } from '@stelis/contracts';
+import { bindCurrentSuiResultToBytes, SUI_ZERO_ADDRESS } from '@stelis/core-relay';
 
 const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
 
-/** Zero-sender address for zero-gas simulate calls. */
-const ZERO_SENDER = '0x0000000000000000000000000000000000000000000000000000000000000000';
+type SimulationCommandResults = NonNullable<
+  SuiClientTypes.SimulateTransactionResult<{ commandResults: true }>['commandResults']
+>;
 
 /** Host settlement swap path file used by runtime policy. */
 export function getSettlementSwapPathRegistryPath(): string {
@@ -122,6 +125,28 @@ function selectNetworkPoolIdSection(json: unknown, network: SuiNetwork): unknown
 // On-chain derivation
 // ─────────────────────────────────────────────
 
+function requireViewCommandResults(
+  result: unknown,
+  transactionBytes: Uint8Array,
+  viewFn: string,
+): readonly unknown[] {
+  const bound = bindCurrentSuiResultToBytes(result, transactionBytes);
+  if (!bound) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned a malformed or mismatched simulation result`,
+    );
+  }
+  if (bound.outcome === 'failure') {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} failed: ${bound.errorMessage}`,
+    );
+  }
+  if (!bound.commandResults) {
+    throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned no command results`);
+  }
+  return bound.commandResults;
+}
+
 /**
  * Build and simulate a single-argument DeepBook pool view call (zero-sender, no gas).
  *
@@ -145,19 +170,14 @@ async function runPoolViewCall(
     typeArguments: [baseType, quoteType],
     arguments: [tx.object(poolId)],
   });
-  tx.setSender(ZERO_SENDER);
+  tx.setSender(SUI_ZERO_ADDRESS);
   const txBytes = await tx.build({ client });
   const result = await client.simulateTransaction({
     transaction: txBytes,
     include: { commandResults: true },
   });
-  const cmdResults =
-    'Transaction' in result && result.Transaction
-      ? result.commandResults
-      : 'FailedTransaction' in result && result.FailedTransaction
-        ? result.commandResults
-        : undefined;
-  return cmdResults?.[0]?.returnValues;
+  const cmdResults = requireViewCommandResults(result, txBytes, viewFn) as SimulationCommandResults;
+  return cmdResults[0]?.returnValues;
 }
 
 /**
@@ -176,19 +196,14 @@ async function runConstantsViewCall(
     target: `${deepbookPackageId}::constants::${viewFn}`,
     arguments: [],
   });
-  tx.setSender(ZERO_SENDER);
+  tx.setSender(SUI_ZERO_ADDRESS);
   const txBytes = await tx.build({ client });
   const result = await client.simulateTransaction({
     transaction: txBytes,
     include: { commandResults: true },
   });
-  const cmdResults =
-    'Transaction' in result && result.Transaction
-      ? result.commandResults
-      : 'FailedTransaction' in result && result.FailedTransaction
-        ? result.commandResults
-        : undefined;
-  return cmdResults?.[0]?.returnValues;
+  const cmdResults = requireViewCommandResults(result, txBytes, viewFn) as SimulationCommandResults;
+  return cmdResults[0]?.returnValues;
 }
 
 /** Result of reading a Pool object's type parameters. */
