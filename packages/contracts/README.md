@@ -27,6 +27,7 @@ Primary source files:
 - `src/settlementContract.ts` — generated compiled settlement entry descriptors, SettleEvent schema, and Stelis/DeepBook runtime abort identities
 - `src/constants.ts` — settlement swap direction vectors, published contract IDs, `SLIPPAGE_CAP_BPS`, `GAS_MARGIN_CAP_BPS`
 - `src/hostWire.ts` — current Host HTTP request/response types and pure boundary parsers
+- `src/hostError.ts` — current Host error-code, subcode, HTTP-status, and metadata policy
 - `src/admin.ts` — sponsor operation gate/status/admin payload types plus the shared pool-withdraw message builder used by `app-api` and `app-admin`
 - `src/index.ts` — package entrypoint
 
@@ -37,6 +38,11 @@ Primary source files:
 - `@stelis/app-api` — contract IDs and admin/studio request and response types
 - `@stelis/sdk` — bundled contract IDs, settlement swap direction tables, and request and response types
 - `@stelis/app-admin` — admin payload types plus the shared pool-withdraw message builder
+- `@stelis/mcp-server` — current Host wire parsers and request/response types bundled into the MCP product artifact
+
+Package manifests and `scripts/check-package-boundaries.mjs` are the enforced
+dependency-graph authority; this list describes their current direct production
+consumers.
 
 ## Boundary Rules
 

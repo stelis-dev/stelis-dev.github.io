@@ -11,11 +11,13 @@
  */
 import { describe, it, expect } from 'vitest';
 import { integrityCompare } from '../src/integrityCompare.js';
-import type { PtbCommand, MoveCallCommand, OtherCommand } from '@stelis/contracts';
+import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Fixtures
 // ─────────────────────────────────────────────
+
+type OtherCommand = Exclude<PtbCommand, MoveCallCommand>;
 
 const makeMoveCall = (over: Partial<MoveCallCommand> = {}): MoveCallCommand => ({
   kind: 'MoveCall',
@@ -47,7 +49,7 @@ describe('integrityCompare — equal', () => {
   });
 
   it('deeply nested identical arguments return ok', () => {
-    const cmd: PtbCommand = makeMoveCall({
+    const cmd = makeMoveCall({
       arguments: [
         { $kind: 'Input', Input: 0 },
         { $kind: 'NestedResult', NestedResult: [1, 2] },

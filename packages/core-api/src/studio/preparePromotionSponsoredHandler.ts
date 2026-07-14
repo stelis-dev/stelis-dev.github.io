@@ -3,6 +3,7 @@
  * SponsoredExecution prepare runner.
  */
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { PromotionPrepareErrorCode } from '@stelis/contracts';
 import type { OnchainConfig } from '@stelis/core-relay';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
@@ -10,8 +11,9 @@ import type { SponsorPoolAdapter } from '../context.js';
 import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
 import type { PrepareInflightLimiter } from '../store/prepareInflightTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
+import type { ReserveFailureReason } from './domain.js';
 import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
-import { logSponsorPoolEvent } from '../sponsorPoolEventLog.js';
+import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_SLOT_EXHAUSTED } from '../observability/events.js';
 import {
   buildStudioPreparedDraftFields,
@@ -82,11 +84,25 @@ export interface PromotionPrepareResult {
 export class PromotionPrepareError extends Error {
   constructor(
     message: string,
-    public readonly code: string,
-    public readonly statusHint: number = 400,
+    public readonly code: PromotionPrepareErrorCode,
   ) {
     super(message);
     this.name = 'PromotionPrepareError';
+  }
+}
+
+function reservationFailureCode(reason: ReserveFailureReason): PromotionPrepareErrorCode {
+  switch (reason) {
+    case 'budget_insufficient':
+      return 'BUDGET_INSUFFICIENT';
+    case 'entitlement_not_found':
+      return 'ENTITLEMENT_NOT_FOUND';
+    case 'entitlement_not_active':
+      return 'ENTITLEMENT_NOT_ACTIVE';
+    case 'entitlement_insufficient':
+      return 'ENTITLEMENT_INSUFFICIENT';
+    case 'concurrent_reservation':
+      return 'ENTITLEMENT_CONCURRENT_RESERVATION';
   }
 }
 
@@ -111,8 +127,8 @@ export async function handlePromotionPrepare(
     prepare: {
       params,
       errors: {
-        prepare: (message: string, code: string, statusHint?: number) =>
-          new PromotionPrepareError(message, code, statusHint),
+        prepare: (message: string, code: PromotionPrepareErrorCode) =>
+          new PromotionPrepareError(message, code),
       },
     },
   } as const;
@@ -140,26 +156,26 @@ export async function handlePromotionPrepare(
     );
   } catch (err) {
     if (err instanceof RunnerSponsorSlotExhaustedError) {
-      logSponsorPoolEvent(PREPARE_SLOT_EXHAUSTED, {
+      logStructuredEvent(PREPARE_SLOT_EXHAUSTED, {
         route: 'promotion',
         promotion_id: params.promotionId,
       });
       throw new PromotionPrepareError(
         'All sponsor slots are currently in use. Try again shortly.',
         'NO_SPONSOR_SLOT',
-        503,
       );
     }
     if (err instanceof RunnerLedgerReservationRejectedError) {
-      const code = err.reason === 'unknown' ? 'RESERVATION_REJECTED' : err.reason.toUpperCase();
-      const reason = err.reason === 'unknown' ? 'ledger_rejected' : err.reason;
-      throw new PromotionPrepareError(`Reservation failed: ${reason}`, code, 422);
+      if (err.reason === 'unknown') {
+        throw new Error('Promotion ledger rejected a reservation without a current reason');
+      }
+      const code = reservationFailureCode(err.reason);
+      throw new PromotionPrepareError(`Reservation failed: ${err.reason}`, code);
     }
     if (err instanceof SponsorLeaseCommitError) {
       throw new PromotionPrepareError(
         `sponsor lease commit failed: ${err.message}`,
         'SPONSOR_LEASE_COMMIT_FAILED',
-        500,
       );
     }
     throw err;

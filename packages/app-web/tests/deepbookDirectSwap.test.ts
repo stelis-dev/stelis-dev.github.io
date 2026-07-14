@@ -1,73 +1,134 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
+import { TransactionDataBuilder } from '@mysten/sui/transactions';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { TestSwapPair } from '../src/pages/sandbox/testSwapPairs';
-import {
-  calculateMinOutputSmallest,
-  decodeLittleEndianU64,
-  directSwapQuantityOutSpec,
-} from '../src/pages/sandbox/deepbookDirectSwap';
 
-const BASE_TYPE = '0x1::base::BASE';
-const QUOTE_TYPE = '0x2::quote::QUOTE';
+const TRANSACTION_BYTES = new Uint8Array([5, 6, 7, 8]);
 
-function makePair(swapDirection: TestSwapPair['swapDirection']): TestSwapPair {
-  return {
-    settlementTokenType: BASE_TYPE,
-    label: 'BASE',
-    poolId: '0x123',
-    baseType: BASE_TYPE,
-    quoteType: QUOTE_TYPE,
-    swapDirection,
-  };
-}
+vi.mock('@mysten/sui/transactions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@mysten/sui/transactions')>();
+  class Transaction {
+    pure = { u64: (value: bigint) => value };
+    moveCall() {}
+    object(value: string) {
+      return value;
+    }
+    setSender() {}
+    async build() {
+      return new Uint8Array([5, 6, 7, 8]);
+    }
+  }
+  return { ...actual, Transaction };
+});
 
-function u64le(value: bigint): Uint8Array {
+import { quoteDirectSwapOutput } from '../src/pages/sandbox/deepbookDirectSwap';
+
+const PAIR: TestSwapPair = {
+  settlementTokenType: '0x1::coin::COIN',
+  label: 'COIN',
+  poolId: '0x2',
+  baseType: '0x2::sui::SUI',
+  quoteType: '0x1::coin::COIN',
+  swapDirection: 'swap_exact_base_for_quote',
+};
+
+function u64(value: bigint): Uint8Array {
   const bytes = new Uint8Array(8);
-  let remaining = value;
-  for (let i = 0; i < bytes.length; i += 1) {
-    bytes[i] = Number(remaining & 0xffn);
-    remaining >>= 8n;
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number((value >> BigInt(index * 8)) & 0xffn);
   }
   return bytes;
 }
 
-describe('direct DeepBook swap quote helpers', () => {
-  it('selects quote output for exact base-for-quote swaps', () => {
-    expect(directSwapQuantityOutSpec(makePair('swap_exact_base_for_quote'))).toEqual({
-      moveFunction: 'get_quote_quantity_out_input_fee',
-      outputIndex: 1,
-    });
+function simulationResult(digest: string) {
+  return {
+    $kind: 'Transaction' as const,
+    Transaction: { digest, status: { success: true as const, error: null } },
+    commandResults: [
+      { returnValues: [{ bcs: u64(0n) }, { bcs: u64(1_000_000n) }, { bcs: u64(0n) }] },
+    ],
+  };
+}
+
+function failedSimulationResult(digest: string, message: string) {
+  return {
+    $kind: 'FailedTransaction' as const,
+    FailedTransaction: {
+      digest,
+      status: {
+        success: false as const,
+        error: { $kind: 'Unknown', message, Unknown: null },
+      },
+    },
+    commandResults: [
+      { returnValues: [{ bcs: u64(0n) }, { bcs: u64(1_000_000n) }, { bcs: u64(0n) }] },
+    ],
+  };
+}
+
+describe('direct DeepBook quote identity', () => {
+  test('uses command results bound to the simulated transaction bytes', async () => {
+    const digest = TransactionDataBuilder.getDigestFromBytes(TRANSACTION_BYTES);
+    const client = {
+      simulateTransaction: vi.fn(async () => simulationResult(digest)),
+    } as unknown as SuiGrpcClient;
+
+    await expect(
+      quoteDirectSwapOutput({
+        client,
+        deepbookPackageId: '0x3',
+        testPair: PAIR,
+        inputAmountSmallest: 1_000n,
+      }),
+    ).resolves.toMatchObject({ expectedOutputSmallest: 1_000_000n });
   });
 
-  it('selects base output for exact quote-for-base swaps', () => {
-    expect(directSwapQuantityOutSpec(makePair('swap_exact_quote_for_base'))).toEqual({
-      moveFunction: 'get_base_quantity_out_input_fee',
-      outputIndex: 0,
-    });
+  test('rejects command results for another transaction', async () => {
+    const client = {
+      simulateTransaction: vi.fn(async () => simulationResult('different-digest')),
+    } as unknown as SuiGrpcClient;
+
+    await expect(
+      quoteDirectSwapOutput({
+        client,
+        deepbookPackageId: '0x3',
+        testPair: PAIR,
+        inputAmountSmallest: 1_000n,
+      }),
+    ).rejects.toThrow('malformed or mismatched result');
   });
 
-  it('decodes little-endian u64 values exactly', () => {
-    expect(decodeLittleEndianU64(u64le(0n))).toBe(0n);
-    expect(decodeLittleEndianU64(u64le(37_000_000n))).toBe(37_000_000n);
-    expect(decodeLittleEndianU64(u64le(18_446_744_073_709_551_615n))).toBe(
-      18_446_744_073_709_551_615n,
-    );
+  test('rejects decodable command results carried by a failed quote transaction', async () => {
+    const digest = TransactionDataBuilder.getDigestFromBytes(TRANSACTION_BYTES);
+    const client = {
+      simulateTransaction: vi.fn(async () => failedSimulationResult(digest, 'quote aborted')),
+    } as unknown as SuiGrpcClient;
+
+    await expect(
+      quoteDirectSwapOutput({
+        client,
+        deepbookPackageId: '0x3',
+        testPair: PAIR,
+        inputAmountSmallest: 1_000n,
+      }),
+    ).rejects.toThrow('DeepBook quote simulation failed: quote aborted');
   });
 
-  it('rejects malformed u64 byte lengths', () => {
-    expect(() => decodeLittleEndianU64(new Uint8Array(7))).toThrow('8 bytes');
-  });
+  test('rejects a trailing-byte u64 result through the shared exact decoder', async () => {
+    const digest = TransactionDataBuilder.getDigestFromBytes(TRANSACTION_BYTES);
+    const malformed = simulationResult(digest);
+    malformed.commandResults[0].returnValues[1].bcs = new Uint8Array(9);
+    const client = {
+      simulateTransaction: vi.fn(async () => malformed),
+    } as unknown as SuiGrpcClient;
 
-  it('calculates positive minimum output with integer slippage', () => {
-    expect(calculateMinOutputSmallest(10_000_000n, 200)).toBe(9_800_000n);
-  });
-
-  it('rejects zero-output and dust quotes that cannot produce a positive minimum', () => {
-    expect(() => calculateMinOutputSmallest(0n, 200)).toThrow('no settlement token output');
-    expect(() => calculateMinOutputSmallest(1n, 200)).toThrow('positive minimum output');
-  });
-
-  it('rejects invalid slippage bounds', () => {
-    expect(() => calculateMinOutputSmallest(100n, -1)).toThrow('slippage');
-    expect(() => calculateMinOutputSmallest(100n, 10_000)).toThrow('slippage');
+    await expect(
+      quoteDirectSwapOutput({
+        client,
+        deepbookPackageId: '0x3',
+        testPair: PAIR,
+        inputAmountSmallest: 1_000n,
+      }),
+    ).rejects.toThrow('exactly 8 bytes, got 9');
   });
 });

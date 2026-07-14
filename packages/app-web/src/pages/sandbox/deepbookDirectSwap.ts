@@ -1,9 +1,13 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import {
+  bindCurrentSuiResultToBytes,
+  decodeExactU64Bytes,
+  SUI_CLOCK_OBJECT_ID,
+  SUI_ZERO_ADDRESS,
+} from '@stelis/core-relay/browser';
 import type { TestSwapPair } from './testSwapPairs';
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000000000000000000000000000';
-const SUI_CLOCK_OBJECT_ID = '0x6';
 const BPS_DENOMINATOR = 10_000n;
 
 export const DIRECT_SWAP_SLIPPAGE_BPS = 200;
@@ -14,13 +18,6 @@ interface DirectSwapReturnValue {
 
 interface DirectSwapCommandResult {
   returnValues?: DirectSwapReturnValue[];
-}
-
-interface DirectSwapSimResult {
-  commandResults?: DirectSwapCommandResult[];
-  Transaction?: {
-    commandResults?: DirectSwapCommandResult[];
-  };
 }
 
 export interface DirectSwapQuote {
@@ -36,18 +33,6 @@ export function directSwapQuantityOutSpec(testPair: TestSwapPair): {
     return { moveFunction: 'get_quote_quantity_out_input_fee', outputIndex: 1 };
   }
   return { moveFunction: 'get_base_quantity_out_input_fee', outputIndex: 0 };
-}
-
-export function decodeLittleEndianU64(bytes: Uint8Array): bigint {
-  if (bytes.length !== 8) {
-    throw new Error(`Expected u64 BCS bytes to be 8 bytes, got ${bytes.length}`);
-  }
-
-  let value = 0n;
-  for (let i = 0; i < bytes.length; i += 1) {
-    value |= BigInt(bytes[i]) << (8n * BigInt(i));
-  }
-  return value;
 }
 
 export function calculateMinOutputSmallest(
@@ -91,7 +76,7 @@ export async function quoteDirectSwapOutput(input: {
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
-  tx.setSender(ZERO_ADDRESS);
+  tx.setSender(SUI_ZERO_ADDRESS);
 
   const txBytes = await tx.build({ client: input.client });
   const result = await input.client.simulateTransaction({
@@ -99,10 +84,13 @@ export async function quoteDirectSwapOutput(input: {
     include: { commandResults: true },
   });
 
-  const quoteResult = result as unknown as DirectSwapSimResult;
-  const returnValues =
-    quoteResult.commandResults?.[0]?.returnValues ??
-    quoteResult.Transaction?.commandResults?.[0]?.returnValues;
+  const bound = bindCurrentSuiResultToBytes(result, txBytes);
+  if (!bound) throw new Error('DeepBook quote returned a malformed or mismatched result');
+  if (bound.outcome === 'failure') {
+    throw new Error(`DeepBook quote simulation failed: ${bound.errorMessage}`);
+  }
+  const commandResults = bound.commandResults as DirectSwapCommandResult[] | undefined;
+  const returnValues = commandResults?.[0]?.returnValues;
   if (!returnValues || returnValues.length < 3) {
     throw new Error(`DeepBook quote returned ${returnValues?.length ?? 0} values; expected 3`);
   }
@@ -112,7 +100,7 @@ export async function quoteDirectSwapOutput(input: {
     throw new Error(`DeepBook quote is missing output at return index ${outputIndex}`);
   }
 
-  const expectedOutputSmallest = decodeLittleEndianU64(
+  const expectedOutputSmallest = decodeExactU64Bytes(
     outputBcs instanceof Uint8Array ? outputBcs : new Uint8Array(outputBcs),
   );
   return {

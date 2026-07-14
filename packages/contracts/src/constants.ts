@@ -4,12 +4,7 @@
 // Scope policy: data tables + pure data-adjacent lookup functions only.
 // No side-effectful runtime helpers, and no Node-only or browser-only deps.
 
-import type {
-  DeepBookSwapDirection,
-  SettlementSwapDirection,
-  SettleProfile,
-  SuiNetwork,
-} from './types.js';
+import type { DeepBookSwapDirection, SettlementSwapDirection, SuiNetwork } from './types.js';
 
 // ─────────────────────────────────────────────
 // Settlement swap direction data tables and lookups
@@ -58,20 +53,6 @@ export function settlementSwapDirectionFromSwapDirections(
 }
 
 // ─────────────────────────────────────────────
-// Settle profile ranking (cost order)
-// ─────────────────────────────────────────────
-
-/**
- * Profile rank: lower = cheaper settle path.
- * credit_general is rank 0 (exact debit, no swap).
- */
-export const PROFILE_RANKS: Record<SettleProfile, number> = {
-  credit_general: 0,
-  with_vault: 1,
-  new_user: 2,
-};
-
-// ─────────────────────────────────────────────
 // Well-known coin types
 // ─────────────────────────────────────────────
 
@@ -80,11 +61,21 @@ export const SUI_TYPE =
   '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
 
 // ─────────────────────────────────────────────
+// Sui network identities
+// ─────────────────────────────────────────────
+
+/** Canonical genesis chain identifier returned by each Sui network. */
+export const SUI_CHAIN_IDENTIFIERS: Record<SuiNetwork, string> = {
+  testnet: '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD',
+  mainnet: '4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S',
+};
+
+// ─────────────────────────────────────────────
 // DeepBook IDs per network
 // ─────────────────────────────────────────────
 
 /** DeepBook-related contract IDs per network. */
-export interface DeepBookIds {
+interface DeepBookIds {
   /** Current published storage/call-target package ID. */
   readonly packageId: string;
   /** DEEP token type (full Move type string) */
@@ -119,7 +110,7 @@ export const DEEPBOOK_IDS: Record<SuiNetwork, DeepBookIds | null> = {
 // ─────────────────────────────────────────────
 
 /** Canonical Stelis contract object IDs per network. */
-export interface StelisContractIds {
+interface StelisContractIds {
   readonly packageId: string;
   readonly configId: string;
   readonly vaultRegistryId: string;

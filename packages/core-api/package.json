@@ -27,17 +27,21 @@
             "types": "./dist/testing/studio.d.ts",
             "import": "./dist/testing/studio.js"
         },
+        "./testing/redis": {
+            "types": "./dist/testing/redis.d.ts",
+            "import": "./dist/testing/redis.js"
+        },
         "./observability": {
             "types": "./dist/observability/index.d.ts",
             "import": "./dist/observability/index.js"
         }
     },
     "scripts": {
-        "build": "tsc",
+        "build": "node ../../scripts/clean-package-dist.mjs && tsc",
         "test": "vitest run --exclude 'tests/**/*.redis.test.ts'",
         "test:redis": "vitest run tests/redisAdapters.redis.test.ts tests/executionLedger.redis.test.ts tests/promotionStore.redis.test.ts tests/adminSessionNotBefore.redis.test.ts",
         "test:watch": "vitest",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc -p tsconfig.check.json"
     },
     "dependencies": {
         "@stelis/contracts": "*",

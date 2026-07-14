@@ -13,13 +13,13 @@
  * that parseBps forwards the same success/failure payload.
  */
 import { describe, expect, it } from 'vitest';
-import { mist, unMist, bps, unBps, parseBps, type Mist, type Bps } from '../src/internal/brand.js';
+import { mist, bps, unBps, parseBps, type Mist, type Bps } from '../src/internal/brand.js';
 
 describe('brand — Mist', () => {
-  it('mist() tags a bigint; unMist() restores identity', () => {
+  it('mist() tags a bigint while retaining its bigint value', () => {
     const v: Mist = mist(1_234_567n);
     expect(typeof v).toBe('bigint');
-    expect(unMist(v)).toBe(1_234_567n);
+    expect(v).toBe(1_234_567n);
   });
 
   it('Mist is a bigint subtype — arithmetic with bigint returns bigint', () => {
@@ -30,7 +30,7 @@ describe('brand — Mist', () => {
     expect(sum).toBe(1_500n);
     // Retagging is the caller's responsibility:
     const tagged: Mist = mist(sum);
-    expect(unMist(tagged)).toBe(1_500n);
+    expect(tagged).toBe(1_500n);
   });
 });
 

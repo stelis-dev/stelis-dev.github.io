@@ -7,7 +7,7 @@ import {
   type AdminJwtConfig,
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
-import { startRealRedis, type RealRedisHandle } from '../../../core-api/tests/helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '@stelis/core-api/testing/redis';
 import type { AppApiContext } from '../../src/context.js';
 import { createAdminRedisAdapter } from '../../src/adminRedis.js';
 import type { RedisClient } from '../../src/redisClient.js';
@@ -26,7 +26,7 @@ function appRedis(real: RealRedisHandle): RedisClient {
   return {
     get: (key) => real.client.get(key),
     async set(key, value, options) {
-      await real.client.set(key, value, options);
+      return real.client.set(key, value, options);
     },
     del: (key) => real.client.del(key),
     scan: (pattern) => real.client.scan(pattern),
@@ -38,6 +38,7 @@ function appRedis(real: RealRedisHandle): RedisClient {
       await real.rawClient.sendCommand(['LTRIM', key, String(start), String(stop)]);
     },
     eval: (script, keys, args) => real.client.eval(script, keys, args),
+    hgetall: (key) => real.client.hgetall(key),
     async dispose() {},
   };
 }

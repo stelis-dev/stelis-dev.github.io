@@ -49,8 +49,9 @@ function makeEntry(overrides: Partial<PreparedTxEntry> = {}): PreparedTxEntry {
 }
 
 function parseJsonFromCalls(spy: ReturnType<typeof vi.spyOn>): Record<string, unknown>[] {
-  return spy.mock.calls
-    .map((call: unknown[]) => {
+  const calls = spy.mock.calls as unknown[][];
+  return calls
+    .map((call) => {
       try {
         return JSON.parse(String(call[0])) as Record<string, unknown>;
       } catch {

@@ -1,118 +1,16 @@
-/**
- * ARG_INDEX_MAP locking tests — extractSettleArgsFromBuiltTx.
- *
- * Verifies that the argument index mapping for each settle function
- * exactly matches the Move call layout in builders.ts.
- *
- * If builders.ts changes its argument order, these tests must break
- * immediately, forcing a synchronized update to ARG_INDEX_MAP.
- *
- * References:
- *   builders.ts:buildSwapAndSettlePtb (L120-L228)
- *   builders.ts:buildSettleWithCreditPtb (L250-L276)
+/** Behavioral tests for the core-api wrapper around the compiled-interface
+ * settle argument parser. The parser's derived index table is intentionally
+ * not exposed through the package boundary.
  */
 import { describe, it, expect } from 'vitest';
-import { ARG_INDEX_MAP } from '../src/prepare/extractSettleArgs.js';
-import {
-  SETTLE_FUNCTIONS,
-  SETTLE_WITH_CREDIT_FUNCTION,
-  SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
-} from '@stelis/contracts';
-
-describe('ARG_INDEX_MAP locking tests', () => {
-  // ─────────────────────────────────────────────
-  // Coverage check: map covers every SETTLE_FUNCTIONS entry
-  // ─────────────────────────────────────────────
-  it('covers all SETTLE_FUNCTIONS entries', () => {
-    for (const fnName of SETTLE_FUNCTIONS) {
-      expect(ARG_INDEX_MAP[fnName]).toBeDefined();
-    }
-  });
-
-  it('has no extra entries beyond SETTLE_FUNCTIONS', () => {
-    for (const fnName of Object.keys(ARG_INDEX_MAP)) {
-      expect(SETTLE_FUNCTIONS.has(fnName)).toBe(true);
-    }
-  });
-
-  // ─────────────────────────────────────────────
-  // Common invariants across all functions
-  // ─────────────────────────────────────────────
-  it('config is always at index 0', () => {
-    for (const map of Object.values(ARG_INDEX_MAP)) {
-      expect(map.config).toBe(0);
-    }
-  });
-
-  it('vault-backed variants have registry at index 1', () => {
-    for (const [_fnName, map] of Object.entries(ARG_INDEX_MAP)) {
-      expect(map.registry).toBe(1);
-    }
-  });
-
-  it('recipient is always claim + 1', () => {
-    for (const map of Object.values(ARG_INDEX_MAP)) {
-      expect(map.recipient).toBe(map.claim + 1);
-    }
-  });
-
-  // ─────────────────────────────────────────────
-  // Per-function exact index assertions
-  // (derived from builders.ts argument layout)
-  // ─────────────────────────────────────────────
-
-  // New-user base-for-quote settlement:
-  //   [config(0), registry(1), clock(2), pool(3), payment(4), swapAmt(5), minSuiOut(6),
-  //    claim(7), recipient(8), receiptId(9), nonce(10), simGas(11),
-  //    gasVariance(12), slippage(13), quotedHostFee(14), expectedProtocol(15), expectedConfig(16),
-  //    quoteTs(17), policyHash(18), orderIdHash(19)]
-  it('new-user base-for-quote settlement: claim=7, recipient=8, pools=[3], nonce=10, policyHash=18, orderIdHash=19', () => {
-    const m = ARG_INDEX_MAP[SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser]!;
-    expect(m.claim).toBe(7);
-    expect(m.recipient).toBe(8);
-    expect(m.pools).toEqual([3]);
-    expect(m.nonce).toBe(10);
-    expect(m.policyHash).toBe(18);
-    expect(m.orderIdHash).toBe(19);
-  });
-
-  // Vault-backed base-for-quote settlement:
-  //   [config(0), registry(1), clock(2), vault(3), pool(4), payment(5), swapAmt(6), minSuiOut(7),
-  //    claim(8), recipient(9), receiptId(10), nonce(11), ..., quotedHostFee(15), ..., policyHash(19), orderIdHash(20)]
-  it('vault-backed base-for-quote settlement: claim=8, recipient=9, pools=[4], nonce=11, policyHash=19, orderIdHash=20', () => {
-    const m = ARG_INDEX_MAP[SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.withVault]!;
-    expect(m.claim).toBe(8);
-    expect(m.recipient).toBe(9);
-    expect(m.pools).toEqual([4]);
-    expect(m.nonce).toBe(11);
-    expect(m.policyHash).toBe(19);
-    expect(m.orderIdHash).toBe(20);
-  });
-
-  // Credit-only settlement:
-  //   [config(0), registry(1), clock(2), vault(3), useCredit(4),
-  //    claim(5), recipient(6), receiptId(7), nonce(8), simGas(9),
-  //    gasVariance(10), slippage(11), quotedHostFee(12), expectedProtocol(13), expectedConfig(14),
-  //    quoteTs(15), policyHash(16), orderIdHash(17)]
-  it('credit-only settlement: claim=5, recipient=6, pools=[], nonce=8, policyHash=16, orderIdHash=17', () => {
-    const m = ARG_INDEX_MAP[SETTLE_WITH_CREDIT_FUNCTION]!;
-    expect(m.claim).toBe(5);
-    expect(m.recipient).toBe(6);
-    expect(m.pools).toEqual([]);
-    expect(m.nonce).toBe(8);
-    expect(m.policyHash).toBe(16);
-    expect(m.orderIdHash).toBe(17);
-  });
-});
-
-// ─────────────────────────────────────────────
-// extractSettleArgsFromBuiltTx unit tests
-// ─────────────────────────────────────────────
-
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { toBase64 } from '@mysten/sui/utils';
-import type { PtbCommand } from '@stelis/contracts';
+import {
+  SETTLE_WITH_CREDIT_FUNCTION,
+  SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
+  type PtbCommand,
+} from '@stelis/contracts';
 import type { HostValidationEnv } from '@stelis/core-relay';
 
 /** Encode a u64 as base64 BCS (8-byte little-endian). */

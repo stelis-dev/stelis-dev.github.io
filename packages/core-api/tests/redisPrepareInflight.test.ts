@@ -38,6 +38,7 @@ function createMockRedisClient(): RedisClientLike {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(0),
+    hgetall: vi.fn().mockResolvedValue({}),
     scan: vi.fn().mockResolvedValue([]),
 
     async eval(script: string, _keys: string[], args: string[]): Promise<unknown> {

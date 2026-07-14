@@ -132,7 +132,7 @@ Capacity-related retry contract:
 | `SPONSOR_CAPACITY_UNAVAILABLE` | 503 | Retry after sponsor capacity recovers. |
 | `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` | 503 | Retry after sponsor capacity recovers; operators inspect refill account health. |
 | `PREPARE_OVERLOADED` | 503 | Retry after the `Retry-After` header. |
-| `NO_SPONSOR_SLOT` | 422 | Retry prepare. |
+| `NO_SPONSOR_SLOT` | 503 | Retry prepare after sponsor capacity recovers. |
 
 Capacity alert thresholds:
 
@@ -194,7 +194,7 @@ When these variables are present, the Host runs in dual mode: generic relay rout
 
 `STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation canonicalizes package addresses and rejects an empty list, malformed entries, and canonical duplicates. Promotion prepare and sponsor requests compare every MoveCall with that same boot-time set.
 
-`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds.
+`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds. The callback response is the closed current shape `{ "valid": boolean, "reason"?: string }`: an explicit `false` is `AUTH_JWT_INVALID`, while transport failure or a malformed/non-current response is `AUTH_UNAVAILABLE`. Both fail closed.
 
 Promotion execution uses Redis-backed promotion records, usage-event records, and the promotion execution ledger. The ledger reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
 

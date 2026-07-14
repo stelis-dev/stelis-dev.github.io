@@ -1,6 +1,5 @@
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { PrepareAuthorizationFields } from '@stelis/contracts';
-import { sha256Bytes } from './hash.js';
 
 export class PrepareAuthorizationMessageError extends Error {
   constructor(message: string) {
@@ -88,13 +87,4 @@ export function serializePrepareAuthorizationMessage(fields: PrepareAuthorizatio
  */
 export function encodePrepareAuthorizationMessage(fields: PrepareAuthorizationFields): Uint8Array {
   return new TextEncoder().encode(serializePrepareAuthorizationMessage(fields));
-}
-
-/**
- * Hash the canonical prepare authorization message with SHA-256.
- */
-export function hashPrepareAuthorizationMessage(
-  fields: PrepareAuthorizationFields,
-): Promise<Uint8Array> {
-  return sha256Bytes(encodePrepareAuthorizationMessage(fields));
 }

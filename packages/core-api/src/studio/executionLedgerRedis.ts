@@ -440,7 +440,6 @@ export type CanonicalPromotionRecordKeyGetter = (promotionId: string) => string;
 export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
   private readonly redis: RedisClientLike;
   private readonly ttlMs: number;
-  private readonly reaperIntervalMs: number;
   private readonly _clock: Clock;
   private readonly canonicalRecordKeyFor: CanonicalPromotionRecordKeyGetter | null;
   private reaperTimer: ReturnType<typeof setInterval> | null = null;
@@ -465,7 +464,6 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     }
     this.redis = redis;
     this.ttlMs = ttlMs;
-    this.reaperIntervalMs = reaperIntervalMs;
     this._clock = clock;
     this.canonicalRecordKeyFor = canonicalRecordKeyFor;
 

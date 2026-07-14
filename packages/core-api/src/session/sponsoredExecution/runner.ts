@@ -31,13 +31,13 @@ import type {
   LedgerReservationHandle,
   NonceReservationHandle,
   SponsorSlotReservationHandle,
-} from './index.js';
-import { createGasBoundBuildInput } from './index.js';
+} from './reservationHandles.js';
+import { createGasBoundBuildInput } from './reservationHandles.js';
 import type {
   SponsoredExecutionPolicy,
   PrepareChainSnapshot,
   PreparePolicyHookContext,
-} from './index.js';
+} from './executionPolicy.js';
 import {
   InflightReservationImpl,
   LedgerBudgetReservationImpl,

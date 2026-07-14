@@ -6,10 +6,8 @@
  * via GET /relay/config, which the SDK fetches separately.
  */
 
-export interface StatusResponse {
-  ok: boolean;
-}
+import type { RelayStatusResponse } from '@stelis/contracts';
 
-export async function handleStatus(): Promise<StatusResponse> {
+export async function handleStatus(): Promise<RelayStatusResponse> {
   return { ok: true };
 }

@@ -25,7 +25,11 @@ import {
   type AdminJwtConfig,
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
-import { readJsonBodyWithLimit, MAX_SMALL_REQUEST_BODY_BYTES } from '@stelis/core-api';
+import {
+  ClientIpResolutionError,
+  readJsonBodyWithLimit,
+  MAX_SMALL_REQUEST_BODY_BYTES,
+} from '@stelis/core-api';
 import {
   MAX_PROMOTION_LEDGER_VALUE_MIST,
   PromotionCurrentConflictError,
@@ -34,16 +38,15 @@ import { createAdminRedisAdapter } from '../adminRedis.js';
 import {
   ADMIN_AUDIT_LOG_KEY,
   ADMIN_AUDIT_LOG_MAX_ENTRIES,
-  safeErrorSummary,
   writeAdminAuditLog,
 } from '../adminAuditLog.js';
+import { redactSensitiveText, safeErrorSummary } from '@stelis/core-api/observability';
 import { deriveSponsorAvailabilitySummary } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import type { ResolveClientIp } from '../clientIp.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
-import { mapError, respondMapped } from '../errorMap.js';
 
 /**
  * Enrich a Promotion with derived totalRequiredBudgetMist.
@@ -263,19 +266,22 @@ function parseOptionalNullableIsoString(
 function tryPromotionErrorResponse(c: Parameters<typeof tryBodyErrorResponse>[0], err: unknown) {
   if (err instanceof Error) {
     if (err.name === 'PromotionBodyParseError') {
-      return c.json({ error: err.message }, 400);
+      return c.json({ error: redactSensitiveText(err.message) }, 400);
     }
     if (
       err.name === 'InvalidStatusTransitionError' ||
       err.name === 'PromotionFieldImmutableError'
     ) {
-      return c.json({ error: err.message }, 409);
+      return c.json({ error: redactSensitiveText(err.message) }, 409);
     }
     if (err instanceof PromotionCurrentConflictError) {
-      return c.json({ code: 'PROMOTION_CURRENT_CONFLICT', error: err.message }, 409);
+      return c.json(
+        { code: 'PROMOTION_CURRENT_CONFLICT', error: redactSensitiveText(err.message) },
+        409,
+      );
     }
     if (err.name === 'PromotionActivationError') {
-      return c.json({ error: err.message }, 422);
+      return c.json({ error: redactSensitiveText(err.message) }, 422);
     }
   }
   return null;
@@ -470,7 +476,7 @@ export function createAdminRoutes(
           state: s.state,
           balanceMist: s.balanceMist,
           lastObservedAtMs: s.lastObservedAtMs,
-          lastError: s.lastError,
+          lastError: s.lastError === null ? null : redactSensitiveText(s.lastError),
         })),
         sponsorRefillAccount: {
           address: ctx.sponsorOperations.sponsorRefillAccountAddress,
@@ -478,7 +484,10 @@ export function createAdminRoutes(
           healthy: stateView.sponsorRefillAccount.healthy ?? false,
           refillsRemaining: stateView.sponsorRefillAccount.refillsRemaining,
           lastObservedAtMs: stateView.sponsorRefillAccount.lastObservedAtMs,
-          lastError: stateView.sponsorRefillAccount.lastError,
+          lastError:
+            stateView.sponsorRefillAccount.lastError === null
+              ? null
+              : redactSensitiveText(stateView.sponsorRefillAccount.lastError),
         },
         availableSlots: aggregates.availableSlots,
         degradedSlots: aggregates.degradedSlots,
@@ -552,8 +561,9 @@ export function createAdminRoutes(
       const response: SponsorRefillAccountWithdrawalChallengeResponse = { nonce, expiresAt };
       return c.json(response);
     } catch (err) {
-      const mapped = mapError(err);
-      if (mapped) return respondMapped(c, mapped);
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       if (ip !== null) {
         await writeAdminAuditLog(await getAdminRedis(contextPromise), {
           event: 'WITHDRAW_NONCE_ERROR',
@@ -642,7 +652,7 @@ export function createAdminRoutes(
           event: 'WITHDRAWAL_BLOCKED',
           ts: ts(),
           ip,
-          detail: result.error,
+          detail: redactSensitiveText(result.error),
         });
         return c.json(
           {
@@ -657,7 +667,7 @@ export function createAdminRoutes(
           event: 'WITHDRAWAL_NOT_ACCEPTED',
           ts: ts(),
           ip,
-          detail: `${result.operationId}: ${result.error}`,
+          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
         });
         return c.json(
           {
@@ -675,7 +685,7 @@ export function createAdminRoutes(
           event: 'WITHDRAWAL_PENDING',
           ts: ts(),
           ip,
-          detail: `${result.operationId}: ${result.error}`,
+          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
         });
         return c.json(
           {
@@ -692,10 +702,13 @@ export function createAdminRoutes(
           event: 'WITHDRAWAL_FAILED',
           ts: ts(),
           ip,
-          detail: result.error,
+          detail: redactSensitiveText(result.error),
         });
         return c.json(
-          { code: 'WITHDRAWAL_FAILED', error: `Withdrawal failed: ${result.error}` },
+          {
+            code: 'WITHDRAWAL_FAILED',
+            error: 'Withdrawal failed',
+          },
           422,
         );
       }
@@ -733,13 +746,14 @@ export function createAdminRoutes(
       };
       return c.json(response);
     } catch (err) {
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       if (err instanceof HostWireParseError) {
-        return c.json({ error: err.message, code: 'BAD_REQUEST' }, 400);
+        return c.json({ error: redactSensitiveText(err.message), code: 'BAD_REQUEST' }, 400);
       }
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
-      const mapped = mapError(err);
-      if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
       try {
@@ -882,12 +896,13 @@ export function createAdminRoutes(
       }).catch(() => undefined);
       return c.json({ promotion: await withDerivedBudget(record) }, 201);
     } catch (err) {
+      if (err instanceof ClientIpResolutionError) {
+        return c.json({ error: 'Client IP could not be resolved' }, 400);
+      }
       const mapped = tryPromotionErrorResponse(c, err);
       if (mapped) return mapped;
       const bodyRes = tryBodyErrorResponse(c, err);
       if (bodyRes) return bodyRes;
-      const publicError = mapError(err);
-      if (publicError) return respondMapped(c, publicError);
       return c.json({ error: 'Internal server error' }, 500);
     }
   });

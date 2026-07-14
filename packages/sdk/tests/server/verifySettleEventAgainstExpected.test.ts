@@ -1,24 +1,29 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { verifySettleEventAgainstExpected } from '../../src/server/verifySettleEventAgainstExpected.js';
-import { decodeSettleEvent, SettleEventBcs } from '../../src/server/settleEventDecoder.js';
+import {
+  verifySettleEventAgainstExpected,
+  verifySettleEventInTransaction,
+} from '../../src/server/verifySettleEventAgainstExpected.js';
+import { decodeSettleEvent } from '../../src/server/settleEventDecoder.js';
+import type { SuiClientTypes } from '@mysten/sui/client';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { serializeSettleEventBcs, type SettleEventBcsInput } from '../helpers/settleEventBcs.js';
 
 const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 
-function hex2bytes(hex: string): number[] {
+function hex2bytes(hex: string): Uint8Array {
   const clean = hex.replace(/^0x/, '');
   const bytes: number[] = [];
   for (let i = 0; i < clean.length; i += 2) {
     bytes.push(parseInt(clean.slice(i, i + 2), 16));
   }
-  return bytes;
+  return Uint8Array.from(bytes);
 }
 
-function sha256Bytes(input: string): number[] {
+function sha256Bytes(input: string): Uint8Array {
   const buf = createHash('sha256').update(input).digest();
-  return Array.from(buf);
+  return new Uint8Array(buf);
 }
 
 const RECEIPT_ID_HEX = 'aabbccdd' + '00'.repeat(28);
@@ -32,11 +37,11 @@ const EXPECTED_BASE = {
   user: USER_ADDR,
 } as const;
 
-function makeSettleEventBcs(overrides?: Record<string, unknown>) {
-  const data = {
+function makeSettleEventBcs() {
+  const data: SettleEventBcsInput = {
     receipt_id: hex2bytes(RECEIPT_ID_HEX),
     nonce: 1n,
-    policy_hash: Array.from({ length: 32 }, () => 0),
+    policy_hash: new Uint8Array(32),
     quote_timestamp_ms: 1700000000000n,
     exec_timestamp_ms: 1700000000000n,
     sim_gas_reported: 1000n,
@@ -53,9 +58,8 @@ function makeSettleEventBcs(overrides?: Record<string, unknown>) {
     user: USER_ADDR,
     settlement_payout_recipient: SETTLEMENT_PAYOUT_RECIPIENT_ADDR,
     order_id_hash: sha256Bytes(ORDER_ID),
-    ...overrides,
   };
-  return SettleEventBcs.serialize(data).toBytes();
+  return serializeSettleEventBcs(data);
 }
 
 function makeEvent(bcsBytes: Uint8Array, eventType = `${PACKAGE_ID}::events::SettleEvent`) {
@@ -66,6 +70,54 @@ function makeEvent(bcsBytes: Uint8Array, eventType = `${PACKAGE_ID}::events::Set
     eventType,
     bcs: bcsBytes,
     json: null,
+  };
+}
+
+function successfulTransaction(
+  events: SuiClientTypes.Event[],
+  digest = '0xDIGEST',
+): SuiClientTypes.TransactionResult<{ events: true }> {
+  return {
+    $kind: 'Transaction',
+    Transaction: {
+      events,
+      digest,
+      signatures: [],
+      epoch: '1',
+      status: { success: true, error: null },
+      balanceChanges: undefined,
+      effects: undefined,
+      objectTypes: undefined,
+      transaction: undefined,
+      bcs: undefined,
+    },
+  };
+}
+
+function failedTransaction(
+  events: SuiClientTypes.Event[],
+): SuiClientTypes.TransactionResult<{ events: true }> {
+  return {
+    $kind: 'FailedTransaction',
+    FailedTransaction: {
+      events,
+      digest: '0xDIGEST',
+      signatures: [],
+      epoch: '1',
+      status: {
+        success: false,
+        error: {
+          $kind: 'Unknown',
+          Unknown: null,
+          message: 'MoveAbort in settlement',
+        },
+      },
+      balanceChanges: undefined,
+      effects: undefined,
+      objectTypes: undefined,
+      transaction: undefined,
+      bcs: undefined,
+    },
   };
 }
 
@@ -158,6 +210,57 @@ describe('decodeSettleEvent canonical BCS boundary', () => {
   });
 });
 
+describe('verifySettleEventInTransaction', () => {
+  it('verifies a current successful result without fetching it again', () => {
+    const result = successfulTransaction([makeEvent(makeSettleEventBcs())]);
+
+    const verified = verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE);
+
+    expect(verified.receiptId).toBe(RECEIPT_ID_HEX);
+    expect(verified.executionCostClaim).toBe('50000');
+  });
+
+  it('rejects a malformed discriminator and payload combination', () => {
+    const success = successfulTransaction([makeEvent(makeSettleEventBcs())]);
+    const malformed = {
+      ...success,
+      FailedTransaction: success.Transaction,
+    } as unknown as SuiClientTypes.TransactionResult<{ events: true }>;
+
+    expect(() => verifySettleEventInTransaction(malformed, '0xDIGEST', EXPECTED_BASE)).toThrow(
+      'malformed or mismatched result',
+    );
+  });
+
+  it('rejects a current failed result before consuming its matching event', () => {
+    const result = failedTransaction([makeEvent(makeSettleEventBcs())]);
+
+    expect(() => verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE)).toThrow(
+      /Transaction 0xDIGEST failed: MoveAbort in settlement/,
+    );
+  });
+
+  it('rejects a result payload for a different digest', () => {
+    const result = successfulTransaction([makeEvent(makeSettleEventBcs())], '0xOTHER');
+
+    expect(() => verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE)).toThrow(
+      'malformed or mismatched result',
+    );
+  });
+
+  it('rejects a successful payload whose requested events are not an array', () => {
+    const result = successfulTransaction([makeEvent(makeSettleEventBcs())]);
+    const malformed = {
+      ...result,
+      Transaction: { ...result.Transaction, events: undefined },
+    } as unknown as SuiClientTypes.TransactionResult<{ events: true }>;
+
+    expect(() => verifySettleEventInTransaction(malformed, '0xDIGEST', EXPECTED_BASE)).toThrow(
+      'did not include requested events',
+    );
+  });
+});
+
 describe('verifySettleEventAgainstExpected', () => {
   it('returns verified fields on match', async () => {
     const client = mockClient([makeEvent(makeSettleEventBcs())]);
@@ -167,6 +270,7 @@ describe('verifySettleEventAgainstExpected', () => {
     expect(result.user).toBe(USER_ADDR);
     expect(result.executionCostClaim).toBe('50000');
     expect(result.execTimestampMs).toBe('1700000000000');
+    expect(client.getTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('verifies orderId hash correctly', async () => {
@@ -355,7 +459,7 @@ describe('verifySettleEventAgainstExpected', () => {
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
         user: USER_ADDR,
-      } as Parameters<typeof verifySettleEventAgainstExpected>[2]),
+      } as unknown as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
     expect(client.getTransaction).not.toHaveBeenCalled();
   });
@@ -368,7 +472,7 @@ describe('verifySettleEventAgainstExpected', () => {
         orderId: ORDER_ID,
         orderIdHash: createHash('sha256').update(ORDER_ID).digest('hex'),
         user: USER_ADDR,
-      } as Parameters<typeof verifySettleEventAgainstExpected>[2]),
+      } as unknown as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
     expect(client.getTransaction).not.toHaveBeenCalled();
   });

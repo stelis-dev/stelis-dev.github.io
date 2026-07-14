@@ -80,7 +80,6 @@ export function verifyPtbIntegrity(
  * Delegates to the shared @stelis/core-relay input helper.
  */
 import { extractObjectIdFromInput } from '@stelis/core-relay/browser';
-export const extractObjectId = extractObjectIdFromInput;
 
 /**
  * Normalize an input to a comparable string.
@@ -101,7 +100,7 @@ export function normalizeInput(input: Record<string, unknown>): string {
   // are equivalent if objectId matches. Additional resolved fields
   // (initialSharedVersion, version, digest, mutable) are added during resolve
   // and validated on-chain, not here.
-  const objectId = extractObjectId(input);
+  const objectId = extractObjectIdFromInput(input);
   if (objectId !== null) {
     return `Object:${normalizeSuiAddress(objectId)}`;
   }

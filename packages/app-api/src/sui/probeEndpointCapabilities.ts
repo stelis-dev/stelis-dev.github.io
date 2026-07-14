@@ -13,8 +13,7 @@
  */
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
-
-const ZERO_SENDER = '0x0000000000000000000000000000000000000000000000000000000000000000';
+import { bindCurrentSuiResultToBytes, SUI_ZERO_ADDRESS } from '@stelis/core-relay';
 
 export type EndpointProbeResult = { ok: true; reason: null } | { ok: false; reason: string };
 
@@ -29,7 +28,7 @@ export async function buildProbeTxBytes(
   simulateProbePoolId: string,
 ): Promise<Uint8Array> {
   const probeTx = new Transaction();
-  probeTx.setSender(ZERO_SENDER);
+  probeTx.setSender(SUI_ZERO_ADDRESS);
   probeTx.object(simulateProbePoolId);
   return probeTx.build({ client });
 }
@@ -69,7 +68,18 @@ export async function probeEndpointCapabilities(
     // registry will immediately need.
     const buildFn = opts.buildProbeTxBytes ?? buildProbeTxBytes;
     const probeTxBytes = await buildFn(client, opts.simulateProbePoolId);
-    await client.simulateTransaction({ transaction: probeTxBytes, include: { effects: true } });
+    const simulation = await client.simulateTransaction({
+      transaction: probeTxBytes,
+      include: { effects: true },
+    });
+    const bound = bindCurrentSuiResultToBytes(simulation, probeTxBytes);
+    if (!bound) throw new Error('simulateTransaction returned a malformed or mismatched result');
+    if (bound.outcome === 'failure') {
+      throw new Error(`simulateTransaction failed: ${bound.errorMessage}`);
+    }
+    if (bound.transaction.effects === undefined) {
+      throw new Error('simulateTransaction returned no requested effects');
+    }
 
     return { ok: true, reason: null };
   } catch (err) {

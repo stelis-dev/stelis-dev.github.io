@@ -1,6 +1,11 @@
 # Empty Execution Benchmark Report
 
-## Current Summary
+> Historical evidence: these runs predate endpoint and current-wire provenance
+> fields. They measure the testnet package listed below, but do not by themselves
+> prove that a currently deployed Host implements the current Relay API and
+> SettleEvent contracts.
+
+## Historical Summary
 
 This report summarizes manual empty-transaction benchmark runs on Sui testnet.
 It compares direct SUI-paid empty transactions with Host-sponsored empty
@@ -17,7 +22,7 @@ separately because it includes one-time setup work.
 - Settlement token type:
   `0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP`
 
-## Current Benchmark Result
+## Historical Benchmark Result
 
 | Execution kind                                      | Count |                      Gas |
 | --------------------------------------------------- | ----: | -----------------------: |

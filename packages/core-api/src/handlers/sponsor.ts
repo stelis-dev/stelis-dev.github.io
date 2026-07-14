@@ -6,8 +6,13 @@
  * public handler signature and error carrier classes consumed by app-api.
  */
 import type { HostContext } from '../context.js';
-import { decodeTxBytes, SessionDecodeError } from '../session/index.js';
-import type { GasUsedFields } from '../session/index.js';
+import type { RelaySponsorErrorCode, SponsorFailureSubcode } from '@stelis/contracts';
+import {
+  decodeTxBytes,
+  SessionDecodeError,
+  SponsorPostSignatureUncertaintyError,
+} from '../session/sessionPrimitives.js';
+import type { GasUsedFields } from '../session/sessionTypes.js';
 import {
   createGenericExecutionPolicy,
   createGenericSignAndSubmitPort,
@@ -48,10 +53,8 @@ export interface SponsorResult {
  */
 export class SponsorValidationError extends Error {
   constructor(
-    public readonly code: string,
+    public readonly code: RelaySponsorErrorCode,
     message: string,
-    /** Override the fallback HTTP status when semantics differ (e.g. 410 for expired). */
-    public readonly statusHint?: number,
   ) {
     super(message);
     this.name = 'SponsorValidationError';
@@ -77,7 +80,7 @@ export class SponsorBlockedError extends Error {
 export class SponsorPreflightError extends Error {
   constructor(
     public readonly reason: string,
-    public readonly subcode?: string,
+    public readonly subcode?: SponsorFailureSubcode,
   ) {
     super(`Preflight simulation failed: ${reason}`);
     this.name = 'SponsorPreflightError';
@@ -93,7 +96,7 @@ export class SponsorOnchainError extends Error {
   constructor(
     public readonly digest: string,
     public readonly onchainError: string,
-    public readonly subcode?: string,
+    public readonly subcode?: SponsorFailureSubcode,
     public readonly gasUsed?: GasUsedFields | null,
   ) {
     super(`Transaction reverted on-chain: ${onchainError}`);
@@ -106,9 +109,42 @@ export class SponsorOnchainError extends Error {
  * No gas is burned (Sui protocol guarantee). Maps to HTTP 503.
  */
 export class SponsorCongestionError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly digest: string,
+  ) {
     super(message);
     this.name = 'SponsorCongestionError';
+  }
+}
+
+/** Known on-chain success whose Host-side terminal processing could not complete. */
+export class SponsorTerminalProcessingError extends Error {
+  readonly code = 'GAS_EFFECTS_MISSING' as const;
+
+  constructor(
+    message: string,
+    public readonly digest: string,
+  ) {
+    super(message);
+    this.name = 'SponsorTerminalProcessingError';
+  }
+}
+
+/**
+ * The sponsor signed the exact transaction and submission may have reached
+ * Sui, but the Host could not prove a current terminal result. The digest is
+ * the reconciliation identity derived before signing.
+ */
+export class SponsorSubmissionUncertainError extends Error {
+  readonly code = 'SPONSOR_SUBMISSION_UNCERTAIN' as const;
+
+  constructor(
+    public readonly digest: string,
+    public readonly cause: unknown,
+  ) {
+    super('Sponsor transaction submission outcome is uncertain');
+    this.name = 'SponsorSubmissionUncertainError';
   }
 }
 
@@ -136,13 +172,14 @@ export async function handleSponsor(
   }
 
   const errors: GenericSponsorErrorFactory = {
-    sponsorValidation: (code, message, statusHint) =>
-      new SponsorValidationError(code, message, statusHint),
+    sponsorValidation: (code, message) => new SponsorValidationError(code, message),
     sponsorBlocked: (retryAfterMs) => new SponsorBlockedError(retryAfterMs),
     sponsorPreflight: (reason, subcode) => new SponsorPreflightError(reason, subcode),
     sponsorOnchain: (digest, reason, subcode, gasUsed) =>
       new SponsorOnchainError(digest, reason, subcode, gasUsed),
-    sponsorCongestion: (message) => new SponsorCongestionError(message),
+    sponsorCongestion: (message, digest) => new SponsorCongestionError(message, digest),
+    sponsorTerminalProcessing: (message, digest) =>
+      new SponsorTerminalProcessingError(message, digest),
   };
 
   const options = {
@@ -155,27 +192,34 @@ export async function handleSponsor(
   } as const;
   const { policy, state } = createGenericExecutionPolicy(options);
 
-  return await runSponsorStateMachine(
-    {
-      prepareStore: ctx.prepareStore,
-      sponsorPool: ctx.sponsorPool,
-      signAndSubmit: createGenericSignAndSubmitPort(options, state),
-    },
-    {
-      hookContext: {
-        receiptId: params.receiptId,
-        clientIp,
+  try {
+    return await runSponsorStateMachine(
+      {
+        prepareStore: ctx.prepareStore,
+        sponsorPool: ctx.sponsorPool,
+        signAndSubmit: createGenericSignAndSubmitPort(options, state),
       },
-      txBytes,
-      userSignature: params.userSignature,
-      projectResult: () => projectGenericSponsorResult(options, state),
-    },
-    policy,
-    createGenericSponsorConsumeAdapter({
-      hostContext: ctx,
-      clientIp,
-      state,
-      errors,
-    }),
-  );
+      {
+        hookContext: {
+          receiptId: params.receiptId,
+          clientIp,
+        },
+        txBytes,
+        userSignature: params.userSignature,
+        projectResult: () => projectGenericSponsorResult(options, state),
+      },
+      policy,
+      createGenericSponsorConsumeAdapter({
+        hostContext: ctx,
+        clientIp,
+        state,
+        errors,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof SponsorPostSignatureUncertaintyError) {
+      throw new SponsorSubmissionUncertainError(err.expectedDigest, err);
+    }
+    throw err;
+  }
 }

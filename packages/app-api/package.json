@@ -1,33 +1,34 @@
 {
-    "name": "@stelis/app-api",
-    "version": "0.1.0",
-    "private": true,
-    "description": "Stelis unified API host — Hono runtime for relay, auth, admin, and studio routes",
-    "type": "module",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "scripts": {
-        "build": "tsc",
-        "start": "node dist/index.js",
-        "dev": "tsx watch src/index.ts",
-        "test": "vitest run --exclude 'tests/**/*.redis.test.ts'",
-        "test:redis": "vitest run tests/sponsor-operations/accountSpend.redis.test.ts tests/admin/adminLogout.redis.test.ts tests/sponsoredLogs.redis.test.ts",
-        "test:watch": "vitest",
-        "typecheck": "tsc --noEmit"
-    },
-    "dependencies": {
-        "@hono/node-server": "^1.0.0",
-        "@mysten/sui": "^2.4.0",
-        "@stelis/contracts": "*",
-        "@stelis/core-api": "*",
-        "hono": "^4.0.0",
-        "redis": "^4.7.0"
-    },
-    "devDependencies": {
-        "@types/node": "^22.0.0",
-        "jose": "^6.0.11",
-        "tsx": "^4.8.1",
-        "typescript": "^5.4.0",
-        "vitest": "^4.1.8"
-    }
+  "name": "@stelis/app-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stelis unified API host — Hono runtime for relay, auth, admin, and studio routes",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run --exclude 'tests/**/*.redis.test.ts'",
+    "test:redis": "vitest run tests/sponsor-operations/accountSpend.redis.test.ts tests/admin/adminLogout.redis.test.ts tests/sponsoredLogs.redis.test.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.check.json --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "@mysten/sui": "^2.4.0",
+    "@stelis/contracts": "*",
+    "@stelis/core-api": "*",
+    "@stelis/core-relay": "*",
+    "hono": "^4.0.0",
+    "redis": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "jose": "^6.0.11",
+    "tsx": "^4.8.1",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.8"
+  }
 }

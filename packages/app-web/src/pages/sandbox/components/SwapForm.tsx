@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useCurrentAccount, useCurrentClient, useDAppKit } from '@mysten/dapp-kit-react';
 import { Transaction } from '@mysten/sui/transactions';
+import { bindCurrentSuiResultToBytes, SUI_CLOCK_OBJECT_ID } from '@stelis/core-relay/browser';
 import { useSDK } from '../hooks/useSDK';
 import { TransactionStatus } from './TransactionStatus';
 import {
@@ -116,7 +117,7 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
         suiCoin,
         deepFeeCoin,
         tx.pure.u64(quote.minOutputSmallest),
-        tx.object('0x6'),
+        tx.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
     tx.transferObjects([swapResult[0], swapResult[1], swapResult[2]], account.address);
@@ -211,10 +212,12 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           storageCost: string;
           storageRebate: string;
         }
-        const txResult = simResult.Transaction as unknown as
-          | { effects?: { gasUsed?: SimGasUsed } }
-          | undefined;
-        const costs = txResult?.effects?.gasUsed;
+        const bound = bindCurrentSuiResultToBytes(simResult, txBytes);
+        if (!bound || bound.outcome !== 'success') {
+          throw new Error('Gas simulation returned a malformed, mismatched, or failed result');
+        }
+        const effects = bound.transaction.effects as { gasUsed?: SimGasUsed } | undefined;
+        const costs = effects?.gasUsed;
         if (costs) {
           const net =
             parseDecimalIntegerToBigInt(costs.computationCost, 'computationCost') +

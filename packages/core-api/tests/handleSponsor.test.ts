@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'crypto';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { toBase64, toBase58 } from '@mysten/sui/utils';
 import { bcs } from '@mysten/sui/bcs';
@@ -26,10 +26,7 @@ import {
   SETTLE_WITH_CREDIT_FUNCTION,
   SLIPPAGE_CAP_BPS,
 } from '@stelis/contracts';
-import {
-  PREPARE_TTL_MS,
-  buildExecutionPathKey as _buildExecutionPathKey,
-} from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
 import {
   handleSponsor,
@@ -38,6 +35,8 @@ import {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
+  SponsorTerminalProcessingError,
+  SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from '../src/handlers/sponsor.js';
 import type { HostContext } from '../src/context.js';
@@ -61,6 +60,7 @@ import type { PrepareStoreAdapter } from '../src/store/prepareTypes.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import {
+  bindGrpcResultToTransactionBytes,
   congestedObjectsExecutionError,
   grpcExecutionFailure,
   grpcExecutionSuccess,
@@ -85,9 +85,43 @@ const SWAP_ALLOWED_ROUTE = {
   hops: [SWAP_POOL],
   settlementSwapDirection: 'baseForQuote' as const,
 };
+const SWAP_EXECUTION_PATH_KEY = `${SWAP_ALLOWED_ROUTE.tokenType}:${SWAP_ALLOWED_ROUTE.hops.join(',')}:${SWAP_ALLOWED_ROUTE.settlementSwapDirection}`;
 
 const sponsorKeypair = Ed25519Keypair.generate();
 const SPONSOR_ADDRESS = sponsorKeypair.toSuiAddress();
+
+const suiDigest = (txBytes: Uint8Array): string =>
+  TransactionDataBuilder.getDigestFromBytes(txBytes);
+
+type ConsoleCallSource = {
+  readonly mock: {
+    readonly calls: readonly (readonly unknown[])[];
+  };
+};
+
+function findStructuredLog(
+  spy: ConsoleCallSource,
+  event: string,
+): Record<string, unknown> | undefined {
+  for (const call of spy.mock.calls) {
+    const raw = call[0];
+    if (typeof raw !== 'string') continue;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        !Array.isArray(parsed) &&
+        (parsed as Record<string, unknown>)['event'] === event
+      ) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Other console output is outside the structured-event assertion surface.
+    }
+  }
+  return undefined;
+}
 
 /**
  * Shared mock Host config values.
@@ -427,6 +461,7 @@ function makeMockPrepareStore(
     evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
     reserveNonce: vi.fn().mockResolvedValue(1n),
     releaseReservation: vi.fn().mockResolvedValue(undefined),
+    checkUserQuota: vi.fn().mockResolvedValue('ok' as const),
   };
 }
 
@@ -452,6 +487,11 @@ function makeMockSponsorPool(): SponsorPoolAdapter {
     }),
     commit: vi.fn().mockResolvedValue(undefined),
     checkin: vi.fn(),
+    leaseStatus: vi.fn().mockResolvedValue({
+      leasedSlots: 0,
+      freeSlots: 1,
+      slots: [{ address: SPONSOR_ADDRESS, leased: false }],
+    }),
     addresses: vi.fn().mockReturnValue([SPONSOR_ADDRESS]),
     sign: vi.fn().mockResolvedValue({ signature: 'mockSponsorSig' }),
   };
@@ -464,12 +504,18 @@ function makeMockSui(simResult?: unknown, execResult?: unknown) {
     storageRebate: '500000',
   };
   return {
-    simulateTransaction: vi
-      .fn()
-      .mockResolvedValue(simResult ?? grpcSimulationSuccess('0xdigest123', gasUsed)),
-    executeTransaction: vi
-      .fn()
-      .mockResolvedValue(execResult ?? grpcExecutionSuccess('0xdigest123', gasUsed)),
+    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        simResult ?? grpcSimulationSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
+    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        execResult ?? grpcExecutionSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
@@ -525,12 +571,16 @@ function makeMockContext(
     packageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
+    vaultsTableId: null,
     // Published DeepBook call-target ID retained for prepare/quote paths.
     // Abort classification uses the generated runtime identity instead.
     deepbookPackageId: MOCK_CONFIG.packageId,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker: overrides.abuseBlocker ?? makeMockAbuseBlocker(),
     prepareStore: overrides.prepareStore ?? makeMockPrepareStore(),
+    prepareRequestNonceStore: {
+      claim: vi.fn().mockResolvedValue('ok' as const),
+    },
     settlementPayoutRecipientAddress: MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
@@ -635,25 +685,23 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest123');
+    expect(result.digest).toBe(suiDigest(txBytes));
     expect(result.effects).toBeDefined();
     // checkin must present the prepared entry's committed txBytesHash so the
     // pool CAS releases the slot.
     expect(sponsorPool.checkin).toHaveBeenCalledWith(SPONSOR_ADDRESS, PAYMENT_ID, txHash);
     expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
-    const logData = JSON.parse(consoleInfoSpy.mock.calls[0][0] as string) as Record<
-      string,
-      unknown
-    >;
-    expect(logData['event']).toBe('SETTLEMENT_ECONOMICS_EXECUTION');
-    expect(logData['digest']).toBe('0xdigest123');
+    const logData = findStructuredLog(consoleInfoSpy, 'SETTLEMENT_ECONOMICS_EXECUTION');
+    expect(logData).toBeDefined();
+    expect(logData!['event']).toBe('SETTLEMENT_ECONOMICS_EXECUTION');
+    expect(logData!['digest']).toBe(suiDigest(txBytes));
   });
 
   it('allows sponsor when the stored-hash-verified PTB carries a valid address-balance payment-input contract', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     // validationFingerprint is not checked at /sponsor — any stub value works.
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
@@ -675,7 +723,7 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest123');
+    expect(result.digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -719,6 +767,7 @@ describe('handleSponsor', () => {
       evictPreparedEntry: evictSpy,
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
+      checkUserQuota: vi.fn().mockResolvedValue('ok' as const),
     };
     const ctx = makeMockContext({ prepareStore: corruptStore });
 
@@ -755,6 +804,7 @@ describe('handleSponsor', () => {
       evictPreparedEntry: evictSpy,
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
+      checkUserQuota: vi.fn().mockResolvedValue('ok' as const),
     };
     const ctx = makeMockContext({ prepareStore: corruptStore });
 
@@ -909,16 +959,14 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest123');
+    expect(result.digest).toBe(suiDigest(txBytes));
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalledWith(
       CLIENT_IP,
       { kind: 'address', address: SENDER },
       'TAMPERING_DETECTED',
       undefined,
     );
-    const economicsLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SETTLEMENT_ECONOMICS_EXECUTION');
+    const economicsLog = findStructuredLog(consoleInfoSpy, 'SETTLEMENT_ECONOMICS_EXECUTION');
     expect(economicsLog).toBeDefined();
     expect(economicsLog!['fee_charged']).toBe(
       DEFAULT_TX_SETTLE_VALUES.quotedHostFeeMist.toString(),
@@ -942,7 +990,7 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest123');
+    expect(result.digest).toBe(suiDigest(txBytes));
   });
 
   // Post-consume payment-integrity failure is server-side drift, not tampering.
@@ -956,7 +1004,7 @@ describe('handleSponsor', () => {
     });
     // validationFingerprint is not checked at /sponsor — stub value
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
@@ -980,9 +1028,7 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // Operator observability: SPONSOR_DRIFT_OBSERVED must be logged with stage+subcode
-    const driftLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+    const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
     expect(driftLog).toBeDefined();
     expect(driftLog!['stage']).toBe('payment_integrity');
     expect(typeof driftLog!['subcode']).toBe('string');
@@ -1049,9 +1095,7 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // Operator observability: SPONSOR_DRIFT_OBSERVED with correct stage
-    const driftLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+    const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
     expect(driftLog).toBeDefined();
     expect(driftLog!['stage']).toBe('gas_owner_mismatch');
     expect(driftLog!['subcode']).toBe('GAS_OWNER_MISMATCH');
@@ -1149,18 +1193,7 @@ describe('handleSponsor', () => {
       );
 
       // Recorder degradation observable via SPONSOR_FAILURE_RECORDER_FAILED.
-      const recorderFailed = warnSpy.mock.calls
-        .map((call) => {
-          try {
-            return JSON.parse(String(call[0])) as Record<string, unknown>;
-          } catch {
-            return null;
-          }
-        })
-        .find(
-          (entry): entry is Record<string, unknown> =>
-            entry?.['event'] === 'SPONSOR_FAILURE_RECORDER_FAILED',
-        );
+      const recorderFailed = findStructuredLog(warnSpy, 'SPONSOR_FAILURE_RECORDER_FAILED');
       expect(recorderFailed).toBeDefined();
       expect(recorderFailed!['code']).toBe('PREFLIGHT_FAILED');
       expect(recorderFailed!['error']).toBe('redis unreachable');
@@ -1282,7 +1315,7 @@ describe('handleSponsor', () => {
     ).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(SponsorOnchainError);
-    expect((err as SponsorOnchainError).digest).toBe('0xrevert');
+    expect((err as SponsorOnchainError).digest).toBe(suiDigest(txBytes));
     expect((err as SponsorOnchainError).gasUsed).toEqual({
       computationCost: '1000000',
       storageCost: '1000000',
@@ -1354,13 +1387,13 @@ describe('handleSponsor', () => {
       sui,
     });
 
-    await expect(
-      handleSponsor(
-        ctx,
-        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-        CLIENT_IP,
-      ),
-    ).rejects.toThrow('connection refused');
+    const err = await handleSponsor(
+      ctx,
+      { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
+      CLIENT_IP,
+    ).catch((cause: unknown) => cause);
+    expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
+    expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -1597,7 +1630,7 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest123');
+    expect(result.digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -1663,9 +1696,7 @@ describe('handleSponsor', () => {
     );
 
     // Structured observability: SPONSOR_DRIFT_OBSERVED must be emitted
-    const driftLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+    const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
     expect(driftLog).toBeDefined();
     expect(driftLog!['stage']).toBe('l2_settle_args');
     expect(typeof driftLog!['subcode']).toBe('string'); // L2_PROTOCOL_FEE_MISMATCH or similar
@@ -1726,9 +1757,7 @@ describe('handleSponsor', () => {
         expect.any(String),
       );
 
-      const driftLog = consoleInfoSpy.mock.calls
-        .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+      const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
       expect(driftLog).toBeDefined();
       expect(driftLog!['stage']).toBe(expectedStage);
       expect(driftLog!['subcode']).toBe(expectedSubcode);
@@ -1747,7 +1776,7 @@ describe('handleSponsor', () => {
     // Build a swap TX valid for SWAP_ALLOWED_ROUTE
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
@@ -1782,9 +1811,7 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // SPONSOR_DRIFT_OBSERVED logged
-    const driftLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+    const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
     expect(driftLog).toBeDefined();
     expect(typeof driftLog!['subcode']).toBe('string');
     expect(driftLog!['receipt_id']).toBe(PAYMENT_ID);
@@ -1888,7 +1915,7 @@ describe('handleSponsor', () => {
       CLIENT_IP,
     );
 
-    expect(result.digest).toBe('0xdigest_negative_gas');
+    expect(result.digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -1972,9 +1999,7 @@ describe('handleSponsor', () => {
     expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
 
     // SPONSOR_DRIFT_OBSERVED must be logged
-    const driftLog = consoleInfoSpy.mock.calls
-      .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+    const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
     expect(driftLog).toBeDefined();
     expect(driftLog!['stage']).toBe('l2_settle_args');
 
@@ -2095,7 +2120,7 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('CLAIM_WOULD_EXCEED_MAX');
-    expect((err as SponsorOnchainError).digest).toBe('0xrevert_claim');
+    expect((err as SponsorOnchainError).digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -2108,7 +2133,7 @@ describe('handleSponsor', () => {
   it('throws SponsorPreflightError with subcode SPREAD_EXCEEDED on abort 110 in preflight', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
@@ -2151,7 +2176,7 @@ describe('handleSponsor', () => {
   it('throws SponsorOnchainError with subcode SPREAD_EXCEEDED on abort 110 in execution', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
@@ -2182,7 +2207,7 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('SPREAD_EXCEEDED');
-    expect((err as SponsorOnchainError).digest).toBe('0xrevert_spread');
+    expect((err as SponsorOnchainError).digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -2195,7 +2220,7 @@ describe('handleSponsor', () => {
   it('throws SponsorPreflightError with subcode SLIPPAGE_EXCEEDED on abort 12 in preflight', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
@@ -2237,7 +2262,7 @@ describe('handleSponsor', () => {
   it('throws SponsorOnchainError with subcode SLIPPAGE_EXCEEDED on abort 12 in execution', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash, {
-      executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+      executionPathKey: SWAP_EXECUTION_PATH_KEY,
     });
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
@@ -2267,7 +2292,7 @@ describe('handleSponsor', () => {
 
     expect(err).toBeInstanceOf(SponsorOnchainError);
     expect((err as SponsorOnchainError).subcode).toBe('SLIPPAGE_EXCEEDED');
-    expect((err as SponsorOnchainError).digest).toBe('0xrevert_slippage');
+    expect((err as SponsorOnchainError).digest).toBe(suiDigest(txBytes));
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -2571,11 +2596,11 @@ describe('handleSponsor', () => {
     });
   });
 
-  // ── Post-submit gasUsed-missing → SPONSOR_FAILED 500 ────────────────
+  // ── Post-submit gasUsed-missing → terminal-processing failure ──────────
   //
   // Locks four characteristics of the post-submit `success + !gasUsed`
   // path:
-  //   1. Error classification: SponsorValidationError(SPONSOR_FAILED, 500)
+  //   1. Error classification: SponsorTerminalProcessingError(GAS_EFFECTS_MISSING)
   //      — NOT SponsorPreflightError (would invite unsafe retries).
   //   2. Observability: `SPONSOR_EXEC_GAS_USED_MISSING` structured warn
   //      event with the locked payload (route, digest, receipt_id,
@@ -2584,7 +2609,7 @@ describe('handleSponsor', () => {
   //      submitted TX — must not increment any abuse counter.
   //   4. Cleanup: slot is checked in via the finally block.
 
-  it('post-submit gasUsed-missing: SPONSOR_FAILED 500 + structured warn log + no abuse + slot checkin', async () => {
+  it('post-submit gasUsed-missing: terminal-processing error + structured warn log + no abuse + slot checkin', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
@@ -2610,19 +2635,17 @@ describe('handleSponsor', () => {
     ).catch((e: unknown) => e);
 
     // (1) Error classification
-    expect(err).toBeInstanceOf(SponsorValidationError);
-    expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
-    expect((err as SponsorValidationError).statusHint).toBe(500);
-    expect((err as SponsorValidationError).message).toContain('0xdigest_exec_no_gas');
+    expect(err).toBeInstanceOf(SponsorTerminalProcessingError);
+    expect((err as SponsorTerminalProcessingError).code).toBe('GAS_EFFECTS_MISSING');
+    expect((err as SponsorTerminalProcessingError).digest).toBe(suiDigest(txBytes));
+    expect((err as SponsorTerminalProcessingError).message).toContain(suiDigest(txBytes));
     expect(err).not.toBeInstanceOf(SponsorPreflightError);
 
     // (2) Observability: SPONSOR_EXEC_GAS_USED_MISSING warn event with locked payload
-    const missingGasLog = consoleWarnSpy.mock.calls
-      .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-      .find((entry) => entry['event'] === 'SPONSOR_EXEC_GAS_USED_MISSING');
+    const missingGasLog = findStructuredLog(consoleWarnSpy, 'SPONSOR_EXEC_GAS_USED_MISSING');
     expect(missingGasLog).toBeDefined();
     expect(missingGasLog!['route']).toBe('generic');
-    expect(missingGasLog!['digest']).toBe('0xdigest_exec_no_gas');
+    expect(missingGasLog!['digest']).toBe(suiDigest(txBytes));
     expect(missingGasLog!['receipt_id']).toBe(PAYMENT_ID);
     expect(missingGasLog!['sender']).toBe(SENDER);
     expect(missingGasLog!['client_ip']).toBe(CLIENT_IP);
@@ -2700,7 +2723,7 @@ describe('handleSponsor', () => {
         outcome: 'success',
         executionStage: 'on_chain',
         route: 'generic',
-        digest: '0xdigest123',
+        digest: suiDigest(txBytes),
       });
       // Economics block feeds the sponsored-execution recorder.
       // success path → known economics with grossGas/storageRebate set.
@@ -2742,9 +2765,9 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ).catch((e: unknown) => e);
 
-      // Primary error transport is unchanged (fail-closed 500).
-      expect(err).toBeInstanceOf(SponsorValidationError);
-      expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
+      expect(err).toBeInstanceOf(SponsorTerminalProcessingError);
+      expect((err as SponsorTerminalProcessingError).code).toBe('GAS_EFFECTS_MISSING');
+      expect((err as SponsorTerminalProcessingError).digest).toBe(suiDigest(txBytes));
 
       // Sponsor result callback sees success because the TX really did submit.
       expect(probe.calls).toHaveLength(1);
@@ -2752,7 +2775,7 @@ describe('handleSponsor', () => {
         sponsorAddress: SPONSOR_ADDRESS,
         outcome: 'success',
         executionStage: 'on_chain',
-        digest: '0xdigest_exec_no_gas',
+        digest: suiDigest(txBytes),
       });
       // Economics block: gasUsed-missing edge path → unknown economics
       // with the SPONSOR_EXEC_GAS_USED_MISSING failureReason.
@@ -2790,7 +2813,7 @@ describe('handleSponsor', () => {
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('onchain_revert');
       expect(probe.calls[0].executionStage).toBe('on_chain');
-      expect(probe.calls[0].digest).toBe('0xreverted_digest');
+      expect(probe.calls[0].digest).toBe(suiDigest(txBytes));
     });
 
     it('congestion → outcome=congestion', async () => {
@@ -2850,13 +2873,15 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ).catch((e: unknown) => e);
 
-      expect(err).toBeInstanceOf(Error);
-      expect((err as Error).message).toContain('rpc transport rejected');
+      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
+      expect((err as SponsorSubmissionUncertainError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
+      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
 
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0].outcome).toBe('internal_error');
       expect(probe.calls[0].executionStage).toBe('after_sponsor_signature');
       expect(probe.calls[0].route).toBe('generic');
+      expect(probe.calls[0].digest).toBe(suiDigest(txBytes));
       expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
       if (probe.calls[0].economics.economicsStatus === 'unknown') {
         expect(probe.calls[0].economics.failureReason).toContain('post_signature_uncertainty');
@@ -2883,13 +2908,14 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ).catch((cause: unknown) => cause);
 
-      expect(err).toBeInstanceOf(Error);
-      expect((err as Error).message).toContain('malformed terminal result');
+      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
+      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0]).toMatchObject({
         outcome: 'internal_error',
         executionStage: 'after_sponsor_signature',
         route: 'generic',
+        digest: suiDigest(txBytes),
       });
       expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
     });
@@ -2921,8 +2947,8 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ).catch((cause: unknown) => cause);
 
-      expect(err).toBeInstanceOf(Error);
-      expect((err as Error).message).toContain('malformed terminal result');
+      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
+      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0]).toMatchObject({
         outcome: 'internal_error',
@@ -2964,8 +2990,8 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       ).catch((cause: unknown) => cause);
 
-      expect(err).toBeInstanceOf(Error);
-      expect((err as Error).message).toContain('malformed terminal result');
+      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
+      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
       expect(probe.calls).toHaveLength(1);
       expect(probe.calls[0]).toMatchObject({
         outcome: 'internal_error',
@@ -3083,7 +3109,8 @@ describe('handleSponsor', () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      const successExec = grpcExecutionSuccess('tx-rebate-event-log', {
+      const executionDigest = suiDigest(txBytes);
+      const successExec = grpcExecutionSuccess(executionDigest, {
         computationCost: '500000',
         storageCost: '300000',
         storageRebate: '2000000',
@@ -3101,15 +3128,7 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       );
 
-      const log = consoleInfoSpy.mock.calls
-        .map((args: unknown[]) => {
-          try {
-            return JSON.parse(args[0] as string) as Record<string, unknown>;
-          } catch {
-            return null;
-          }
-        })
-        .find((entry) => entry && entry['event'] === 'SETTLEMENT_ECONOMICS_EXECUTION');
+      const log = findStructuredLog(consoleInfoSpy, 'SETTLEMENT_ECONOMICS_EXECUTION');
       expect(log).toBeDefined();
       // Raw on-chain values preserved verbatim.
       expect(log!['gross_gas']).toBe('800000');
@@ -3126,7 +3145,7 @@ describe('handleSponsor', () => {
       // ever changes.
       expect(log).toMatchObject({
         event: 'SETTLEMENT_ECONOMICS_EXECUTION',
-        digest: 'tx-rebate-event-log',
+        digest: executionDigest,
       });
 
       consoleInfoSpy.mockRestore();
@@ -3201,11 +3220,9 @@ describe('handleSponsor', () => {
       );
 
       // Primary response unaffected by callback failure.
-      expect(result.digest).toBe('0xdigest123');
+      expect(result.digest).toBe(suiDigest(txBytes));
       // Structured warn log emitted by the handler's defence-in-depth catch.
-      const callbackFailedLog = consoleWarnSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_RESULT_CALLBACK_FAILED');
+      const callbackFailedLog = findStructuredLog(consoleWarnSpy, 'SPONSOR_RESULT_CALLBACK_FAILED');
       expect(callbackFailedLog).toBeDefined();
       expect(callbackFailedLog!['route']).toBe('generic');
       expect(callbackFailedLog!['outcome']).toBe('success');
@@ -3213,7 +3230,7 @@ describe('handleSponsor', () => {
       // operators can correlate this emit with host-side projection
       // failures (`SPONSORED_LOGS_RECORDER_FAILED` / `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`).
       expect(callbackFailedLog!['source']).toBe('sponsor_handler');
-      expect(callbackFailedLog!['digest']).toBe('0xdigest123');
+      expect(callbackFailedLog!['digest']).toBe(suiDigest(txBytes));
       consoleWarnSpy.mockRestore();
     });
   });
@@ -3230,7 +3247,7 @@ describe('handleSponsor', () => {
   // vault state after gas-owner verification and before preflight/signing:
   //   - vault now exists  → REPREPARE_REQUIRED + SPONSOR_DRIFT_OBSERVED, no abuse, no sign.
   //   - vault still absent → flow continues unchanged.
-  //   - RPC error / inconsistent state → fail closed (SPONSOR_FAILED 500), no sign.
+  //   - RPC error / inconsistent state → fail closed (SPONSOR_FAILED), no sign.
   //   - non-new_user PTBs (with_vault, credit) → re-query is not invoked.
   describe('new-user User Vault drift pre-sign re-query', () => {
     function makeVaultDriftContext(
@@ -3287,9 +3304,7 @@ describe('handleSponsor', () => {
       // §Sponsor Failure Classification: stage / subcode / route / receipt_id /
       // sender / client_ip. The promotion-only `promotion_id` field must NOT
       // appear on a generic-execution-path emit.
-      const driftLog = consoleInfoSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+      const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
       expect(driftLog).toBeDefined();
       expect(driftLog!['stage']).toBe(VAULT_DRIFT_NEW_USER_VAULT_EXISTS.stage);
       expect(driftLog!['subcode']).toBe(VAULT_DRIFT_NEW_USER_VAULT_EXISTS.subcode);
@@ -3379,9 +3394,7 @@ describe('handleSponsor', () => {
       expect(sui.executeTransaction).not.toHaveBeenCalled();
       // The handler emits SPONSOR_DRIFT_OBSERVED with the right stage; it does NOT
       // emit a preflight-failure record because preflight never ran.
-      const driftLog = consoleInfoSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+      const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
       expect(driftLog).toBeDefined();
       expect(driftLog!['stage']).toBe(VAULT_DRIFT_NEW_USER_VAULT_EXISTS.stage);
     });
@@ -3424,7 +3437,7 @@ describe('handleSponsor', () => {
         settleVariant: 'with_vault',
       });
       const prepared = makePreparedEntry(txHash, {
-        executionPathKey: _buildExecutionPathKey(SWAP_ALLOWED_ROUTE),
+        executionPathKey: SWAP_EXECUTION_PATH_KEY,
       });
       const userSig = await buildValidSignature(txBytes);
       const sui = makeMockSui();
@@ -3453,7 +3466,7 @@ describe('handleSponsor', () => {
       expect(sui.executeTransaction).toHaveBeenCalledTimes(1);
     });
 
-    it('new_user PTB + queryUserCredit RPC error → SPONSOR_FAILED 500, no sign, no abuse, drift log', async () => {
+    it('new_user PTB + queryUserCredit RPC error → SPONSOR_FAILED, no sign, no abuse, drift log', async () => {
       const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash, { executionPathKey: 'swap:new_user' });
       const userSig = await buildValidSignature(txBytes);
@@ -3476,7 +3489,6 @@ describe('handleSponsor', () => {
 
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
-      expect((err as SponsorValidationError).statusHint).toBe(500);
       // Fail-closed BEFORE preflight + sign + submit.
       expect(sui.simulateTransaction).not.toHaveBeenCalled();
       expect(sponsorPool.sign).not.toHaveBeenCalled();
@@ -3484,9 +3496,7 @@ describe('handleSponsor', () => {
       // Sponsor-time vault re-query failure records no abuse:
       // server-observable transient/inconsistent state, not user manipulation.
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
-      const driftLog = consoleInfoSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+      const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
       expect(driftLog).toBeDefined();
       expect(driftLog!['stage']).toBe(VAULT_DRIFT_QUERY_FAILED.stage);
       expect(driftLog!['subcode']).toBe(VAULT_DRIFT_QUERY_FAILED.subcode);
@@ -3498,7 +3508,7 @@ describe('handleSponsor', () => {
       expect(sponsorPool.checkin).toHaveBeenCalledTimes(1);
     });
 
-    it('new_user PTB + CreditQueryInconsistentStateError → SPONSOR_FAILED 500, no abuse, distinct drift stage', async () => {
+    it('new_user PTB + CreditQueryInconsistentStateError → SPONSOR_FAILED, no abuse, distinct drift stage', async () => {
       const { encodedTxBytes, txBytes, txHash } = await buildAddressBalanceSwapTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash, { executionPathKey: 'swap:new_user' });
       const userSig = await buildValidSignature(txBytes);
@@ -3521,7 +3531,6 @@ describe('handleSponsor', () => {
 
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
-      expect((err as SponsorValidationError).statusHint).toBe(500);
       // Fail-closed BEFORE preflight + sign + submit.
       expect(sui.simulateTransaction).not.toHaveBeenCalled();
       expect(sponsorPool.sign).not.toHaveBeenCalled();
@@ -3529,9 +3538,7 @@ describe('handleSponsor', () => {
       // Registry/vault inconsistency is a server-observable trust-root drift,
       // not user manipulation.
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
-      const driftLog = consoleInfoSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_DRIFT_OBSERVED');
+      const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
       expect(driftLog).toBeDefined();
       expect(driftLog!['stage']).toBe(VAULT_DRIFT_STATE_INCONSISTENT.stage);
       expect(driftLog!['subcode']).toBe(VAULT_DRIFT_STATE_INCONSISTENT.subcode);

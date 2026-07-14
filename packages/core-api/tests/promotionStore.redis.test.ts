@@ -14,7 +14,7 @@ import {
   RedisPromotionStore,
   type CreatePromotionInput,
 } from '../src/studio/promotionStore.js';
-import { startRealRedis, type RealRedisHandle } from './helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 const STATUSES = [
   'draft',

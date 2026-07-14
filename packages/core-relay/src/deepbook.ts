@@ -9,9 +9,12 @@
  */
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiClientTypes } from '@mysten/sui/client';
 import type { DeepBookPoolHop } from '@stelis/contracts';
-import { SUI_CLOCK_OBJECT_ID } from './constants.js';
+import { SUI_CLOCK_OBJECT_ID, SUI_ZERO_ADDRESS } from './constants.js';
 import { SlippageQueryError } from './deepbookErrors.js';
+import { bindCurrentSuiResultToBytes } from './suiResultBinding.js';
+import { decodeExactU64Bytes } from './decodeU64.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -19,6 +22,28 @@ import { SlippageQueryError } from './deepbookErrors.js';
 
 /** Default slippage tolerance in basis points. */
 export const DEFAULT_SLIPPAGE_BPS = 200;
+
+type SimulationCommandResults = NonNullable<
+  SuiClientTypes.SimulateTransactionResult<{ commandResults: true }>['commandResults']
+>;
+
+function requireSuccessfulSimulationCommandResults(
+  result: unknown,
+  transactionBytes: Uint8Array,
+  operation: string,
+): SimulationCommandResults {
+  const bound = bindCurrentSuiResultToBytes(result, transactionBytes);
+  if (!bound) {
+    throw new SlippageQueryError(`${operation}: malformed or mismatched simulation result`);
+  }
+  if (bound.outcome === 'failure') {
+    throw new SlippageQueryError(`${operation}: simulation failed (${bound.errorMessage})`);
+  }
+  if (!bound.commandResults) {
+    throw new SlippageQueryError(`${operation}: simulation returned no command results`);
+  }
+  return bound.commandResults as SimulationCommandResults;
+}
 
 // ─────────────────────────────────────────────
 // getHopMidPriceRaw — bigint native, per-hop
@@ -45,7 +70,7 @@ export async function getHopMidPriceRaw(
     arguments: [tx.object(hop.poolId), tx.object(SUI_CLOCK_OBJECT_ID)],
   });
 
-  tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
+  tx.setSender(SUI_ZERO_ADDRESS);
 
   let txBytes: Uint8Array;
   try {
@@ -56,8 +81,7 @@ export async function getHopMidPriceRaw(
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic SimulateTransactionResult
-  let result: any;
+  let result: unknown;
   try {
     result = await client.simulateTransaction({
       transaction: txBytes,
@@ -70,15 +94,16 @@ export async function getHopMidPriceRaw(
   }
 
   // Empty/missing return values = pool has no data → null (not an error)
-  const cmdResults = result.commandResults;
+  const cmdResults = requireSuccessfulSimulationCommandResults(result, txBytes, 'mid_price');
   if (!cmdResults?.[0]?.returnValues?.[0]?.bcs) {
     return null;
   }
 
-  // BCS decode — decodeLittleEndianU64Raw throws SlippageQueryError on length ≠ 8
+  // BCS decode — the boundary translates exact-width decoder failures to the
+  // DeepBook query error contract.
   const bcsBytes = cmdResults[0].returnValues[0].bcs;
   const buf = bcsBytes instanceof Uint8Array ? bcsBytes : new Uint8Array(bcsBytes);
-  return decodeLittleEndianU64Raw(buf);
+  return decodeDeepBookU64(buf);
 }
 
 /**
@@ -113,7 +138,7 @@ export async function batchGetHopMidPrices(
       arguments: [tx.object(hop.poolId), tx.object(SUI_CLOCK_OBJECT_ID)],
     });
   }
-  tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
+  tx.setSender(SUI_ZERO_ADDRESS);
 
   let txBytes: Uint8Array;
   try {
@@ -124,8 +149,7 @@ export async function batchGetHopMidPrices(
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic SimulateTransactionResult
-  let result: any;
+  let result: unknown;
   try {
     result = await client.simulateTransaction({
       transaction: txBytes,
@@ -137,7 +161,7 @@ export async function batchGetHopMidPrices(
     );
   }
 
-  const cmdResults = result.commandResults;
+  const cmdResults = requireSuccessfulSimulationCommandResults(result, txBytes, 'batch mid_price');
   const prices: bigint[] = [];
   for (let i = 0; i < hops.length; i++) {
     const bcsBytes = cmdResults?.[i]?.returnValues?.[0]?.bcs;
@@ -147,7 +171,7 @@ export async function batchGetHopMidPrices(
       continue;
     }
     const buf = bcsBytes instanceof Uint8Array ? bcsBytes : new Uint8Array(bcsBytes);
-    prices.push(decodeLittleEndianU64Raw(buf));
+    prices.push(decodeDeepBookU64(buf));
   }
   return prices;
 }
@@ -196,7 +220,7 @@ export async function getQuantityOut(
       ],
     });
 
-    tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
+    tx.setSender(SUI_ZERO_ADDRESS);
     const txBytes = await tx.build({ client });
 
     const result = await client.simulateTransaction({
@@ -204,7 +228,12 @@ export async function getQuantityOut(
       include: { commandResults: true },
     });
 
-    const rv = result.commandResults?.[0]?.returnValues;
+    const commandResults = requireSuccessfulSimulationCommandResults(
+      result,
+      txBytes,
+      'get_quantity_out',
+    );
+    const rv = commandResults[0]?.returnValues;
     if (!rv || rv.length < 3) {
       throw new SlippageQueryError(
         `get_quantity_out: expected 3 return values, got ${rv?.length ?? 0}`,
@@ -218,7 +247,7 @@ export async function getQuantityOut(
         throw new SlippageQueryError(`get_quantity_out: missing BCS at index ${idx}`);
       }
       const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
-      return decodeLittleEndianU64Raw(buf);
+      return decodeDeepBookU64(buf);
     };
 
     const baseOut = decode(0);
@@ -298,7 +327,7 @@ export async function getInputForTargetOutput(
       ],
     });
 
-    tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
+    tx.setSender(SUI_ZERO_ADDRESS);
     const txBytes = await tx.build({ client });
 
     const result = await client.simulateTransaction({
@@ -306,7 +335,8 @@ export async function getInputForTargetOutput(
       include: { commandResults: true },
     });
 
-    const rv = result.commandResults?.[0]?.returnValues;
+    const commandResults = requireSuccessfulSimulationCommandResults(result, txBytes, moveFn);
+    const rv = commandResults[0]?.returnValues;
     if (!rv || rv.length < 3) {
       throw new SlippageQueryError(`${moveFn}: expected 3 return values, got ${rv?.length ?? 0}`);
     }
@@ -317,7 +347,7 @@ export async function getInputForTargetOutput(
         throw new SlippageQueryError(`${moveFn}: missing BCS at index ${idx}`);
       }
       const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
-      return decodeLittleEndianU64Raw(buf);
+      return decodeDeepBookU64(buf);
     };
 
     const baseValue = decode(0);
@@ -341,16 +371,12 @@ export async function getInputForTargetOutput(
 // Internal helpers
 // ─────────────────────────────────────────────
 
-/** Decode a little-endian u64 from a byte array (returns bigint — precision safe) */
-function decodeLittleEndianU64Raw(buf: Uint8Array): bigint {
-  // Fail-closed: u64 BCS encoding must be exactly 8 bytes.
-  // Shorter or longer payloads indicate a malformed response.
-  if (buf.length !== 8) {
-    throw new SlippageQueryError(`u64 BCS decode: expected 8 bytes, got ${buf.length}`);
+function decodeDeepBookU64(bytes: Uint8Array): bigint {
+  try {
+    return decodeExactU64Bytes(bytes);
+  } catch (error) {
+    throw new SlippageQueryError(
+      `u64 BCS decode failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  let value = 0n;
-  for (let i = 0; i < 8; i++) {
-    value |= BigInt(buf[i]) << BigInt(i * 8);
-  }
-  return value;
 }

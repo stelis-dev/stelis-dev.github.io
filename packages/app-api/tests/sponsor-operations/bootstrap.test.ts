@@ -42,6 +42,9 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
     async read() {
       return null;
     },
+    async readWithdrawalReceipt() {
+      return null;
+    },
     async readAccountObservationCursor() {
       return { operationId: null, spendSequence: 0, writeSequence: 0 };
     },

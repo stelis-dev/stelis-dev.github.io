@@ -1,4 +1,5 @@
 import type { SuiClientTypes } from '@mysten/sui/client';
+import { TransactionDataBuilder } from '@mysten/sui/transactions';
 
 export interface TestGasUsed {
   readonly computationCost: string;
@@ -16,6 +17,38 @@ const DEFAULT_GAS_USED: TestGasUsed = {
   storageRebate: '200000',
   nonRefundableStorageFee: '0',
 };
+
+/**
+ * Bind an otherwise intentional RPC fixture shape to the transaction passed
+ * to a mock Sui client. Real RPC terminals cannot choose an unrelated digest;
+ * tests for malformed unions remain malformed because this helper changes
+ * only the terminal identity fields.
+ */
+export function bindGrpcResultToTransactionBytes<T>(result: T, transaction: Uint8Array): T {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) return result;
+  const record = result as Record<string, unknown>;
+  const kind = record.$kind;
+  if (kind !== 'Transaction' && kind !== 'FailedTransaction') return result;
+  const payload = record[kind];
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return result;
+
+  const digest = TransactionDataBuilder.getDigestFromBytes(transaction);
+  const payloadRecord = payload as Record<string, unknown>;
+  const effectsValue = payloadRecord.effects;
+  const effectsRecord =
+    typeof effectsValue === 'object' && effectsValue !== null && !Array.isArray(effectsValue)
+      ? { ...(effectsValue as Record<string, unknown>), transactionDigest: digest }
+      : effectsValue;
+
+  return {
+    ...record,
+    [kind]: {
+      ...payloadRecord,
+      digest,
+      effects: effectsRecord,
+    },
+  } as T;
+}
 
 function gasSummary(gasUsed: TestGasUsed): SuiClientTypes.GasCostSummary {
   return {

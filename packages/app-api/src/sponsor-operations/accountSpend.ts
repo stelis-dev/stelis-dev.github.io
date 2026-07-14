@@ -9,7 +9,10 @@ import {
   type SponsorSlotState,
   type SuiNetwork,
 } from '@stelis/contracts';
-import { parseSuiTransactionResult } from '@stelis/core-api';
+import {
+  parseCurrentSuiTerminalForBytes,
+  parseCurrentSuiTerminalForDigest,
+} from '@stelis/core-api';
 import type {
   SponsorRefillAccountDispatchLock,
   SponsorRefillAccountDispatchLockHandle,
@@ -190,12 +193,9 @@ function parseCurrentTransactionResult(
   raw: SuiClientTypes.TransactionResult<{ effects: true }>,
   expectedDigest: string,
 ): SponsorRefillAccountChainResult {
-  const transaction = parseSuiTransactionResult(raw);
+  const transaction = parseCurrentSuiTerminalForDigest(raw, expectedDigest);
   if (transaction === null) {
     throw new Error('Sponsor Refill Account transaction returned a malformed terminal result');
-  }
-  if (transaction.digest !== expectedDigest) {
-    throw new Error('Sponsor Refill Account transaction result has an unexpected digest');
   }
   return {
     digest: expectedDigest,
@@ -204,11 +204,14 @@ function parseCurrentTransactionResult(
   };
 }
 
-function parseSimulationResult(raw: SuiClientTypes.SimulateTransactionResult<{ effects: true }>): {
+function parseSimulationResult(
+  raw: SuiClientTypes.SimulateTransactionResult<{ effects: true }>,
+  transactionBytes: Uint8Array,
+): {
   success: boolean;
   error: string | null;
 } {
-  const transaction = parseSuiTransactionResult(raw);
+  const transaction = parseCurrentSuiTerminalForBytes(raw, transactionBytes);
   if (transaction === null) {
     throw new Error('Sponsor Refill Account simulation returned a malformed terminal result');
   }
@@ -396,6 +399,7 @@ export function createSuiSponsorRefillAccountSpendBoundary(input: {
           transaction: transactionBytes,
           include: { effects: true },
         }),
+        transactionBytes,
       );
     },
 

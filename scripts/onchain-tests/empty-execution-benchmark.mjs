@@ -7,21 +7,51 @@
  * the sponsored transaction. In the direct phase, the wallet submits a
  * plain empty SUI transaction.
  */
-import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
-import { fromBase64 } from '@mysten/sui/utils';
-import { queryUserCredit, StelisApiException, StelisSDK, StelisSponsoredError } from '@stelis/sdk';
+import { fromBase64, isValidTransactionDigest, SUI_TYPE_ARG } from '@mysten/sui/utils';
+import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
+import {
+  parseRelaySponsorResponse,
+  parseHostErrorResponse,
+  HOST_ERROR_HTTP_STATUS,
+  RELAY_SPONSOR_ERROR_CODES,
+  SLIPPAGE_CAP_BPS,
+  SUI_CHAIN_IDENTIFIERS,
+} from '@stelis/contracts';
+import { parseCurrentSuiTerminalForDigest } from '@stelis/core-api';
+import { computeExecutionCostClaim, DEFAULT_SLIPPAGE_BPS } from '@stelis/core-relay';
+import { queryUserCredit, StelisApiException, StelisSDK } from '@stelis/sdk';
+import { verifySettleEventInTransaction } from '@stelis/sdk/server';
+import {
+  classifyVaultSnapshots,
+  classifySponsorPostOutcome,
+  composeBenchmarkRecord,
+  measureSettlementTokenBalanceChanges,
+  parseSpendableBalanceRaw,
+  projectBenchmarkErrorMeta,
+  resolveSettlementSwapPathByType,
+  summarizeTokenMeasurements,
+} from './empty-execution-benchmark-model.mjs';
+import {
+  appendDurableJsonl,
+  createDurableJsonl,
+  defaultBenchmarkJournalRoot,
+  EmptyExecutionBenchmarkJournal,
+  recoverBenchmarkAttempt,
+  writeExclusiveText,
+} from './empty-execution-benchmark-journal.mjs';
 
-const SUI_TYPE = '0x2::sui::SUI';
 const DEFAULT_DIRECT_GAS_BUDGET_MIST = 3_000_000n;
-const RATE_LIMIT_RETRY_FALLBACK_MS = 10_000;
 const RATE_LIMIT_RETRY_PADDING_MS = 250;
 const DIRECT_DUPLICATE_DIGEST_RETRY_WAIT_MS = 1_000;
 const DIRECT_DUPLICATE_DIGEST_RETRY_LIMIT = 10;
+const BENCHMARK_EVIDENCE_SCHEMA = 'stelis_empty_execution_benchmark_v1';
 const PHASE = Object.freeze({
   SPONSORED: 'sponsored',
   DIRECT: 'direct',
@@ -62,6 +92,45 @@ const SPONSORED_FLOW_BY_PROFILE = {
 const SPONSORED_FLOW_BY_KIND = Object.fromEntries(
   Object.values(SPONSORED_FLOW_BY_PROFILE).map((flow) => [flow.key, flow]),
 );
+const VALUE_CLI_OPTIONS = Object.freeze({
+  '--phase': 'phase',
+  '--api-url': 'apiUrl',
+  '--grpc-url': 'grpcUrl',
+  '--settlement-token-type': 'settlementTokenType',
+  '--sponsored-max-runs': 'sponsoredMaxRuns',
+  '--direct-max-runs': 'directMaxRuns',
+  '--slippage-bps': 'slippageBps',
+  '--direct-gas-budget-mist': 'directGasBudgetMist',
+  '--min-sui-reserve-mist': 'minSuiReserveMist',
+  '--require-zero-sui-for-sponsored': 'requireZeroSuiForSponsored',
+  '--raw-dir': 'rawDir',
+  '--report-dir': 'reportDir',
+});
+const SUPPORTED_ENV_KEYS = new Set([
+  'STELIS_ONCHAIN_RELAY_API_URL',
+  'STELIS_ONCHAIN_USER_SECRET_KEY',
+  'STELIS_ONCHAIN_GRPC_URL',
+  'STELIS_ONCHAIN_SETTLEMENT_TOKEN_TYPE',
+  'STELIS_ONCHAIN_PHASE',
+  'STELIS_ONCHAIN_SPONSORED_MAX_RUNS',
+  'STELIS_ONCHAIN_DIRECT_MAX_RUNS',
+  'STELIS_ONCHAIN_SLIPPAGE_BPS',
+  'STELIS_ONCHAIN_REQUIRE_ZERO_SUI_FOR_SPONSORED',
+  'STELIS_ONCHAIN_DIRECT_GAS_BUDGET_MIST',
+  'STELIS_ONCHAIN_MIN_SUI_RESERVE_MIST',
+  'STELIS_ONCHAIN_RAW_DIR',
+  'STELIS_ONCHAIN_REPORT_DIR',
+]);
+const EXHAUSTION_CODES = new Set(['INSUFFICIENT_BALANCE', 'INSUFFICIENT_SETTLE_INPUT']);
+const EXHAUSTION_SUBCODES = new Set(['INSUFFICIENT_FUNDS', 'INSUFFICIENT_SETTLE_INPUT']);
+
+class SponsorResponseContractError extends Error {
+  constructor(message, candidateDigest, cause) {
+    super(message, { cause });
+    this.name = 'SponsorResponseContractError';
+    this.candidateDigest = candidateDigest;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,31 +148,44 @@ function usage() {
     '  --execute                         Actually submit transactions. Omit for dry config check.',
     '  --phase <sponsored|direct|both>    Phase to run.',
     '  --api-url <url>                    Relay API base URL.',
-    '  --settlement-token-symbol <sym>    Settlement token symbol from /relay/config.',
-    '  --settlement-token-type <type>     Full settlement token type from /relay/config.',
-    '  --max-runs <n>                     Run cap for each selected phase.',
+    '  --settlement-token-type <type>     Exact settlement token type from /relay/config.',
+    '  --sponsored-max-runs <n>           Sponsored verified-success cap.',
+    '  --direct-max-runs <n>              Direct verified-success cap.',
+    '  --slippage-bps <bps>                Sponsored prepare slippage tolerance.',
     '  --direct-gas-budget-mist <mist>    Direct empty transaction gas budget.',
     '  --min-sui-reserve-mist <mist>      Direct phase stop reserve.',
+    '  --require-zero-sui-for-sponsored <true|false>',
+    '                                     Require an isolated zero-SUI sponsored wallet.',
+    '  --grpc-url <url>                   Testnet Sui gRPC endpoint.',
     '  --raw-dir <path>                   Directory for timestamped raw JSONL files.',
-    '  --report-dir <path>                Directory for fixed cumulative Markdown reports.',
-    '  --allow-mainnet                    Permit mainnet. Default is testnet-only.',
+    '  --report-dir <path>                Directory for generated Markdown reports.',
   ].join('\n');
 }
 
 async function parseEnvFile(filePath) {
+  let raw;
   try {
-    await access(filePath);
-  } catch {
-    return {};
+    raw = await readFile(filePath, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {};
+    throw err;
   }
-  const raw = await readFile(filePath, 'utf8');
   const parsed = {};
-  for (const line of raw.split(/\r?\n/)) {
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
     const idx = trimmed.indexOf('=');
-    if (idx === -1) continue;
-    parsed[trimmed.slice(0, idx).trim()] = stripOptionalQuotes(trimmed.slice(idx + 1).trim());
+    if (idx === -1) {
+      throw new Error(`${filePath}:${index + 1} must be KEY=VALUE`);
+    }
+    const key = trimmed.slice(0, idx).trim();
+    if (!SUPPORTED_ENV_KEYS.has(key)) {
+      throw new Error(`${filePath}:${index + 1} contains unsupported setting ${key}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+      throw new Error(`${filePath}:${index + 1} repeats ${key}`);
+    }
+    parsed[key] = stripOptionalQuotes(trimmed.slice(idx + 1).trim());
   }
   return parsed;
 }
@@ -118,6 +200,14 @@ function stripOptionalQuotes(value) {
   return value;
 }
 
+function assertSupportedProcessEnv(env) {
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('STELIS_ONCHAIN_') && !SUPPORTED_ENV_KEYS.has(key)) {
+      throw new Error(`Process environment contains unsupported setting ${key}`);
+    }
+  }
+}
+
 function parseCliArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -126,25 +216,21 @@ function parseCliArgs(argv) {
       out.help = true;
     } else if (arg === '--execute') {
       out.execute = true;
-    } else if (arg === '--allow-mainnet') {
-      out.allowMainnet = true;
     } else if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
-      const key = arg.slice(2, eq === -1 ? undefined : eq);
+      const option = eq === -1 ? arg : arg.slice(0, eq);
+      const key = VALUE_CLI_OPTIONS[option];
+      if (!key) throw new Error(`Unknown option: ${option}`);
       const value = eq === -1 ? argv[++i] : arg.slice(eq + 1);
       if (value === undefined || value.startsWith('--')) {
-        throw new Error(`Missing value for --${key}`);
+        throw new Error(`Missing value for ${option}`);
       }
-      out[toCamelCase(key)] = value;
+      out[key] = value;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
   return out;
-}
-
-function toCamelCase(kebab) {
-  return kebab.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
 }
 
 function envValue(env, cli, cliName, envName, fallback = undefined) {
@@ -160,8 +246,31 @@ function requireValue(value, name) {
 }
 
 function normalizeRelayApiUrl(raw) {
-  const value = raw.trim().replace(/\/+$/, '');
-  return value.endsWith('/relay') ? value : `${value}/relay`;
+  const parsed = new URL(raw.trim());
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Relay API URL must use http or https');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Relay API URL must not contain embedded credentials');
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('Relay API URL must not contain a query string or fragment');
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  if (!parsed.pathname.endsWith('/relay')) parsed.pathname = `${parsed.pathname}/relay`;
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+function normalizeGrpcUrl(raw) {
+  const parsed = new URL(raw.trim());
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Sui gRPC URL must use http or https');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Sui gRPC URL must not contain embedded credentials');
+  }
+  if (parsed.hash) throw new Error('Sui gRPC URL must not contain a fragment');
+  return parsed.toString().replace(/\/+$/, '');
 }
 
 function includesPhase(selectedPhase, phase) {
@@ -194,14 +303,18 @@ function parseNonNegativeBigInt(raw, label) {
   return BigInt(value);
 }
 
-function defaultGrpcBaseUrl(network) {
-  if (network === 'testnet') return 'https://fullnode.testnet.sui.io:443';
-  if (network === 'mainnet') return 'https://fullnode.mainnet.sui.io:443';
-  throw new Error(`Unsupported network: ${network}`);
+function parseBoolean(raw, label) {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  throw new Error(`${label} must be true or false, got ${raw}`);
 }
 
 function timestampForFileName(date) {
   return date.toISOString().replace(/[:.]/g, '-');
+}
+
+function sha256Text(value) {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function resolveOutputPaths({ fileEnv, cli, runId }) {
@@ -211,43 +324,17 @@ function resolveOutputPaths({ fileEnv, cli, runId }) {
   );
   const reportDir = path.resolve(
     repoRoot,
-    envValue(fileEnv, cli, 'reportDir', 'STELIS_ONCHAIN_REPORT_DIR', 'docs/onchain-tests/reports'),
+    envValue(fileEnv, cli, 'reportDir', 'STELIS_ONCHAIN_REPORT_DIR', '.WORK/onchain-tests/reports'),
   );
   return {
     rawPath: path.join(rawDir, `${runId}-empty-execution-benchmark.jsonl`),
-    reportPath: path.join(reportDir, 'empty-execution-benchmark.md'),
+    reportPath: path.join(reportDir, `${runId}-empty-execution-benchmark.md`),
   };
 }
 
-function resolveSettlementSwapPath(sdk, tokenType, tokenSymbol) {
-  const paths = sdk.supportedSettlementSwapPaths;
-  if (tokenType) {
-    const match = paths.find((p) => p.settlementTokenType === tokenType);
-    if (!match) {
-      throw new Error(`No settlement swap path for settlement token type: ${tokenType}`);
-    }
-    return match;
-  }
-  const symbol = tokenSymbol.toUpperCase();
-  const matches = paths.filter((p) => p.settlementTokenSymbol.toUpperCase() === symbol);
-  if (matches.length === 0) {
-    const supported = paths
-      .map((p) => `${p.settlementTokenSymbol} (${p.settlementTokenType})`)
-      .join(', ');
-    throw new Error(`No settlement swap path for symbol ${tokenSymbol}. Supported: ${supported}`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Multiple settlement swap paths match symbol ${tokenSymbol}. Use --settlement-token-type.`,
-    );
-  }
-  return matches[0];
-}
-
-async function getBalanceMist(client, owner, coinType) {
+async function getSpendableBalanceRaw(client, owner, coinType) {
   const res = await client.getBalance({ owner, coinType });
-  const raw = res?.balance?.balance ?? res?.totalBalance ?? '0';
-  return parseNonNegativeBigInt(raw, `${coinType} balance`);
+  return parseSpendableBalanceRaw(res?.balance, coinType);
 }
 
 function formatDecimal(raw, decimals, fractionDigits = Math.min(decimals, 6)) {
@@ -272,133 +359,80 @@ async function getUserVaultStatus(client, vaultRegistryId, address) {
     vaultObjectId: credit.vaultObjectId,
     needsCreate: credit.needsCreate,
     creditMist: parseNonNegativeBigInt(credit.credit, 'User Vault credit'),
+    lastNonce: parseNonNegativeBigInt(credit.lastNonce, 'User Vault last nonce'),
   };
-}
-
-function formatUserVaultStatus(status) {
-  if (status.needsCreate || !status.vaultObjectId) return 'none';
-  return status.vaultObjectId;
 }
 
 function gasNetMist(gasUsed) {
-  const computation = parseNonNegativeBigInt(gasUsed.computationCost, 'gasUsed.computationCost');
-  const storage = parseNonNegativeBigInt(gasUsed.storageCost, 'gasUsed.storageCost');
-  const rebate = parseNonNegativeBigInt(gasUsed.storageRebate, 'gasUsed.storageRebate');
-  const net = computation + storage - rebate;
-  return net < 0n ? 0n : net;
+  return computeExecutionCostClaim(gasUsed).simGas;
 }
 
-function extractTransactionGasUsed(result) {
-  const tx = result?.Transaction ?? result?.FailedTransaction ?? result;
-  return tx?.effects?.gasUsed ?? result?.effects?.gasUsed ?? tx?.gasUsed ?? result?.gasUsed ?? null;
+function requireCurrentTransactionResult(result, expectedDigest, label) {
+  const parsed = parseCurrentSuiTerminalForDigest(result, expectedDigest);
+  if (!parsed) {
+    throw new Error(`${label} is not a canonical current Sui result for ${expectedDigest}`);
+  }
+  return parsed;
 }
 
-function extractTransactionEffects(result) {
-  const tx = result?.Transaction ?? result?.FailedTransaction ?? result;
-  return tx?.effects ?? result?.effects ?? null;
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function extractTransactionEvents(result) {
-  const tx = result?.Transaction ?? result?.FailedTransaction ?? result;
-  const events = tx?.events ?? result?.events;
-  return Array.isArray(events) ? events : [];
+function isCurrentFailure(err, code) {
+  return (
+    err instanceof StelisApiException &&
+    err.code === code &&
+    err.status === HOST_ERROR_HTTP_STATUS[code]
+  );
 }
 
-function eventTypeOf(event) {
-  return typeof event?.eventType === 'string' ? event.eventType : null;
-}
-
-function transactionEventFields(ctx, events) {
-  const eventTypes = events.map(eventTypeOf).filter((eventType) => eventType !== null);
-  return {
-    eventsAvailable: true,
-    eventTypes,
-    stelisEventTypes: eventTypes.filter((eventType) => eventType.startsWith(`${ctx.packageId}::`)),
-  };
-}
-
-function emptyTransactionEventFields() {
-  return {
-    eventsAvailable: false,
-    eventTypes: [],
-    stelisEventTypes: [],
-  };
-}
-
-function extractTransactionDigest(result) {
-  const tx = result?.Transaction ?? result?.FailedTransaction ?? result;
-  return tx?.digest ?? result?.digest ?? null;
-}
-
-function extractTransactionStatus(result) {
-  const tx = result?.Transaction ?? result?.FailedTransaction ?? result;
-  return tx?.status ?? result?.status ?? null;
-}
-
-function isFailedTransactionResult(result) {
-  if (result?.$kind === 'FailedTransaction') return true;
-  const status = extractTransactionStatus(result);
-  return status?.success === false;
-}
-
-function isExhaustionError(err) {
-  if (err instanceof StelisSponsoredError && err.code === 'INSUFFICIENT_FUNDS') return true;
-  const code = err?.code;
-  const subcode = err?.meta?.subcode;
-  if (code === 'INSUFFICIENT_FUNDS' || subcode === 'INSUFFICIENT_FUNDS') return true;
-  if (subcode === 'INSUFFICIENT_SETTLE_INPUT') return true;
-  const msg = err instanceof Error ? err.message : String(err ?? '');
-  return /insufficient|exceeds available balance|no valid gas coins|coin balance/i.test(msg);
+function isExhaustionError(err, expectedDigest) {
+  if (!(err instanceof StelisApiException)) return false;
+  if (EXHAUSTION_CODES.has(err.code)) return isCurrentFailure(err, err.code);
+  if (typeof err.meta?.subcode !== 'string' || !EXHAUSTION_SUBCODES.has(err.meta.subcode)) {
+    return false;
+  }
+  if (isCurrentFailure(err, 'SPONSOR_PREFLIGHT_FAILED')) return true;
+  return (
+    expectedDigest !== null &&
+    isCurrentFailure(err, 'SPONSOR_ONCHAIN_FAILED') &&
+    sponsorErrorDigest(err) === expectedDigest
+  );
 }
 
 function normalizeErrorMeta(meta) {
-  if (!meta || typeof meta !== 'object') return undefined;
-  const normalized = {};
-  for (const [key, value] of Object.entries(meta)) {
-    if (
-      value === null ||
-      typeof value === 'string' ||
-      typeof value === 'number' ||
-      typeof value === 'boolean'
-    ) {
-      normalized[key] = value;
-    } else if (typeof value === 'bigint') {
-      normalized[key] = value.toString();
-    } else {
-      normalized[key] = JSON.stringify(value);
-    }
-  }
-  return normalized;
+  return projectBenchmarkErrorMeta(meta);
 }
 
 function describeError(err) {
-  if (err instanceof StelisSponsoredError) {
-    return {
-      name: err.name,
-      code: err.code,
-      message: err.message,
-      meta: normalizeErrorMeta(err.meta),
-    };
-  }
   if (err instanceof StelisApiException) {
     return {
       name: err.name,
       code: err.code,
       status: err.status,
-      message: err.message,
+      message: redactSensitiveText(err.message),
       meta: normalizeErrorMeta(err.meta),
     };
   }
   if (err instanceof Error) {
     return {
       name: err.name,
-      message: err.message,
+      message: redactSensitiveText(err.message),
     };
   }
   return {
     name: 'UnknownError',
-    message: String(err),
+    message: redactSensitiveText(String(err)),
   };
+}
+
+async function observe(read) {
+  try {
+    return { status: 'observed', value: await read() };
+  } catch (error) {
+    return { status: 'unavailable', error: describeError(error) };
+  }
 }
 
 function summarizeError(err) {
@@ -409,16 +443,14 @@ function summarizeError(err) {
 
 function parseRetryAfterMs(value) {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
-  if (typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value)) {
-    const parsed = Number(value);
-    if (Number.isSafeInteger(parsed)) return parsed;
-  }
   return null;
 }
 
 function rateLimitRetryAfterMs(err) {
-  if (!(err instanceof StelisApiException) || err.status !== 429) return null;
-  return parseRetryAfterMs(err.meta?.retryAfterMs) ?? RATE_LIMIT_RETRY_FALLBACK_MS;
+  if (!(err instanceof StelisApiException) || err.status !== 429 || err.code !== 'UNKNOWN') {
+    return null;
+  }
+  return parseRetryAfterMs(err.meta?.retryAfterMs);
 }
 
 function formatDurationMs(ms) {
@@ -453,9 +485,8 @@ function parseJsonIfPossible(raw) {
 }
 
 function summarizeHttpBody(raw) {
-  const trimmed = raw.trim().replace(/\s+/g, ' ');
-  if (!trimmed) return null;
-  return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed;
+  const bytes = new TextEncoder().encode(raw);
+  return `bodyBytes=${bytes.length}; bodySha256=${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
 async function postRelaySponsor(apiUrl, body) {
@@ -468,17 +499,17 @@ async function postRelaySponsor(apiUrl, body) {
   const raw = await res.text();
   const data = parseJsonIfPossible(raw);
   if (!res.ok) {
-    const isApiError = data && typeof data === 'object' && typeof data.code === 'string';
-    const code = isApiError ? data.code : 'UNKNOWN';
-    const message = isApiError
-      ? String(data.error ?? `HTTP ${res.status}`)
-      : (summarizeHttpBody(raw) ?? res.statusText ?? `HTTP ${res.status}`);
-    const extra =
-      data && typeof data === 'object'
-        ? Object.fromEntries(
-            Object.entries(data).filter(([key]) => key !== 'code' && key !== 'error'),
-          )
-        : undefined;
+    let apiError;
+    try {
+      apiError = parseHostErrorResponse(data, RELAY_SPONSOR_ERROR_CODES, res.status);
+    } catch {
+      apiError = undefined;
+    }
+    const code = apiError?.code ?? 'UNKNOWN';
+    const message =
+      apiError?.error ??
+      `Relay API /sponsor returned a non-current error response (HTTP ${res.status}; ${summarizeHttpBody(raw)})`;
+    const extra = projectBenchmarkErrorMeta(apiError);
     throw new StelisApiException(
       code,
       message,
@@ -486,29 +517,21 @@ async function postRelaySponsor(apiUrl, body) {
       extra && Object.keys(extra).length > 0 ? extra : undefined,
     );
   }
-  if (!data || typeof data !== 'object') {
-    const hint = summarizeHttpBody(raw);
+  if (data === undefined) {
     throw new Error(
-      hint
-        ? `Invalid non-JSON response from Relay API /sponsor: ${hint}`
-        : `Invalid empty response from Relay API /sponsor (HTTP ${res.status})`,
+      `Relay API /sponsor returned a non-JSON success response (HTTP ${res.status}; ${summarizeHttpBody(raw)})`,
     );
   }
-  return data;
-}
-
-async function appendJsonl(rawPath, record) {
-  await mkdir(path.dirname(rawPath), { recursive: true });
-  await appendFile(rawPath, `${JSON.stringify(record)}\n`);
-}
-
-async function ensureRawWritable(rawPath) {
-  await mkdir(path.dirname(rawPath), { recursive: true });
-  await appendFile(rawPath, '');
-}
-
-async function ensureReportDirectory(reportPath) {
-  await mkdir(path.dirname(reportPath), { recursive: true });
+  try {
+    return parseRelaySponsorResponse(data);
+  } catch (err) {
+    const candidateDigest = isRecord(data) && typeof data.digest === 'string' ? data.digest : null;
+    throw new SponsorResponseContractError(
+      `Relay API /sponsor returned a response outside the current Host wire contract (HTTP ${res.status}; ${summarizeHttpBody(raw)})`,
+      candidateDigest,
+      err,
+    );
+  }
 }
 
 function stringifyRecord(record) {
@@ -517,27 +540,68 @@ function stringifyRecord(record) {
   );
 }
 
-async function appendBenchmarkRecord(ctx, fields) {
-  const { network: _network, stelisPackageId: _stelisPackageId, ...recordFields } = fields;
-  await appendJsonl(
-    ctx.rawPath,
-    stringifyRecord({
-      network: ctx.network,
-      stelisPackageId: ctx.packageId,
-      ...recordFields,
-    }),
-  );
+function projectBenchmarkRecord(ctx, fields) {
+  const {
+    evidenceSchema: _evidenceSchema,
+    network: _network,
+    chainIdentifier: _chainIdentifier,
+    relayApiUrl: _relayApiUrl,
+    relayEndpointHash: _relayEndpointHash,
+    suiGrpcUrl: _suiGrpcUrl,
+    suiGrpcEndpointHash: _suiGrpcEndpointHash,
+    stelisPackageId: _stelisPackageId,
+    address: _address,
+    settlementTokenType: _settlementTokenType,
+    ...recordFields
+  } = fields;
+  const provenance = benchmarkProvenance(ctx);
+  return stringifyRecord(composeBenchmarkRecord(provenance, recordFields));
 }
 
-async function executeSponsoredEmpty({
+async function createBenchmarkEvidence(ctx, fields) {
+  await createDurableJsonl(ctx.rawPath, projectBenchmarkRecord(ctx, fields));
+}
+
+async function appendBenchmarkRecord(ctx, fields) {
+  await appendDurableJsonl(ctx.rawPath, projectBenchmarkRecord(ctx, fields));
+}
+
+function benchmarkProvenance(ctx) {
+  return {
+    evidenceSchema: BENCHMARK_EVIDENCE_SCHEMA,
+    network: ctx.network,
+    chainIdentifier: ctx.chainIdentifier,
+    relayApiUrl: ctx.relayApiEvidenceUrl,
+    relayEndpointHash: ctx.relayEndpointHash,
+    suiGrpcUrl: ctx.suiGrpcEvidenceUrl,
+    suiGrpcEndpointHash: ctx.suiGrpcEndpointHash,
+    stelisPackageId: ctx.packageId,
+    address: ctx.address,
+    settlementTokenType: ctx.settlementSwapPath.settlementTokenType,
+  };
+}
+
+async function recoverActiveAttempt(journal, client) {
+  const resolved = await recoverBenchmarkAttempt(journal, async (digest) => {
+    return client.getTransaction({ digest, include: { effects: true } });
+  });
+  if (resolved === null) return false;
+
+  console.log(
+    `Recovered prior ${resolved.mode} attempt ${resolved.attemptId}; no new transaction work was started. Rerun deliberately if another benchmark is required.`,
+  );
+  return true;
+}
+
+async function requestSponsoredPreparation({
   sdk,
-  apiUrl,
   client,
   keypair,
   address,
   settlementTokenType,
   slippageBps,
   runLabel,
+  orderId,
 }) {
   const tx = new Transaction();
   const prepared = await withRateLimitRetry(`${runLabel} prepare`, () =>
@@ -546,88 +610,47 @@ async function executeSponsoredEmpty({
       addr: address,
       settlementToken: { type: settlementTokenType },
       slippageBps,
+      orderId,
       prepareAuthorizationSigner: async (messageBytes) => {
         const { signature } = await keypair.signPersonalMessage(messageBytes);
         return signature;
       },
     }),
   );
+  if (prepared.orderId !== orderId) {
+    throw new Error(`${runLabel} prepare response did not echo the requested orderId`);
+  }
+  return prepared;
+}
+
+async function signSponsoredPreparation(prepared, keypair) {
   const { signature: userSignature } = await keypair.signTransaction(fromBase64(prepared.txBytes));
-  const sponsorRes = await withRateLimitRetry(`${runLabel} sponsor`, () =>
-    postRelaySponsor(apiUrl, {
+  const expectedDigest = await Transaction.from(prepared.txBytes).getDigest();
+  return {
+    expectedDigest,
+    sponsorRequest: {
       txBytes: prepared.txBytes,
       userSignature,
       receiptId: prepared.receiptId,
-    }),
-  );
-  const submittedTransaction = await resolveSubmittedTransaction({
-    client,
-    digest: sponsorRes.digest,
-    effects: sponsorRes.effects,
-  });
-  return {
-    digest: sponsorRes.digest,
-    effects: submittedTransaction.effects,
-    events: submittedTransaction.events,
-    eventsAvailable: submittedTransaction.eventsAvailable,
-    cost: prepared.cost,
-    profile: prepared.profile,
-    vaultId: prepared.vaultId,
-    totalCostMist: prepared.totalCostMist,
-    totalCostSui: prepared.totalCostSui,
-    orderId: sponsorRes.orderId ?? prepared.orderId,
+    },
   };
 }
 
 async function waitForTransactionByDigest(client, digest) {
   return client.waitForTransaction({
     digest,
-    include: { effects: true, events: true },
+    include: { effects: true, events: true, balanceChanges: true },
   });
 }
 
-async function resolveSubmittedTransaction({ client, digest, effects }) {
-  if (!digest) {
-    return { effects, events: [], eventsAvailable: false };
-  }
-  let loaded;
-  try {
-    loaded = await waitForTransactionByDigest(client, digest);
-  } catch (err) {
-    if (extractTransactionGasUsed(effects)) {
-      return { effects, events: [], eventsAvailable: false };
-    }
-    throw err;
-  }
-  return {
-    effects: extractTransactionEffects(loaded) ?? effects,
-    events: extractTransactionEvents(loaded),
-    eventsAvailable: true,
-  };
-}
-
-async function submitDirectEmptyTransaction({ client, keypair, address, directGasBudgetMist }) {
+async function prepareDirectEmptyTransaction({ client, keypair, address, directGasBudgetMist }) {
   const tx = new Transaction();
   tx.setSender(address);
   tx.setGasBudget(directGasBudgetMist.toString());
   const txBytes = await tx.build({ client });
+  const expectedDigest = await Transaction.from(txBytes).getDigest();
   const { signature } = await keypair.signTransaction(txBytes);
-  return client.executeTransaction({
-    transaction: txBytes,
-    signatures: [signature],
-    include: { effects: true },
-  });
-}
-
-async function waitForSubmittedTransaction(client, submitted) {
-  const digest = extractTransactionDigest(submitted);
-  if (!digest) return submitted;
-  return waitForTransactionByDigest(client, digest);
-}
-
-async function executeDirectEmpty(ctx) {
-  const submitted = await submitDirectEmptyTransaction(ctx);
-  return waitForSubmittedTransaction(ctx.client, submitted);
+  return { txBytes, signature, expectedDigest };
 }
 
 function average(values) {
@@ -638,7 +661,7 @@ function average(values) {
 function emptySponsoredFlowStats() {
   return {
     runs: 0,
-    tokenSpentRaw: [],
+    tokenMeasurements: [],
     totalCostMist: [],
     executionCostClaimMist: [],
     actualGasMist: [],
@@ -649,7 +672,6 @@ function emptySponsoredFlowStats() {
 function createSponsoredStats() {
   return {
     runs: 0,
-    tokenSpentRaw: [],
     totalCostMist: [],
     executionCostClaimMist: [],
     actualGasMist: [],
@@ -667,7 +689,6 @@ function classifySponsoredProfile(profile) {
 
 function recordSponsoredMetrics(stats, flowKey, metrics) {
   stats.runs++;
-  stats.tokenSpentRaw.push(metrics.tokenSpentRaw);
   stats.totalCostMist.push(metrics.totalCostMist);
   stats.executionCostClaimMist.push(metrics.executionCostClaimMist);
   stats.actualGasMist.push(metrics.actualGasMist);
@@ -676,7 +697,7 @@ function recordSponsoredMetrics(stats, flowKey, metrics) {
   const flowStats = stats.byFlow[flowKey];
   if (!flowStats) throw new Error(`Unknown sponsored flow: ${flowKey}`);
   flowStats.runs++;
-  flowStats.tokenSpentRaw.push(metrics.tokenSpentRaw);
+  flowStats.tokenMeasurements.push(metrics.tokenMeasurement);
   flowStats.totalCostMist.push(metrics.totalCostMist);
   flowStats.executionCostClaimMist.push(metrics.executionCostClaimMist);
   flowStats.actualGasMist.push(metrics.actualGasMist);
@@ -685,10 +706,7 @@ function recordSponsoredMetrics(stats, flowKey, metrics) {
 
 function assertExecutableBalances({
   phase,
-  initialSui,
-  initialToken,
-  settlementSwapPath,
-  minSettlementTokenRaw,
+  initialSuiObservation,
   minSuiReserveMist,
   directGasBudgetMist,
   requireZeroSuiForSponsored,
@@ -696,135 +714,489 @@ function assertExecutableBalances({
   const needsSponsored = includesPhase(phase, PHASE.SPONSORED);
   const needsDirect = includesPhase(phase, PHASE.DIRECT);
 
-  if (needsSponsored && initialToken <= minSettlementTokenRaw) {
-    throw new Error(
-      `Cannot start sponsored phase: ${settlementSwapPath.settlementTokenSymbol} balance is ${initialToken.toString()} raw, which is at or below the minimum ${minSettlementTokenRaw.toString()}.`,
-    );
-  }
+  if (!needsDirect && !(needsSponsored && requireZeroSuiForSponsored)) return;
+  const initialSui = requireObservedBalance(initialSuiObservation, 'Pre-execution SUI balance');
+
   if (needsSponsored && requireZeroSuiForSponsored && initialSui !== 0n) {
     throw new Error(
       `Cannot start sponsored phase: wallet has ${initialSui.toString()} MIST (${formatMist(initialSui)}), but STELIS_ONCHAIN_REQUIRE_ZERO_SUI_FOR_SPONSORED=true.`,
     );
   }
-  if (needsDirect && initialSui <= minSuiReserveMist) {
+  const requiredDirectBalanceMist = minSuiReserveMist + directGasBudgetMist;
+  if (needsDirect && initialSui < requiredDirectBalanceMist) {
     throw new Error(
-      `Cannot start direct phase: SUI balance ${initialSui.toString()} is at or below reserve ${minSuiReserveMist.toString()}.`,
+      `Cannot start direct phase: SUI balance ${initialSui.toString()} is below reserve + gas budget ${requiredDirectBalanceMist.toString()}.`,
     );
   }
-  if (needsDirect && initialSui < directGasBudgetMist) {
+}
+
+function sponsorErrorDigest(err) {
+  if (err instanceof StelisApiException && isValidTransactionDigest(err.meta?.digest)) {
+    return err.meta.digest;
+  }
+  return err instanceof SponsorResponseContractError &&
+    isValidTransactionDigest(err.candidateDigest)
+    ? err.candidateDigest
+    : null;
+}
+
+function sponsorErrorOutcome(err, digest, expectedDigest) {
+  const currentCode =
+    err instanceof StelisApiException &&
+    RELAY_SPONSOR_ERROR_CODES.includes(err.code) &&
+    isCurrentFailure(err, err.code)
+      ? err.code
+      : null;
+  return classifySponsorPostOutcome({
+    currentCode,
+    reportedDigest: digest,
+    expectedDigest,
+  });
+}
+
+function assertSponsorResponseMatchesPrepared({
+  sponsorResponse,
+  prepared,
+  expectedDigest,
+  orderId,
+}) {
+  if (sponsorResponse.digest !== expectedDigest) {
     throw new Error(
-      `Cannot start direct phase: SUI balance ${initialSui.toString()} is below direct gas budget ${directGasBudgetMist.toString()}.`,
+      `Sponsor response digest ${sponsorResponse.digest} does not match prepared transaction ${expectedDigest}`,
     );
   }
+  if (sponsorResponse.executionCostClaim !== prepared.cost.executionCostClaim) {
+    throw new Error(
+      `Sponsor executionCostClaim ${sponsorResponse.executionCostClaim} does not match prepare ${prepared.cost.executionCostClaim}`,
+    );
+  }
+  if (sponsorResponse.orderId !== orderId) {
+    throw new Error('Sponsor response did not echo the prepared orderId');
+  }
+}
+
+function assertSponsorEffectsMatchTerminal(sponsorEffects, terminal) {
+  if (!isRecord(sponsorEffects)) {
+    throw new Error('Sponsor response effects must be a current TransactionEffects object');
+  }
+  if (sponsorEffects.transactionDigest !== terminal.digest) {
+    throw new Error(
+      `Sponsor response effects digest ${String(sponsorEffects.transactionDigest)} does not match terminal ${terminal.digest}`,
+    );
+  }
+  if (
+    !isRecord(sponsorEffects.status) ||
+    sponsorEffects.status.success !== true ||
+    sponsorEffects.status.error !== null
+  ) {
+    throw new Error('Sponsor response effects do not carry a successful current status');
+  }
+  if (!isRecord(sponsorEffects.gasUsed) || !terminal.gasUsed) {
+    throw new Error('Sponsor response effects do not carry canonical gasUsed');
+  }
+  for (const field of ['computationCost', 'storageCost', 'storageRebate']) {
+    if (sponsorEffects.gasUsed[field] !== terminal.gasUsed[field]) {
+      throw new Error(
+        `Sponsor response effects gasUsed.${field} does not match the on-chain terminal result`,
+      );
+    }
+  }
+  computeExecutionCostClaim({
+    computationCost: sponsorEffects.gasUsed.computationCost,
+    storageCost: sponsorEffects.gasUsed.storageCost,
+    storageRebate: sponsorEffects.gasUsed.storageRebate,
+  });
+}
+
+function assertVerifiedSettleEconomics(event, prepared) {
+  const executionCostClaimMist = parseNonNegativeBigInt(
+    prepared.cost.executionCostClaim,
+    'executionCostClaim',
+  );
+  const hostFeeMist = parseNonNegativeBigInt(prepared.cost.quotedHostFee, 'quotedHostFee');
+  const protocolFeeMist = parseNonNegativeBigInt(prepared.cost.protocolFee, 'protocolFee');
+  const expectedPayoutMist = executionCostClaimMist + hostFeeMist;
+  const expectedDeductionMist = expectedPayoutMist + protocolFeeMist;
+  if (prepared.totalCostMist !== expectedDeductionMist) {
+    throw new Error(
+      `Prepared total cost ${prepared.totalCostMist} does not match its current cost fields ${expectedDeductionMist}`,
+    );
+  }
+  const eventPayoutMist = parseNonNegativeBigInt(event.payout, 'SettleEvent.payout');
+  const eventTotalInMist = parseNonNegativeBigInt(event.totalIn, 'SettleEvent.totalIn');
+  if (eventPayoutMist !== expectedPayoutMist) {
+    throw new Error(
+      `SettleEvent payout ${eventPayoutMist} does not match claim + Host fee ${expectedPayoutMist}`,
+    );
+  }
+  if (eventTotalInMist < expectedDeductionMist) {
+    throw new Error(
+      `SettleEvent totalIn ${eventTotalInMist} is below required deduction ${expectedDeductionMist}`,
+    );
+  }
+  return {
+    executionCostClaimMist,
+    hostFeeMist,
+    protocolFeeMist,
+    payoutMist: eventPayoutMist,
+    totalInMist: eventTotalInMist,
+  };
+}
+
+async function readInitialWalletSnapshot(ctx) {
+  const [sui, settlementToken, vault] = await Promise.all([
+    observe(() => getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG)),
+    observe(() =>
+      getSpendableBalanceRaw(ctx.client, ctx.address, ctx.settlementSwapPath.settlementTokenType),
+    ),
+    observe(() => getUserVaultStatus(ctx.client, ctx.sdk.config.vaultRegistryId, ctx.address)),
+  ]);
+  return { sui, settlementToken, vault };
+}
+
+async function readSponsoredDiagnosticSnapshot(ctx) {
+  const [sui, vault] = await Promise.all([
+    observe(() => getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG)),
+    observe(() => getUserVaultStatus(ctx.client, ctx.sdk.config.vaultRegistryId, ctx.address)),
+  ]);
+  return { sui, vault };
+}
+
+function requireObservedBalance(observation, label) {
+  if (observation.status !== 'observed') {
+    throw new Error(`${label} is unavailable: ${observation.error.message}`);
+  }
+  return observation.value;
+}
+
+async function appendSubmittedUnverified(ctx, fields, err, attempt) {
+  await appendBenchmarkRecord(ctx, {
+    ...fields,
+    recordType: 'terminal',
+    outcome: 'submitted_unverified',
+    reconciliationDigests: attempt.reconciliationDigests,
+    error: describeError(err),
+  });
 }
 
 async function runSponsoredPhase(ctx) {
   const stats = createSponsoredStats();
 
   for (let i = 1; i <= ctx.sponsoredMaxRuns; i++) {
-    const beforeToken = await getBalanceMist(
-      ctx.client,
-      ctx.address,
-      ctx.settlementSwapPath.settlementTokenType,
-    );
-    const beforeSui = await getBalanceMist(ctx.client, ctx.address, SUI_TYPE);
-    if (beforeToken <= ctx.minSettlementTokenRaw) {
-      console.log('Sponsored stop: settlement token balance is at or below minimum.');
-      break;
-    }
-
-    if (ctx.requireZeroSuiForSponsored && beforeSui !== 0n) {
-      throw new Error(
-        `Sponsored phase requires zero SUI, but wallet has ${beforeSui} MIST (${formatMist(beforeSui)}).`,
-      );
-    }
-
+    let attemptRecorded = false;
+    let expectedDigest = null;
+    let activeAttempt = null;
     try {
-      console.log(`Sponsored #${i}: preparing empty user PTB`);
-      const result = await executeSponsoredEmpty({ ...ctx, runLabel: `Sponsored #${i}` });
-      const sponsoredFlow = classifySponsoredProfile(result.profile);
-      const afterToken = await getBalanceMist(
-        ctx.client,
+      const runLabel = `Sponsored #${i}`;
+      const orderId = `stelis-empty:${ctx.runId}:${i}`;
+      const beforeSnapshot = await readSponsoredDiagnosticSnapshot(ctx);
+      if (
+        ctx.requireZeroSuiForSponsored &&
+        requireObservedBalance(beforeSnapshot.sui, `${runLabel} SUI balance`) !== 0n
+      ) {
+        const beforeSui = beforeSnapshot.sui.value;
+        throw new Error(
+          `Sponsored phase requires zero SUI, but wallet has ${beforeSui} MIST (${formatMist(beforeSui)}).`,
+        );
+      }
+
+      console.log(`${runLabel}: preparing empty user PTB`);
+      const prepared = await requestSponsoredPreparation({
+        ...ctx,
+        runLabel,
+        orderId,
+      });
+      const sponsoredFlow = classifySponsoredProfile(prepared.profile);
+      const preparationFields = {
+        mode: PHASE.SPONSORED,
+        executionKind: sponsoredFlow.key,
+        sponsoredFlow: sponsoredFlow.key,
+        sponsoredFlowLabel: sponsoredFlow.label,
+        profile: prepared.profile,
+        run: i,
+        orderId,
+        receiptId: prepared.receiptId,
+        executedContractPackageId: ctx.packageId,
+        vaultId: prepared.vaultId,
+      };
+      await appendBenchmarkRecord(ctx, {
+        ...preparationFields,
+        recordType: 'preparation',
+        outcome: 'host_prepared',
+        diagnosticSnapshotBefore: beforeSnapshot,
+      });
+
+      const { expectedDigest: signedDigest, sponsorRequest } = await signSponsoredPreparation(
+        prepared,
+        ctx.keypair,
+      );
+      expectedDigest = signedDigest;
+      const baseFields = { ...preparationFields, expectedDigest };
+      activeAttempt = await ctx.journal.beginAttempt({
+        provenance: benchmarkProvenance(ctx),
+        mode: PHASE.SPONSORED,
+        expectedDigest,
+      });
+      await appendBenchmarkRecord(ctx, {
+        ...baseFields,
+        recordType: 'attempt',
+        outcome: 'sponsor_ready',
+      });
+      attemptRecorded = true;
+      activeAttempt = await ctx.journal.markSubmissionStarted(activeAttempt);
+
+      let sponsorResponse;
+      try {
+        sponsorResponse = await withRateLimitRetry(`${runLabel} sponsor`, () =>
+          postRelaySponsor(ctx.apiUrl, sponsorRequest),
+        );
+      } catch (err) {
+        const digest = sponsorErrorDigest(err);
+        const outcome = sponsorErrorOutcome(err, digest, expectedDigest);
+        if (outcome === 'submitted_failed') {
+          let loaded;
+          let terminal;
+          try {
+            loaded = await waitForTransactionByDigest(ctx.client, expectedDigest);
+            terminal = requireCurrentTransactionResult(
+              loaded,
+              expectedDigest,
+              `${runLabel} Host-reported on-chain failure`,
+            );
+            if (terminal.kind !== 'failure') {
+              throw new Error(
+                `${runLabel} Host-reported on-chain failure was not proven by the matching failed Sui terminal result`,
+              );
+            }
+          } catch (terminalProofError) {
+            activeAttempt = await ctx.journal.markUncertain(activeAttempt, digest);
+            await appendBenchmarkRecord(ctx, {
+              ...baseFields,
+              recordType: 'terminal',
+              outcome: 'submitted_unverified',
+              digest,
+              reconciliationDigests: activeAttempt.reconciliationDigests,
+              hostError: describeError(err),
+              terminalProofError: describeError(terminalProofError),
+            });
+            throw terminalProofError;
+          }
+
+          await ctx.journal.resolveSubmittedResult(activeAttempt, loaded);
+          activeAttempt = null;
+          await appendBenchmarkRecord(ctx, {
+            ...baseFields,
+            recordType: 'terminal',
+            outcome: 'submitted_failed',
+            digest: terminal.digest,
+            gasMist: terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null,
+            error: terminal.error,
+            hostError: describeError(err),
+          });
+          throw err;
+        }
+
+        let reconciliationDigests;
+        switch (outcome) {
+          case 'submission_uncertain':
+          case 'submitted_unverified':
+            activeAttempt = await ctx.journal.markUncertain(activeAttempt, digest);
+            reconciliationDigests = activeAttempt.reconciliationDigests;
+            break;
+          case 'sponsor_rejected':
+            await ctx.journal.resolveSponsorRejected(activeAttempt);
+            activeAttempt = null;
+            reconciliationDigests = [];
+            break;
+          default:
+            throw new Error(`Unexpected definitive sponsor outcome: ${outcome}`);
+        }
+        await appendBenchmarkRecord(ctx, {
+          ...baseFields,
+          recordType: 'terminal',
+          outcome,
+          digest,
+          reportedDigestMatchesExpected: digest === null ? null : digest === expectedDigest,
+          reconciliationDigests,
+          error: describeError(err),
+        });
+        throw err;
+      }
+
+      try {
+        assertSponsorResponseMatchesPrepared({
+          sponsorResponse,
+          prepared,
+          expectedDigest,
+          orderId,
+        });
+      } catch (err) {
+        activeAttempt = await ctx.journal.markUncertain(activeAttempt, sponsorResponse.digest);
+        await appendSubmittedUnverified(
+          ctx,
+          { ...baseFields, digest: sponsorResponse.digest },
+          err,
+          activeAttempt,
+        );
+        throw err;
+      }
+
+      let loaded;
+      try {
+        loaded = await waitForTransactionByDigest(ctx.client, sponsorResponse.digest);
+      } catch (err) {
+        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+        await appendSubmittedUnverified(
+          ctx,
+          { ...baseFields, digest: sponsorResponse.digest },
+          err,
+          activeAttempt,
+        );
+        throw err;
+      }
+
+      let terminal;
+      try {
+        terminal = requireCurrentTransactionResult(
+          loaded,
+          expectedDigest,
+          `${runLabel} terminal result`,
+        );
+      } catch (err) {
+        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+        await appendSubmittedUnverified(
+          ctx,
+          { ...baseFields, digest: sponsorResponse.digest },
+          err,
+          activeAttempt,
+        );
+        throw err;
+      }
+      if (terminal.kind === 'failure') {
+        const actualGasMist = terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null;
+        await ctx.journal.resolveSubmittedResult(activeAttempt, loaded);
+        activeAttempt = null;
+        await appendBenchmarkRecord(ctx, {
+          ...baseFields,
+          recordType: 'terminal',
+          outcome: 'submitted_failed',
+          digest: terminal.digest,
+          gasMist: actualGasMist,
+          error: terminal.error,
+        });
+        throw new Error(`${runLabel} failed on-chain: ${JSON.stringify(terminal.error)}`);
+      }
+      if (!terminal.gasUsed) {
+        const err = new Error(`${runLabel} succeeded without canonical gasUsed`);
+        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+        await appendSubmittedUnverified(
+          ctx,
+          { ...baseFields, digest: terminal.digest },
+          err,
+          activeAttempt,
+        );
+        throw err;
+      }
+
+      let verifiedEvent;
+      let economics;
+      try {
+        assertSponsorEffectsMatchTerminal(sponsorResponse.effects, terminal);
+        verifiedEvent = verifySettleEventInTransaction(loaded, terminal.digest, {
+          receiptId: prepared.receiptId,
+          user: ctx.address,
+          orderId,
+          executionCostClaimMist: sponsorResponse.executionCostClaim,
+          quotedHostFeeMist: prepared.cost.quotedHostFee,
+          protocolFeeMist: prepared.cost.protocolFee,
+        });
+        economics = assertVerifiedSettleEconomics(verifiedEvent, prepared);
+      } catch (err) {
+        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+        await appendSubmittedUnverified(
+          ctx,
+          { ...baseFields, digest: terminal.digest },
+          err,
+          activeAttempt,
+        );
+        throw err;
+      }
+
+      const transactionPayload =
+        isRecord(loaded) && isRecord(loaded.Transaction) ? loaded.Transaction : null;
+      const tokenMeasurement = measureSettlementTokenBalanceChanges(
+        transactionPayload?.balanceChanges,
         ctx.address,
         ctx.settlementSwapPath.settlementTokenType,
       );
-      const tokenSpentRaw = beforeToken > afterToken ? beforeToken - afterToken : 0n;
-      const gasUsed = extractTransactionGasUsed(result.effects);
-      const eventFields = result.eventsAvailable
-        ? transactionEventFields(ctx, result.events)
-        : emptyTransactionEventFields();
-      if (!gasUsed) {
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.SPONSORED,
-          executionKind: sponsoredFlow.key,
-          sponsoredFlow: sponsoredFlow.key,
-          sponsoredFlowLabel: sponsoredFlow.label,
-          profile: result.profile,
-          run: i,
-          executedContractPackageId: ctx.packageId,
-          digest: result.digest,
-          vaultId: result.vaultId,
-          gasMist: null,
-          ...eventFields,
-          error: 'Sponsored transaction returned no gasUsed.',
-        });
-        throw new Error('Sponsored transaction returned no gasUsed.');
-      }
-      const actualGasMist = gasNetMist(gasUsed);
-      const executionCostClaimMist = parseNonNegativeBigInt(
-        result.cost.executionCostClaim,
-        'executionCostClaim',
+      const afterSnapshot = await readSponsoredDiagnosticSnapshot(ctx);
+      const vaultSnapshotTransition = classifyVaultSnapshots(
+        beforeSnapshot.vault,
+        afterSnapshot.vault,
       );
-      const hostFeeMist = parseNonNegativeBigInt(result.cost.quotedHostFee, 'quotedHostFee');
-      const protocolFeeMist = parseNonNegativeBigInt(result.cost.protocolFee, 'protocolFee');
-      const hostRecoveryMist = executionCostClaimMist + hostFeeMist;
-      const hostMarginMist = hostRecoveryMist - actualGasMist;
+      const actualGasMist = gasNetMist(terminal.gasUsed);
+      const hostMarginMist = economics.payoutMist - actualGasMist;
+
+      await ctx.journal.resolveSubmittedResult(activeAttempt, loaded);
+      activeAttempt = null;
 
       recordSponsoredMetrics(stats, sponsoredFlow.key, {
-        tokenSpentRaw,
-        totalCostMist: result.totalCostMist,
-        executionCostClaimMist,
+        tokenMeasurement,
+        totalCostMist: prepared.totalCostMist,
+        executionCostClaimMist: economics.executionCostClaimMist,
         actualGasMist,
         hostMarginMist,
       });
 
       await appendBenchmarkRecord(ctx, {
-        mode: PHASE.SPONSORED,
-        executionKind: sponsoredFlow.key,
-        sponsoredFlow: sponsoredFlow.key,
-        sponsoredFlowLabel: sponsoredFlow.label,
-        profile: result.profile,
-        run: i,
-        executedContractPackageId: ctx.packageId,
-        digest: result.digest,
-        vaultId: result.vaultId,
+        ...baseFields,
+        recordType: 'terminal',
+        outcome: 'success',
+        digest: terminal.digest,
         gasMist: actualGasMist,
-        ...eventFields,
-        executionCostClaimMist,
-        hostFeeMist,
-        protocolFeeMist,
-        userTotalCostMist: result.totalCostMist,
-        hostRecoveryMist,
+        settleEventVerified: true,
+        settleEventReceiptId: verifiedEvent.receiptId,
+        settleEventNonce: verifiedEvent.nonce,
+        settleEventOrderIdHash: verifiedEvent.orderIdHash,
+        settleEventUser: verifiedEvent.user,
+        settleEventPayoutMist: economics.payoutMist,
+        settleEventTotalInMist: economics.totalInMist,
+        settleEventConfigVersion: verifiedEvent.configVersion,
+        settleEventTimestampMs: verifiedEvent.execTimestampMs,
+        executionCostClaimMist: economics.executionCostClaimMist,
+        hostFeeMist: economics.hostFeeMist,
+        protocolFeeMist: economics.protocolFeeMist,
+        userTotalCostMist: prepared.totalCostMist,
+        hostRecoveryMist: economics.payoutMist,
         hostMarginMist,
-        settlementTokenSpentRaw: tokenSpentRaw,
+        settlementTokenMeasurement: tokenMeasurement,
+        diagnosticSnapshotBefore: beforeSnapshot,
+        diagnosticSnapshotAfter: afterSnapshot,
+        vaultSnapshotTransition,
       });
-
       console.log(
-        `Sponsored #${i} [${sponsoredFlow.label}]: ${result.digest} gas=${formatMist(actualGasMist)} hostMargin=${formatMist(hostMarginMist)} tokenSpentRaw=${tokenSpentRaw.toString()}`,
+        `${runLabel} [${sponsoredFlow.label}]: ${terminal.digest} gas=${formatMist(actualGasMist)} hostMargin=${formatMist(hostMarginMist)} settlementTokenChange=${tokenMeasurement.kind}`,
       );
     } catch (err) {
-      if (isExhaustionError(err)) {
+      const reportedDigest = sponsorErrorDigest(err);
+      if (expectedDigest !== null && reportedDigest !== null && reportedDigest !== expectedDigest) {
+        throw err;
+      }
+      if (isExhaustionError(err, expectedDigest)) {
         const stopReason = describeError(err);
         stats.stopReason = stopReason;
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.SPONSORED,
-          run: i,
-          stoppedBeforeSubmit: true,
-          executedContractPackageId: null,
-          digest: null,
-          gasMist: null,
-          error: stopReason,
-        });
+        if (!attemptRecorded) {
+          await appendBenchmarkRecord(ctx, {
+            mode: PHASE.SPONSORED,
+            recordType: 'terminal',
+            outcome: 'stopped_before_prepare',
+            run: i,
+            executedContractPackageId: null,
+            digest: null,
+            gasMist: null,
+            error: stopReason,
+          });
+        }
         console.log(`Sponsored stop: ${summarizeError(err)}`);
         break;
       }
@@ -840,126 +1212,151 @@ async function runDirectPhase(ctx) {
     actualGasMist: [],
     stopReason: null,
     duplicateDigestRetries: 0,
-    seenDigests: new Set(),
+    seenDigests: await ctx.journal.resolvedDigests(),
   };
 
   let i = 1;
   let duplicateRetriesForRun = 0;
   while (i <= ctx.directMaxRuns) {
-    const beforeSui = await getBalanceMist(ctx.client, ctx.address, SUI_TYPE);
-    if (beforeSui <= ctx.minSuiReserveMist) {
-      console.log('Direct stop: SUI balance is at or below reserve.');
-      break;
-    }
-    if (beforeSui < ctx.directGasBudgetMist) {
-      console.log(
-        `Direct stop: SUI balance ${beforeSui.toString()} is below gas budget ${ctx.directGasBudgetMist.toString()}.`,
-      );
-      break;
-    }
-
-    try {
-      console.log(`Direct #${i}: submitting empty SUI PTB`);
-      const result = await executeDirectEmpty(ctx);
-      const digest = extractTransactionDigest(result);
-      const status = extractTransactionStatus(result);
-      const gasUsed = extractTransactionGasUsed(result);
-      const eventFields = digest
-        ? transactionEventFields(ctx, extractTransactionEvents(result))
-        : emptyTransactionEventFields();
-      if (!digest) {
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.DIRECT,
-          executionKind: EXECUTION_KIND.DIRECT,
-          run: i,
-          executedContractPackageId: null,
-          digest: null,
-          gasMist: null,
-          ...eventFields,
-          error: 'Direct transaction returned no digest.',
-        });
-        throw new Error('Direct transaction returned no digest.');
-      }
-      if (isFailedTransactionResult(result)) {
-        const actualGasMist = gasUsed ? gasNetMist(gasUsed) : null;
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.DIRECT,
-          executionKind: EXECUTION_KIND.DIRECT,
-          run: i,
-          failed: true,
-          executedContractPackageId: null,
-          digest,
-          gasMist: actualGasMist,
-          ...eventFields,
-          error: status?.error ?? 'Transaction failed',
-        });
-        throw new Error(`Direct transaction failed: ${JSON.stringify(status)}`);
-      }
-      if (stats.seenDigests.has(digest)) {
-        stats.duplicateDigestRetries++;
-        duplicateRetriesForRun++;
-        if (duplicateRetriesForRun > DIRECT_DUPLICATE_DIGEST_RETRY_LIMIT) {
-          throw new Error(
-            `Direct #${i} kept returning duplicate digest ${digest} after ${DIRECT_DUPLICATE_DIGEST_RETRY_LIMIT} retries.`,
-          );
-        }
-        console.log(
-          `Direct #${i}: duplicate digest ${digest}; waiting ${formatDurationMs(DIRECT_DUPLICATE_DIGEST_RETRY_WAIT_MS)} before retry`,
-        );
-        await sleep(DIRECT_DUPLICATE_DIGEST_RETRY_WAIT_MS);
-        continue;
-      }
-
-      if (!gasUsed) {
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.DIRECT,
-          executionKind: EXECUTION_KIND.DIRECT,
-          run: i,
-          executedContractPackageId: null,
-          digest,
-          gasMist: null,
-          ...eventFields,
-          error: 'Direct transaction returned no gasUsed.',
-        });
-        throw new Error('Direct transaction returned no gasUsed.');
-      }
-      const actualGasMist = gasNetMist(gasUsed);
-      stats.runs++;
-      stats.seenDigests.add(digest);
-      duplicateRetriesForRun = 0;
-      stats.actualGasMist.push(actualGasMist);
-
+    const beforeSui = await getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG);
+    const requiredDirectBalanceMist = ctx.minSuiReserveMist + ctx.directGasBudgetMist;
+    if (beforeSui < requiredDirectBalanceMist) {
+      const stopReason = {
+        name: 'DirectBalanceGuard',
+        message: `SUI balance ${beforeSui.toString()} is below reserve + gas budget ${requiredDirectBalanceMist.toString()}.`,
+      };
+      stats.stopReason = stopReason;
       await appendBenchmarkRecord(ctx, {
         mode: PHASE.DIRECT,
         executionKind: EXECUTION_KIND.DIRECT,
+        recordType: 'terminal',
+        outcome: 'stopped_before_build',
         run: i,
-        executedContractPackageId: null,
-        digest,
-        gasMist: actualGasMist,
-        ...eventFields,
+        digest: null,
+        gasMist: null,
+        suiBalanceBeforeMist: beforeSui,
+        requiredDirectBalanceMist,
+        error: stopReason,
       });
+      console.log(`Direct stop: ${stopReason.message}`);
+      break;
+    }
 
-      console.log(`Direct #${i}: ${digest} gas=${formatMist(actualGasMist)}`);
-      i++;
-    } catch (err) {
-      if (isExhaustionError(err)) {
-        const stopReason = describeError(err);
-        stats.stopReason = stopReason;
-        await appendBenchmarkRecord(ctx, {
-          mode: PHASE.DIRECT,
-          executionKind: EXECUTION_KIND.DIRECT,
-          run: i,
-          stoppedBeforeSubmit: true,
-          executedContractPackageId: null,
-          digest: null,
-          gasMist: null,
-          error: stopReason,
-        });
-        console.log(`Direct stop: ${summarizeError(err)}`);
-        break;
+    console.log(`Direct #${i}: building empty SUI PTB`);
+    const prepared = await prepareDirectEmptyTransaction(ctx);
+    if (stats.seenDigests.has(prepared.expectedDigest)) {
+      stats.duplicateDigestRetries++;
+      duplicateRetriesForRun++;
+      if (duplicateRetriesForRun > DIRECT_DUPLICATE_DIGEST_RETRY_LIMIT) {
+        throw new Error(
+          `Direct #${i} kept building duplicate digest ${prepared.expectedDigest} after ${DIRECT_DUPLICATE_DIGEST_RETRY_LIMIT} retries.`,
+        );
       }
+      console.log(
+        `Direct #${i}: duplicate digest ${prepared.expectedDigest} before submit; waiting ${formatDurationMs(DIRECT_DUPLICATE_DIGEST_RETRY_WAIT_MS)} before rebuild`,
+      );
+      await sleep(DIRECT_DUPLICATE_DIGEST_RETRY_WAIT_MS);
+      continue;
+    }
+
+    const baseFields = {
+      mode: PHASE.DIRECT,
+      executionKind: EXECUTION_KIND.DIRECT,
+      run: i,
+      expectedDigest: prepared.expectedDigest,
+      executedContractPackageId: null,
+    };
+    let activeAttempt = await ctx.journal.beginAttempt({
+      provenance: benchmarkProvenance(ctx),
+      mode: PHASE.DIRECT,
+      expectedDigest: prepared.expectedDigest,
+    });
+    await appendBenchmarkRecord(ctx, {
+      ...baseFields,
+      recordType: 'attempt',
+      outcome: 'prepared',
+      suiBalanceBeforeMist: beforeSui,
+      gasBudgetMist: ctx.directGasBudgetMist,
+      reserveMist: ctx.minSuiReserveMist,
+    });
+    activeAttempt = await ctx.journal.markSubmissionStarted(activeAttempt);
+
+    let result;
+    try {
+      result = await ctx.client.executeTransaction({
+        transaction: prepared.txBytes,
+        signatures: [prepared.signature],
+        include: { effects: true },
+      });
+    } catch (err) {
+      activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+      await appendBenchmarkRecord(ctx, {
+        ...baseFields,
+        recordType: 'terminal',
+        outcome: 'submission_uncertain',
+        digest: null,
+        reconciliationDigests: activeAttempt.reconciliationDigests,
+        error: describeError(err),
+      });
       throw err;
     }
+
+    let terminal;
+    try {
+      terminal = requireCurrentTransactionResult(
+        result,
+        prepared.expectedDigest,
+        `Direct #${i} terminal result`,
+      );
+    } catch (err) {
+      activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+      await appendSubmittedUnverified(ctx, baseFields, err, activeAttempt);
+      throw err;
+    }
+    if (terminal.kind === 'failure') {
+      const actualGasMist = terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null;
+      await ctx.journal.resolveSubmittedResult(activeAttempt, result);
+      activeAttempt = null;
+      await appendBenchmarkRecord(ctx, {
+        ...baseFields,
+        recordType: 'terminal',
+        outcome: 'submitted_failed',
+        digest: terminal.digest,
+        gasMist: actualGasMist,
+        error: terminal.error,
+      });
+      throw new Error(`Direct #${i} failed on-chain: ${JSON.stringify(terminal.error)}`);
+    }
+    if (!terminal.gasUsed) {
+      const err = new Error(`Direct #${i} succeeded without canonical gasUsed`);
+      activeAttempt = await ctx.journal.markUncertain(activeAttempt);
+      await appendSubmittedUnverified(
+        ctx,
+        { ...baseFields, digest: terminal.digest },
+        err,
+        activeAttempt,
+      );
+      throw err;
+    }
+
+    const actualGasMist = gasNetMist(terminal.gasUsed);
+    await ctx.journal.resolveSubmittedResult(activeAttempt, result);
+    activeAttempt = null;
+
+    stats.runs++;
+    stats.seenDigests.add(terminal.digest);
+    duplicateRetriesForRun = 0;
+    stats.actualGasMist.push(actualGasMist);
+
+    await appendBenchmarkRecord(ctx, {
+      ...baseFields,
+      recordType: 'terminal',
+      outcome: 'success',
+      digest: terminal.digest,
+      gasMist: actualGasMist,
+    });
+    console.log(`Direct #${i}: ${terminal.digest} gas=${formatMist(actualGasMist)}`);
+    i++;
   }
   return stats;
 }
@@ -970,7 +1367,6 @@ function printSummary(sponsoredStats, directStats, settlementSwapPath) {
   let avgVaultCreditUseGas = null;
   let avgDirectGas = null;
   if (sponsoredStats) {
-    const avgTokenRaw = average(sponsoredStats.tokenSpentRaw);
     const avgTotalCost = average(sponsoredStats.totalCostMist);
     const avgExecutionClaim = average(sponsoredStats.executionCostClaimMist);
     const avgSponsoredGas = average(sponsoredStats.actualGasMist);
@@ -983,10 +1379,19 @@ function printSummary(sponsoredStats, directStats, settlementSwapPath) {
       const flow = SPONSORED_FLOW_BY_KIND[key];
       const flowStats = sponsoredStats.byFlow[key];
       const flowAvgGas = average(flowStats.actualGasMist);
+      const tokenSummary = summarizeTokenMeasurements(flowStats.tokenMeasurements);
+      const flowAvgTokenSpent = average(tokenSummary.attributableSpentRaw);
       console.log(
         `  ${key}: ${flowStats.runs} run(s)${
           flowAvgGas === null ? '' : `, avg gas=${formatMist(flowAvgGas)}`
         } — ${flow.label}`,
+      );
+      console.log(
+        `    settlement-token tx changes: debit=${tokenSummary.debit}, unchanged=${tokenSummary.unchanged}, credit=${tokenSummary.credit}, unavailable=${tokenSummary.unavailable}${
+          flowAvgTokenSpent === null
+            ? ''
+            : `, avg attributable spend=${formatDecimal(flowAvgTokenSpent, settlementSwapPath.settlementTokenDecimals)} ${settlementSwapPath.settlementTokenSymbol}`
+        }`,
       );
     }
     if (avgTotalCost !== null)
@@ -1000,11 +1405,6 @@ function printSummary(sponsoredStats, directStats, settlementSwapPath) {
         `  avg sponsored actual gas (vault credit use only): ${formatMist(avgVaultCreditUseGas)}`,
       );
     if (avgHostMargin !== null) console.log(`  avg Host margin: ${formatMist(avgHostMargin)}`);
-    if (avgTokenRaw !== null) {
-      console.log(
-        `  avg settlement token spent: ${formatDecimal(avgTokenRaw, settlementSwapPath.settlementTokenDecimals)} ${settlementSwapPath.settlementTokenSymbol}`,
-      );
-    }
   }
   if (directStats) {
     avgDirectGas = average(directStats.actualGasMist);
@@ -1026,7 +1426,23 @@ function formatOptionalMist(value) {
 }
 
 function formatStopSummary(error) {
-  return error ? 'before submission' : 'n/a';
+  if (!error) return 'n/a';
+  return `${error.code ?? error.name}: ${error.message}`;
+}
+
+function formatBalanceObservation(observation, format) {
+  return observation.status === 'observed'
+    ? format(observation.value)
+    : `unavailable (${observation.error.name}: ${observation.error.message})`;
+}
+
+function formatVaultObservation(observation) {
+  if (observation.status !== 'observed') {
+    return `unavailable (${observation.error.name}: ${observation.error.message})`;
+  }
+  const vault = observation.value;
+  if (vault.needsCreate) return 'none';
+  return `present (${vault.vaultObjectId}; credit ${vault.creditMist.toString()} MIST; last nonce ${vault.lastNonce.toString()})`;
 }
 
 function renderMarkdownReport({
@@ -1034,13 +1450,14 @@ function renderMarkdownReport({
   completedAt,
   phase,
   network,
+  chainIdentifier,
+  relayApiUrl,
+  suiGrpcUrl,
   packageId,
   settlementSwapPath,
   sponsoredMaxRuns,
   directMaxRuns,
-  initialSui,
-  initialToken,
-  initialVaultStatus,
+  initialSnapshot,
   sponsoredStats,
   directStats,
 }) {
@@ -1055,20 +1472,27 @@ function renderMarkdownReport({
       : null;
   const avgHostMargin = sponsoredStats ? average(sponsoredStats.hostMarginMist) : null;
   const avgTotalCost = sponsoredStats ? average(sponsoredStats.totalCostMist) : null;
-  const avgTokenRaw = sponsoredStats ? average(sponsoredStats.tokenSpentRaw) : null;
   const sponsoredFlowLines = sponsoredStats
     ? SPONSORED_FLOW_ORDER.flatMap((key) => {
         const flow = SPONSORED_FLOW_BY_KIND[key];
         const flowStats = sponsoredStats.byFlow[key];
         const flowAvgGas = average(flowStats.actualGasMist);
         const flowAvgHostMargin = average(flowStats.hostMarginMist);
+        const tokenSummary = summarizeTokenMeasurements(flowStats.tokenMeasurements);
+        const flowAvgTokenSpent = average(tokenSummary.attributableSpentRaw);
         return [
           `### ${flow.label}`,
           '',
           `- Flow key: \`${key}\``,
-          `- Submitted: ${flowStats.runs}`,
+          `- Verified successes: ${flowStats.runs}`,
           `- Average gas: ${formatOptionalMist(flowAvgGas)}`,
           `- Average Host margin: ${formatOptionalMist(flowAvgHostMargin)}`,
+          `- Settlement-token transaction changes: debit ${tokenSummary.debit}, unchanged ${tokenSummary.unchanged}, credit ${tokenSummary.credit}, unavailable ${tokenSummary.unavailable}`,
+          `- Average attributable settlement-token spend: ${
+            flowAvgTokenSpent === null
+              ? 'n/a'
+              : `${formatDecimal(flowAvgTokenSpent, settlementSwapPath.settlementTokenDecimals)} ${settlementSwapPath.settlementTokenSymbol}`
+          }`,
           `- Interpretation: ${flow.reportNote}`,
           '',
         ];
@@ -1081,6 +1505,9 @@ function renderMarkdownReport({
     `- Test date: ${runStartedAt.toISOString()}`,
     `- Completed at: ${completedAt.toISOString()}`,
     `- Network: ${network}`,
+    `- Chain identifier: \`${chainIdentifier}\``,
+    `- Relay API: \`${relayApiUrl}\``,
+    `- Sui gRPC: \`${suiGrpcUrl}\``,
     `- Stelis package ID: \`${packageId}\``,
     `- Mode: ${phase}`,
     `- Settlement token: ${settlementSwapPath.settlementTokenSymbol}`,
@@ -1088,8 +1515,8 @@ function renderMarkdownReport({
     '',
     '## Test Counts',
     '',
-    `- Sponsored submitted: ${sponsoredStats?.runs ?? 0} / ${sponsoredMaxRuns}`,
-    `- Direct submitted: ${directStats?.runs ?? 0} / ${directMaxRuns}`,
+    `- Sponsored verified successes: ${sponsoredStats?.runs ?? 0} / ${sponsoredMaxRuns}`,
+    `- Direct verified successes: ${directStats?.runs ?? 0} / ${directMaxRuns}`,
     `- Direct duplicate digest retries: ${directStats?.duplicateDigestRetries ?? 0}`,
     '',
     '## Sponsored Flow Breakdown',
@@ -1098,10 +1525,9 @@ function renderMarkdownReport({
     '',
     '## Starting Balances',
     '',
-    `- SUI: ${formatMist(initialSui)}`,
-    `- ${settlementSwapPath.settlementTokenSymbol}: ${formatDecimal(initialToken, settlementSwapPath.settlementTokenDecimals)} (${initialToken.toString()} raw)`,
-    `- User Vault: ${initialVaultStatus.needsCreate ? 'none' : 'present'}`,
-    `- User Vault credit: ${formatMist(initialVaultStatus.creditMist)} (${initialVaultStatus.creditMist.toString()} MIST)`,
+    `- SUI: ${formatBalanceObservation(initialSnapshot.sui, (value) => `${formatMist(value)} (${value.toString()} MIST)`)}`,
+    `- ${settlementSwapPath.settlementTokenSymbol}: ${formatBalanceObservation(initialSnapshot.settlementToken, (value) => `${formatDecimal(value, settlementSwapPath.settlementTokenDecimals)} (${value.toString()} raw)`)}`,
+    `- User Vault: ${formatVaultObservation(initialSnapshot.vault)}`,
     '',
     '## Summary',
     '',
@@ -1112,32 +1538,27 @@ function renderMarkdownReport({
     '- Direct comparison basis: User Vault credit use only',
     `- Average Host margin: ${formatOptionalMist(avgHostMargin)}`,
     `- Average sponsored user total cost: ${formatOptionalMist(avgTotalCost)}`,
-    `- Average settlement token spent: ${
-      avgTokenRaw === null
-        ? 'n/a'
-        : `${formatDecimal(avgTokenRaw, settlementSwapPath.settlementTokenDecimals)} ${settlementSwapPath.settlementTokenSymbol}`
-    }`,
     `- Sponsored stop: ${formatStopSummary(sponsoredStats?.stopReason)}`,
     `- Direct stop: ${formatStopSummary(directStats?.stopReason)}`,
     '',
     '## Interpretation Fields',
     '',
     '- `gasMist`: actual on-chain gas paid for the submitted transaction.',
+    '- Sponsored successes require the current Sui terminal shape and one compiled-schema SettleEvent bound to receipt, user, order, and quoted costs.',
     '- `hostMarginMist`: `executionCostClaimMist + hostFeeMist - gasMist`.',
     '- `hostMarginMist >= 0` means the Host recovered at least the paid gas for that run.',
+    "- Settlement-token spend is derived only from this transaction's Sui `balanceChanges`, matched by exact user and token type. Wallet snapshots are diagnostic and never enter spend averages.",
+    '- Token debit averages are reported per sponsored flow. Credit and unavailable observations are exposed rather than converted to zero.',
     '- Direct gas overhead is compared only against `vault_credit_use` runs. `vault_create` and `vault_top_up` include User Vault setup or settlement-token swap work and are reported separately.',
     '',
   ].join('\n');
 }
 
 async function writeMarkdownReport(reportPath, input) {
-  await mkdir(path.dirname(reportPath), { recursive: true });
-  try {
-    await access(reportPath);
-  } catch {
-    await writeFile(reportPath, '# Empty Execution Benchmark Report\n\n');
-  }
-  await appendFile(reportPath, `${renderMarkdownReport(input)}\n`);
+  await writeExclusiveText(
+    reportPath,
+    `# Empty Execution Benchmark Report\n\n${renderMarkdownReport(input)}\n`,
+  );
 }
 
 async function main() {
@@ -1147,16 +1568,52 @@ async function main() {
     return;
   }
 
+  assertSupportedProcessEnv(process.env);
   const fileEnv = await parseEnvFile(envPath);
+  const secretKey = requireValue(
+    envValue(fileEnv, cli, 'secretKey', 'STELIS_ONCHAIN_USER_SECRET_KEY'),
+    'STELIS_ONCHAIN_USER_SECRET_KEY',
+  );
+  const keypair = Ed25519Keypair.fromSecretKey(secretKey);
+  const address = keypair.getPublicKey().toSuiAddress();
+  const grpcBaseUrl = normalizeGrpcUrl(
+    envValue(fileEnv, cli, 'grpcUrl', 'STELIS_ONCHAIN_GRPC_URL') ??
+      'https://fullnode.testnet.sui.io:443',
+  );
+  const journal = new EmptyExecutionBenchmarkJournal({
+    root: defaultBenchmarkJournalRoot(SUI_CHAIN_IDENTIFIERS.testnet, address),
+    chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+    address,
+  });
+
+  await journal.acquireSessionLease();
+  try {
+    await runWithSession({ cli, fileEnv, keypair, address, grpcBaseUrl, journal });
+  } finally {
+    await journal.releaseSessionLease();
+  }
+}
+
+async function runWithSession({ cli, fileEnv, keypair, address, grpcBaseUrl, journal }) {
+  const client = new SuiGrpcClient({ network: 'testnet', baseUrl: grpcBaseUrl });
+  const chainIdentity = await client.core.getChainIdentifier();
+  if (chainIdentity.chainIdentifier !== SUI_CHAIN_IDENTIFIERS.testnet) {
+    throw new Error(
+      `Sui gRPC endpoint is not testnet: expected ${SUI_CHAIN_IDENTIFIERS.testnet}, got ${chainIdentity.chainIdentifier}`,
+    );
+  }
+  console.log(`Wallet: ${address}`);
+  console.log(`Sui gRPC: ${redactEndpointUrl(grpcBaseUrl)}`);
+  console.log(`Chain identifier: ${chainIdentity.chainIdentifier}`);
+  console.log(`Machine journal: ${journal.root}`);
+
+  if (await recoverActiveAttempt(journal, client)) return;
+
   const apiUrl = normalizeRelayApiUrl(
     requireValue(
       envValue(fileEnv, cli, 'apiUrl', 'STELIS_ONCHAIN_RELAY_API_URL'),
       'STELIS_ONCHAIN_RELAY_API_URL',
     ),
-  );
-  const secretKey = requireValue(
-    envValue(fileEnv, cli, 'secretKey', 'STELIS_ONCHAIN_USER_SECRET_KEY'),
-    'STELIS_ONCHAIN_USER_SECRET_KEY',
   );
   const phase = requireValue(
     envValue(fileEnv, cli, 'phase', 'STELIS_ONCHAIN_PHASE', PHASE.SPONSORED),
@@ -1165,10 +1622,13 @@ async function main() {
   if (!RUN_PHASES.has(phase)) {
     throw new Error(`STELIS_ONCHAIN_PHASE must be sponsored, direct, or both; got ${phase}`);
   }
-
-  const maxRuns = parsePositiveSafeInteger(
-    envValue(fileEnv, cli, 'maxRuns', 'STELIS_ONCHAIN_MAX_RUNS', '20'),
-    'STELIS_ONCHAIN_MAX_RUNS',
+  const sponsoredMaxRuns = parsePositiveSafeInteger(
+    envValue(fileEnv, cli, 'sponsoredMaxRuns', 'STELIS_ONCHAIN_SPONSORED_MAX_RUNS', '20'),
+    'STELIS_ONCHAIN_SPONSORED_MAX_RUNS',
+  );
+  const directMaxRuns = parsePositiveSafeInteger(
+    envValue(fileEnv, cli, 'directMaxRuns', 'STELIS_ONCHAIN_DIRECT_MAX_RUNS', '20'),
+    'STELIS_ONCHAIN_DIRECT_MAX_RUNS',
   );
   const directGasBudgetMist = parseNonNegativeBigInt(
     envValue(
@@ -1187,76 +1647,89 @@ async function main() {
     envValue(fileEnv, cli, 'minSuiReserveMist', 'STELIS_ONCHAIN_MIN_SUI_RESERVE_MIST', '0'),
     'STELIS_ONCHAIN_MIN_SUI_RESERVE_MIST',
   );
-  const minSettlementTokenRaw = parseNonNegativeBigInt(
-    envValue(fileEnv, cli, 'minSettlementTokenRaw', 'STELIS_ONCHAIN_MIN_SETTLEMENT_TOKEN_RAW', '0'),
-    'STELIS_ONCHAIN_MIN_SETTLEMENT_TOKEN_RAW',
-  );
   const slippageBps = parseNonNegativeSafeInteger(
-    envValue(fileEnv, cli, 'slippageBps', 'STELIS_ONCHAIN_SLIPPAGE_BPS', '200'),
+    envValue(
+      fileEnv,
+      cli,
+      'slippageBps',
+      'STELIS_ONCHAIN_SLIPPAGE_BPS',
+      DEFAULT_SLIPPAGE_BPS.toString(),
+    ),
     'STELIS_ONCHAIN_SLIPPAGE_BPS',
   );
-  if (slippageBps > 500) throw new Error('STELIS_ONCHAIN_SLIPPAGE_BPS must be <= 500');
-
-  const runStartedAt = new Date();
-  const runId = timestampForFileName(runStartedAt);
-  const { rawPath, reportPath } = resolveOutputPaths({ fileEnv, cli, runId });
-  const requireZeroSuiForSponsored =
+  if (slippageBps > SLIPPAGE_CAP_BPS) {
+    throw new Error(`STELIS_ONCHAIN_SLIPPAGE_BPS must be <= ${SLIPPAGE_CAP_BPS}`);
+  }
+  const requireZeroSuiForSponsored = parseBoolean(
     envValue(
       fileEnv,
       cli,
       'requireZeroSuiForSponsored',
       'STELIS_ONCHAIN_REQUIRE_ZERO_SUI_FOR_SPONSORED',
       'false',
-    ) === 'true';
+    ),
+    'STELIS_ONCHAIN_REQUIRE_ZERO_SUI_FOR_SPONSORED',
+  );
 
-  const keypair = Ed25519Keypair.fromSecretKey(secretKey);
-  const address = keypair.getPublicKey().toSuiAddress();
   const sdk = await StelisSDK.connect(apiUrl);
-  if (sdk.network === 'mainnet' && !cli.allowMainnet) {
+  if (sdk.network !== 'testnet') {
     throw new Error(
-      'Refusing to run on mainnet. Pass --allow-mainnet only if this is intentional.',
+      `This benchmark supports the current testnet deployment only; got ${sdk.network}`,
     );
   }
-  const grpcBaseUrl =
-    envValue(fileEnv, cli, 'grpcUrl', 'STELIS_ONCHAIN_GRPC_URL') ?? defaultGrpcBaseUrl(sdk.network);
-  const client = new SuiGrpcClient({ network: sdk.network, baseUrl: grpcBaseUrl });
-
-  const settlementSwapPath = resolveSettlementSwapPath(
+  const runStartedAt = new Date();
+  const runId = `${timestampForFileName(runStartedAt)}-${randomUUID()}`;
+  const { rawPath, reportPath } = resolveOutputPaths({ fileEnv, cli, runId });
+  const relayApiEvidenceUrl = redactEndpointUrl(apiUrl);
+  const suiGrpcEvidenceUrl = redactEndpointUrl(grpcBaseUrl);
+  const settlementSwapPath = resolveSettlementSwapPathByType(
     sdk,
-    envValue(fileEnv, cli, 'settlementTokenType', 'STELIS_ONCHAIN_SETTLEMENT_TOKEN_TYPE'),
-    envValue(
-      fileEnv,
-      cli,
-      'settlementTokenSymbol',
-      'STELIS_ONCHAIN_SETTLEMENT_TOKEN_SYMBOL',
-      'DEEP',
+    requireValue(
+      envValue(fileEnv, cli, 'settlementTokenType', 'STELIS_ONCHAIN_SETTLEMENT_TOKEN_TYPE'),
+      'STELIS_ONCHAIN_SETTLEMENT_TOKEN_TYPE',
     ),
   );
 
-  console.log(`Wallet: ${address}`);
   console.log(`Network: ${sdk.network}`);
-  console.log(`Relay API: ${apiUrl}`);
-  console.log(`Sui gRPC: ${grpcBaseUrl}`);
+  console.log(`Relay API: ${relayApiEvidenceUrl}`);
   console.log(
     `Settlement token: ${settlementSwapPath.settlementTokenSymbol} (${settlementSwapPath.settlementTokenType})`,
   );
   console.log(`Phase: ${phase}`);
 
-  const initialSui = await getBalanceMist(client, address, SUI_TYPE);
-  const initialToken = await getBalanceMist(
+  const ctx = {
+    sdk,
+    apiUrl,
     client,
+    keypair,
     address,
-    settlementSwapPath.settlementTokenType,
-  );
-  const initialVaultStatus = await getUserVaultStatus(client, sdk.config.vaultRegistryId, address);
-  console.log(`Pre-execution SUI balance: ${formatMist(initialSui)}`);
+    journal,
+    network: sdk.network,
+    chainIdentifier: chainIdentity.chainIdentifier,
+    relayApiEvidenceUrl,
+    relayEndpointHash: sha256Text(apiUrl),
+    suiGrpcEvidenceUrl,
+    suiGrpcEndpointHash: sha256Text(grpcBaseUrl),
+    packageId: sdk.config.packageId,
+    runId,
+    settlementSwapPath,
+    settlementTokenType: settlementSwapPath.settlementTokenType,
+    sponsoredMaxRuns,
+    directMaxRuns,
+    directGasBudgetMist,
+    minSuiReserveMist,
+    slippageBps,
+    rawPath,
+    requireZeroSuiForSponsored,
+  };
+  const initialSnapshot = await readInitialWalletSnapshot(ctx);
   console.log(
-    `Pre-execution ${settlementSwapPath.settlementTokenSymbol} balance: ${formatDecimal(initialToken, settlementSwapPath.settlementTokenDecimals)} (${initialToken.toString()} raw)`,
+    `Pre-execution SUI balance: ${formatBalanceObservation(initialSnapshot.sui, (value) => `${formatMist(value)} (${value.toString()} MIST)`)}`,
   );
-  console.log(`User Vault: ${formatUserVaultStatus(initialVaultStatus)}`);
   console.log(
-    `User Vault credit: ${formatMist(initialVaultStatus.creditMist)} (${initialVaultStatus.creditMist.toString()} MIST)`,
+    `Pre-execution ${settlementSwapPath.settlementTokenSymbol} balance: ${formatBalanceObservation(initialSnapshot.settlementToken, (value) => `${formatDecimal(value, settlementSwapPath.settlementTokenDecimals)} (${value.toString()} raw)`)}`,
   );
+  console.log(`User Vault: ${formatVaultObservation(initialSnapshot.vault)}`);
 
   if (!cli.execute) {
     console.log('');
@@ -1267,66 +1740,81 @@ async function main() {
 
   assertExecutableBalances({
     phase,
-    initialSui,
-    initialToken,
-    settlementSwapPath,
-    minSettlementTokenRaw,
+    initialSuiObservation: initialSnapshot.sui,
     minSuiReserveMist,
     directGasBudgetMist,
     requireZeroSuiForSponsored,
   });
-
-  await ensureRawWritable(rawPath);
-  await ensureReportDirectory(reportPath);
-
-  const ctx = {
-    sdk,
-    apiUrl,
-    client,
-    keypair,
-    address,
-    network: sdk.network,
-    packageId: sdk.config.packageId,
-    settlementSwapPath,
-    settlementTokenType: settlementSwapPath.settlementTokenType,
-    sponsoredMaxRuns: maxRuns,
-    directMaxRuns: maxRuns,
-    directGasBudgetMist,
-    minSuiReserveMist,
-    minSettlementTokenRaw,
-    slippageBps,
-    rawPath,
-    requireZeroSuiForSponsored,
-  };
-
-  const sponsoredStats = includesPhase(phase, PHASE.SPONSORED)
-    ? await runSponsoredPhase(ctx)
-    : null;
-  const directStats = includesPhase(phase, PHASE.DIRECT) ? await runDirectPhase(ctx) : null;
-  printSummary(sponsoredStats, directStats, settlementSwapPath);
-  await writeMarkdownReport(reportPath, {
-    runStartedAt,
-    completedAt: new Date(),
+  await createBenchmarkEvidence(ctx, {
+    recordType: 'run',
+    outcome: 'started',
     phase,
-    network: sdk.network,
-    packageId: sdk.config.packageId,
-    settlementSwapPath,
-    sponsoredMaxRuns: maxRuns,
-    directMaxRuns: maxRuns,
-    initialSui,
-    initialToken,
-    initialVaultStatus,
-    sponsoredStats,
-    directStats,
+    initialSnapshot,
   });
-  console.log(`Raw data written: ${rawPath}`);
-  console.log(`Report written: ${reportPath}`);
+  console.log(`Raw evidence: ${rawPath}`);
+
+  try {
+    const sponsoredStats = includesPhase(phase, PHASE.SPONSORED)
+      ? await runSponsoredPhase(ctx)
+      : null;
+    const directStats = includesPhase(phase, PHASE.DIRECT) ? await runDirectPhase(ctx) : null;
+    printSummary(sponsoredStats, directStats, settlementSwapPath);
+    const completedAt = new Date();
+    await writeMarkdownReport(reportPath, {
+      runStartedAt,
+      completedAt,
+      phase,
+      network: sdk.network,
+      chainIdentifier: chainIdentity.chainIdentifier,
+      relayApiUrl: relayApiEvidenceUrl,
+      suiGrpcUrl: suiGrpcEvidenceUrl,
+      packageId: sdk.config.packageId,
+      settlementSwapPath,
+      sponsoredMaxRuns,
+      directMaxRuns,
+      initialSnapshot,
+      sponsoredStats,
+      directStats,
+    });
+    await appendBenchmarkRecord(ctx, {
+      recordType: 'run',
+      outcome: 'completed',
+      phase,
+      completedAt: completedAt.toISOString(),
+      reportPath,
+    });
+    console.log(`Report written: ${reportPath}`);
+  } catch (error) {
+    try {
+      await appendBenchmarkRecord(ctx, {
+        recordType: 'run',
+        outcome: 'failed',
+        phase,
+        failedAt: new Date().toISOString(),
+        error: describeError(error),
+      });
+    } catch (recordError) {
+      console.error(`Failed to append run failure evidence: ${summarizeError(recordError)}`);
+    }
+    try {
+      const active = await journal.readActiveAttempt();
+      if (active) {
+        console.error(
+          `Run stopped with active journal state ${active.state}. This wallet is blocked until every candidate has a canonical terminal result: ${active.reconciliationDigests.join(', ')}`,
+        );
+      } else {
+        console.error(`Run stopped. Raw evidence: ${rawPath}`);
+      }
+    } catch (journalError) {
+      console.error(
+        `Run stopped and the active journal could not be read: ${summarizeError(journalError)}`,
+      );
+    }
+    throw error;
+  }
 }
 
 main().catch((err) => {
   console.error(`Failed: ${summarizeError(err)}`);
-  if (err instanceof Error && err.stack) {
-    console.error(err.stack);
-  }
   process.exitCode = 1;
 });

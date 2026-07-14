@@ -6,7 +6,7 @@
  * keeping the existing Studio route behavior as the target.
  */
 import { describe, test, expect, vi } from 'vitest';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase58, toBase64 } from '@mysten/sui/utils';
 import {
   buildStudioPreparedDraftFields,
@@ -18,13 +18,14 @@ import {
   type StudioExecutionPolicyOptions,
   type StudioExecutionPolicyState,
   type StudioPolicyContext,
+  type StudioPrepareErrorFactory,
   type StudioSponsorErrorFactory,
 } from '../src/session/sponsoredExecution/studioExecutionPolicy.js';
+import type { GasBoundBuildInput } from '../src/session/sponsoredExecution/reservationHandles.js';
 import type {
-  GasBoundBuildInput,
   PostConsumeSponsorContext,
   PreConsumeSponsorContext,
-} from '../src/session/sponsoredExecution/index.js';
+} from '../src/session/sponsoredExecution/executionPolicy.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
 import {
   SenderSignatureError,
@@ -63,9 +64,11 @@ class TestStudioError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly statusHint?: number,
-    readonly gasUsed?: unknown,
-    readonly subcode?: string,
+    readonly meta?: {
+      readonly gasUsed?: unknown;
+      readonly digest?: string;
+      readonly subcode?: string;
+    },
   ) {
     super(message);
     this.name = 'TestStudioError';
@@ -73,14 +76,11 @@ class TestStudioError extends Error {
 }
 
 const sponsorErrors: StudioSponsorErrorFactory = {
-  sponsor: (message, code, statusHint, gasUsed, subcode) =>
-    new TestStudioError(code, message, statusHint, gasUsed, subcode),
-  sponsorCongestion: (message) => new TestStudioError('SPONSOR_CONGESTION', message),
+  sponsor: (message, code, meta) => new TestStudioError(code, message, meta),
 };
 
-const prepareErrors = {
-  prepare: (message: string, code: string, statusHint?: number) =>
-    new TestStudioError(code, message, statusHint),
+const prepareErrors: StudioPrepareErrorFactory = {
+  prepare: (message: string, code: string) => new TestStudioError(code, message),
 };
 
 function makePromotionEntry(
@@ -187,7 +187,7 @@ function makeContext(
     prepareStore: {
       peek: vi.fn(),
       evictPreparedEntry: vi.fn(),
-      checkUserQuota: vi.fn(async () => 'ok'),
+      checkUserQuota: vi.fn(async () => 'ok' as const),
     },
     abuseBlocker: {} as StudioPolicyContext['abuseBlocker'],
     usageStore: {
@@ -350,7 +350,7 @@ describe('createStudioExecutionPolicy', () => {
   });
 
   test('does not widen the package main barrel', async () => {
-    const mainBarrel = await import('@stelis/core-api');
+    const mainBarrel = await import('../src/index.js');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'createStudioExecutionPolicy')).toBe(
       false,
     );
@@ -388,7 +388,9 @@ describe('studio prepare hooks', () => {
     const kindTx = makeBuildReadyTransaction();
     const ctx = makeContext({
       sui: {
-        simulateTransaction: vi.fn(async () => grpcSimulationSuccess('mock-digest', GAS_USED)),
+        simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+          grpcSimulationSuccess(TransactionDataBuilder.getDigestFromBytes(transaction), GAS_USED),
+        ),
       } as unknown as StudioPolicyContext['sui'],
       getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
     });
@@ -440,12 +442,12 @@ describe('studio prepare hooks', () => {
   test.each([
     {
       name: 'legacy partial result',
-      simulationResult: {
+      simulationResult: () => ({
         Transaction: {
           status: { success: true },
           effects: { gasUsed: GAS_USED },
         },
-      },
+      }),
       expected: {
         code: 'DRY_RUN_FAILED',
         message: 'Dry-run returned a malformed terminal result',
@@ -453,11 +455,12 @@ describe('studio prepare hooks', () => {
     },
     {
       name: 'typed failed transaction',
-      simulationResult: grpcSimulationFailure(
-        'mock-failure',
-        unknownExecutionError('unit-8 typed dry-run failure'),
-        GAS_USED,
-      ),
+      simulationResult: (digest: string) =>
+        grpcSimulationFailure(
+          digest,
+          unknownExecutionError('unit-8 typed dry-run failure'),
+          GAS_USED,
+        ),
       expected: {
         code: 'DRY_RUN_FAILED',
         message: 'Dry-run failed: unit-8 typed dry-run failure',
@@ -465,8 +468,8 @@ describe('studio prepare hooks', () => {
     },
     {
       name: 'current-union success without gas',
-      simulationResult: (() => {
-        const success = grpcSimulationSuccess('mock-no-gas', GAS_USED);
+      simulationResult: (digest: string) => {
+        const success = grpcSimulationSuccess(digest, GAS_USED);
         return {
           ...success,
           Transaction: {
@@ -477,7 +480,7 @@ describe('studio prepare hooks', () => {
             },
           },
         };
-      })(),
+      },
       expected: {
         code: 'DRY_RUN_NO_GAS',
         message: 'Dry-run returned no gas usage',
@@ -490,7 +493,9 @@ describe('studio prepare hooks', () => {
       const kindTx = makeBuildReadyTransaction();
       const ctx = makeContext({
         sui: {
-          simulateTransaction: vi.fn(async () => simulationResult),
+          simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+            simulationResult(TransactionDataBuilder.getDigestFromBytes(transaction)),
+          ),
         } as unknown as StudioPolicyContext['sui'],
         getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
       });
@@ -533,7 +538,7 @@ describe('studio sponsor preconsume', () => {
       prepareStore: {
         peek: vi.fn(async () => makeGenericEntry()),
         evictPreparedEntry: vi.fn(),
-        checkUserQuota: vi.fn(async () => 'ok'),
+        checkUserQuota: vi.fn(async () => 'ok' as const),
       },
       executionLedger: {
         ...makeContext().executionLedger,
@@ -556,7 +561,7 @@ describe('studio sponsor preconsume', () => {
       prepareStore: {
         peek: vi.fn(async () => makePromotionEntry()),
         evictPreparedEntry: vi.fn(),
-        checkUserQuota: vi.fn(async () => 'ok'),
+        checkUserQuota: vi.fn(async () => 'ok' as const),
       },
     });
     const { policy } = createStudioExecutionPolicy(
@@ -596,7 +601,7 @@ describe('studio sponsor preconsume', () => {
           prepareStore: {
             peek: vi.fn(async () => makePromotionEntry()),
             evictPreparedEntry: vi.fn(),
-            checkUserQuota: vi.fn(async () => 'ok'),
+            checkUserQuota: vi.fn(async () => 'ok' as const),
           },
         }),
         deps: {
@@ -693,7 +698,7 @@ describe('createStudioSponsorConsumeAdapter', () => {
     expect(state.sponsor?.prepared).toBe(promotion);
 
     await expect(adapter.validateConsumedEntry?.(makeGenericEntry())).rejects.toMatchObject({
-      code: 'MODE_MISMATCH',
+      code: 'SPONSOR_FAILED',
     });
     expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, TX_HASH);
   });
@@ -745,7 +750,7 @@ describe('studio sponsor postconsume hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          runPreflight: vi.fn(async () => ({ success: false, reason: 'MoveAbort(9)' })),
+          runPreflight: vi.fn(async () => ({ success: false as const, reason: 'MoveAbort(9)' })),
           releaseLedgerReservationWithLog:
             releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
           recordSponsorFailureForAbuse:
@@ -1098,11 +1103,12 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
     const usageRows: CreateUsageEventInput[] = [];
     const rawCause = new Error('rpc transport error');
+    const expectedDigest = 'expected-sui-transaction-digest';
     const options = makeSponsorOptions({
       ctx: makeContext({}, usageRows),
       deps: {
         signAndSubmit: vi.fn(async () => {
-          throw new SponsorPostSignatureUncertaintyError(rawCause);
+          throw new SponsorPostSignatureUncertaintyError(expectedDigest, rawCause);
         }) as unknown as StudioExecutionPolicyDependencies['signAndSubmit'],
         consumeLedgerReservationWithLog:
           consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
@@ -1117,20 +1123,23 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     );
     expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
     expect((thrown as SponsorPostSignatureUncertaintyError).cause).toBe(rawCause);
+    expect((thrown as SponsorPostSignatureUncertaintyError).expectedDigest).toBe(expectedDigest);
 
     expect(consumeLedgerReservationWithLog).toHaveBeenCalledWith(
       expect.anything(),
       RECEIPT_ID,
       RESERVED_GAS,
       'post_signature_uncertainty',
-      expect.objectContaining({ txDigest: null }),
+      expect.objectContaining({ txDigest: expectedDigest }),
     );
     expect(usageRows[0]).toMatchObject({
       result: 'failed',
+      txDigest: expectedDigest,
       failureReason: 'post_signature_uncertainty',
       consumedGasMist: RESERVED_GAS.toString(),
     });
     expect(state.sponsor?.sponsorResultOutcome).toBe('internal_error');
+    expect(state.sponsor?.sponsorResultDigest).toBe(expectedDigest);
     expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
       economicsStatus: 'unknown',
       failureReason: expect.stringContaining('post_signature_uncertainty'),

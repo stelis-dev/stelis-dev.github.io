@@ -8,6 +8,7 @@ import type {
   SponsorRefillAccountDispatchLockHandle,
 } from '../../src/sponsor-operations/refillLock.js';
 import type {
+  ReadySponsorRefillAccountSpend,
   SponsorRefillAccountSpend,
   SponsorRefillAccountSpendStateStore,
   SponsorRefillAccountWithdrawalReceipt,
@@ -68,7 +69,7 @@ function createMemorySpendState(nonces: Set<string>) {
     [...nonces].map((nonceKey) => [nonceKey, { type: 'issued', network: 'testnet' }]),
   );
 
-  function save(next: SponsorRefillAccountSpend): SponsorRefillAccountSpend {
+  function save<T extends SponsorRefillAccountSpend>(next: T): T {
     current = next;
     writeSequence += 1;
     snapshots.push(structuredClone(next));
@@ -286,6 +287,15 @@ function createMemorySpendState(nonces: Set<string>) {
   };
 
   return { state, snapshots, current: () => current };
+}
+
+function requireReadySpend(
+  spend: SponsorRefillAccountSpend | null,
+): ReadySponsorRefillAccountSpend {
+  if (spend?.state !== 'ready') {
+    throw new Error(`expected ready spend, received ${spend?.state ?? 'null'}`);
+  }
+  return spend;
 }
 
 function createOperationsState(
@@ -673,12 +683,11 @@ describe('Sponsor Refill Account spend coordinator', () => {
     const memory = createMemorySpendState(new Set([nonce]));
     const chain = createBoundary({
       onSubmit(bytes, signature, digest) {
-        const ready = memory.current();
-        expect(ready?.state).toBe('ready');
-        expect(ready?.transactionBytesBase64).toBe(Buffer.from(bytes).toString('base64'));
-        expect(ready?.signature).toBe(signature);
-        expect(ready?.digest).toBe(digest);
-        expect(ready?.gasBudgetMist).toBe('37');
+        const ready = requireReadySpend(memory.current());
+        expect(ready.transactionBytesBase64).toBe(Buffer.from(bytes).toString('base64'));
+        expect(ready.signature).toBe(signature);
+        expect(ready.digest).toBe(digest);
+        expect(ready.gasBudgetMist).toBe('37');
       },
     });
 
@@ -752,8 +761,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(pending.status).toBe('pending');
     expect(chain.submitCount()).toBe(0);
     expect(chain.buildCount()).toBe(1);
-    const ready = structuredClone(memory.current());
-    expect(ready?.state).toBe('ready');
+    const ready = structuredClone(requireReadySpend(memory.current()));
 
     chain.setLookup('not_found');
     const recovered = await coordinator({
@@ -765,9 +773,9 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(chain.buildCount()).toBe(1);
     expect(chain.validateCount()).toBe(2);
     const [submission] = chain.submissions();
-    expect(toBase64(submission!.bytes)).toBe(ready?.transactionBytesBase64);
-    expect(submission?.signature).toBe(ready?.signature);
-    expect(submission?.digest).toBe(ready?.digest);
+    expect(toBase64(submission!.bytes)).toBe(ready.transactionBytesBase64);
+    expect(submission?.signature).toBe(ready.signature);
+    expect(submission?.digest).toBe(ready.digest);
   });
 
   it('uses a found digest as authority and does not resubmit', async () => {
@@ -1074,8 +1082,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(chain.submitCount()).toBe(1);
     expect(chain.lookupCount()).toBe(2);
     expect(chain.validateCount()).toBe(1);
-    const ready = structuredClone(memory.current());
-    expect(ready?.state).toBe('ready');
+    const ready = structuredClone(requireReadySpend(memory.current()));
 
     submitGate.resolve();
     await Promise.resolve();
@@ -1092,9 +1099,9 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(chain.lookupCount()).toBe(4);
     expect(chain.validateCount()).toBe(2);
     const [submission] = chain.submissions();
-    expect(toBase64(submission!.bytes)).toBe(ready?.transactionBytesBase64);
-    expect(submission?.signature).toBe(ready?.signature);
-    expect(submission?.digest).toBe(ready?.digest);
+    expect(toBase64(submission!.bytes)).toBe(ready.transactionBytesBase64);
+    expect(submission?.signature).toBe(ready.signature);
+    expect(submission?.digest).toBe(ready.digest);
   });
 
   it.each(['build', 'simulate'] as const)(
@@ -1389,6 +1396,28 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
       'bytes do not match their digest',
     );
     expect(executeTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a self-consistent simulation terminal for different transaction bytes', async () => {
+    const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(12));
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const wrongDigest = TransactionDataBuilder.getDigestFromBytes(new Uint8Array([4, 3, 2, 1]));
+    const status = { success: true, error: null };
+    const terminal = {
+      $kind: 'Transaction',
+      Transaction: {
+        digest: wrongDigest,
+        status,
+        effects: { transactionDigest: wrongDigest, status },
+      },
+    };
+    const boundary = createSuiSponsorRefillAccountSpendBoundary({
+      sui: { simulateTransaction: vi.fn(async () => terminal) } as unknown as SuiGrpcClient,
+      signer,
+      sourceAddress: signer.toSuiAddress(),
+    });
+
+    await expect(boundary.simulate(bytes)).rejects.toThrow('malformed terminal result');
   });
 
   it('accepts a current failed terminal union and preserves its error message', async () => {

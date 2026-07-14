@@ -16,13 +16,8 @@
  * Binding this as `app.post(path, middleware, handler)` would run JWT/block/
  * rate-limit before the 503 guards — that ordering is not permitted.
  *
- * JWT failure mapping has two modes:
- *   - claim:           DeveloperJwtAuthError → 401 AUTH_FAILED.
- *                      Other JWT errors → 500 `{ error: 'Internal server error' }`
- *                      (no `code` field — matches pre-middleware claim outer
- *                      catch behavior exactly).
- *   - prepare/sponsor: DeveloperJwtAuthError → 401 AUTH_FAILED.
- *                      Other JWT errors → 401 AUTH_JWT_INVALID.
+ * JWT failures are classified once for every Studio route: credential shape,
+ * verified rejection, and verifier availability have distinct current codes.
  *
  * Return shape: `{ ok: true, identity, ip }` on success, or
  * `{ ok: false, response }` carrying a ready-to-return short-circuit
@@ -40,23 +35,33 @@ import {
   type VerifiedDeveloperIdentity,
 } from '@stelis/core-api/studio';
 import { checkBlockedRequest, toBlockedError } from '@stelis/core-api';
+import type { HostErrorCode } from '@stelis/contracts';
 import type { AppApiContext } from '../context.js';
 import type { ResolveClientIp } from '../clientIp.js';
-import { callDeveloperVerifyApi } from '../developerJwtVerifyCallback.js';
+import {
+  callDeveloperVerifyApi,
+  DeveloperVerifyRejectedError,
+  DeveloperVerifyUnavailableError,
+} from '../developerJwtVerifyCallback.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
+import { codedHostError, respondMapped, uncodedHostError } from '../errorMap.js';
 
-/** Auth error with HTTP status hint for route-layer error mapping. */
-export class DeveloperJwtAuthError extends Error {
+type StudioAuthenticationErrorCode = 'AUTH_FAILED' | 'AUTH_JWT_INVALID' | 'AUTH_UNAVAILABLE';
+
+/** Closed Studio authentication outcome; HTTP status belongs to contracts. */
+export class StudioAuthenticationError extends Error {
   constructor(
     message: string,
-    public readonly statusHint: number,
+    public readonly code: StudioAuthenticationErrorCode,
   ) {
     super(message);
-    this.name = 'DeveloperJwtAuthError';
+    this.name = 'StudioAuthenticationError';
   }
 }
 
 export interface StudioAuthOptions {
+  /** Current error-code set for the exact Studio route invoking this prelude. */
+  allowedErrorCodes: readonly HostErrorCode[];
   /**
    * Rate-limit key prefix, e.g. `'promo_list'` / `'promo_detail'` /
    * `'promo_claim'` / `'promo_prepare'` / `'promo_sponsor'`. Keys are
@@ -64,14 +69,6 @@ export interface StudioAuthOptions {
    * when the route has a promotion id, `${prefix}:promotion:${promotionId}`.
    */
   rateLimitPrefix: string;
-  /**
-   * If true, a JWT verification error that is not a DeveloperJwtAuthError is
-   * mapped to `401 AUTH_JWT_INVALID`. If false (default), such errors are
-   * mapped to `500 { error: 'Internal server error' }` (no `code` field),
-   * matching the pre-middleware claim route contract. Claim uses `false`;
-   * prepare/sponsor use `true`.
-   */
-  unknownJwtErrorAs401?: boolean;
 }
 
 export type StudioAuthResult =
@@ -84,17 +81,38 @@ export async function verifyDeveloperJwtFromRequest(
 ): Promise<VerifiedDeveloperIdentity> {
   const authResult = extractBearerToken(request);
   if (authResult.status === 'absent') {
-    throw new DeveloperJwtAuthError('Authorization header required', 401);
+    throw new StudioAuthenticationError('Authorization header required', 'AUTH_FAILED');
   }
   if (authResult.status === 'malformed') {
-    throw new DeveloperJwtAuthError(authResult.reason, 400);
+    throw new StudioAuthenticationError(authResult.reason, 'AUTH_FAILED');
   }
   if (!ctx.developerJwtTrustConfig) {
-    throw new DeveloperJwtAuthError('Developer JWT trust config not configured', 503);
+    throw new StudioAuthenticationError(
+      'Developer JWT trust config not configured',
+      'AUTH_UNAVAILABLE',
+    );
   }
-  const identity = await verifyDeveloperJwt(authResult.token, ctx.developerJwtTrustConfig);
+  let identity: VerifiedDeveloperIdentity;
+  try {
+    identity = await verifyDeveloperJwt(authResult.token, ctx.developerJwtTrustConfig);
+  } catch (err) {
+    throw new StudioAuthenticationError(
+      err instanceof Error ? err.message : 'Developer JWT verification failed',
+      'AUTH_JWT_INVALID',
+    );
+  }
   if (ctx.developerJwtVerifyUrl) {
-    await callDeveloperVerifyApi(authResult.token, ctx.developerJwtVerifyUrl);
+    try {
+      await callDeveloperVerifyApi(authResult.token, ctx.developerJwtVerifyUrl);
+    } catch (err) {
+      if (err instanceof DeveloperVerifyRejectedError) {
+        throw new StudioAuthenticationError(err.message, 'AUTH_JWT_INVALID');
+      }
+      if (err instanceof DeveloperVerifyUnavailableError) {
+        throw new StudioAuthenticationError(err.message, 'AUTH_UNAVAILABLE');
+      }
+      throw err;
+    }
   }
   return identity;
 }
@@ -116,32 +134,30 @@ export async function runStudioAuth(
   try {
     identity = await verifyDeveloperJwtFromRequest(c.req.raw, ctx);
   } catch (authErr) {
-    if (authErr instanceof DeveloperJwtAuthError) {
+    if (authErr instanceof StudioAuthenticationError) {
       return {
         ok: false,
-        response: c.json(
-          { error: authErr.message, code: 'AUTH_FAILED' },
-          authErr.statusHint as 401,
+        response: respondMapped(
+          c,
+          codedHostError(
+            {
+              error:
+                authErr.code === 'AUTH_UNAVAILABLE'
+                  ? 'Authentication service unavailable'
+                  : 'Authentication failed',
+              code: authErr.code,
+            },
+            opts.allowedErrorCodes,
+          ),
         ),
       };
     }
-    if (opts.unknownJwtErrorAs401) {
-      return {
-        ok: false,
-        response: c.json(
-          {
-            error: authErr instanceof Error ? authErr.message : 'JWT verification failed',
-            code: 'AUTH_JWT_INVALID',
-          },
-          401,
-        ),
-      };
-    }
-    // Claim-path contract: unknown JWT error → 500 Internal server error
-    // (no `code` field). Matches the pre-middleware route-outer catch.
     return {
       ok: false,
-      response: c.json({ error: 'Internal server error' }, 500),
+      response: respondMapped(
+        c,
+        uncodedHostError({ error: 'Internal server error' }, opts.allowedErrorCodes, 500),
+      ),
     };
   }
 
@@ -156,10 +172,12 @@ export async function runStudioAuth(
   if (blocked.blocked) {
     return {
       ok: false,
-      response: c.json(toBlockedError(blocked), {
-        status: 429,
-        headers: { 'Retry-After': formatRetryAfterSeconds(blocked.retryAfterMs) },
-      }),
+      response: respondMapped(
+        c,
+        codedHostError(toBlockedError(blocked), opts.allowedErrorCodes, {
+          'Retry-After': formatRetryAfterSeconds(blocked.retryAfterMs),
+        }),
+      ),
     };
   }
 
@@ -175,12 +193,14 @@ export async function runStudioAuth(
     if (!rl.allowed) {
       return {
         ok: false,
-        response: c.json(
-          { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
-          {
-            status: 429,
-            headers: { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
-          },
+        response: respondMapped(
+          c,
+          uncodedHostError(
+            { error: 'Rate limit exceeded', retryAfterMs: rl.retryAfterMs },
+            opts.allowedErrorCodes,
+            429,
+            { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
+          ),
         ),
       };
     }

@@ -4,9 +4,12 @@
  */
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SponsorResultCallback } from '../handlers/sponsorResult.js';
-import { SponsorCongestionError } from '../handlers/sponsor.js';
-import type { GasUsedFields } from '../session/index.js';
-import { decodeTxBytes, SessionDecodeError } from '../session/index.js';
+import type { GasUsedFields } from '../session/sessionTypes.js';
+import {
+  decodeTxBytes,
+  SessionDecodeError,
+  SponsorPostSignatureUncertaintyError,
+} from '../session/sessionPrimitives.js';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import type { PromotionUsageStoreAdapter } from './promotionUsageStore.js';
@@ -14,7 +17,7 @@ import type { SponsorPoolAdapter } from '../context.js';
 import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
-import type { SponsorFailureSubcode } from '../prepare/prepareErrors.js';
+import type { PromotionSponsorErrorCode, SponsorFailureSubcode } from '@stelis/contracts';
 import {
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
@@ -92,18 +95,12 @@ export interface PromotionSponsorResult {
 export class PromotionSponsorError extends Error {
   constructor(
     message: string,
-    public readonly code: string,
-    public readonly statusHint: number = 400,
-    /**
-     * Gas burned by an on-chain attempt when retrievable. Set on
-     * `code === 'ONCHAIN_REVERT'` when the failure-path effects carry
-     * gasUsed; `null` otherwise.
-     */
-    public readonly gasUsed: GasUsedFields | null = null,
-    /**
-     * Classified sponsor failure subcode from `classifySponsorFailureSubcode()`.
-     */
-    public readonly subcode: SponsorFailureSubcode | undefined = undefined,
+    public readonly code: PromotionSponsorErrorCode,
+    public readonly meta: {
+      readonly gasUsed?: GasUsedFields | null;
+      readonly digest?: string;
+      readonly subcode?: SponsorFailureSubcode;
+    } = {},
   ) {
     super(message);
     this.name = 'PromotionSponsorError';
@@ -123,7 +120,7 @@ export async function handlePromotionSponsor(
     txBytes = decodeTxBytes(params.txBytes);
   } catch (err) {
     if (err instanceof SessionDecodeError) {
-      throw new PromotionSponsorError(err.message, 'BAD_REQUEST', 400);
+      throw new PromotionSponsorError(err.message, 'BAD_REQUEST');
     }
     throw err;
   }
@@ -137,39 +134,51 @@ export async function handlePromotionSponsor(
       errors: {
         sponsor: (
           message: string,
-          code: string,
-          statusHint?: number,
-          gasUsed?: GasUsedFields | null,
-          subcode?: SponsorFailureSubcode,
-        ) => new PromotionSponsorError(message, code, statusHint, gasUsed ?? null, subcode),
-        sponsorCongestion: (message: string) => new SponsorCongestionError(message),
+          code: PromotionSponsorErrorCode,
+          meta?: {
+            readonly gasUsed?: GasUsedFields | null;
+            readonly digest?: string;
+            readonly subcode?: SponsorFailureSubcode;
+          },
+        ) => new PromotionSponsorError(message, code, meta),
       },
     },
   } as const;
   const { policy, state } = createStudioExecutionPolicy(options);
 
-  return await runSponsorStateMachine(
-    {
-      prepareStore: ctx.prepareStore,
-      sponsorPool: ctx.sponsorPool,
-      executionLedger: ctx.executionLedger,
-      signAndSubmit: createStudioSignAndSubmitPort(options, state),
-    },
-    {
-      hookContext: {
-        receiptId: params.receiptId,
-        clientIp: params.clientIp,
+  try {
+    return await runSponsorStateMachine(
+      {
+        prepareStore: ctx.prepareStore,
+        sponsorPool: ctx.sponsorPool,
+        executionLedger: ctx.executionLedger,
+        signAndSubmit: createStudioSignAndSubmitPort(options, state),
       },
-      txBytes,
-      userSignature: params.userSignature,
-      projectResult: () => projectStudioSponsorResult(options, state),
-    },
-    policy,
-    createStudioSponsorConsumeAdapter({
-      context: ctx,
-      params,
-      state,
-      errors: options.sponsor.errors,
-    }),
-  );
+      {
+        hookContext: {
+          receiptId: params.receiptId,
+          clientIp: params.clientIp,
+        },
+        txBytes,
+        userSignature: params.userSignature,
+        projectResult: () => projectStudioSponsorResult(options, state),
+      },
+      policy,
+      createStudioSponsorConsumeAdapter({
+        context: ctx,
+        params,
+        state,
+        errors: options.sponsor.errors,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof SponsorPostSignatureUncertaintyError) {
+      throw new PromotionSponsorError(
+        'Sponsor transaction submission outcome is uncertain',
+        'SPONSOR_SUBMISSION_UNCERTAIN',
+        { digest: err.expectedDigest },
+      );
+    }
+    throw err;
+  }
 }

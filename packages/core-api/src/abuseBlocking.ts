@@ -188,12 +188,12 @@ function subjectLogFields(subject: AbuseSubject | undefined): Record<string, str
 
 export function toBlockedError(status: AbuseBlockStatus): {
   error: string;
-  code: string;
+  code: typeof ABUSE_BLOCKED_CODE;
   retryAfterMs?: number;
 } {
   return {
     error: 'Request temporarily blocked',
     code: ABUSE_BLOCKED_CODE,
-    retryAfterMs: status.retryAfterMs,
+    ...(status.retryAfterMs === undefined ? {} : { retryAfterMs: status.retryAfterMs }),
   };
 }

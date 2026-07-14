@@ -33,8 +33,13 @@ import {
   parseRequiredPositiveIntegerEnv,
 } from './env.js';
 import { createRedisClient } from './redisClient.js';
-import { loadRpcConfig, createSuiClient } from './sui/index.js';
-import { redactUrl } from './sui/redactUrl.js';
+import { loadRpcConfig } from './sui/parseEndpointConfig.js';
+import { createSuiClient } from './sui/createSuiClient.js';
+import {
+  redactEndpointUrl,
+  redactSensitiveText,
+  safeErrorSummary,
+} from '@stelis/core-api/observability';
 import { validateChainIdentity } from './sui/validateChainIdentity.js';
 import {
   getSettlementSwapPathRegistryPath,
@@ -223,7 +228,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     settlementSwapPathRegistryRaw = readFileSync(settlementSwapPathRegistryPath, 'utf-8');
   } catch (err) {
     throw new Error(
-      `[app-api] Cannot read settlement-swap-paths.json at "${settlementSwapPathRegistryPath}": ${err instanceof Error ? err.message : String(err)}. ` +
+      `[app-api] Cannot read settlement-swap-paths.json at "${settlementSwapPathRegistryPath}": ${redactSensitiveText(err instanceof Error ? err.message : String(err))}. ` +
         'Restore the tracked packages/app-api/settlement-swap-paths.json config file and configure the active NETWORK section before starting app-api.',
     );
   }
@@ -234,7 +239,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     settlementSwapPathRegistryJson = JSON.parse(settlementSwapPathRegistryRaw);
   } catch (err) {
     throw new Error(
-      `[app-api] Invalid JSON in settlement-swap-paths.json at "${settlementSwapPathRegistryPath}": ${err instanceof Error ? err.message : String(err)}`,
+      `[app-api] Invalid JSON in settlement-swap-paths.json at "${settlementSwapPathRegistryPath}": ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
     );
   }
   const settlementSwapPathRegistryEntries = parseSettlementSwapPathRegistryJson(
@@ -444,7 +449,9 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     // eslint-disable-next-line no-console
     console.warn(
       `[app-api] RPC endpoint(s) excluded: ` +
-        rejected.map((r) => `${redactUrl(r.url)}: ${r.reason}`).join('; '),
+        rejected
+          .map((r) => `${redactEndpointUrl(r.url)}: ${safeErrorSummary(r.reason)}`)
+          .join('; '),
     );
   }
   if (verified.length === 0) {
@@ -453,7 +460,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
   // eslint-disable-next-line no-console
   console.log(
     `[app-api] Sui RPC: ${verified.length}/${rpcEndpoints.length} endpoint(s) verified — ` +
-      verified.map((ep) => redactUrl(ep.url)).join(', '),
+      verified.map((ep) => redactEndpointUrl(ep.url)).join(', '),
   );
 
   const {
@@ -499,9 +506,9 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         canonicalTarget = canonicalizePromotionTarget(t);
       } catch (error) {
         throw new Error(
-          `[app-api] STUDIO_ALLOWED_TARGETS entry "${t}" is invalid: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `[app-api] STUDIO_ALLOWED_TARGETS entry "${t}" is invalid: ${redactSensitiveText(
+            error instanceof Error ? error.message : String(error),
+          )}`,
         );
       }
       if (allowedTargets.has(canonicalTarget)) {
@@ -526,7 +533,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         }
       } catch (e) {
         throw new Error(
-          `[app-api] STUDIO_DEVELOPER_JWT_VERIFY_URL is not a valid URL: "${verifyUrl}" — ${e instanceof Error ? e.message : String(e)}`,
+          `[app-api] STUDIO_DEVELOPER_JWT_VERIFY_URL is not a valid URL: "${redactEndpointUrl(verifyUrl)}" — ${redactSensitiveText(e instanceof Error ? e.message : String(e))}`,
         );
       }
     }

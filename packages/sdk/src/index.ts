@@ -4,7 +4,8 @@
 // High-level SDK (recommended)
 // ─────────────────────────────────────────────
 
-export { StelisSDK, StelisSponsoredError } from './sdk.js';
+export { StelisSDK } from './sdk.js';
+export { StelisSponsoredError } from './errors.js';
 export { StelisApiException } from './client.js';
 
 // ─────────────────────────────────────────────
@@ -53,14 +54,14 @@ export type {
 // ─────────────────────────────────────────────
 
 export { checkSettlementSwapPathLiquidity } from './swap.js';
-export type { SettlementSwapPathLiquidityStatus, HopStatus, LiquidityStatusCode } from './swap.js';
+export type { SettlementSwapPathLiquidityStatus } from './swap.js';
 
 // ─────────────────────────────────────────────
 // Credit query (shared trust root via core-relay)
 // ─────────────────────────────────────────────
 
-export { queryUserCredit, CreditQueryInconsistentStateError } from './credit.js';
-export type { CreditResult } from './credit.js';
+export { queryUserCredit, CreditQueryInconsistentStateError } from '@stelis/core-relay/browser';
+export type { CreditResult } from '@stelis/core-relay/browser';
 
 // ─────────────────────────────────────────────
 // Integrity verification (S-16)
@@ -74,7 +75,6 @@ export { parseRelayConfigResponse } from '@stelis/contracts';
 // ─────────────────────────────────────────────
 
 export { STELIS_CONTRACT_IDS, DEEPBOOK_IDS } from '@stelis/contracts';
-export type { StelisContractIds, DeepBookIds } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Promotion discovery (standalone helpers)

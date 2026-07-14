@@ -22,6 +22,48 @@
  */
 export const DEVELOPER_VERIFY_TIMEOUT_MS = 5_000;
 
+export class DeveloperVerifyRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeveloperVerifyRejectedError';
+  }
+}
+
+export class DeveloperVerifyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeveloperVerifyUnavailableError';
+  }
+}
+
+function parseDeveloperVerifyResponse(value: unknown): { valid: boolean; reason?: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeveloperVerifyUnavailableError(
+      'developer verify API returned a non-object response',
+    );
+  }
+  const raw = value as Record<string, unknown>;
+  const unexpectedKey = Object.keys(raw).find((key) => key !== 'valid' && key !== 'reason');
+  if (unexpectedKey !== undefined) {
+    throw new DeveloperVerifyUnavailableError(
+      'developer verify API returned a non-current response shape',
+    );
+  }
+  if (typeof raw.valid !== 'boolean') {
+    throw new DeveloperVerifyUnavailableError(
+      'developer verify API response.valid must be a boolean',
+    );
+  }
+  if (raw.reason !== undefined && typeof raw.reason !== 'string') {
+    throw new DeveloperVerifyUnavailableError(
+      'developer verify API response.reason must be a string when present',
+    );
+  }
+  return raw.reason === undefined
+    ? { valid: raw.valid }
+    : { valid: raw.valid, reason: raw.reason as string };
+}
+
 /**
  * Call the developer-owned JWT verification API.
  *
@@ -38,7 +80,10 @@ export const DEVELOPER_VERIFY_TIMEOUT_MS = 5_000;
  *
  * @param jwt - The developer JWT to verify
  * @param verifyUrl - The developer-owned verification URL
- * @throws Error on any failure (fail-closed)
+ * @throws DeveloperVerifyRejectedError when the developer supplies an explicit
+ *   negative verdict.
+ * @throws DeveloperVerifyUnavailableError when no trustworthy verdict can be
+ *   established because the callback transport or response is unavailable.
  */
 export async function callDeveloperVerifyApi(jwt: string, verifyUrl: string): Promise<void> {
   const controller = new AbortController();
@@ -53,24 +98,35 @@ export async function callDeveloperVerifyApi(jwt: string, verifyUrl: string): Pr
     });
 
     if (!response.ok) {
-      throw new Error(`developer verify API returned HTTP ${response.status}`);
+      throw new DeveloperVerifyUnavailableError(
+        `developer verify API returned HTTP ${response.status}`,
+      );
     }
 
-    let body: { valid?: boolean; reason?: string };
+    let rawBody: unknown;
     try {
-      body = (await response.json()) as { valid?: boolean; reason?: string };
+      rawBody = await response.json();
     } catch {
-      throw new Error('developer verify API returned invalid JSON');
+      throw new DeveloperVerifyUnavailableError('developer verify API returned invalid JSON');
     }
+    const body = parseDeveloperVerifyResponse(rawBody);
 
-    if (body.valid !== true) {
-      throw new Error(`developer verify API denied: ${body.reason ?? 'no reason given'}`);
+    if (!body.valid) {
+      throw new DeveloperVerifyRejectedError(
+        `developer verify API denied: ${body.reason ?? 'no reason given'}`,
+      );
     }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`developer verify API timed out after ${DEVELOPER_VERIFY_TIMEOUT_MS}ms`);
+      throw new DeveloperVerifyUnavailableError(
+        `developer verify API timed out after ${DEVELOPER_VERIFY_TIMEOUT_MS}ms`,
+      );
     }
-    throw err;
+    if (err instanceof DeveloperVerifyRejectedError) throw err;
+    if (err instanceof DeveloperVerifyUnavailableError) throw err;
+    throw new DeveloperVerifyUnavailableError(
+      `developer verify API request failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   } finally {
     clearTimeout(timeout);
   }

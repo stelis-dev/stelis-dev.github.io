@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   ClientIpResolutionError,
-  normalizeTrustedProxyHops,
   parseTrustedProxyHops,
   resolveClientIp,
 } from '../src/clientIp.js';
@@ -94,12 +93,6 @@ describe('clientIp helper', () => {
     expect(parseTrustedProxyHops(undefined)).toBe(0);
   });
 
-  it('normalizes trust-proxy hop count', () => {
-    expect(normalizeTrustedProxyHops(0)).toBe(0);
-    expect(normalizeTrustedProxyHops(1)).toBe(1);
-    expect(normalizeTrustedProxyHops(3)).toBe(3);
-  });
-
   it('rejects invalid hop configuration', () => {
     expect(() => parseTrustedProxyHops('-1')).toThrow(
       /TRUSTED_PROXY_HOPS must be a non-negative integer/,
@@ -109,12 +102,6 @@ describe('clientIp helper', () => {
     );
     expect(() => parseTrustedProxyHops('9007199254740993')).toThrow(
       /TRUSTED_PROXY_HOPS must be a non-negative integer/,
-    );
-    expect(() => normalizeTrustedProxyHops(-1)).toThrow(
-      /trustedProxyHops must be a non-negative integer/,
-    );
-    expect(() => normalizeTrustedProxyHops(Number.MAX_SAFE_INTEGER + 1)).toThrow(
-      /trustedProxyHops must be a non-negative integer/,
     );
   });
 });

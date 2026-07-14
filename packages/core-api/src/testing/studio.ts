@@ -16,5 +16,4 @@
  * `@stelis/core-api/studio`.
  */
 export { MemoryPromotionStore } from '../studio/promotionStore.js';
-export { MemoryPromotionUsageStore } from '../studio/promotionUsageStore.js';
 export { MemoryPromotionExecutionLedger } from '../studio/executionLedgerMemory.js';

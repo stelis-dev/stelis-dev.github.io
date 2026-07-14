@@ -1,11 +1,16 @@
 import type { FetchLike, StelisMcpServerConfig } from './config.js';
+import {
+  parseHostErrorResponse,
+  type HostErrorCode,
+  type HostErrorResponse,
+} from '@stelis/contracts';
 
 export class StelisMcpHttpError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code: string,
-    public readonly body: unknown,
+    public readonly code: HostErrorCode | 'HTTP_ERROR',
+    public readonly body: HostErrorResponse | undefined,
   ) {
     super(message);
     this.name = 'StelisMcpHttpError';
@@ -20,12 +25,13 @@ export interface RequestJsonOptions {
   body?: unknown;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  allowedErrorCodes: readonly HostErrorCode[];
 }
 
-export async function requestJson<T>(
+export async function requestJson(
   config: StelisMcpServerConfig,
   options: RequestJsonOptions,
-): Promise<T> {
+): Promise<unknown> {
   const method = options.method ?? 'GET';
   const url = buildRequestUrl(config, options);
   const fetchFn = resolveFetch(config.fetchFn);
@@ -43,7 +49,7 @@ export async function requestJson<T>(
       body: method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined,
       signal: controller.signal,
     });
-    return await handleResponse<T>(res);
+    return await handleResponse(res, options.allowedErrorCodes);
   } catch (error) {
     if (isAbortError(error)) {
       throw new Error(`Stelis host request timed out after ${timeoutMs} ms.`);
@@ -100,25 +106,32 @@ function resolveTimeoutMs(input: number | undefined, fallback: number): number {
   return value;
 }
 
-async function handleResponse<T>(res: Response): Promise<T> {
+async function handleResponse(
+  res: Response,
+  allowedErrorCodes: readonly HostErrorCode[],
+): Promise<unknown> {
   const raw = await res.text();
   const data = parseJsonIfPossible(raw);
 
   if (!res.ok) {
-    const code = readStringField(data, 'code') ?? 'HTTP_ERROR';
+    let currentError: HostErrorResponse | undefined;
+    try {
+      currentError = parseHostErrorResponse(data, allowedErrorCodes, res.status);
+    } catch {
+      currentError = undefined;
+    }
+    const code = currentError?.code ?? 'HTTP_ERROR';
     const message =
-      readStringField(data, 'error') ??
-      summarizeHttpBody(raw) ??
-      res.statusText ??
-      `HTTP ${res.status}`;
-    throw new StelisMcpHttpError(message, res.status, code, data);
+      currentError?.error ??
+      `Stelis Host returned a non-current error response (HTTP ${res.status})`;
+    throw new StelisMcpHttpError(message, res.status, code, currentError);
   }
 
   if (data === undefined) {
     throw new Error(`Invalid non-JSON response from Stelis host (HTTP ${res.status}).`);
   }
 
-  return data as T;
+  return data;
 }
 
 function parseJsonIfPossible(raw: string): unknown | undefined {
@@ -129,18 +142,6 @@ function parseJsonIfPossible(raw: string): unknown | undefined {
   } catch {
     return undefined;
   }
-}
-
-function summarizeHttpBody(raw: string): string | undefined {
-  const trimmed = raw.trim().replace(/\s+/g, ' ');
-  if (!trimmed) return undefined;
-  return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed;
-}
-
-function readStringField(value: unknown, field: string): string | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const candidate = (value as Record<string, unknown>)[field];
-  return typeof candidate === 'string' ? candidate : undefined;
 }
 
 function stripTrailingSlashes(value: string): string {

@@ -17,7 +17,7 @@ import {
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   SLIPPAGE_CAP_BPS,
 } from '@stelis/contracts';
-import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
 
 // ─── Module mocks (vi.hoisted ensures availability inside vi.mock factory) ──
@@ -85,7 +85,10 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
-import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
+import {
+  extractSettleArgsFromBuiltTx,
+  type ExtractedSettleArgs,
+} from '../src/prepare/extractSettleArgs.js';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
@@ -142,6 +145,29 @@ const ONCHAIN_CONFIG = {
   protocolFlatFeeMist: 10_000n,
   configVersion: 1n,
 };
+
+function makeExtractedSettleArgs(
+  overrides: Partial<ExtractedSettleArgs> = {},
+): ExtractedSettleArgs {
+  return {
+    configObjectId: '0xCONFIG',
+    registryObjectId: '0xREGISTRY',
+    settlementPayoutRecipient: '0xPAYOUT',
+    executionCostClaim: 1_800_000n,
+    policyHash: new Uint8Array(32),
+    orderIdHash: new Uint8Array(0),
+    nonce: 1n,
+    receiptId: new Uint8Array(32),
+    simGasReported: MOCK_BUILD_RESULT.simGas,
+    gasVarianceFixedMist: MOCK_BUILD_RESULT.gasVarianceFixedMist,
+    slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
+    quotedHostFeeMist: 50_000n,
+    expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
+    expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
+    quoteTimestampMs: 1n,
+    ...overrides,
+  };
+}
 
 function makeMockContext() {
   return {
@@ -203,8 +229,8 @@ function makeExtraCfg(): PrepareHandlerConfig {
       settlementTokenType: '0xDEEP::deep::DEEP',
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
-      lotSize: 1,
-      minSize: 1,
+      lotSize: 1n,
+      minSize: 1n,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
@@ -268,24 +294,26 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
 
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
-      configObjectId: '0xCONFIG',
-      registryObjectId: '0xREGISTRY',
-      settlementPayoutRecipient: '0xPAYOUT',
-      executionCostClaim: 1_800_000n,
-      policyHash: policyHashBytes,
-      orderIdHash: new Uint8Array(0),
-      quotedHostFeeMist: 50_000n,
-      expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
-      expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
-      paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
-      slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
-      extractedSettlementSwapPath: {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
-        settlementSwapDirection: 'baseForQuote',
-      },
-    });
+    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+      makeExtractedSettleArgs({
+        configObjectId: '0xCONFIG',
+        registryObjectId: '0xREGISTRY',
+        settlementPayoutRecipient: '0xPAYOUT',
+        executionCostClaim: 1_800_000n,
+        policyHash: policyHashBytes,
+        orderIdHash: new Uint8Array(0),
+        quotedHostFeeMist: 50_000n,
+        expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
+        expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
+        paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
+        slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
+        extractedSettlementSwapPath: {
+          tokenType: '0xDEEP::deep::DEEP',
+          hops: ['0xPOOL'],
+          settlementSwapDirection: 'baseForQuote',
+        },
+      }),
+    );
   });
 
   it('returns correct cost breakdown with all fee components', async () => {
@@ -435,24 +463,26 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('test-order-123'));
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
-      configObjectId: '0xCONFIG',
-      registryObjectId: '0xREGISTRY',
-      settlementPayoutRecipient: '0xPAYOUT',
-      executionCostClaim: 1_800_000n,
-      policyHash: policyHashBytes,
-      orderIdHash,
-      quotedHostFeeMist: 50_000n,
-      expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
-      expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
-      paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
-      slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
-      extractedSettlementSwapPath: {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
-        settlementSwapDirection: 'baseForQuote',
-      },
-    });
+    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+      makeExtractedSettleArgs({
+        configObjectId: '0xCONFIG',
+        registryObjectId: '0xREGISTRY',
+        settlementPayoutRecipient: '0xPAYOUT',
+        executionCostClaim: 1_800_000n,
+        policyHash: policyHashBytes,
+        orderIdHash,
+        quotedHostFeeMist: 50_000n,
+        expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
+        expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
+        paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
+        slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
+        extractedSettlementSwapPath: {
+          tokenType: '0xDEEP::deep::DEEP',
+          hops: ['0xPOOL'],
+          settlementSwapDirection: 'baseForQuote',
+        },
+      }),
+    );
 
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
@@ -483,24 +513,26 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('store-test-order'));
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
-      configObjectId: '0xCONFIG',
-      registryObjectId: '0xREGISTRY',
-      settlementPayoutRecipient: '0xPAYOUT',
-      executionCostClaim: 1_800_000n,
-      policyHash: policyHashBytes,
-      orderIdHash,
-      quotedHostFeeMist: 50_000n,
-      expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
-      expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
-      paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
-      slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
-      extractedSettlementSwapPath: {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
-        settlementSwapDirection: 'baseForQuote',
-      },
-    });
+    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+      makeExtractedSettleArgs({
+        configObjectId: '0xCONFIG',
+        registryObjectId: '0xREGISTRY',
+        settlementPayoutRecipient: '0xPAYOUT',
+        executionCostClaim: 1_800_000n,
+        policyHash: policyHashBytes,
+        orderIdHash,
+        quotedHostFeeMist: 50_000n,
+        expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
+        expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
+        paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
+        slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
+        extractedSettlementSwapPath: {
+          tokenType: '0xDEEP::deep::DEEP',
+          hops: ['0xPOOL'],
+          settlementSwapDirection: 'baseForQuote',
+        },
+      }),
+    );
 
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
@@ -524,31 +556,33 @@ describe('handlePrepare — success path', () => {
   });
 
   it('rejects before store when payment-input trace mismatches the selected source', async () => {
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue({
-      configObjectId: '0xCONFIG',
-      registryObjectId: '0xREGISTRY',
-      settlementPayoutRecipient: '0xPAYOUT',
-      executionCostClaim: 1_800_000n,
-      policyHash: new Uint8Array(32).fill(0x11),
-      orderIdHash: new Uint8Array(0),
-      quotedHostFeeMist: 50_000n,
-      expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
-      expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
-      paymentInputTrace: {
-        settleVariantClass: 'new_user',
-        source: 'address_balance',
-        paymentCoinRefKind: 'nested_result',
-        producerCommandKind: 'MoveCall',
-        settleSwapAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
-        withdrawalAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
-        redeemCommandIndex: 0,
-        withdrawalInputIndex: 0,
-        senderWithdrawals: [{ inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest }],
-        senderRedeems: [
-          { commandIndex: 0, inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest },
-        ],
-      },
-    });
+    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+      makeExtractedSettleArgs({
+        configObjectId: '0xCONFIG',
+        registryObjectId: '0xREGISTRY',
+        settlementPayoutRecipient: '0xPAYOUT',
+        executionCostClaim: 1_800_000n,
+        policyHash: new Uint8Array(32).fill(0x11),
+        orderIdHash: new Uint8Array(0),
+        quotedHostFeeMist: 50_000n,
+        expectedProtocolFeeMist: ONCHAIN_CONFIG.protocolFlatFeeMist,
+        expectedConfigVersion: ONCHAIN_CONFIG.configVersion,
+        paymentInputTrace: {
+          settleVariantClass: 'new_user',
+          source: 'address_balance',
+          paymentCoinRefKind: 'nested_result',
+          producerCommandKind: 'MoveCall',
+          settleSwapAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
+          withdrawalAmount: MOCK_BUILD_RESULT.swapAmountSmallest,
+          redeemCommandIndex: 0,
+          withdrawalInputIndex: 0,
+          senderWithdrawals: [{ inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest }],
+          senderRedeems: [
+            { commandIndex: 0, inputIndex: 0, amount: MOCK_BUILD_RESULT.swapAmountSmallest },
+          ],
+        },
+      }),
+    );
 
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
@@ -566,7 +600,7 @@ describe('handlePrepare — success path', () => {
   // ── Lease commit error mapping (handler adapter invariant) ──────────────
   // `SponsorLeaseCommitError` thrown by `sponsorPool.commit()` (called via
   // the prepare runner) MUST be re-mapped by the handler to
-  // `PrepareValidationError('SPONSOR_LEASE_COMMIT_FAILED')` with statusHint=500.
+  // `PrepareValidationError('SPONSOR_LEASE_COMMIT_FAILED')`.
   // The runner owns cleanup, and the handler adapter owns the route-specific
   // domain error classification.
   it('maps SponsorLeaseCommitError → SPONSOR_LEASE_COMMIT_FAILED at handler boundary, releases all runner resources', async () => {
@@ -595,11 +629,13 @@ describe('handlePrepare — success path', () => {
       caught = err;
     }
 
-    // Mapping invariant: typed lease error → PrepareValidationError(500).
+    // Mapping invariant: typed lease error → current prepare-domain code.
     expect(caught).toBeInstanceOf(PrepareValidationError);
-    expect((caught as PrepareValidationError).code).toBe('SPONSOR_LEASE_COMMIT_FAILED');
-    expect((caught as PrepareValidationError).statusHint).toBe(500);
-    expect((caught as PrepareValidationError).message).toContain('lease was not in reserved stage');
+    if (!(caught instanceof PrepareValidationError)) {
+      throw new Error('expected PrepareValidationError');
+    }
+    expect(caught.code).toBe('SPONSOR_LEASE_COMMIT_FAILED');
+    expect(caught.message).toContain('lease was not in reserved stage');
 
     // Scope cleanup invariant: nonce reservation must be released, slot
     // checked back in (reserved stage — commit failed before promotion to

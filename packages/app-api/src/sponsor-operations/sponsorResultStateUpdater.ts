@@ -97,7 +97,7 @@ export interface SponsorResultCallbackDeps {
 
 /**
  * Build the host-side post-sponsor result callback. The returned function is the
- * value you pass to `HostRuntimeConfig.onSponsorResult` /
+ * value you pass to the `createHostContext` onSponsorResult callback /
  * `PromotionSponsorContext.onSponsorResult`.
  */
 export function createSponsorResultStateUpdater(

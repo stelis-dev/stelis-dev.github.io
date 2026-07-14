@@ -11,6 +11,11 @@ export type {
   RelayPrepareResponse,
   RelaySponsorRequest,
   RelaySponsorResponse,
+  PromotionUnavailableReason,
+  PromotionListItem,
+  PromotionListResponse,
+  UserPromotionDetail,
+  PromotionDetailResponse,
 } from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
@@ -44,14 +49,6 @@ export interface StelisRequestTimeouts {
 }
 
 // ─────────────────────────────────────────────
-// /status response
-// ─────────────────────────────────────────────
-
-export interface StatusResponse {
-  ok: boolean;
-}
-
-// ─────────────────────────────────────────────
 // Settle profile (re-export from @stelis/contracts)
 // ─────────────────────────────────────────────
 
@@ -65,18 +62,6 @@ import type { SettleProfile } from '@stelis/contracts';
 // ─────────────────────────────────────────────
 // /sponsor request & response
 // ─────────────────────────────────────────────
-
-// ─────────────────────────────────────────────
-// API error
-// ─────────────────────────────────────────────
-
-export interface StelisApiError {
-  error: string;
-  /** Present for domain-coded Host failures; omitted by uncoded transport failures. */
-  code?: string;
-  /** Present on rate-limit and temporary-capacity responses when available. */
-  retryAfterMs?: number;
-}
 
 // ─────────────────────────────────────────────
 // DeepBook pool config (re-export from @stelis/contracts)
@@ -256,11 +241,6 @@ export interface ExecuteSuiFirstResult {
 }
 
 // ─────────────────────────────────────────────
-// Promotion prepare/sponsor (promotion-specific path)
-// ─────────────────────────────────────────────
-
-/** POST /studio/promotions/:id/prepare request body. */
-// ─────────────────────────────────────────────
 // executePromotionSponsored
 // ─────────────────────────────────────────────
 
@@ -292,57 +272,4 @@ export interface ExecutePromotionSponsoredResult {
   estimatedGasMist: string;
   /** Actual gas consumed (MIST) from sponsor. */
   actualGasMist: string;
-}
-
-// ─────────────────────────────────────────────
-// Promotion discovery (server-to-server, developer JWT)
-// ─────────────────────────────────────────────
-
-/** Unavailable reason for promotion sponsored actions. */
-export type PromotionUnavailableReason =
-  | 'not_claimed'
-  | 'promotion_unavailable'
-  | 'promotion_not_started'
-  | 'claim_deadline_passed'
-  | 'use_window_expired'
-  | 'allowance_exhausted'
-  | 'action_in_flight';
-
-/** Single promotion item from GET /studio/promotions. */
-export interface PromotionListItem {
-  promotionId: string;
-  displayName: string;
-  type: string;
-  status: string;
-  canClaim: boolean;
-  canUseSponsoredAction: boolean;
-  promotionRemainingBudgetMist: string;
-  remainingParticipantSlots: number;
-  userRemainingGasAllowanceMist: string | null;
-  unavailableReason: PromotionUnavailableReason | null;
-}
-
-/** GET /studio/promotions response wrapper. */
-export interface PromotionListResponse {
-  promotions: PromotionListItem[];
-}
-
-/** User promotion detail from GET /studio/promotions/:id. */
-export interface UserPromotionDetail {
-  claimStatus: 'claimed' | 'not_claimed';
-  userRemainingGasAllowanceMist: string | null;
-  claimDeadlineAt: string | null;
-  useUntilAt: string | null;
-  canClaim: boolean;
-  canUseSponsoredAction: boolean;
-  unavailableReason: PromotionUnavailableReason | null;
-}
-
-/** GET /studio/promotions/:id response wrapper. */
-export interface PromotionDetailResponse {
-  promotionId: string;
-  displayName: string;
-  type: string;
-  promotionRemainingBudgetMist: string;
-  detail: UserPromotionDetail;
 }

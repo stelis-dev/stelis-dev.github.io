@@ -32,7 +32,6 @@ import { type Clock, systemClock } from '../clock.js';
 // ─────────────────────────────────────────────
 
 import { PREPARE_TTL_MS } from '../preparePolicy.js';
-export { PREPARE_TTL_MS };
 
 /** Maximum outstanding prepared entries per client IP. Oldest evicted on overflow. */
 export const MAX_CONCURRENT_PER_IP = 2;

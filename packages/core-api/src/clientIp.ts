@@ -103,13 +103,3 @@ export function parseTrustedProxyHops(trustedProxyHops: string | null | undefine
 
   return 0;
 }
-
-/**
- * Normalize trust-proxy hop count input.
- */
-export function normalizeTrustedProxyHops(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`trustedProxyHops must be a non-negative integer, got '${value}'`);
-  }
-  return value;
-}

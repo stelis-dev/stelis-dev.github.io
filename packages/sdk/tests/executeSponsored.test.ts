@@ -12,7 +12,6 @@
  *   5c. SPONSOR_ONCHAIN_FAILED + subcode INSUFFICIENT_FUNDS → INSUFFICIENT_FUNDS
  *   6. DRY_RUN_FAILED → TRANSACTION_FAILED
  *   7. SPONSOR_PREFLIGHT_FAILED (no subcode) → EXECUTION_FAILED
- *   8. Unknown code → passthrough
  *   14. SPREAD_EXCEEDED (prepare top-level) → TRANSACTION_FAILED
  *   15. SPONSOR_PREFLIGHT_FAILED + subcode SPREAD_EXCEEDED → TRANSACTION_FAILED
  *   16. SPONSOR_ONCHAIN_FAILED + subcode SPREAD_EXCEEDED → TRANSACTION_FAILED
@@ -27,9 +26,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { StelisSDK, StelisSponsoredError } from '../src/sdk.js';
+import { StelisSDK } from '../src/sdk.js';
+import { StelisSponsoredError } from '../src/errors.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { makeCreditResult } from './helpers/currentFixtures.js';
 
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
   mockExtractSettleFields: vi.fn(),
@@ -47,15 +48,11 @@ vi.mock('../src/integrity.js', () => ({
   },
 }));
 
-// ── Mock: credit ─────────────────────────────────────────────────────────────
-vi.mock('../src/credit.js', () => ({
-  queryUserCredit: vi.fn(async () => ({ vaultObjectId: null, credit: '0', needsCreate: false })),
-}));
-
 vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
+    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
   };
@@ -64,11 +61,13 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
 // ── Mock: StelisClient ────────────────────────────────────────────────────────
 const mockPrepare = vi.fn();
 const mockSponsor = vi.fn();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function ({ endpoint }: { endpoint: string }) {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: mockPrepare,
       sponsor: mockSponsor,
       endpoint,
@@ -86,10 +85,6 @@ vi.mock('../src/client.js', () => ({
     }
   },
 }));
-
-// ── Mock: fetch ──────────────────────────────────────────────────────────────
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
@@ -132,9 +127,7 @@ function makeMockSuiClient(): SuiGrpcClient {
 }
 
 async function createSDK(): Promise<StelisSDK> {
-  mockFetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(RELAY_CONFIG_RESPONSE), { status: 200 }),
-  );
+  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -154,7 +147,7 @@ describe('StelisSDK.executeSponsored', () => {
   let sdk: StelisSDK;
 
   beforeEach(async () => {
-    mockFetch.mockReset();
+    mockGetConfig.mockReset();
     mockPrepare.mockReset();
     mockSponsor.mockReset();
     mockExtractSettleFields.mockReset();
@@ -199,7 +192,7 @@ describe('StelisSDK.executeSponsored', () => {
       new StelisApiException('INSUFFICIENT_SETTLE_INPUT', 'Settle input too low', 422, {
         minSettleMist: '100000',
         requiredTotalIn: '250000',
-        isEstimate: 'false',
+        isEstimate: false,
       }),
     );
 
@@ -359,25 +352,6 @@ describe('StelisSDK.executeSponsored', () => {
     }
   });
 
-  // ── 8: Unknown code → passthrough ──────────────────────────────────────
-  it('passes through unknown API error codes verbatim', async () => {
-    const { StelisApiException } = await import('../src/client.js');
-    // Sample a code that the SDK has no normalizer for. Use a synthetic
-    // literal that is intentionally outside every public error-code union so the
-    // passthrough path is exercised without depending on a stale code.
-    mockPrepare.mockRejectedValueOnce(
-      new StelisApiException('UNKNOWN_FUTURE_CODE', 'Some unmapped server reason', 422),
-    );
-
-    try {
-      await sdk.executeSponsored(new Transaction(), defaultOpts());
-      expect.unreachable('Should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(StelisSponsoredError);
-      expect((err as StelisSponsoredError).code).toBe('UNKNOWN_FUTURE_CODE');
-    }
-  });
-
   // ── 9: SLIPPAGE_EXCEEDED → TRANSACTION_FAILED (pre-wired) ──────────────
   it('normalizes SLIPPAGE_EXCEEDED to TRANSACTION_FAILED', async () => {
     const { StelisApiException } = await import('../src/client.js');
@@ -433,22 +407,6 @@ describe('StelisSDK.executeSponsored', () => {
     const { StelisApiException } = await import('../src/client.js');
     mockPrepare.mockRejectedValueOnce(
       new StelisApiException('SLIPPAGE_CONVERGENCE_FAILED', 'Convergence failed', 422),
-    );
-
-    try {
-      await sdk.executeSponsored(new Transaction(), defaultOpts());
-      expect.unreachable('Should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(StelisSponsoredError);
-      expect((err as StelisSponsoredError).code).toBe('TRANSACTION_FAILED');
-    }
-  });
-
-  // ── 13: SWAP_AMOUNT_OVERFLOW → TRANSACTION_FAILED ─────────────────────
-  it('normalizes SWAP_AMOUNT_OVERFLOW to TRANSACTION_FAILED', async () => {
-    const { StelisApiException } = await import('../src/client.js');
-    mockPrepare.mockRejectedValueOnce(
-      new StelisApiException('SWAP_AMOUNT_OVERFLOW', 'Amount exceeds safe integer', 422),
     );
 
     try {

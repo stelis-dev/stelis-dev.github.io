@@ -74,7 +74,6 @@ import type { PrepareStoreAdapter, PreparedTxEntry } from '../store/prepareTypes
 // Phase vocabulary
 // ─────────────────────────────────────────────
 
-export type SponsorPhaseKind = 'preconsume' | 'consume' | 'postconsume' | 'result';
 export type SponsorRoute = 'generic' | 'promotion';
 
 // ─────────────────────────────────────────────

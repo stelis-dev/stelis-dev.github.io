@@ -8,12 +8,11 @@
 import type {
   StelisClientConfig,
   StelisRequestTimeouts,
-  StatusResponse,
+  RelayConfigResponse,
   RelayPrepareRequest,
   RelayPrepareResponse,
   RelaySponsorRequest,
   RelaySponsorResponse,
-  StelisApiError,
   PromotionPrepareRequest,
   PromotionPrepareResponse,
   PromotionSponsorRequest,
@@ -24,8 +23,23 @@ import type {
 import {
   parsePromotionPrepareResponse,
   parsePromotionSponsorResponse,
+  parsePromotionListResponse,
+  parsePromotionDetailResponse,
+  parseRelayConfigResponse,
   parseRelayPrepareResponse,
+  parseHostErrorResponse,
   parseRelaySponsorResponse,
+  parseRelayStatusResponse,
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  RELAY_CONFIG_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
+  STUDIO_DETAIL_ERROR_CODES,
+  STUDIO_LIST_ERROR_CODES,
+  type HostErrorCode,
+  type HostErrorMeta,
+  type RelayStatusResponse,
 } from '@stelis/contracts';
 
 interface ResolvedRequestTimeouts {
@@ -48,11 +62,11 @@ const DEFAULT_REQUEST_TIMEOUTS: ResolvedRequestTimeouts = {
 
 export class StelisApiException extends Error {
   constructor(
-    public readonly code: string,
+    public readonly code: HostErrorCode | 'UNKNOWN',
     message: string,
     public readonly status: number,
-    /** Extra fields from the API error response (e.g. minSettleMist, subcode). */
-    public readonly meta?: Record<string, unknown>,
+    /** Closed current Host error fields other than `error` and `code`. */
+    public readonly meta?: HostErrorMeta,
   ) {
     super(message);
     this.name = 'StelisApiException';
@@ -81,8 +95,14 @@ export class StelisClient {
   // GET /status
   // ─────────────────────────────────────────
 
-  async getStatus(): Promise<StatusResponse> {
-    return this.get<StatusResponse>('/status', this.timeouts.statusMs);
+  async getStatus(): Promise<RelayStatusResponse> {
+    return parseRelayStatusResponse(await this.get('/status', this.timeouts.statusMs, []));
+  }
+
+  async getConfig(): Promise<RelayConfigResponse> {
+    return parseRelayConfigResponse(
+      await this.get('/config', this.timeouts.configMs, RELAY_CONFIG_ERROR_CODES),
+    );
   }
 
   // ─────────────────────────────────────────
@@ -94,7 +114,13 @@ export class StelisClient {
     headers?: Record<string, string>,
   ): Promise<RelayPrepareResponse> {
     return parseRelayPrepareResponse(
-      await this.post('/prepare', params, this.timeouts.prepareMs, headers),
+      await this.post(
+        '/prepare',
+        params,
+        this.timeouts.prepareMs,
+        RELAY_PREPARE_ERROR_CODES,
+        headers,
+      ),
     );
   }
 
@@ -107,7 +133,13 @@ export class StelisClient {
     headers?: Record<string, string>,
   ): Promise<RelaySponsorResponse> {
     return parseRelaySponsorResponse(
-      await this.post('/sponsor', params, this.timeouts.sponsorMs, headers),
+      await this.post(
+        '/sponsor',
+        params,
+        this.timeouts.sponsorMs,
+        RELAY_SPONSOR_ERROR_CODES,
+        headers,
+      ),
     );
   }
 
@@ -125,6 +157,7 @@ export class StelisClient {
         `/studio/promotions/${encodeURIComponent(promotionId)}/prepare`,
         params,
         this.timeouts.studioWriteMs,
+        PROMOTION_PREPARE_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
       ),
     );
@@ -140,6 +173,7 @@ export class StelisClient {
         `/studio/promotions/${encodeURIComponent(promotionId)}/sponsor`,
         params,
         this.timeouts.studioWriteMs,
+        PROMOTION_SPONSOR_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
       ),
     );
@@ -150,12 +184,15 @@ export class StelisClient {
   // ─────────────────────────────────────────
 
   async listPromotions(developerJwt: string): Promise<PromotionListResponse> {
-    return this.studioGet<PromotionListResponse>(
-      '/studio/promotions',
-      {
-        Authorization: `Bearer ${developerJwt}`,
-      },
-      this.timeouts.studioReadMs,
+    return parsePromotionListResponse(
+      await this.studioGet(
+        '/studio/promotions',
+        {
+          Authorization: `Bearer ${developerJwt}`,
+        },
+        this.timeouts.studioReadMs,
+        STUDIO_LIST_ERROR_CODES,
+      ),
     );
   }
 
@@ -163,10 +200,13 @@ export class StelisClient {
     promotionId: string,
     developerJwt: string,
   ): Promise<PromotionDetailResponse> {
-    return this.studioGet<PromotionDetailResponse>(
-      `/studio/promotions/${encodeURIComponent(promotionId)}`,
-      { Authorization: `Bearer ${developerJwt}` },
-      this.timeouts.studioReadMs,
+    return parsePromotionDetailResponse(
+      await this.studioGet(
+        `/studio/promotions/${encodeURIComponent(promotionId)}`,
+        { Authorization: `Bearer ${developerJwt}` },
+        this.timeouts.studioReadMs,
+        STUDIO_DETAIL_ERROR_CODES,
+      ),
     );
   }
 
@@ -174,75 +214,86 @@ export class StelisClient {
   // Internal HTTP helpers
   // ─────────────────────────────────────────
 
-  private async get<T>(path: string, timeoutMs: number): Promise<T> {
+  private async get(
+    path: string,
+    timeoutMs: number,
+    allowedErrorCodes: readonly HostErrorCode[],
+  ): Promise<unknown> {
     const res = await fetch(`${this.endpoint}${path}`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return this.handleResponse<T>(res);
+    return this.handleResponse(res, allowedErrorCodes);
   }
 
-  private async post<T>(
+  private async post(
     path: string,
     body: unknown,
     timeoutMs: number,
+    allowedErrorCodes: readonly HostErrorCode[],
     extraHeaders?: Record<string, string>,
-  ): Promise<T> {
+  ): Promise<unknown> {
     const res = await fetch(`${this.endpoint}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...extraHeaders },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return this.handleResponse<T>(res);
+    return this.handleResponse(res, allowedErrorCodes);
   }
 
   /** GET against studioBase (for /studio/* endpoints). */
-  private async studioGet<T>(
+  private async studioGet(
     path: string,
     headers: Record<string, string>,
     timeoutMs: number,
-  ): Promise<T> {
+    allowedErrorCodes: readonly HostErrorCode[],
+  ): Promise<unknown> {
     const res = await fetch(`${this.studioBase}${path}`, {
       headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return this.handleResponse<T>(res);
+    return this.handleResponse(res, allowedErrorCodes);
   }
 
   /** POST against studioBase (for /studio/* endpoints). */
-  private async studioPost<T>(
+  private async studioPost(
     path: string,
     body: unknown,
     timeoutMs: number,
+    allowedErrorCodes: readonly HostErrorCode[],
     headers: Record<string, string>,
-  ): Promise<T> {
+  ): Promise<unknown> {
     const res = await fetch(`${this.studioBase}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return this.handleResponse<T>(res);
+    return this.handleResponse(res, allowedErrorCodes);
   }
 
-  private async handleResponse<T>(res: Response): Promise<T> {
+  private async handleResponse(
+    res: Response,
+    allowedErrorCodes: readonly HostErrorCode[],
+  ): Promise<unknown> {
     const raw = await res.text();
     const data = parseJsonIfPossible(raw);
 
     if (!res.ok) {
-      const apiError = isStelisApiError(data) ? data : undefined;
+      let apiError;
+      try {
+        apiError = parseHostErrorResponse(data, allowedErrorCodes, res.status);
+      } catch {
+        apiError = undefined;
+      }
       const code = apiError?.code ?? 'UNKNOWN';
       const message =
-        apiError?.error ?? summarizeHttpBody(raw) ?? res.statusText ?? `HTTP ${res.status}`;
-      // Preserve extra fields (minSettleMist, requiredTotalIn, subcode, etc.)
-      const extra =
-        typeof data === 'object' && data !== null
-          ? Object.fromEntries(
-              Object.entries(data as Record<string, unknown>).filter(
-                ([k]) => k !== 'code' && k !== 'error',
-              ),
-            )
-          : undefined;
+        apiError?.error ?? `Relay API returned a non-current error response (HTTP ${res.status})`;
+      let extra: HostErrorMeta | undefined;
+      if (apiError) {
+        const { error: _error, code: _code, ...currentMeta } = apiError;
+        if (Object.keys(currentMeta).length > 0) extra = currentMeta;
+      }
       throw new StelisApiException(
         code,
         message,
@@ -253,16 +304,10 @@ export class StelisClient {
 
     if (data === undefined) {
       // Successful HTTP status with a non-JSON body indicates an invalid Relay API response.
-      // Surface the raw body snippet instead of a JSON parser SyntaxError.
-      const bodyHint = summarizeHttpBody(raw);
-      throw new Error(
-        bodyHint
-          ? `Invalid non-JSON response from Relay API: ${bodyHint}`
-          : `Invalid empty response from Relay API (HTTP ${res.status})`,
-      );
+      throw new Error(`Relay API returned a non-JSON success response (HTTP ${res.status})`);
     }
 
-    return data as T;
+    return data;
   }
 }
 
@@ -296,21 +341,6 @@ function resolveTimeoutMs(name: string, value: number | undefined, fallback: num
   return value;
 }
 
-/**
- * Narrow an unknown API error response to the common StelisApiError shape.
- * `error` is universal. `code` is optional because uncoded transport failures
- * and rate-limit responses are also current Host responses.
- */
-function isStelisApiError(value: unknown): value is StelisApiError {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'error' in value &&
-    typeof (value as Record<string, unknown>).error === 'string' &&
-    (!('code' in value) || typeof (value as Record<string, unknown>).code === 'string')
-  );
-}
-
 function parseJsonIfPossible(raw: string): unknown | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
@@ -319,10 +349,4 @@ function parseJsonIfPossible(raw: string): unknown | undefined {
   } catch {
     return undefined;
   }
-}
-
-function summarizeHttpBody(raw: string): string | undefined {
-  const trimmed = raw.trim().replace(/\s+/g, ' ');
-  if (!trimmed) return undefined;
-  return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed;
 }

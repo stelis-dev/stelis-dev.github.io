@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
+import { ClientIpResolutionError } from '@stelis/core-api';
 
 // ── Mock core-api/admin ─────────────────────────────────────────────────
 const { mockRedis, mockResolveClientIp } = vi.hoisted(() => ({
@@ -62,10 +63,7 @@ const AUTH_RUNTIME: Omit<AuthRoutesRuntime, 'resolveClientIp'> = {
 };
 
 function clientIpResolutionError(): Error {
-  return Object.assign(new Error('Client IP could not be resolved'), {
-    name: 'ClientIpResolutionError',
-    code: 'CLIENT_IP_UNRESOLVED',
-  });
+  return new ClientIpResolutionError('Client IP could not be resolved');
 }
 
 describe('auth routes', () => {
@@ -132,9 +130,7 @@ describe('auth routes', () => {
       const res = await app.request('/auth/nonce', { method: 'POST' });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(checkAndIncrement).not.toHaveBeenCalled();
       expect(mockRedis.set).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
@@ -152,7 +148,7 @@ describe('auth routes', () => {
         await expect(res.json()).resolves.toEqual({ error: 'Internal server error' });
         expect(errorSpy).toHaveBeenCalledWith(
           '[app-api] /auth/nonce failed',
-          'Error: redis unavailable at redis://[REDACTED]@redis.example:6379',
+          'Error: redis unavailable at redis://redis.example:6379',
         );
       } finally {
         errorSpy.mockRestore();
@@ -280,9 +276,7 @@ describe('auth routes', () => {
       });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(checkAndIncrement).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
@@ -426,9 +420,7 @@ describe('auth routes', () => {
       });
 
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toMatchObject({
-        code: 'CLIENT_IP_UNRESOLVED',
-      });
+      await expect(res.json()).resolves.toEqual({ error: 'Client IP could not be resolved' });
       expect(checkAndIncrement).not.toHaveBeenCalled();
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });

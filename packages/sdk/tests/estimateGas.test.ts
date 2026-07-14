@@ -12,23 +12,19 @@ import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { makeCreditResult } from './helpers/currentFixtures.js';
 
 // ── Module-level mock: queryUserCredit ──────────────────────────────────────────
-let _creditResult = { vaultObjectId: null as string | null, credit: '0', needsCreate: false };
-vi.mock('../src/credit.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/credit.js')>();
-  return {
-    ...actual,
-    queryUserCredit: vi.fn(async () => _creditResult),
-  };
-});
+let _creditResult = makeCreditResult();
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
 const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<RelayPrepareResponse>>();
+const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function () {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
+      getConfig: mockGetConfig,
       prepare: mockPrepare,
       sponsor: vi.fn(),
     };
@@ -50,13 +46,10 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
+    queryUserCredit: vi.fn(async () => _creditResult),
     batchGetHopMidPrices: vi.fn(async () => (_midPrice !== null ? [_midPrice] : [0n])),
   };
 });
-
-// ── Mock fetch ─────────────────────────────────────────────────────────────────
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ADDR = '0x' + 'a'.repeat(64);
@@ -100,7 +93,7 @@ function makeSuiClient(): SuiGrpcClient {
 
 async function createSDK(configOverrides?: Partial<RelayConfigResponse>): Promise<StelisSDK> {
   const config = { ...BASE_CONFIG, ...configOverrides };
-  mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(config), { status: 200 }));
+  mockGetConfig.mockResolvedValueOnce(config);
   return StelisSDK.connect('http://mock.local/api');
 }
 
@@ -110,8 +103,8 @@ async function createSDK(configOverrides?: Partial<RelayConfigResponse>): Promis
 
 describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   beforeEach(() => {
-    mockFetch.mockReset();
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: false };
+    mockGetConfig.mockReset();
+    _creditResult = makeCreditResult();
     _midPrice = 27_000_000_000n;
   });
 
@@ -136,7 +129,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   // ── 2: No vault → new_user profile, display in settlement token ────────
 
   it('returns new_user profile when user has no vault', async () => {
-    _creditResult = { vaultObjectId: null, credit: '0', needsCreate: false };
+    _creditResult = makeCreditResult();
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
@@ -152,7 +145,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   // ── 3: Vault + sufficient credit → credit_general ───────────────────
 
   it('returns credit_general profile when vault credit covers totalCost', async () => {
-    _creditResult = { vaultObjectId: '0xvault', credit: '999999999', needsCreate: false };
+    _creditResult = makeCreditResult({ vaultObjectId: '0xvault', credit: '999999999' });
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
@@ -167,7 +160,7 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   // ── 4: Vault + insufficient credit → with_vault ─────────────────────
 
   it('returns with_vault profile when vault credit is insufficient', async () => {
-    _creditResult = { vaultObjectId: '0xvault', credit: '1', needsCreate: false };
+    _creditResult = makeCreditResult({ vaultObjectId: '0xvault', credit: '1' });
     const sdk = await createSDK();
     const result = await sdk.estimateGas(makeSuiClient(), {
       addr: ADDR,
@@ -207,8 +200,8 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   // ── 7: CreditQueryInconsistentStateError propagates to caller ─────
 
   it('throws CreditQueryInconsistentStateError when vault state is inconsistent', async () => {
-    const { CreditQueryInconsistentStateError } = await import('../src/credit.js');
-    const { queryUserCredit } = await import('../src/credit.js');
+    const { CreditQueryInconsistentStateError, queryUserCredit } =
+      await import('@stelis/core-relay/browser');
     (queryUserCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new CreditQueryInconsistentStateError('vault missing', '0xVAULT', '0xUSER'),
     );

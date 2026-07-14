@@ -12,8 +12,16 @@
 
 import { Transaction } from '@mysten/sui/transactions';
 import { fromHex } from '@mysten/sui/utils';
-import type { PtbCommand, SettleProfile, SingleHopSettlementSwapPath } from '@stelis/contracts';
+import type {
+  PtbCommand,
+  RelayPrepareErrorCode,
+  RelaySponsorErrorCode,
+  SettleProfile,
+  SingleHopSettlementSwapPath,
+  SponsorFailureSubcode,
+} from '@stelis/contracts';
 import { GAS_MARGIN_CAP_BPS, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
+import { RELAY_PREPARE_ERROR_CODES } from '@stelis/contracts';
 import {
   convertSdkCommands,
   CreditQueryInconsistentStateError,
@@ -91,15 +99,14 @@ import type { SponsorConsumePolicyAdapter } from '../sponsorLifecycle.js';
 import type { SponsorResultEconomics, SponsorResultOutcome } from '../../handlers/sponsorResult.js';
 import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from './runner.js';
 import type { SignAndSubmitPort } from './sponsorRunner.js';
+import type { GasBoundBuildInput, GasBoundBuildResult } from './reservationHandles.js';
 import type {
-  GasBoundBuildInput,
-  GasBoundBuildResult,
   GenericPrepareChainSnapshot,
   SponsoredExecutionPolicy,
   PolicyPostconsumeReconstruction,
   PostConsumeSponsorContext,
   PreConsumeSponsorContext,
-} from './index.js';
+} from './executionPolicy.js';
 import { parseBps, mist, type Bps, type Mist } from '../../internal/brand.js';
 
 // -------------------------------------------------------------
@@ -125,16 +132,17 @@ export interface GenericPreparePolicyConfig {
 }
 
 export interface GenericSponsorErrorFactory {
-  sponsorValidation(code: string, message: string, statusHint?: number): Error;
+  sponsorValidation(code: RelaySponsorErrorCode, message: string): Error;
   sponsorBlocked(retryAfterMs: number | undefined): Error;
-  sponsorPreflight(reason: string, subcode?: string): Error;
+  sponsorPreflight(reason: string, subcode?: SponsorFailureSubcode): Error;
   sponsorOnchain(
     digest: string,
     reason: string,
-    subcode: string | undefined,
+    subcode: SponsorFailureSubcode | undefined,
     gasUsed: GasUsedFields | null,
   ): Error;
-  sponsorCongestion(message: string): Error;
+  sponsorCongestion(message: string, digest: string): Error;
+  sponsorTerminalProcessing(message: string, digest: string): Error;
 }
 
 export interface GenericExecutionPolicyOptions {
@@ -210,12 +218,27 @@ export class GenericExecutionPolicyError extends Error {
 
 export class GenericSponsorPolicyError extends Error {
   constructor(
-    public readonly code: string,
+    public readonly code: RelaySponsorErrorCode,
     message: string,
   ) {
     super(message);
     this.name = 'GenericSponsorPolicyError';
   }
+}
+
+const RELAY_PREPARE_ERROR_CODE_SET: ReadonlySet<string> = new Set(RELAY_PREPARE_ERROR_CODES);
+
+function isRelayPrepareErrorCode(code: string): code is RelayPrepareErrorCode {
+  return RELAY_PREPARE_ERROR_CODE_SET.has(code);
+}
+
+function requireRelayPrepareErrorCode(code: string): RelayPrepareErrorCode {
+  if (!isRelayPrepareErrorCode(code)) {
+    throw new GenericExecutionPolicyError(
+      `Prepare validator returned non-current Relay prepare code: ${code}`,
+    );
+  }
+  return code;
 }
 
 export interface RevalidateGenericResult {
@@ -357,7 +380,6 @@ export function createGenericSponsorConsumeAdapter(input: {
       input.errors.sponsorValidation(
         'PREPARED_TX_EXPIRED',
         'Prepared transaction expired — retry /prepare',
-        410,
       ),
     onHashMismatch: async () => {
       await getDeps(input).recordSponsorFailureForAbuse(
@@ -484,7 +506,7 @@ export function createGenericSignAndSubmitPort(
       if (err instanceof SponsorPostSignatureUncertaintyError) {
         const sponsorState = requireSponsorState(state);
         sponsorState.sponsorResultOutcome = 'internal_error';
-        sponsorState.sponsorResultDigest = undefined;
+        sponsorState.sponsorResultDigest = err.expectedDigest;
         sponsorState.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
           unknownSponsoredExecutionEconomics(`post_signature_uncertainty: ${err.message}`),
         );
@@ -523,7 +545,10 @@ async function runGenericRequestValidation(
     'INVALID_SLIPPAGE_BPS',
   );
   if (!slippageResult.ok) {
-    throw new PrepareValidationError(slippageResult.code, slippageResult.message);
+    throw new PrepareValidationError(
+      requireRelayPrepareErrorCode(slippageResult.code),
+      slippageResult.message,
+    );
   }
   const gasMarginResult = parseBps(
     'gasMarginBps',
@@ -532,7 +557,10 @@ async function runGenericRequestValidation(
     'INVALID_GAS_MARGIN_BPS',
   );
   if (!gasMarginResult.ok) {
-    throw new PrepareValidationError(gasMarginResult.code, gasMarginResult.message);
+    throw new PrepareValidationError(
+      requireRelayPrepareErrorCode(gasMarginResult.code),
+      gasMarginResult.message,
+    );
   }
   state.slippageBps = slippageResult.value;
   state.gasMarginBps = gasMarginResult.value;
@@ -546,7 +574,7 @@ async function runGenericRequestValidation(
   );
   if (!validationResult.ok) {
     throw new PrepareValidationError(
-      validationResult.code,
+      requireRelayPrepareErrorCode(validationResult.code),
       `P1 validation failed: ${validationResult.message}`,
     );
   }
@@ -734,7 +762,9 @@ async function runGenericSelfCheck(
       allowedSettlementSwapPaths: [...prepare.config.allowedSettlementSwapPaths],
     };
     const l1 = validateGenericSettlementTransaction(builtTx, builtEnv);
-    if (!l1.ok) throw new PrepareValidationError(l1.code, l1.message);
+    if (!l1.ok) {
+      throw new PrepareValidationError(requireRelayPrepareErrorCode(l1.code), l1.message);
+    }
 
     const settleArgs = extractSettleArgsFromBuiltTx(builtCommands, builtTxData.inputs, builtEnv, {
       requirePaymentInputTrace: true,
@@ -757,7 +787,9 @@ async function runGenericSelfCheck(
       );
     }
     const l2 = validateSettleArgs(settleArgs, config, builtEnv, policyHashBytes, orderIdHash);
-    if (!l2.ok) throw new PrepareValidationError(l2.code, l2.message);
+    if (!l2.ok) {
+      throw new PrepareValidationError(requireRelayPrepareErrorCode(l2.code), l2.message);
+    }
 
     state.executionPathKey = buildGenericExecutionPathKey(settleArgs.extractedSettlementSwapPath);
     logPrepareStage('l1_l2_validated', { execution_path_key: state.executionPathKey });
@@ -967,7 +999,7 @@ async function runGenericPolicyPostconsumeChecks(
       });
       const message = `Vault registry state inconsistent for ${err.userAddress}: ${err.message}`;
       setValidationFailure(state, message);
-      throw sponsor.errors.sponsorValidation('SPONSOR_FAILED', message, 500);
+      throw sponsor.errors.sponsorValidation('SPONSOR_FAILED', message);
     }
     emitSponsorDriftObserved({
       ...VAULT_DRIFT_QUERY_FAILED,
@@ -980,7 +1012,7 @@ async function runGenericPolicyPostconsumeChecks(
       err instanceof Error ? err.message : String(err)
     }`;
     setValidationFailure(state, message);
-    throw sponsor.errors.sponsorValidation('SPONSOR_FAILED', message, 500);
+    throw sponsor.errors.sponsorValidation('SPONSOR_FAILED', message);
   }
 
   if (credit.vaultObjectId && !credit.needsCreate) {
@@ -1077,10 +1109,11 @@ async function classifyGenericSponsorResult(
   if (!result.success) {
     if (result.isCongestion) {
       state.sponsorResultOutcome = 'congestion';
+      state.sponsorResultDigest = result.digest;
       state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
         unknownSponsoredExecutionEconomics('congestion'),
       );
-      throw sponsor.errors.sponsorCongestion(result.reason);
+      throw sponsor.errors.sponsorCongestion(result.reason, result.digest);
     }
 
     const subcode = classifySponsorFailureSubcode(result.reason, options.hostContext.packageId, {
@@ -1133,10 +1166,9 @@ async function classifyGenericSponsorResult(
     state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
       unknownSponsoredExecutionEconomics('SPONSOR_EXEC_GAS_USED_MISSING'),
     );
-    throw sponsor.errors.sponsorValidation(
-      'SPONSOR_FAILED',
+    throw sponsor.errors.sponsorTerminalProcessing(
       `Execution succeeded but gasUsed missing — cannot verify economics. Digest: ${result.digest}`,
-      500,
+      result.digest,
     );
   }
 
@@ -1371,7 +1403,10 @@ async function revalidateGenericSponsorPolicy(
     });
   } catch (err) {
     if (err instanceof PrepareValidationError) {
-      const sub = err.meta?.subcode ?? 'extraction_failed';
+      const sub =
+        typeof err.meta?.subcode === 'string' && err.meta.subcode !== ''
+          ? err.meta.subcode
+          : 'extraction_failed';
       emitGenericDriftEvent('settle_extraction', sub, prepared.receiptId, txSender, clientIp);
       throw new GenericSponsorPolicyError(
         'REPREPARE_REQUIRED',
@@ -1434,7 +1469,16 @@ function validateGenericSponsorNonloss(
     onchainConfig,
   );
   if (!l3.ok) {
-    throw new GenericSponsorPolicyError(l3.code, l3.message);
+    switch (l3.code) {
+      case 'L3_NONLOSS_VIOLATION':
+      case 'L3_GAS_BUDGET_EXCEEDED':
+      case 'L3_SIM_GAS_OUT_OF_RANGE':
+        throw new GenericSponsorPolicyError(l3.code, l3.message);
+      default:
+        throw new GenericExecutionPolicyError(
+          `Nonloss validator returned non-current sponsor code: ${l3.code}`,
+        );
+    }
   }
 }
 

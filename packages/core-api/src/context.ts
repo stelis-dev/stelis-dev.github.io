@@ -17,7 +17,7 @@ import type { AbuseBlockerAdapter } from './store/abuseBlockTypes.js';
 import type { PrepareInflightLimiter } from './store/prepareInflightTypes.js';
 import type { SponsorResultCallback } from './handlers/sponsorResult.js';
 import { canonicalizeAddress, validateAddressConstraints } from './addressConstraints.js';
-import { logSponsorPoolEvent } from './sponsorPoolEventLog.js';
+import { logStructuredEvent } from './structuredEventLog.js';
 import {
   SPONSOR_POOL_LEASE_CHECKIN,
   SPONSOR_POOL_LEASE_CHECKOUT,
@@ -232,14 +232,14 @@ export class SponsorPool implements SponsorPoolAdapter {
   /**
    * Atomically checks out an available slot for the given `receiptId`.
    * Stores the reserved-stage HMAC proof. Returns null if all slots are
-   * busy — caller maps to NO_SPONSOR_SLOT (422).
+   * busy — caller maps to NO_SPONSOR_SLOT (503).
    *
    * Node.js single-threaded: this is effectively a mutex-free atomic operation.
    */
   async checkout(receiptId: string): Promise<SponsorLease | null> {
     const sponsorAddress = this._addresses.find((address) => !this._inUse.has(address));
     if (!sponsorAddress) {
-      logSponsorPoolEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
+      logStructuredEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
         adapter: 'memory',
         pool_size: this.size,
       });
@@ -250,7 +250,7 @@ export class SponsorPool implements SponsorPoolAdapter {
       sponsorAddress,
       computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, COMMIT_DIGEST_RESERVED),
     );
-    logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
+    logStructuredEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
       pool_size: this.size,
@@ -291,7 +291,7 @@ export class SponsorPool implements SponsorPoolAdapter {
       sponsorAddress,
       computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, txBytesHash),
     );
-    logSponsorPoolEvent(SPONSOR_POOL_LEASE_COMMITTED, {
+    logStructuredEvent(SPONSOR_POOL_LEASE_COMMITTED, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
     });
@@ -318,7 +318,7 @@ export class SponsorPool implements SponsorPoolAdapter {
     if (!leaseProofMatches(current, expected)) return;
     this._inUse.delete(sponsorAddress);
     this._leaseProofs.delete(sponsorAddress);
-    logSponsorPoolEvent(SPONSOR_POOL_LEASE_CHECKIN, {
+    logStructuredEvent(SPONSOR_POOL_LEASE_CHECKIN, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
       stage: txBytesHash === null ? 'reserved' : 'committed',
@@ -369,7 +369,7 @@ export class SponsorPool implements SponsorPoolAdapter {
     if (!keypair) {
       throw new Error(`SponsorPool: unknown sponsor address ${sponsorAddress}`);
     }
-    logSponsorPoolEvent(SPONSOR_POOL_SIGN, {
+    logStructuredEvent(SPONSOR_POOL_SIGN, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
       tx_bytes_len: txBytes.length,
@@ -599,10 +599,11 @@ export interface HostContext {
  * Call once at server startup, then pass to all handlers.
  *
  * Every coordination adapter (`sponsorPool`, `prepareStore`,
- * `prepareInflightLimiter`, `rateLimiter`, `abuseBlocker`) is required. There
- * is no in-memory runtime default. Hosts must inject production-capable adapters
- * (Redis-backed for `app-api`); test code injects memory fixtures directly.
- * Missing adapters fail closed at construction time.
+ * `prepareRequestNonceStore`, `prepareInflightLimiter`, `rateLimiter`,
+ * `abuseBlocker`) is required. There is no in-memory runtime default. Hosts
+ * must inject production-capable adapters (Redis-backed for `app-api`); test
+ * code injects memory fixtures directly. Missing adapters fail closed at
+ * construction time.
  */
 export function createHostContext(config: HostRuntimeConfig): HostContext {
   const sui =

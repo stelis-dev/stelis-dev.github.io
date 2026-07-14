@@ -32,12 +32,14 @@
 import type {
   LedgerReservationHandle,
   NonceReservationHandle,
+  SponsorSlotReservationHandle,
+} from './reservationHandles.js';
+import { reconstructReservationHandles } from './reservationHandles.js';
+import type {
   PostConsumeSponsorContext,
   SponsoredExecutionPolicy,
   PreConsumeSponsorContext,
-  SponsorSlotReservationHandle,
-} from './index.js';
-import { reconstructReservationHandles } from './index.js';
+} from './executionPolicy.js';
 import type { ExecResult } from '../sessionTypes.js';
 import type { PreparedTxEntry, PrepareStoreAdapter } from '../../store/prepareTypes.js';
 import type { SponsorPoolAdapter } from '../../context.js';
@@ -63,7 +65,7 @@ import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
  *     unchanged.
  *   - `SponsorPostSignatureUncertaintyError` throws AFTER the sponsor
  *     signature was issued. The runner captures its typed stage for the
- *     Release metadata and rethrows the original cause.
+ *     Release metadata and preserves the typed error plus expected digest.
  *   - Any other thrown value propagates unchanged.
  *   - On a normalized failed `ExecResult`, the runner forwards the
  *     result to `ClassifySponsorResult` so the policy can classify
@@ -364,7 +366,7 @@ export async function runSponsorStateMachine<TResult>(
     // ── State 9: Submit ───────────────────────────────────────────────
     // Pre-sign failures (`SponsorLeaseExpiredError`) propagate from the
     // port unchanged. Typed post-signature uncertainty updates the runner-
-    // owned stage before the original cause is rethrown. On a normalized failed `ExecResult`, the
+    // owned stage before the typed uncertainty is rethrown. On a normalized failed `ExecResult`, the
     // runner does NOT classify — it forwards the result to
     // `ClassifySponsorResult` so the policy can decide whether to throw
     // congestion vs on-chain revert.
@@ -382,7 +384,7 @@ export async function runSponsorStateMachine<TResult>(
       if (err instanceof SponsorPostSignatureUncertaintyError) {
         executionStage = err.executionStage;
         postCtxSnapshot = buildPostCtx();
-        throw err.cause;
+        throw err;
       }
       throw err;
     }

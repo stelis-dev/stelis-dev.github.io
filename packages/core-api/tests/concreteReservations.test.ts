@@ -174,6 +174,11 @@ describe('SponsorSlotReservationImpl', () => {
       checkout: vi.fn().mockResolvedValue(slot),
       commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
+      leaseStatus: vi.fn().mockResolvedValue({
+        leasedSlots: 0,
+        freeSlots: 1,
+        slots: [{ address: '0xPRIMARY', leased: false }],
+      }),
       addresses: vi.fn().mockReturnValue([]),
       sign: vi.fn(),
     };

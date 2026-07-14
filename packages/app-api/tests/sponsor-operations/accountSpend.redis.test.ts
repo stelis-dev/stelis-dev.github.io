@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { startRealRedis, type RealRedisHandle } from '../../../core-api/tests/helpers/realRedis.js';
+import { startRealRedis, type RealRedisHandle } from '@stelis/core-api/testing/redis';
 import {
   createRedisSponsorOperationsState,
   slotKey,

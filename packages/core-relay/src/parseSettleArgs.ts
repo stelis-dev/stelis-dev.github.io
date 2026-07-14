@@ -28,7 +28,7 @@ import {
   settlementSwapDirectionFromFunctionName,
 } from '@stelis/contracts';
 import { findSettleCommand } from './settleCommand.js';
-import { decodeExactPureU64Base64 } from './decodePureU64.js';
+import { decodeExactPureU64Base64 } from './decodeU64.js';
 
 // ─────────────────────────────────────────────
 // Error type

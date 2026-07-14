@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FetchLike, StelisMcpServerConfig } from '../src/config.js';
-import { resolveRelayApiUrl } from '../src/http.js';
+import { requestJson, resolveRelayApiUrl, StelisMcpHttpError } from '../src/http.js';
 import {
+  claimPromotion,
   getRelayApiConfig,
   listPromotions,
   preparePromotionSponsoredTransaction,
   prepareSponsoredTransaction,
   submitPromotionSponsoredTransaction,
 } from '../src/operations.js';
+import { RELAY_CONFIG_ERROR_CODES } from '@stelis/contracts';
 
 function createConfig(fetchFn: FetchLike): StelisMcpServerConfig {
   return {
@@ -39,6 +41,100 @@ describe('resolveRelayApiUrl', () => {
       defaultTimeoutMs: 1000,
     };
     expect(() => resolveRelayApiUrl(config)).toThrow(/ending in \/relay/);
+  });
+});
+
+describe('current Host error boundary', () => {
+  it('preserves only a valid closed Host error response', async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: 'Relay config unavailable',
+          code: 'CONFIG_UNAVAILABLE',
+        },
+        503,
+      ),
+    );
+
+    await expect(
+      requestJson(createConfig(fetchFn), {
+        path: '/config',
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      }),
+    ).rejects.toMatchObject({
+      message: 'Relay config unavailable',
+      code: 'CONFIG_UNAVAILABLE',
+      body: {
+        error: 'Relay config unavailable',
+        code: 'CONFIG_UNAVAILABLE',
+      },
+    });
+  });
+
+  it('does not echo or retain a non-current remote response', async () => {
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ error: 'bad', 'sk-live-secret': 'must-not-leak' }, 500));
+
+    try {
+      await requestJson(createConfig(fetchFn), {
+        path: '/config',
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      });
+      expect.fail('Expected StelisMcpHttpError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(StelisMcpHttpError);
+      const hostError = error as StelisMcpHttpError;
+      expect(hostError.message).toBe(
+        'Stelis Host returned a non-current error response (HTTP 500)',
+      );
+      expect(hostError.code).toBe('HTTP_ERROR');
+      expect(hostError.body).toBeUndefined();
+      expect(JSON.stringify(hostError)).not.toContain('must-not-leak');
+      expect(JSON.stringify(hostError)).not.toContain('sk-live-secret');
+    }
+  });
+
+  it('does not accept a current code on a route that cannot produce it', async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: 'Prepare body invalid',
+          code: 'BAD_REQUEST',
+        },
+        400,
+      ),
+    );
+
+    await expect(
+      requestJson(createConfig(fetchFn), {
+        path: '/config',
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      }),
+    ).rejects.toMatchObject({
+      message: 'Stelis Host returned a non-current error response (HTTP 400)',
+      code: 'HTTP_ERROR',
+      body: undefined,
+    });
+  });
+
+  it('keeps Studio read and claim error ownership distinct', async () => {
+    const claimFetch = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ error: 'Claim body invalid', code: 'BAD_REQUEST' }, 400));
+    await expect(
+      claimPromotion(createConfig(claimFetch), {
+        developerJwt: 'jwt',
+        promotionId: 'promotion',
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST', status: 400 });
+
+    const readFetch = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ error: 'Wrong route', code: 'BAD_REQUEST' }, 400));
+    await expect(
+      listPromotions(createConfig(readFetch), { developerJwt: 'jwt' }),
+    ).rejects.toMatchObject({ code: 'HTTP_ERROR', body: undefined });
   });
 });
 
@@ -177,5 +273,33 @@ describe('Stelis MCP operations', () => {
         userSignature: 'signature',
       }),
     ).rejects.toThrow('actualGasMist must be a string');
+  });
+
+  it('validates promotion claim success before exposing it to a tool', async () => {
+    const malformedClaimFetch = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse({
+        entitlement: {
+          promotionId: 'promo',
+          userId: 'user',
+          claimedAt: '2026-07-14T00:00:00.000Z',
+          useUntilAt: null,
+          remainingGasAllowanceMist: '01',
+          consumedGasAllowanceMist: '0',
+          status: 'active',
+          activeReservationReceiptId: null,
+          activeReservationAmountMist: null,
+          lastUsedAt: null,
+        },
+      }),
+    );
+
+    await expect(
+      claimPromotion(createConfig(malformedClaimFetch), {
+        developerJwt: 'jwt',
+        promotionId: 'promo',
+      }),
+    ).rejects.toThrow(
+      'PromotionEntitlement.remainingGasAllowanceMist must be a canonical non-negative decimal string',
+    );
   });
 });

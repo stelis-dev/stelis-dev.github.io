@@ -7,6 +7,7 @@
  *   - determineSettlementToken: settle.move baseForQuote direction enforcement
  */
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { TransactionDataBuilder } from '@mysten/sui/transactions';
 
 const { forbiddenReadFile, forbiddenReadFileSync } = vi.hoisted(() => ({
   forbiddenReadFile: vi.fn(() => {
@@ -34,7 +35,8 @@ import {
 } from '../src/settlementSwapPathRegistry.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 
-vi.mock('@mysten/sui/transactions', () => {
+vi.mock('@mysten/sui/transactions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@mysten/sui/transactions')>();
   class Transaction {
     private target = '';
 
@@ -56,7 +58,7 @@ vi.mock('@mysten/sui/transactions', () => {
     }
   }
 
-  return { Transaction };
+  return { ...actual, Transaction };
 });
 
 const SUI_TYPE = '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
@@ -161,8 +163,8 @@ function makeSettlementSwapPath(
     settlementTokenType,
     settlementTokenSymbol: symbol,
     settlementTokenDecimals: 9,
-    lotSize: 1000,
-    minSize: 10000,
+    lotSize: 1000n,
+    minSize: 10000n,
     effectiveFeeRateBps: 0,
     settlementSwapDirection: 'baseForQuote',
     hops: [
@@ -266,9 +268,11 @@ function bcsBool(value: boolean): Uint8Array {
   return new Uint8Array([value ? 1 : 0]);
 }
 
-function viewResult(values: Uint8Array[]) {
+function viewResult(transaction: Uint8Array, values: Uint8Array[]) {
+  const digest = TransactionDataBuilder.getDigestFromBytes(transaction);
   return {
-    Transaction: {},
+    $kind: 'Transaction' as const,
+    Transaction: { digest, status: { success: true as const, error: null } },
     commandResults: [
       {
         returnValues: values.map((bcs) => ({ bcs })),
@@ -296,21 +300,21 @@ describe('resolveSettlementSwapPathRegistry', () => {
       simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
         const target = new TextDecoder().decode(transaction);
         if (target.endsWith('::constants::float_scaling')) {
-          return viewResult([bcsU64(1_000_000_000n)]);
+          return viewResult(transaction, [bcsU64(1_000_000_000n)]);
         }
         if (target.endsWith('::constants::fee_penalty_multiplier')) {
-          return viewResult([bcsU64(1_250_000_000n)]);
+          return viewResult(transaction, [bcsU64(1_250_000_000n)]);
         }
         if (target.endsWith('::pool::pool_book_params')) {
-          return viewResult([bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
+          return viewResult(transaction, [bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
         }
         if (target.endsWith('::pool::whitelisted')) {
-          return viewResult([bcsBool(false)]);
+          return viewResult(transaction, [bcsBool(false)]);
         }
         if (target.endsWith('::pool::pool_trade_params')) {
           // DeepBook taker_fee 2_000_000 / 1e9 = 20 bps in DEEP-fee mode.
           // Stelis executes input-fee mode, which applies the 1.25x penalty: 25 bps.
-          return viewResult([bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
+          return viewResult(transaction, [bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
         }
         throw new Error(`unexpected view call target: ${target}`);
       }),
@@ -345,19 +349,19 @@ describe('resolveSettlementSwapPathRegistry', () => {
       simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
         const target = new TextDecoder().decode(transaction);
         if (target.endsWith('::constants::float_scaling')) {
-          return viewResult([bcsU64(1_000_000_000n)]);
+          return viewResult(transaction, [bcsU64(1_000_000_000n)]);
         }
         if (target.endsWith('::constants::fee_penalty_multiplier')) {
-          return viewResult([bcsU64(2_000_000_000n)]);
+          return viewResult(transaction, [bcsU64(2_000_000_000n)]);
         }
         if (target.endsWith('::pool::pool_book_params')) {
-          return viewResult([bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
+          return viewResult(transaction, [bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
         }
         if (target.endsWith('::pool::whitelisted')) {
-          return viewResult([bcsBool(false)]);
+          return viewResult(transaction, [bcsBool(false)]);
         }
         if (target.endsWith('::pool::pool_trade_params')) {
-          return viewResult([bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
+          return viewResult(transaction, [bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
         }
         throw new Error(`unexpected view call target: ${target}`);
       }),
@@ -374,5 +378,39 @@ describe('resolveSettlementSwapPathRegistry', () => {
     );
     expect(settlementSwapPaths[0].effectiveFeeRateBps).toBe(40);
     expect(settlementSwapPaths[0].hops[0].feeBps).toBe(40);
+  });
+
+  it('rejects command results carried by a failed DeepBook view transaction', async () => {
+    const client = {
+      getObject: vi.fn(async () => ({
+        object: {
+          type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
+        },
+      })),
+      getCoinMetadata: vi.fn(async () => ({
+        coinMetadata: { symbol: 'USDC', decimals: 6 },
+      })),
+      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => ({
+        $kind: 'FailedTransaction' as const,
+        FailedTransaction: {
+          digest: TransactionDataBuilder.getDigestFromBytes(transaction),
+          status: {
+            success: false as const,
+            error: { $kind: 'Unknown', message: 'view aborted', Unknown: null },
+          },
+        },
+        // A failed RPC result may still carry decodable-looking values. They
+        // are not authoritative view output and must never enter the registry.
+        commandResults: [{ returnValues: [{ bcs: bcsU64(1_000_000_000n) }] }],
+      })),
+    };
+
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    await expect(
+      resolveSettlementSwapPathRegistry(client as never, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('DeepBook float_scaling failed: view aborted');
   });
 });

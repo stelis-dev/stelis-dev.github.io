@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AdminRedisClient } from '@stelis/core-api/admin';
-import { ADMIN_AUDIT_LOG_KEY, safeErrorSummary, writeAdminAuditLog } from '../src/adminAuditLog.js';
+import { ADMIN_AUDIT_LOG_KEY, writeAdminAuditLog } from '../src/adminAuditLog.js';
+import { safeErrorSummary } from '@stelis/core-api/observability';
 
 function makeRedis(): AdminRedisClient {
   return {
@@ -50,7 +51,7 @@ describe('admin audit log helpers', () => {
     expect(redis.ltrim).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
     const line = vi.mocked(redis.lpush).mock.calls[0]![1] as string;
     const entry = JSON.parse(line) as { detail: string; ts: string };
-    expect(entry.detail).toBe('redis unavailable at redis://[REDACTED]@redis.example:6379');
+    expect(entry.detail).toBe('redis unavailable at redis://redis.example:6379');
     expect(entry.ts).toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 });

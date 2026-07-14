@@ -39,7 +39,7 @@ import type { HostContext } from '../src/context.js';
 import { SponsorPool } from '../src/context.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
-import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import type { GenericPreparedTxDraft } from '../src/store/prepareTypes.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
 
@@ -203,11 +203,21 @@ async function buildHarness(): Promise<E2EHarness> {
     sui: makeMockSui() as unknown as HostContext['sui'],
     sponsorPool: sponsorPool as unknown as HostContext['sponsorPool'],
     packageId: MOCK_CONFIG.packageId,
+    deepbookPackageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
+    vaultsTableId: null,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker: new MemoryAbuseBlocker() as unknown as HostContext['abuseBlocker'],
     prepareStore,
+    prepareRequestNonceStore: {
+      claim: vi.fn().mockResolvedValue('ok' as const),
+    },
+    prepareInflightLimiter: {
+      inflight: 0,
+      capacity: 1,
+      tryAcquire: vi.fn().mockResolvedValue(null),
+    },
     settlementPayoutRecipientAddress: MOCK_CONFIG.settlementPayoutRecipientAddress,
     allowedSettlementSwapPaths: [],
     getConfig: vi.fn().mockResolvedValue({
@@ -269,7 +279,7 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     expect(rawJson).not.toBeNull();
     const parsed = JSON.parse(rawJson!);
     parsed.unexpected = true;
-    await redis.set(entryKey, JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set(entryKey, JSON.stringify(parsed), { px: 65_000 });
 
     // 5. Drive handleSponsor end-to-end. It must reject AND clean up.
     await expect(
@@ -356,7 +366,7 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
         if (rawJson) {
           const parsed = JSON.parse(rawJson);
           parsed.unexpected = true;
-          await redis.set(entryKey, JSON.stringify(parsed), { PX: 65_000 });
+          await redis.set(entryKey, JSON.stringify(parsed), { px: 65_000 });
         }
       }
       // 3. Return the (still-valid) entry the real peek produced. The
@@ -446,7 +456,7 @@ describe('Redis-backed sponsor path: corrupt entry recovery (end-to-end)', () =>
     expect(rawJson).not.toBeNull();
     const parsed = JSON.parse(rawJson!);
     parsed.txBytesHash = attackerHash;
-    await redis.set(entryKey, JSON.stringify(parsed), { PX: 65_000 });
+    await redis.set(entryKey, JSON.stringify(parsed), { px: 65_000 });
 
     // 3. Sanity: the store-level consume() accepts the forged entry
     //    because its txBytesHash matches hash(attackerBytes). The

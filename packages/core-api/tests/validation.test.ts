@@ -22,7 +22,7 @@ vi.mock('@stelis/core-relay', async () => {
 });
 
 import * as coreRelay from '@stelis/core-relay';
-import type { PtbCommand, MoveCallCommand, OtherCommand } from '@stelis/contracts';
+import type { PtbCommand, MoveCallCommand } from '@stelis/contracts';
 import {
   validatePromotionCommandCount,
   validatePromotionPtbStructure,
@@ -38,6 +38,7 @@ const ALLOWED_TARGET =
 const DISALLOWED_TARGET =
   '0x0000000000000000000000000000000000000000000000000000000000000002::evil::drain';
 const ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]);
+type OtherCommand = Exclude<PtbCommand, MoveCallCommand>;
 
 // ─────────────────────────────────────────────
 // PtbCommand helpers (flat normalized shape, not raw SDK shape)

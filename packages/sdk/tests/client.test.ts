@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisClient, StelisApiException } from '../src/client.js';
+import type { RelayConfigResponse } from '../src/types.js';
+import { makeRelayPrepareRequest } from './helpers/currentFixtures.js';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -10,6 +12,44 @@ function jsonResponse(data: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function relayConfigResponse(): RelayConfigResponse {
+  return {
+    network: 'testnet',
+    packageId: '0x1',
+    settlementPayoutRecipient: '0x2',
+    supportedSettlementSwapPaths: [],
+    quotedHostFeeMist: '1',
+    protocolFlatFeeMist: '1',
+  };
+}
+
+function relayConfigResponseWithPath(): RelayConfigResponse {
+  const settlementTokenType = '0x1::deep::DEEP';
+  return {
+    ...relayConfigResponse(),
+    supportedSettlementSwapPaths: [
+      {
+        hops: [
+          {
+            poolId: '0x4',
+            baseType: settlementTokenType,
+            quoteType: '0x2::sui::SUI',
+            swapDirection: 'baseForQuote',
+            feeBps: 0,
+          },
+        ],
+        settlementTokenType,
+        settlementTokenSymbol: 'DEEP',
+        settlementTokenDecimals: 6,
+        lotSize: 100,
+        minSize: 1_000_000,
+        effectiveFeeRateBps: 0,
+        settlementSwapDirection: 'baseForQuote',
+      },
+    ],
+  };
 }
 
 describe('StelisClient', () => {
@@ -27,6 +67,7 @@ describe('StelisClient', () => {
         endpoint: 'http://localhost:3000/relay',
         requestTimeouts: {
           statusMs: 1111,
+          configMs: 1666,
           prepareMs: 2222,
           sponsorMs: 3333,
           studioReadMs: 4444,
@@ -36,6 +77,7 @@ describe('StelisClient', () => {
 
       mockFetch
         .mockResolvedValueOnce(jsonResponse({ ok: true })) // getStatus
+        .mockResolvedValueOnce(jsonResponse(relayConfigResponse())) // getConfig
         .mockResolvedValueOnce(
           jsonResponse({
             txBytes: 'b64',
@@ -64,11 +106,14 @@ describe('StelisClient', () => {
         ); // promotionPrepare
 
       await c.getStatus();
-      await c.prepare({
-        txKindBytes: 'k',
-        senderAddress: '0x' + 'a'.repeat(64),
-        settlementTokenType: '0x2::sui::SUI',
-      });
+      await c.getConfig();
+      await c.prepare(
+        makeRelayPrepareRequest({
+          txKindBytes: 'k',
+          senderAddress: '0x' + 'a'.repeat(64),
+          settlementTokenType: '0x2::sui::SUI',
+        }),
+      );
       await c.sponsor({
         txBytes: 'b64',
         userSignature: 'sig',
@@ -82,10 +127,11 @@ describe('StelisClient', () => {
       );
 
       expect(timeoutSpy).toHaveBeenNthCalledWith(1, 1111);
-      expect(timeoutSpy).toHaveBeenNthCalledWith(2, 2222);
-      expect(timeoutSpy).toHaveBeenNthCalledWith(3, 3333);
-      expect(timeoutSpy).toHaveBeenNthCalledWith(4, 4444);
-      expect(timeoutSpy).toHaveBeenNthCalledWith(5, 5555);
+      expect(timeoutSpy).toHaveBeenNthCalledWith(2, 1666);
+      expect(timeoutSpy).toHaveBeenNthCalledWith(3, 2222);
+      expect(timeoutSpy).toHaveBeenNthCalledWith(4, 3333);
+      expect(timeoutSpy).toHaveBeenNthCalledWith(5, 4444);
+      expect(timeoutSpy).toHaveBeenNthCalledWith(6, 5555);
       timeoutSpy.mockRestore();
     });
 
@@ -104,6 +150,72 @@ describe('StelisClient', () => {
             requestTimeouts: { sponsorMs: Number.MAX_SAFE_INTEGER + 1 },
           }),
       ).toThrow('Number.MAX_SAFE_INTEGER');
+    });
+  });
+
+  describe('getConfig', () => {
+    it('returns the current wire shape through the shared Host parser', async () => {
+      const config = relayConfigResponse();
+      mockFetch.mockResolvedValueOnce(jsonResponse(config));
+
+      await expect(client.getConfig()).resolves.toEqual(config);
+      expect(mockFetch.mock.calls[0][0]).toBe('http://localhost:3000/relay/config');
+    });
+
+    it('rejects config fields and values outside the current Host contract', async () => {
+      for (const config of [
+        { ...relayConfigResponse(), obsoleteField: true },
+        { ...relayConfigResponse(), protocolFlatFeeMist: '1.5' },
+      ]) {
+        mockFetch.mockResolvedValueOnce(jsonResponse(config));
+        await expect(client.getConfig()).rejects.toThrow(/non-current field|canonical/);
+      }
+    });
+
+    it('enforces settlement swap path identity and fee invariants at the HTTP boundary', async () => {
+      const invalidConfigs: Array<{ config: RelayConfigResponse; error: string }> = [];
+
+      const missingDirection = relayConfigResponseWithPath();
+      delete (missingDirection.supportedSettlementSwapPaths[0] as Record<string, unknown>)[
+        'settlementSwapDirection'
+      ];
+      invalidConfigs.push({
+        config: missingDirection,
+        error: 'settlementSwapDirection is invalid',
+      });
+
+      const directionMismatch = relayConfigResponseWithPath();
+      directionMismatch.supportedSettlementSwapPaths[0].hops[0].swapDirection = 'quoteForBase';
+      invalidConfigs.push({
+        config: directionMismatch,
+        error: 'hops do not match settlementSwapDirection',
+      });
+
+      const duplicateToken = relayConfigResponseWithPath();
+      duplicateToken.supportedSettlementSwapPaths.push({
+        ...duplicateToken.supportedSettlementSwapPaths[0],
+        hops: [
+          {
+            ...duplicateToken.supportedSettlementSwapPaths[0].hops[0],
+            poolId: '0x5',
+          },
+        ],
+      });
+      invalidConfigs.push({ config: duplicateToken, error: 'duplicate settlementTokenType' });
+
+      const feeDrift = relayConfigResponseWithPath();
+      feeDrift.supportedSettlementSwapPaths[0].effectiveFeeRateBps = 25;
+      feeDrift.supportedSettlementSwapPaths[0].hops[0].feeBps = 20;
+      invalidConfigs.push({ config: feeDrift, error: 'feeBps must equal effectiveFeeRateBps' });
+
+      const unsafeLotSize = relayConfigResponseWithPath();
+      unsafeLotSize.supportedSettlementSwapPaths[0].lotSize = Number.MAX_SAFE_INTEGER + 1;
+      invalidConfigs.push({ config: unsafeLotSize, error: 'lotSize must be a safe integer' });
+
+      for (const { config, error } of invalidConfigs) {
+        mockFetch.mockResolvedValueOnce(jsonResponse(config));
+        await expect(client.getConfig()).rejects.toThrow(error);
+      }
     });
   });
 
@@ -133,11 +245,12 @@ describe('StelisClient', () => {
 
       mockFetch.mockResolvedValueOnce(jsonResponse(prepareData));
 
-      const result = await client.prepare({
+      const request = makeRelayPrepareRequest({
         txKindBytes: 'base64kind',
         senderAddress: '0xAlice',
         settlementTokenType: 'DEEP',
       });
+      const result = await client.prepare(request);
 
       expect(result.txBytes).toBe('base64txbytes');
       expect(result.receiptId).toBe('0x7a3f');
@@ -145,11 +258,7 @@ describe('StelisClient', () => {
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toBe('http://localhost:3000/relay/prepare');
       expect(init.method).toBe('POST');
-      expect(JSON.parse(init.body)).toEqual({
-        txKindBytes: 'base64kind',
-        senderAddress: '0xAlice',
-        settlementTokenType: 'DEEP',
-      });
+      expect(JSON.parse(init.body)).toEqual(request);
     });
 
     it('forwards orderId in request body and echoes in response', async () => {
@@ -174,12 +283,14 @@ describe('StelisClient', () => {
 
       mockFetch.mockResolvedValueOnce(jsonResponse(prepareData));
 
-      const result = await client.prepare({
-        txKindBytes: 'base64kind',
-        senderAddress: '0xAlice',
-        settlementTokenType: 'DEEP',
-        orderId: 'test-123',
-      });
+      const result = await client.prepare(
+        makeRelayPrepareRequest({
+          txKindBytes: 'base64kind',
+          senderAddress: '0xAlice',
+          settlementTokenType: 'DEEP',
+          orderId: 'test-123',
+        }),
+      );
 
       expect(result.orderId).toBe('test-123');
 
@@ -259,26 +370,166 @@ describe('StelisClient', () => {
   // ─────────────────────────────────────────
 
   describe('error handling', () => {
-    it('throws StelisApiException on API error', async () => {
-      mockFetch.mockResolvedValueOnce(
-        jsonResponse({ error: 'Insufficient claim', code: 'INSUFFICIENT_CLAIM' }, 400),
-      );
+    it('preserves current codes on every route that owns them', async () => {
+      const ownedRouteResponses: Array<{
+        body: Record<string, unknown>;
+        status: number;
+        request: () => Promise<unknown>;
+      }> = [
+        {
+          body: { error: 'Current error', code: 'CONFIG_UNAVAILABLE' },
+          status: 503,
+          request: () => client.getConfig(),
+        },
+        {
+          body: { error: 'Current error', code: 'INSUFFICIENT_BALANCE' },
+          status: 422,
+          request: () =>
+            client.prepare(
+              makeRelayPrepareRequest({
+                txKindBytes: 'kind',
+                senderAddress: '0x1',
+                settlementTokenType: '0x2::sui::SUI',
+              }),
+            ),
+        },
+        {
+          body: {
+            error: 'Current error',
+            code: 'SPONSOR_ONCHAIN_FAILED',
+            digest: '0xfailed',
+          },
+          status: 422,
+          request: () =>
+            client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
+        },
+        {
+          body: { error: 'Current error', code: 'NOT_CLAIMED' },
+          status: 403,
+          request: () =>
+            client.promotionPrepare(
+              'promotion',
+              { senderAddress: '0x1', txKindBytes: 'kind' },
+              'jwt',
+            ),
+        },
+        {
+          body: { error: 'Current error', code: 'ONCHAIN_REVERT', digest: '0xpromotion' },
+          status: 422,
+          request: () =>
+            client.promotionSponsor(
+              'promotion',
+              { receiptId: 'receipt', txBytes: 'tx', userSignature: 'sig' },
+              'jwt',
+            ),
+        },
+        {
+          body: { error: 'Current error', code: 'AUTH_FAILED' },
+          status: 401,
+          request: () => client.listPromotions('jwt'),
+        },
+        {
+          body: { error: 'Current error', code: 'CLIENT_IP_UNRESOLVED' },
+          status: 400,
+          request: () => client.getPromotionDetail('promotion', 'jwt'),
+        },
+      ];
 
-      await expect(client.getStatus()).rejects.toThrow(StelisApiException);
-
-      try {
-        mockFetch.mockResolvedValueOnce(
-          jsonResponse({ error: 'Not found', code: 'NOT_FOUND' }, 404),
-        );
-        await client.getStatus();
-      } catch (e) {
-        const err = e as StelisApiException;
-        expect(err.code).toBe('NOT_FOUND');
-        expect(err.status).toBe(404);
+      for (const { body, status, request } of ownedRouteResponses) {
+        mockFetch.mockResolvedValueOnce(jsonResponse(body, status));
+        await expect(request()).rejects.toMatchObject({ code: body.code, status });
       }
     });
 
-    it('throws StelisApiException with raw body snippet on non-JSON error response', async () => {
+    it('rejects current codes when they come from a route that does not own them', async () => {
+      const wrongRouteResponses: Array<{
+        code: string;
+        status: number;
+        request: () => Promise<unknown>;
+      }> = [
+        { code: 'BAD_REQUEST', status: 400, request: () => client.getStatus() },
+        { code: 'BAD_REQUEST', status: 400, request: () => client.getConfig() },
+        {
+          code: 'SPONSOR_ONCHAIN_FAILED',
+          status: 422,
+          request: () =>
+            client.prepare(
+              makeRelayPrepareRequest({
+                txKindBytes: 'kind',
+                senderAddress: '0x1',
+                settlementTokenType: '0x2::sui::SUI',
+              }),
+            ),
+        },
+        {
+          code: 'INSUFFICIENT_BALANCE',
+          status: 422,
+          request: () =>
+            client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
+        },
+        {
+          code: 'ONCHAIN_REVERT',
+          status: 422,
+          request: () =>
+            client.promotionPrepare(
+              'promotion',
+              { senderAddress: '0x1', txKindBytes: 'kind' },
+              'jwt',
+            ),
+        },
+        {
+          code: 'GAS_EXCEEDS_TX_CAP',
+          status: 422,
+          request: () =>
+            client.promotionSponsor(
+              'promotion',
+              { receiptId: 'receipt', txBytes: 'tx', userSignature: 'sig' },
+              'jwt',
+            ),
+        },
+        { code: 'NOT_CLAIMED', status: 403, request: () => client.listPromotions('jwt') },
+        {
+          code: 'NOT_CLAIMED',
+          status: 403,
+          request: () => client.getPromotionDetail('promotion', 'jwt'),
+        },
+        {
+          code: 'ALREADY_CLAIMED',
+          status: 409,
+          request: () => client.getPromotionDetail('promotion', 'jwt'),
+        },
+      ];
+
+      for (const { code, status, request } of wrongRouteResponses) {
+        mockFetch.mockResolvedValueOnce(jsonResponse({ error: 'Wrong route', code }, status));
+        await expect(request()).rejects.toMatchObject({
+          code: 'UNKNOWN',
+          status,
+          message: `Relay API returned a non-current error response (HTTP ${status})`,
+        });
+      }
+    });
+
+    it('rejects a current code paired with the wrong HTTP status', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ error: 'Wrong status', code: 'AUTH_FAILED' }, 422),
+      );
+      await expect(client.listPromotions('jwt')).rejects.toMatchObject({
+        code: 'UNKNOWN',
+        status: 422,
+      });
+    });
+
+    it('rejects a known on-chain terminal code without its required digest', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ error: 'Missing identity', code: 'SPONSOR_ONCHAIN_FAILED' }, 422),
+      );
+      await expect(
+        client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
+      ).rejects.toMatchObject({ code: 'UNKNOWN', status: 422 });
+    });
+
+    it('does not echo a non-current remote error body', async () => {
       mockFetch.mockResolvedValueOnce(
         new Response('A server error occurred while processing this request.', {
           status: 500,
@@ -295,7 +546,8 @@ describe('StelisClient', () => {
         expect(err).toBeInstanceOf(StelisApiException);
         expect(err.code).toBe('UNKNOWN');
         expect(err.status).toBe(500);
-        expect(err.message).toContain('A server error occurred');
+        expect(err.message).toBe('Relay API returned a non-current error response (HTTP 500)');
+        expect(err.message).not.toContain('A server error occurred');
       }
     });
 
@@ -316,6 +568,66 @@ describe('StelisClient', () => {
       }
     });
 
+    it('accepts only the closed current error metadata shape', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: 'Settle input too low',
+            code: 'INSUFFICIENT_SETTLE_INPUT',
+            minSettleMist: '1000',
+            requiredTotalIn: '2000',
+            isEstimate: false,
+          },
+          422,
+        ),
+      );
+
+      await expect(
+        client.prepare(
+          makeRelayPrepareRequest({
+            txKindBytes: 'kind',
+            senderAddress: '0x1',
+            settlementTokenType: '0x2::sui::SUI',
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'INSUFFICIENT_SETTLE_INPUT',
+        meta: {
+          minSettleMist: '1000',
+          requiredTotalIn: '2000',
+          isEstimate: false,
+        },
+      });
+    });
+
+    it('rejects unknown or mistyped remote error fields without preserving them', async () => {
+      for (const body of [
+        { error: 'bad', code: 'BAD_REQUEST', secretKey: 'must-not-leak' },
+        { error: 'bad', code: 'BAD_REQUEST', isEstimate: false },
+        { error: 'bad', code: 'BAD_REQUEST', minSettleMist: '1' },
+      ]) {
+        mockFetch.mockResolvedValueOnce(jsonResponse(body, 400));
+        try {
+          await client.prepare(
+            makeRelayPrepareRequest({
+              txKindBytes: 'kind',
+              senderAddress: '0x1',
+              settlementTokenType: '0x2::sui::SUI',
+            }),
+          );
+          expect.fail('Expected StelisApiException');
+        } catch (error) {
+          const apiError = error as StelisApiException;
+          expect(apiError.code).toBe('UNKNOWN');
+          expect(apiError.meta).toBeUndefined();
+          expect(apiError.message).toBe(
+            'Relay API returned a non-current error response (HTTP 400)',
+          );
+          expect(JSON.stringify(apiError)).not.toContain('must-not-leak');
+        }
+      }
+    });
+
     it('throws a readable error on successful but non-JSON response', async () => {
       mockFetch.mockResolvedValueOnce(
         new Response('<html>ok</html>', {
@@ -325,8 +637,15 @@ describe('StelisClient', () => {
       );
 
       await expect(client.getStatus()).rejects.toThrow(
-        /Invalid non-JSON response from Relay API: <html>ok<\/html>/,
+        /Relay API returned a non-JSON success response \(HTTP 200\)/,
       );
+    });
+
+    it('rejects non-current successful status bodies instead of casting them', async () => {
+      for (const body of [{ ok: false }, { ok: true, legacyStatus: 'ready' }]) {
+        mockFetch.mockResolvedValueOnce(jsonResponse(body));
+        await expect(client.getStatus()).rejects.toThrow(/RelayStatusResponse/);
+      }
     });
   });
 
@@ -419,26 +738,6 @@ describe('StelisClient', () => {
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('promo%2Fspecial%20chars');
     });
-
-    it('throws StelisApiException on API error', async () => {
-      mockFetch.mockResolvedValueOnce(
-        jsonResponse({ error: 'Not claimed', code: 'NOT_CLAIMED' }, 403),
-      );
-
-      try {
-        await client.promotionPrepare(
-          'promo_1',
-          { senderAddress: '0xA', txKindBytes: 'b64' },
-          'jwt',
-        );
-        expect.fail('Expected StelisApiException');
-      } catch (e) {
-        const err = e as StelisApiException;
-        expect(err).toBeInstanceOf(StelisApiException);
-        expect(err.code).toBe('NOT_CLAIMED');
-        expect(err.status).toBe(403);
-      }
-    });
   });
 
   // ─────────────────────────────────────────
@@ -505,6 +804,31 @@ describe('StelisClient', () => {
       expect(init.method).toBeUndefined(); // GET default
       expect(init.headers['Authorization']).toBe('Bearer dev-jwt-token');
     });
+
+    it('rejects a non-current promotion list success body', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          promotions: [
+            {
+              promotionId: 'p1',
+              displayName: 'Test Promo',
+              type: 'legacy_kind',
+              status: 'active',
+              canClaim: true,
+              canUseSponsoredAction: false,
+              promotionRemainingBudgetMist: '100',
+              remainingParticipantSlots: 1,
+              userRemainingGasAllowanceMist: null,
+              unavailableReason: 'not_claimed',
+            },
+          ],
+        }),
+      );
+
+      await expect(client.listPromotions('dev-jwt-token')).rejects.toThrow(
+        /PromotionListResponse\.promotions\[0\]\.type is not current/,
+      );
+    });
   });
 
   // ─────────────────────────────────────────
@@ -539,6 +863,30 @@ describe('StelisClient', () => {
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toBe('http://localhost:3000/studio/promotions/p1');
       expect(init.headers['Authorization']).toBe('Bearer dev-jwt');
+    });
+
+    it('rejects non-canonical MIST in a promotion detail success body', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          promotionId: 'p1',
+          displayName: 'Test',
+          type: 'gas_sponsorship',
+          promotionRemainingBudgetMist: '01',
+          detail: {
+            claimStatus: 'not_claimed',
+            userRemainingGasAllowanceMist: null,
+            claimDeadlineAt: null,
+            useUntilAt: null,
+            canClaim: true,
+            canUseSponsoredAction: false,
+            unavailableReason: 'not_claimed',
+          },
+        }),
+      );
+
+      await expect(client.getPromotionDetail('p1', 'dev-jwt')).rejects.toThrow(
+        /promotionRemainingBudgetMist must be a canonical non-negative decimal string/,
+      );
     });
   });
 });

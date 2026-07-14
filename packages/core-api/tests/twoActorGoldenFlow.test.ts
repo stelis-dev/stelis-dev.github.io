@@ -29,7 +29,7 @@
  */
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64, toBase58 } from '@mysten/sui/utils';
@@ -66,11 +66,8 @@ vi.mock('../src/prepare/extractSettleArgs.js');
 // Imports under test (loaded after vi.mock so factories register)
 // ─────────────────────────────────────────────
 
-import {
-  handlePrepare,
-  PREPARE_TTL_MS,
-  type PrepareHandlerConfig,
-} from '../src/handlers/prepare.js';
+import { handlePrepare, type PrepareHandlerConfig } from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { handleSponsor, SponsorValidationError } from '../src/handlers/sponsor.js';
 import { computePolicyHash } from '../src/policyHash.js';
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
@@ -93,7 +90,11 @@ import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import { withPrepareAuthorization } from './prepareAuthTestHelpers.js';
-import { grpcExecutionSuccess, grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
+import {
+  bindGrpcResultToTransactionBytes,
+  grpcExecutionSuccess,
+  grpcSimulationSuccess,
+} from './helpers/suiGrpcExecutionFixtures.js';
 
 // ─────────────────────────────────────────────
 // Shared identities + secrets
@@ -218,8 +219,18 @@ function genericMockSui() {
     storageRebate: '500000',
   };
   return {
-    simulateTransaction: vi.fn().mockResolvedValue(grpcSimulationSuccess('0xdigest123', gasUsed)),
-    executeTransaction: vi.fn().mockResolvedValue(grpcExecutionSuccess('0xdigest123', gasUsed)),
+    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcSimulationSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
+    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcExecutionSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
     getObject: vi.fn().mockResolvedValue({
       object: {
         json: {
@@ -267,8 +278,8 @@ function makeGenericHarness(): GenericHarness {
       settlementTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
-      lotSize: 1,
-      minSize: 1,
+      lotSize: 1n,
+      minSize: 1n,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
@@ -290,6 +301,7 @@ function makeGenericHarness(): GenericHarness {
     packageId: GENERIC_MOCK_CONFIG.packageId,
     configId: GENERIC_MOCK_CONFIG.configId,
     vaultRegistryId: GENERIC_MOCK_CONFIG.vaultRegistryId,
+    vaultsTableId: null,
     deepbookPackageId: extraCfg.deepbookPackageId,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker,
@@ -435,7 +447,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
       CLIENT_IP,
     );
 
-    expect(sponsorResult.digest).toBe('0xdigest123');
+    expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytes));
 
     // Cross-request binding check #2: consume() ran to completion and
     // the entry is gone (single-use receipt).
@@ -494,7 +506,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
       { txBytes: response.txBytes, userSignature: userSig, receiptId: response.receiptId },
       CLIENT_IP,
     );
-    expect(first.digest).toBe('0xdigest123');
+    expect(first.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytes));
 
     const replay = await handleSponsor(
       harness.ctx,
@@ -556,12 +568,18 @@ function studioMockSui() {
     storageRebate: '200000',
   };
   return {
-    simulateTransaction: vi
-      .fn()
-      .mockResolvedValue(grpcSimulationSuccess('studio-mock-digest', gasUsed)),
-    executeTransaction: vi
-      .fn()
-      .mockResolvedValue(grpcExecutionSuccess('studio-tx-digest', gasUsed)),
+    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcSimulationSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
+    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
+      bindGrpcResultToTransactionBytes(
+        grpcExecutionSuccess('fixture-digest', gasUsed),
+        transaction,
+      ),
+    ),
     core: {
       resolveTransactionPlugin: () => undefined,
       getCurrentSystemState: async () => ({
@@ -732,7 +750,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       clientIp: CLIENT_IP,
     });
 
-    expect(sponsorResult.digest).toBe('studio-tx-digest');
+    expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytesRaw));
 
     // Cross-request binding check #2: entry consumed, ledger
     // reservation cleared by the success path.
@@ -797,7 +815,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       verifiedIdentity: h.identity,
       clientIp: CLIENT_IP,
     });
-    expect(first.digest).toBe('studio-tx-digest');
+    expect(first.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytesRaw));
 
     const replay = await handlePromotionSponsor(h.sponsorCtx, {
       promotionId: h.promoId,

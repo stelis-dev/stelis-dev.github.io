@@ -7,6 +7,8 @@
  */
 
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiClientTypes } from '@mysten/sui/client';
+import { bindCurrentSuiResultToDigest } from '@stelis/core-relay/browser';
 import { decodeSettleEvent, SETTLE_EVENT_TYPE } from './settleEventDecoder.js';
 
 // ─────────────────────────────────────────────
@@ -66,17 +68,24 @@ export async function extractSettleEvents(
       continue;
     }
 
-    if (result.$kind === 'FailedTransaction') {
-      const reason = result.FailedTransaction.status.error?.message ?? 'unknown execution failure';
-      logger(`[reconciliation] Transaction ${digest}: execution failed (${reason}); skipping.`);
+    const bound = bindCurrentSuiResultToDigest(result, digest);
+    if (!bound) {
+      logger(`[reconciliation] Transaction ${digest}: malformed or mismatched result; skipping.`);
+      continue;
+    }
+    if (bound.outcome === 'failure') {
+      logger(
+        `[reconciliation] Transaction ${digest}: execution failed (${bound.errorMessage}); skipping.`,
+      );
       continue;
     }
 
-    const events = result.Transaction.events;
-    if (!Array.isArray(events)) {
+    const eventsValue = bound.transaction.events;
+    if (!Array.isArray(eventsValue)) {
       logger(`[reconciliation] Transaction ${digest}: requested events were missing; skipping.`);
       continue;
     }
+    const events = eventsValue as SuiClientTypes.Event[];
     const settleEvents = events.filter((event) => event.eventType === SETTLE_EVENT_TYPE);
 
     if (settleEvents.length === 0) {

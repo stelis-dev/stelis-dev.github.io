@@ -8,6 +8,7 @@
  */
 import type { RedisClientLike, RawRedisClient } from '@stelis/core-api';
 import { wrapRedisClient } from '@stelis/core-api';
+import { redactSensitiveText } from '@stelis/core-api/observability';
 
 interface RedisRuntimeClient extends RawRedisClient {
   isOpen?: boolean;
@@ -34,7 +35,7 @@ async function loadRedisModule(): Promise<{
       createClient: (options: { url: string }) => RedisRuntimeClient;
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
     throw new Error(
       'The "redis" package is required for @stelis/app-api. ' +
         'Run "npm install" in the workspace before starting. ' +
@@ -198,7 +199,7 @@ async function assertSupportedRedisTopology(client: RedisRuntimeClient): Promise
     throw new Error(
       `Redis topology probe failed — cannot verify supported deployment. ` +
         `Stelis requires a standalone Redis data endpoint. ` +
-        `Original error: ${err instanceof Error ? err.message : String(err)}`,
+        `Original error: ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
     );
   }
 

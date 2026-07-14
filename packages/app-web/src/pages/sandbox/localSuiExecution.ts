@@ -1,6 +1,7 @@
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
+import { bindCurrentSuiResultToBytes } from '@stelis/core-relay/browser';
 
 interface WalletTransactionSigner {
   signTransaction(input: { transaction: string }): Promise<{ signature: string }>;
@@ -14,23 +15,6 @@ interface SignAndExecuteLocalTransactionInput {
 }
 
 type ExecuteTransactionResult = Awaited<ReturnType<SuiGrpcClient['executeTransaction']>>;
-
-function getDigest(result: ExecuteTransactionResult): string {
-  const txResult = result as {
-    Transaction?: { digest?: string };
-    FailedTransaction?: { digest?: string; status?: { error?: string } };
-  };
-  if (txResult.FailedTransaction) {
-    throw new Error(
-      `SUI execution failed: ${txResult.FailedTransaction.status?.error ?? 'unknown error'}`,
-    );
-  }
-  const digest = txResult.Transaction?.digest;
-  if (!digest) {
-    throw new Error('SUI execution returned an empty digest');
-  }
-  return digest;
-}
 
 export async function signAndExecuteLocalTransaction({
   transaction,
@@ -50,7 +34,15 @@ export async function signAndExecuteLocalTransaction({
     signatures: [signature],
     include: { effects: true },
   });
-  const digest = getDigest(result);
+  const bound = bindCurrentSuiResultToBytes(result, txBytes);
+  if (!bound) throw new Error('SUI execution returned a malformed or mismatched result');
+  if (bound.outcome === 'failure') {
+    throw new Error(`SUI execution failed: ${bound.errorMessage}`);
+  }
+  if (bound.transaction.effects === undefined) {
+    throw new Error('SUI execution returned no requested effects');
+  }
+  const digest = bound.digest;
   await client.waitForTransaction({ digest });
   return { digest, result };
 }

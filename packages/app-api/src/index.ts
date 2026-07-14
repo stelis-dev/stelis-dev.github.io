@@ -7,6 +7,7 @@ import { serve } from '@hono/node-server';
 import { formatRuntimeMode } from './boot.js';
 import { parsePortEnv } from './env.js';
 import { createApp } from './app.js';
+import { safeErrorSummary } from '@stelis/core-api/observability';
 
 const PORT = parsePortEnv('PORT', process.env.PORT, 3200);
 
@@ -32,6 +33,6 @@ async function main() {
 
 main().catch((err) => {
   // eslint-disable-next-line no-console
-  console.error('[app-api] Fatal error:', err);
+  console.error('[app-api] Fatal error:', safeErrorSummary(err));
   process.exit(1);
 });

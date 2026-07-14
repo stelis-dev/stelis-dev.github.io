@@ -15,7 +15,7 @@
  *   - Module API hygiene: directory barrel exposes the runner;
  *     package main barrel does NOT re-export.
  */
-import { describe, test, expect, vi } from 'vitest';
+import { describe, test, expect, vi, type Mock } from 'vitest';
 import { createHash } from 'node:crypto';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
@@ -33,7 +33,7 @@ import type {
   PostConsumeSponsorContext,
   SharedPostconsumeReconstruction,
   PolicyPostconsumeReconstruction,
-} from '../src/session/sponsoredExecution/index.js';
+} from '../src/session/sponsoredExecution/executionPolicy.js';
 import type {
   GenericPreparedTxDraft,
   PromotionPreparedTxDraft,
@@ -77,7 +77,6 @@ const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
     computationCost: '1000',
     storageCost: '0',
     storageRebate: '0',
-    nonRefundableStorageFee: '0',
   },
 };
 
@@ -177,15 +176,16 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
       if (opts.failAtState === 'SharedPostconsumeChecks') {
         throw new Error('policy fault at SharedPostconsumeChecks');
       }
-      const out: SharedPostconsumeReconstruction = {};
-      if (opts.emitNonce) {
-        out.nonce = {
-          nonce: 42n,
-          senderAddress: TEST_SENDER,
-          receiptId: TEST_RECEIPT_ID,
-          inPtbNonceMatch: true,
-        };
-      }
+      const out: SharedPostconsumeReconstruction = opts.emitNonce
+        ? {
+            nonce: {
+              nonce: 42n,
+              senderAddress: TEST_SENDER,
+              receiptId: TEST_RECEIPT_ID,
+              inPtbNonceMatch: true,
+            },
+          }
+        : {};
       return out;
     },
     PolicyPostconsumeChecks: (ctx) => {
@@ -199,16 +199,17 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
       if (opts.failAtState === 'PolicyPostconsumeChecks') {
         throw new Error('policy fault at PolicyPostconsumeChecks');
       }
-      const out: PolicyPostconsumeReconstruction = {};
-      if (opts.emitLedger) {
-        out.ledgerReservation = {
-          receiptId: TEST_RECEIPT_ID,
-          promotionId: TEST_PROMO,
-          userId: TEST_USER,
-          reservedGasMist: 1_400_000n,
-          ledgerLookupVerified: true,
-        };
-      }
+      const out: PolicyPostconsumeReconstruction = opts.emitLedger
+        ? {
+            ledgerReservation: {
+              receiptId: TEST_RECEIPT_ID,
+              promotionId: TEST_PROMO,
+              userId: TEST_USER,
+              reservedGasMist: 1_400_000n,
+              ledgerLookupVerified: true,
+            },
+          }
+        : {};
       return out;
     },
     Preflight: recordPost('Preflight'),
@@ -298,7 +299,7 @@ interface HostBuild {
   prepareStore: MemoryPrepareStore;
   sponsorPool: SponsorPool;
   ledger: MemoryPromotionExecutionLedger;
-  signAndSubmitMock: ReturnType<typeof vi.fn>;
+  signAndSubmitMock: Mock<SignAndSubmitPort>;
 }
 
 function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): HostBuild {
@@ -308,19 +309,17 @@ function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): Hos
   );
   const ledger = new MemoryPromotionExecutionLedger();
 
-  const signAndSubmitMock = vi.fn<Parameters<SignAndSubmitPort>, ReturnType<SignAndSubmitPort>>(
-    async () => {
-      if (opts?.signThrows) throw opts.signThrows;
-      return opts?.execResult ?? SUCCESS_EXEC;
-    },
-  );
+  const signAndSubmitMock = vi.fn<SignAndSubmitPort>(async () => {
+    if (opts?.signThrows) throw opts.signThrows;
+    return opts?.execResult ?? SUCCESS_EXEC;
+  });
 
   return {
     host: {
       prepareStore,
       sponsorPool,
       executionLedger: ledger,
-      signAndSubmit: signAndSubmitMock as unknown as SignAndSubmitPort,
+      signAndSubmit: signAndSubmitMock,
     },
     prepareStore,
     sponsorPool,
@@ -654,10 +653,12 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
     );
   });
 
-  test('typed post-signature uncertainty updates Release metadata before rethrowing the original cause', async () => {
+  test('typed post-signature uncertainty updates Release metadata without losing the submitted digest', async () => {
     const cause = new Error('rpc transport error');
+    const expectedDigest = 'expected-sui-transaction-digest';
+    const uncertainty = new SponsorPostSignatureUncertaintyError(expectedDigest, cause);
     const host = makeHost({
-      signThrows: new SponsorPostSignatureUncertaintyError(cause),
+      signThrows: uncertainty,
     });
     await pinGenericEntry(host);
     const { policy, log } = makeGenericPolicy({ emitNonce: true });
@@ -665,7 +666,10 @@ describe('runSponsorStateMachine — finally slot checkin parity', () => {
 
     await expect(
       runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toBe(cause);
+    ).rejects.toBe(uncertainty);
+
+    expect(uncertainty.cause).toBe(cause);
+    expect(uncertainty.expectedDigest).toBe(expectedDigest);
 
     const release = log.find((entry) => entry.state === 'Release');
     expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
@@ -860,17 +864,8 @@ describe('runSponsorStateMachine — RunnerSponsorReservationHandleMissingError'
 // ─────────────────────────────────────────────
 
 describe('runSponsorStateMachine — module API', () => {
-  test('directory internal barrel exposes sponsor runner symbols', async () => {
-    const barrel = (await import('../src/session/sponsoredExecution/index.js')) as Record<
-      string,
-      unknown
-    >;
-    expect(barrel.runSponsorStateMachine).toBeDefined();
-    expect(barrel.RunnerSponsorReservationHandleMissingError).toBeDefined();
-  });
-
   test('package main barrel does NOT re-export sponsor runner symbols', async () => {
-    const mainBarrel = await import('@stelis/core-api');
+    const mainBarrel = await import('../src/index.js');
     expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'runSponsorStateMachine')).toBe(false);
     expect(
       Object.prototype.hasOwnProperty.call(

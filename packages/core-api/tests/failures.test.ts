@@ -25,21 +25,23 @@ import {
   subjectCounterFamily,
   getFailurePolicy,
   FAILURE_TABLE,
-  ADMISSION_FAILURE_CODES,
   PROMOTION_ABUSE_CODES,
   VAULT_DRIFT_NEW_USER_VAULT_EXISTS,
   VAULT_DRIFT_QUERY_FAILED,
   VAULT_DRIFT_STATE_INCONSISTENT,
-  VAULT_DRIFT_PAIRS,
   type FailureCode,
   type FailureClassification,
 } from '../src/failures.js';
 import {
-  KNOWN_PREPARE_ERROR_CODES,
-  KNOWN_SPONSOR_ERROR_CODES,
-  KNOWN_PROMOTION_PREPARE_ERROR_CODES,
-  KNOWN_PROMOTION_SPONSOR_ERROR_CODES,
-} from '../../core-relay/src/errorCode.js';
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  RELAY_CONFIG_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
+  STUDIO_CLAIM_ERROR_CODES,
+  STUDIO_DETAIL_ERROR_CODES,
+  STUDIO_LIST_ERROR_CODES,
+} from '@stelis/contracts';
 
 const RECEIPT_ID = '0x' + 'aa'.repeat(32);
 const SENDER = '0x' + 'bb'.repeat(32);
@@ -76,7 +78,6 @@ describe('isManipulationAttemptCode', () => {
     expect(isManipulationAttemptCode('TAMPERING_DETECTED')).toBe(true);
     expect(isManipulationAttemptCode('P1_GASCOIN_FORBIDDEN')).toBe(true);
     expect(isManipulationAttemptCode('L2_UNAUTHORIZED_SETTLEMENT_SWAP_PATH')).toBe(true);
-    expect(isManipulationAttemptCode('AUTH_FAILED')).toBe(true);
     expect(isManipulationAttemptCode('SENDER_ADDRESS_MISMATCH')).toBe(true);
     expect(isManipulationAttemptCode('USER_ID_MISMATCH')).toBe(true);
   });
@@ -87,6 +88,7 @@ describe('isManipulationAttemptCode', () => {
   });
 
   it('returns false for normal and infra codes', () => {
+    expect(isManipulationAttemptCode('AUTH_FAILED')).toBe(false);
     expect(isManipulationAttemptCode('L2_POLICY_HASH_MISMATCH')).toBe(false);
     expect(isManipulationAttemptCode('SPONSOR_PREFLIGHT_FAILED')).toBe(false);
     expect(isManipulationAttemptCode('SPONSOR_CONGESTION')).toBe(false);
@@ -296,14 +298,6 @@ describe('vault-drift vocabulary — public-code pin', () => {
       subcode: 'VAULT_STATE_INCONSISTENT',
     });
   });
-
-  it('aggregates the three pairs in VAULT_DRIFT_PAIRS in a stable order', () => {
-    expect(VAULT_DRIFT_PAIRS).toEqual([
-      VAULT_DRIFT_NEW_USER_VAULT_EXISTS,
-      VAULT_DRIFT_QUERY_FAILED,
-      VAULT_DRIFT_STATE_INCONSISTENT,
-    ]);
-  });
 });
 
 // ─────────────────────────────────────────────
@@ -311,18 +305,21 @@ describe('vault-drift vocabulary — public-code pin', () => {
 // ─────────────────────────────────────────────
 
 describe('FAILURE_TABLE — coverage lock', () => {
-  it('contains an entry for every route-bound, host-admission, and PROMO_* code', () => {
-    const allKnownCodes = new Set<string>([
-      ...KNOWN_PREPARE_ERROR_CODES,
-      ...KNOWN_SPONSOR_ERROR_CODES,
-      ...KNOWN_PROMOTION_PREPARE_ERROR_CODES,
-      ...KNOWN_PROMOTION_SPONSOR_ERROR_CODES,
-      ...Object.values(ADMISSION_FAILURE_CODES),
+  it('contains an entry for every route-bound and PROMO_* classification code', () => {
+    const allCurrentCodes = new Set<string>([
+      ...RELAY_CONFIG_ERROR_CODES,
+      ...RELAY_PREPARE_ERROR_CODES,
+      ...RELAY_SPONSOR_ERROR_CODES,
+      ...STUDIO_LIST_ERROR_CODES,
+      ...STUDIO_DETAIL_ERROR_CODES,
+      ...STUDIO_CLAIM_ERROR_CODES,
+      ...PROMOTION_PREPARE_ERROR_CODES,
+      ...PROMOTION_SPONSOR_ERROR_CODES,
       ...Object.values(PROMOTION_ABUSE_CODES),
     ]);
     const tableKeys = new Set<string>(Object.keys(FAILURE_TABLE));
-    const missing = [...allKnownCodes].filter((c) => !tableKeys.has(c));
-    const extra = [...tableKeys].filter((c) => !allKnownCodes.has(c));
+    const missing = [...allCurrentCodes].filter((c) => !tableKeys.has(c));
+    const extra = [...tableKeys].filter((c) => !allCurrentCodes.has(c));
     expect(missing).toEqual([]);
     expect(extra).toEqual([]);
   });
@@ -349,10 +346,8 @@ describe('FAILURE_TABLE — coverage lock', () => {
 
   it('every entry uses one of the five standard classification values', () => {
     const valid: FailureClassification[] = ['manipulation', 'ignored', 'drift', 'infra', 'normal'];
-    for (const [code, policy] of Object.entries(FAILURE_TABLE)) {
+    for (const policy of Object.values(FAILURE_TABLE)) {
       expect(valid).toContain(policy.classification);
-      // entry's `code` field must match the table key
-      expect(policy.code).toBe(code as FailureCode);
     }
   });
 
@@ -441,27 +436,11 @@ describe('FAILURE_TABLE — coverage lock', () => {
     }
   });
 
-  it('http status is one of 4xx or 5xx for HTTP-public entries', () => {
-    // PROMO_* entries have httpStatus=0 because they are not HTTP-public
-    // sentinel codes (recorded against the abuse blocker only); they
-    // never appear in an HTTP response body.
-    const promotionAbuseCodes = new Set<string>(Object.values(PROMOTION_ABUSE_CODES));
-    for (const [code, policy] of Object.entries(FAILURE_TABLE)) {
-      if (promotionAbuseCodes.has(code)) {
-        expect(policy.httpStatus).toBe(0);
-      } else {
-        expect(policy.httpStatus).toBeGreaterThanOrEqual(400);
-        expect(policy.httpStatus).toBeLessThan(600);
-      }
-    }
-  });
-
-  it('bodyFields is restricted to digest, subcode, meta', () => {
-    const allowed = new Set(['digest', 'subcode', 'meta']);
+  it('does not duplicate contracts-owned HTTP status or metadata policy', () => {
     for (const policy of Object.values(FAILURE_TABLE)) {
-      for (const field of policy.bodyFields) {
-        expect(allowed.has(field)).toBe(true);
-      }
+      expect('code' in policy).toBe(false);
+      expect('httpStatus' in policy).toBe(false);
+      expect('bodyFields' in policy).toBe(false);
     }
   });
 });

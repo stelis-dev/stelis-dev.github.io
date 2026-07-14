@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { fromBase64 } from '@mysten/sui/utils';
 import { encodePrepareAuthorizationMessage } from '@stelis/core-relay';
+import type { SuiNetwork } from '@stelis/contracts';
 import type { PrepareParams } from '../src/handlers/prepare.js';
 
 export const TEST_PREPARE_AUTH_KEYPAIR = Ed25519Keypair.generate();
@@ -21,7 +22,7 @@ type PrepareAuthInput = Omit<PrepareParams, keyof PrepareAuthFields>;
 
 interface PrepareAuthorizationOptions extends Partial<PrepareAuthFields> {
   keypair?: Ed25519Keypair;
-  network?: 'mainnet' | 'testnet' | 'devnet' | 'localnet';
+  network?: SuiNetwork;
   packageId?: string;
 }
 

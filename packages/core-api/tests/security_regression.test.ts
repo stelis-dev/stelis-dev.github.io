@@ -18,7 +18,7 @@ import {
   MemoryPrepareStore,
   MAX_OUTSTANDING_PER_STUDIO_USER,
 } from '../src/store/memoryPrepareStore.js';
-import { PREPARE_TTL_MS } from '../src/handlers/prepare.js';
+import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { PrepareStudioUserQuotaError } from '../src/store/prepareErrors.js';
 import type {
   GenericPreparedTxDraft,
@@ -288,39 +288,6 @@ describe('PrepareStudioUserQuotaError (mode-aware)', () => {
     } finally {
       shortStore.dispose();
     }
-  });
-});
-
-// ─── B: executionPathKey — canonical key from extractedSettlementSwapPath ────────────────────────
-// Directly calls buildExecutionPathKey() exported from prepare.ts — the same function the
-// handler calls at runtime. If prepare.ts changes the format, this test breaks immediately.
-
-import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
-import { buildExecutionPathKey } from '../src/handlers/prepare.js';
-
-describe('executionPathKey canonical construction', () => {
-  it('swap path: key encodes tokenType + poolId + settlementSwapDirection', () => {
-    const er: AllowedSettlementSwapPath = {
-      tokenType: '0xDEEP::deep::DEEP',
-      hops: ['0xPOOL1'],
-      settlementSwapDirection: 'baseForQuote',
-    };
-    expect(buildExecutionPathKey(er)).toBe('0xDEEP::deep::DEEP:0xPOOL1:baseForQuote');
-  });
-
-  it('credit-only path yields "credit"', () => {
-    // buildExecutionPathKey handles undefined — same branch as prepare.ts
-    expect(buildExecutionPathKey(undefined)).toBe('credit');
-  });
-
-  it('settle profile argument does not affect swap-path executionPathKey', () => {
-    // When extractedSettlementSwapPath is present, executionPathKey is determined by the swap path.
-    const er: AllowedSettlementSwapPath = {
-      tokenType: '0xDEEP::deep::DEEP',
-      hops: ['0xPOOL1'],
-      settlementSwapDirection: 'baseForQuote',
-    };
-    expect(buildExecutionPathKey(er)).toBe('0xDEEP::deep::DEEP:0xPOOL1:baseForQuote');
   });
 });
 

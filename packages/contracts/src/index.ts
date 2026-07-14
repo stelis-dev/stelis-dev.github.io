@@ -12,7 +12,6 @@ export type {
   SettleProfile,
   SettlementSwapDirection,
   MoveCallCommand,
-  OtherCommand,
   PtbCommand,
   DeepBookPoolHop,
   SingleHopSettlementSwapPath,
@@ -22,11 +21,24 @@ export type {
 } from './types.js';
 
 export type {
+  RelayStatusResponse,
   RelayConfigResponse,
   RelayPrepareRequest,
   RelayPrepareResponse,
   RelaySponsorRequest,
   RelaySponsorResponse,
+  HostErrorResponse,
+  HostErrorMeta,
+  PromotionType,
+  PromotionStatus,
+  PromotionUnavailableReason,
+  PromotionListItem,
+  PromotionListResponse,
+  UserPromotionDetail,
+  PromotionDetailResponse,
+  PromotionEntitlementStatus,
+  PromotionEntitlement,
+  PromotionClaimResponse,
   PromotionPrepareRequest,
   PromotionPrepareResponse,
   PromotionSponsorRequest,
@@ -41,11 +53,16 @@ export type {
 
 export {
   HostWireParseError,
+  parseRelayStatusResponse,
   parseRelayConfigResponse,
   parseRelayPrepareRequest,
   parseRelayPrepareResponse,
   parseRelaySponsorRequest,
   parseRelaySponsorResponse,
+  parseHostErrorResponse,
+  parsePromotionListResponse,
+  parsePromotionDetailResponse,
+  parsePromotionClaimResponse,
   parsePromotionPrepareRequest,
   parsePromotionPrepareResponse,
   parsePromotionSponsorRequest,
@@ -57,6 +74,35 @@ export {
   parseSponsorRefillAccountWithdrawalRequest,
   parseSponsorRefillAccountWithdrawalResponse,
 } from './hostWire.js';
+
+export type {
+  RelayPrepareErrorCode,
+  RelaySponsorErrorCode,
+  PromotionPrepareErrorCode,
+  PromotionSponsorErrorCode,
+  HostErrorCode,
+  HostErrorMetaField,
+  SponsorFailureSubcode,
+  PaymentInputIntegritySubcode,
+  HostErrorSubcode,
+} from './hostError.js';
+
+export {
+  RELAY_CONFIG_ERROR_CODES,
+  STUDIO_LIST_ERROR_CODES,
+  STUDIO_DETAIL_ERROR_CODES,
+  STUDIO_CLAIM_ERROR_CODES,
+  RELAY_PREPARE_ERROR_CODES,
+  RELAY_SPONSOR_ERROR_CODES,
+  PROMOTION_PREPARE_ERROR_CODES,
+  PROMOTION_SPONSOR_ERROR_CODES,
+  SPONSOR_FAILURE_SUBCODES,
+  PAYMENT_INPUT_INTEGRITY_SUBCODES,
+  HOST_ERROR_HTTP_STATUS,
+  HOST_ERROR_META_POLICY,
+  isHostErrorCode,
+  isHostErrorSubcode,
+} from './hostError.js';
 
 export type {
   SettleVariantClass,
@@ -85,10 +131,9 @@ export {
 
 export {
   SETTLEMENT_SWAP_DIRECTION_VECTORS,
-  VALID_SETTLEMENT_SWAP_DIRECTIONS,
   settlementSwapDirectionFromSwapDirections,
-  PROFILE_RANKS,
   SUI_TYPE,
+  SUI_CHAIN_IDENTIFIERS,
   DEEPBOOK_IDS,
   STELIS_CONTRACT_IDS,
   requireContractId,
@@ -96,15 +141,10 @@ export {
   GAS_MARGIN_CAP_BPS,
 } from './constants.js';
 
-export type { DeepBookIds, StelisContractIds } from './constants.js';
-
 export type {
   SponsorSlotState,
   SponsorAvailabilityErrorCode,
-  SponsorSlotStatus,
-  SponsorSlotLeaseStatus,
   SponsorSlotLeaseSummary,
-  SponsorRefillAccountStatus,
   SponsorOperationsStatus,
 } from './admin.js';
 

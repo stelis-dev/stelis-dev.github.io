@@ -122,8 +122,8 @@ function makeExtraCfg(): PrepareHandlerConfig {
       settlementTokenType: '0xDEEP::deep::DEEP',
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
-      lotSize: 1,
-      minSize: 1,
+      lotSize: 1n,
+      minSize: 1n,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote' as const,
     },
@@ -233,6 +233,9 @@ describe('handlePrepare', () => {
     seed.withdrawal({ amount: 999_999_999n, type: '0x2::sui::SUI' });
     const kindBytes = await seed.build({ onlyTransactionKind: true });
     const decoded = bcs.TransactionKind.parse(kindBytes);
+    if (!decoded.ProgrammableTransaction) {
+      throw new Error('test fixture must decode as ProgrammableTransaction');
+    }
     const fw = decoded.ProgrammableTransaction.inputs[0] as {
       FundsWithdrawal: { withdrawFrom: Record<string, unknown> };
     };

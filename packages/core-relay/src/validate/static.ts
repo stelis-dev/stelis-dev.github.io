@@ -225,11 +225,12 @@ export function validateUserCommands(
  *   5. quoted_host_fee_mist <= config.maxHostFeeMist (L2_HOST_FEE_CAP)
  *   6. expected_protocol_fee_mist == config.protocolFlatFeeMist (L2_PROTOCOL_FEE_MISMATCH)
  *   7. expected_config_version == config.configVersion (L2_CONFIG_VERSION_MISMATCH)
- *   8. Settlement swap path validation (if extractedSettlementSwapPath is present):
- *      b. hops.length ↔ settlementSwapDirection integrity check
- *      c. Ordered array equality against env.allowedSettlementSwapPaths[]
- *   9. S-16: policy_hash byte-equality check (if expectedPolicyHash provided)
- *   10. S-10b: order_id_hash byte-equality check (if expectedOrderIdHash provided)
+ *   8. Credit-only settlement must carry zero slippage_buffer_mist
+ *   9. Settlement swap path validation (if extractedSettlementSwapPath is present):
+ *      a. Exactly one hop
+ *      b. Ordered identity equality against env.allowedSettlementSwapPaths[]
+ *   10. S-16: policy_hash byte-equality check (if expectedPolicyHash provided)
+ *   11. S-10b: order_id_hash byte-equality check (if expectedOrderIdHash provided)
  *
  * S-16 contract: Production `/prepare` path MUST always provide expectedPolicyHash.
  * When omitted, S-16 validation is disabled (test/internal use only).
@@ -300,7 +301,7 @@ export function validateSettleArgs(
     );
   }
 
-  // Credit-only settlement has no DEX execution, so the execution-gap buffer
+  // (8) Credit-only settlement has no DEX execution, so the execution-gap buffer
   // must be zero. Swap paths carry extractedSettlementSwapPath and may use a non-zero buffer.
   if (!args.extractedSettlementSwapPath && args.slippageBufferMist !== 0n) {
     return fail(
@@ -309,7 +310,7 @@ export function validateSettleArgs(
     );
   }
 
-  // (5) Settlement swap path validation — only when extractedSettlementSwapPath is present
+  // (9) Settlement swap path validation — only when extractedSettlementSwapPath is present
   //
   // Note on scope: `settlementSwapDirection ↔ ordered swapDirection vector` is enforced at boot time
   // by deriveAllowedSettlementSwapPaths() in core-api/prepareConfig.ts, which is the canonical
@@ -321,7 +322,7 @@ export function validateSettleArgs(
   if (args.extractedSettlementSwapPath) {
     const settlementSwapPath = args.extractedSettlementSwapPath;
 
-    // (5b) Integrity: exactly 1 hop required
+    // (9a) Integrity: exactly 1 hop required
     if (settlementSwapPath.hops.length !== 1) {
       return fail(
         'L2_SETTLEMENT_SWAP_PATH_INTEGRITY',
@@ -329,7 +330,7 @@ export function validateSettleArgs(
       );
     }
 
-    // (5c) Ordered array equality against allowedSettlementSwapPaths[]
+    // (9b) Ordered array equality against allowedSettlementSwapPaths[]
     if (!env.allowedSettlementSwapPaths || env.allowedSettlementSwapPaths.length === 0) {
       return fail(
         'L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED',
@@ -353,7 +354,7 @@ export function validateSettleArgs(
     }
   }
 
-  // (6) S-16: policy_hash validation — byte-level equality
+  // (10) S-16: policy_hash validation — byte-level equality
   if (expectedPolicyHash) {
     const extracted = args.policyHash;
     if (extracted.length !== expectedPolicyHash.length) {
@@ -369,7 +370,7 @@ export function validateSettleArgs(
     }
   }
 
-  // (10) S-10b: order_id_hash validation — byte-level equality
+  // (11) S-10b: order_id_hash validation — byte-level equality
   if (expectedOrderIdHash) {
     const extracted = args.orderIdHash;
     if (extracted.length !== expectedOrderIdHash.length) {

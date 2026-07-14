@@ -14,6 +14,13 @@
  * @module studio/domain
  */
 
+import type {
+  PromotionEntitlement,
+  PromotionEntitlementStatus,
+  PromotionStatus as HostPromotionStatus,
+  PromotionType as HostPromotionType,
+} from '@stelis/contracts';
+
 // ─────────────────────────────────────────────
 // Promotion (operator-configured definition)
 // ─────────────────────────────────────────────
@@ -22,7 +29,7 @@
  * Promotion type values.
  * - `gas_sponsorship`: claim -> repeatable gas-sponsored actions with budget/allowance.
  */
-export type PromotionType = 'gas_sponsorship';
+export type PromotionType = HostPromotionType;
 
 /**
  * Promotion lifecycle status.
@@ -31,7 +38,7 @@ export type PromotionType = 'gas_sponsorship';
  * - `paused`: temporarily suspended (no claims or actions).
  * - `archived`: permanently closed (terminal).
  */
-export type PromotionStatus = 'draft' | 'active' | 'paused' | 'archived';
+export type PromotionStatus = HostPromotionStatus;
 
 // Status-transition constant, activation guard, and error classes live in
 // `promotionStore.ts` — they are tightly coupled to the adapter API and
@@ -87,8 +94,8 @@ export interface Promotion {
 // Entitlement (per-user execution state)
 // ─────────────────────────────────────────────
 
-/** Entitlement lifecycle status. */
-export type EntitlementStatus = 'active' | 'exhausted' | 'expired';
+/** Entitlement lifecycle status shared with the current claim-response wire contract. */
+export type EntitlementStatus = PromotionEntitlementStatus;
 
 /**
  * Entitlement — per-user gas allowance and reservation state.
@@ -96,25 +103,7 @@ export type EntitlementStatus = 'active' | 'exhausted' | 'expired';
  * Created atomically by ExecutionLedger.claim(). Budget reservation
  * markers (activeReservation*) are managed by reserve/consume/release.
  */
-export interface Entitlement {
-  promotionId: string;
-  userId: string;
-  claimedAt: string;
-  /** Post-claim use window end. null = unlimited. */
-  useUntilAt: string | null;
-  /** Remaining gas allowance in MIST (string for bigint precision). */
-  remainingGasAllowanceMist: string;
-  /** Consumed gas allowance in MIST. */
-  consumedGasAllowanceMist: string;
-  /** Entitlement lifecycle status. */
-  status: EntitlementStatus;
-  /** Receipt ID of active reservation, null if none. */
-  activeReservationReceiptId: string | null;
-  /** Amount of active reservation in MIST, null if none. */
-  activeReservationAmountMist: string | null;
-  /** ISO 8601 of last sponsored action. null if never used. */
-  lastUsedAt: string | null;
-}
+export type Entitlement = PromotionEntitlement;
 
 // ─────────────────────────────────────────────
 // Budget Summary (read model)

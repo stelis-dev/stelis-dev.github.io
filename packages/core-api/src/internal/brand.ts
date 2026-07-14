@@ -14,8 +14,9 @@
  *     function parameter typed `Mist` without an explicit `mist()`
  *     tag — this is the nominal property we want.
  *   - `Bps` uses the same discipline over `number`.
- *   - `mist()` / `bps()` / `unMist()` / `unBps()` are identity tags
- *     at runtime. Zero runtime cost.
+ *   - `mist()` / `bps()` / `unBps()` are identity tags at runtime.
+ *     `Mist` remains assignable to `bigint`, so it needs no unwrapping
+ *     helper.
  *   - `parseBps()` delegates input validation to the shared
  *     `validateBps()`, then tags the accepted number. No second
  *     validator is introduced.
@@ -48,11 +49,6 @@ export type Bps = number & { readonly __brand: 'Bps' };
 /** Tag a raw bigint as Mist. Identity at runtime. */
 export function mist(value: bigint): Mist {
   return value as Mist;
-}
-
-/** Remove the Mist tag. Use at HTTP or serialization boundaries only. */
-export function unMist(value: Mist): bigint {
-  return value as bigint;
 }
 
 /** Tag a raw number as Bps. Identity at runtime. Prefer `parseBps` at HTTP boundaries. */
