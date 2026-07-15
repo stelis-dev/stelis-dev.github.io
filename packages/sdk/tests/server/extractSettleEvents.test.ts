@@ -5,14 +5,36 @@
  * network client local and deterministic.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { extractSettleEvents } from '../../src/server/extractSettleEvents.js';
-import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { STELIS_CONTRACT_IDS, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 import { serializeSettleEventBcs } from '../helpers/settleEventBcs.js';
+import type { SuiTransactionWithEventsResult } from '@stelis/core-relay/browser';
+import { SuiOperationError } from '@stelis/core-relay/browser';
+import { withSuiClientIdentity } from '../helpers/suiClientIdentity.js';
+
+const { getSuiTransactionEventsMock, responsesByDigest } = vi.hoisted(() => {
+  const responsesByDigest = new Map<string, unknown>();
+  return {
+    responsesByDigest,
+    getSuiTransactionEventsMock: vi.fn((_snapshot: unknown, options: { digest: string }) => {
+      const response = responsesByDigest.get(options.digest);
+      if (response instanceof Error) throw response;
+      return response;
+    }),
+  };
+});
+
+vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
+  return { ...actual, getSuiTransactionEvents: getSuiTransactionEventsMock };
+});
 
 const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 const SETTLE_EVENT_TYPE = `${PACKAGE_ID}::events::SettleEvent`;
 const USER = `0x${'ab'.repeat(32)}`;
+
+type SuiEvent = Extract<SuiTransactionWithEventsResult, { outcome: 'success' }>['events'][number];
 
 function createMockSettleEventBcs(): Uint8Array {
   return serializeSettleEventBcs({
@@ -38,57 +60,90 @@ function createMockSettleEventBcs(): Uint8Array {
   });
 }
 
-function createEvent(bcs: Uint8Array, eventType = SETTLE_EVENT_TYPE) {
+function createEvent(bcs: Uint8Array, overrides: Partial<Omit<SuiEvent, 'bcs'>> = {}): SuiEvent {
   return {
     packageId: PACKAGE_ID,
     module: 'events',
     sender: USER,
-    eventType,
+    eventType: SETTLE_EVENT_TYPE,
     bcs,
-    json: null,
+    ...overrides,
   };
 }
 
-function successfulTransaction(events: unknown[] | undefined, digest = 'digest') {
+function effects(digest: string, success: boolean) {
+  const error = success ? null : ({ kind: 'MoveAbortRaw' as const } as const);
   return {
-    $kind: 'Transaction',
-    Transaction: {
-      digest,
-      signatures: [],
-      epoch: '1',
-      status: { success: true, error: null },
-      events,
+    version: 2 as const,
+    transactionDigest: digest,
+    status: success
+      ? ({ success: true as const, error: null } as const)
+      : ({ success: false as const, error: error! } as const),
+    gasUsed: {
+      computationCost: '1',
+      storageCost: '1',
+      storageRebate: '0',
+      nonRefundableStorageFee: '0',
     },
+    eventsDigest: null,
   };
 }
 
-function failedTransaction(events: unknown[], message: string, digest = 'failed') {
+function successfulTransaction(
+  events: readonly SuiEvent[],
+  digest = 'digest',
+): SuiTransactionWithEventsResult {
   return {
-    $kind: 'FailedTransaction',
-    FailedTransaction: {
-      digest,
-      signatures: [],
-      epoch: '1',
-      status: {
-        success: false,
-        error: { $kind: 'Unknown', Unknown: null, message },
-      },
-      events,
-    },
+    outcome: 'success',
+    digest,
+    effects: effects(digest, true),
+    events,
   };
 }
 
-function createMockClient(responses: Record<string, unknown>) {
-  return {
-    getTransaction: vi.fn(async ({ digest }: { digest: string }) => {
-      const response = responses[digest];
-      if (response instanceof Error) throw response;
-      return response;
-    }),
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+function failedTransaction(
+  events: readonly SuiEvent[],
+  digest = 'failed',
+): SuiTransactionWithEventsResult {
+  const error = { kind: 'MoveAbortRaw' as const };
+  return { outcome: 'failure', digest, effects: effects(digest, false), events, error };
 }
+
+function createMockClient(
+  responses: Record<string, unknown>,
+  network: 'testnet' | 'mainnet' = 'testnet',
+  chainIdentifier = SUI_CHAIN_IDENTIFIERS[network],
+) {
+  const client = withSuiClientIdentity({}, network, chainIdentifier);
+  responsesByDigest.clear();
+  for (const [digest, response] of Object.entries(responses)) {
+    responsesByDigest.set(digest, response);
+  }
+  return client;
+}
+
+beforeEach(() => {
+  getSuiTransactionEventsMock.mockClear();
+});
 
 describe('extractSettleEvents', () => {
+  it('rejects the batch before event reads when the live chain is not the settlement network', async () => {
+    const logger = vi.fn();
+    const client = createMockClient(
+      {
+        digest1: successfulTransaction([createEvent(createMockSettleEventBcs())], 'digest1'),
+      },
+      'testnet',
+      SUI_CHAIN_IDENTIFIERS.mainnet,
+    );
+
+    await expect(extractSettleEvents(client, ['digest1'], logger)).rejects.toThrow(
+      'Sui operation returned a malformed response',
+    );
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
+    expect(logger).not.toHaveBeenCalled();
+  });
+
   it('extracts the canonical SettleEvent from a successful transaction', async () => {
     const logger = vi.fn();
     const client = createMockClient({
@@ -107,7 +162,7 @@ describe('extractSettleEvents', () => {
     const logger = vi.fn();
     const client = createMockClient({
       digest2: successfulTransaction(
-        [createEvent(new Uint8Array(), `${PACKAGE_ID}::events::OtherEvent`)],
+        [createEvent(new Uint8Array(), { eventType: `${PACKAGE_ID}::events::OtherEvent` })],
         'digest2',
       ),
     });
@@ -121,38 +176,36 @@ describe('extractSettleEvents', () => {
   it('continues after a fetch failure and reports the failed digest', async () => {
     const logger = vi.fn();
     const client = createMockClient({
-      bad: new Error('network timeout'),
+      bad: new SuiOperationError('transport_unavailable', {
+        operation: 'get_transaction_events',
+        attempt: 1,
+        maxAttempts: 1,
+      }),
       good: successfulTransaction([createEvent(createMockSettleEventBcs())], 'good'),
     });
 
     const results = await extractSettleEvents(client, ['bad', 'good'], logger);
 
     expect(results).toEqual([expect.objectContaining({ digest: 'good' })]);
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('network timeout'));
+    expect(logger).toHaveBeenCalledWith(
+      expect.stringContaining('Sui RPC transport was unavailable'),
+    );
   });
 
-  it('skips a FailedTransaction even when it carries a matching event', async () => {
+  it('skips a normalized failed transaction even when it carries a matching event', async () => {
     const logger = vi.fn();
     const event = createEvent(createMockSettleEventBcs());
     const client = createMockClient({
-      failed: failedTransaction([event], 'MoveAbort in settlement', 'failed'),
+      failed: failedTransaction([event], 'failed'),
     });
 
     const results = await extractSettleEvents(client, ['failed'], logger);
 
     expect(results).toEqual([]);
     expect(logger).toHaveBeenCalledWith(expect.stringContaining('execution failed'));
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('MoveAbort in settlement'));
-  });
-
-  it('reports and skips a successful response missing requested events', async () => {
-    const logger = vi.fn();
-    const client = createMockClient({ missing: successfulTransaction(undefined, 'missing') });
-
-    const results = await extractSettleEvents(client, ['missing'], logger);
-
-    expect(results).toEqual([]);
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('requested events were missing'));
+    expect(logger).toHaveBeenCalledWith(
+      expect.stringContaining('Sui execution failed (MoveAbortRaw)'),
+    );
   });
 
   it('skips duplicate SettleEvents and reports the count boundary', async () => {
@@ -180,17 +233,43 @@ describe('extractSettleEvents', () => {
     const results = await extractSettleEvents(client, ['malformed'], logger);
 
     expect(results).toEqual([]);
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('invalid SettleEvent BCS'));
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('invalid SettleEvent'));
     expect(logger).toHaveBeenCalledWith(expect.stringContaining('not canonical'));
   });
 
-  it('skips an internally valid result for a different requested digest', async () => {
+  it.each([
+    ['package', { packageId: `0x${'9'.repeat(64)}` }],
+    ['module', { module: 'not_events' }],
+  ] as const)(
+    'rejects a canonical eventType whose top-level %s identity conflicts',
+    async (_field, overrides) => {
+      const logger = vi.fn();
+      const client = createMockClient({
+        mismatched: successfulTransaction(
+          [createEvent(createMockSettleEventBcs(), overrides)],
+          'mismatched',
+        ),
+      });
+
+      const results = await extractSettleEvents(client, ['mismatched'], logger);
+
+      expect(results).toEqual([]);
+      expect(logger).toHaveBeenCalledWith(expect.stringContaining('envelope identity'));
+    },
+  );
+
+  it('rejects a canonical event whose sender conflicts with the decoded user', async () => {
     const logger = vi.fn();
     const client = createMockClient({
-      requested: successfulTransaction([createEvent(createMockSettleEventBcs())], 'different'),
+      mismatched: successfulTransaction(
+        [createEvent(createMockSettleEventBcs(), { sender: `0x${'dd'.repeat(32)}` })],
+        'mismatched',
+      ),
     });
 
-    await expect(extractSettleEvents(client, ['requested'], logger)).resolves.toEqual([]);
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('malformed or mismatched result'));
+    const results = await extractSettleEvents(client, ['mismatched'], logger);
+
+    expect(results).toEqual([]);
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('sender does not match'));
   });
 });

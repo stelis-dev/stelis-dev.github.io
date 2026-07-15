@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { describe, it, expect, vi } from 'vitest';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
+
+const gateway = vi.hoisted(() => ({ getSuiBalance: vi.fn() }));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, getSuiBalance: gateway.getSuiBalance };
+});
+
 import { bootstrapSponsorOperations } from '../../src/sponsor-operations/bootstrap.js';
 import type {
   SponsorRefillAccountWriteFields,
@@ -9,6 +17,7 @@ import type {
 } from '../../src/sponsor-operations/redisState.js';
 import { SPONSOR_BALANCE_WARN_MIST } from '../../src/sponsor-operations/defaults.js';
 import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
+import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
 
 function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
   state: RedisSponsorOperationsState;
@@ -72,15 +81,25 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
   return ref;
 }
 
-function makeStubSui(impl: (owner: string) => Promise<string | Error>): SuiGrpcClient {
-  const stub = {
-    async getBalance({ owner }: { owner: string }): Promise<{ balance: { balance: string } }> {
-      const result = await impl(owner);
-      if (result instanceof Error) throw result;
-      return { balance: { balance: result } };
-    },
-  };
-  return stub as unknown as SuiGrpcClient;
+const balanceReaders = new WeakMap<
+  SuiEndpointSnapshot,
+  (owner: string) => Promise<string | Error>
+>();
+
+gateway.getSuiBalance.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { readonly owner: string }) => {
+    const readBalance = balanceReaders.get(snapshot);
+    if (!readBalance) throw new Error('Missing balance gateway fixture');
+    const result = await readBalance(input.owner);
+    if (result instanceof Error) throw result;
+    return { balance: result };
+  },
+);
+
+function makeStubSui(impl: (owner: string) => Promise<string | Error>): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  balanceReaders.set(snapshot, impl);
+  return snapshot;
 }
 
 function makeSlotRead(

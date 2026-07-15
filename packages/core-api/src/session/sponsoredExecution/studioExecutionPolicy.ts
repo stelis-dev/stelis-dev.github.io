@@ -13,14 +13,16 @@
 
 import { createHash } from 'node:crypto';
 import { Transaction } from '@mysten/sui/transactions';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import {
+  buildSuiTransaction,
   computeExecutionCostClaim,
   convertSdkCommands,
   GAS_VARIANCE_FIXED_MIST,
   MAX_FINAL_COMMANDS,
+  simulateSuiTransaction,
+  suiExecutionErrorMessage,
 } from '@stelis/core-relay';
-import type { OnchainConfig } from '@stelis/core-relay';
+import type { OnchainConfig, SuiEndpointSnapshot, SuiTransactionResult } from '@stelis/core-relay';
 import { PrepareValidationError, deserializeUserTxKind } from '../../prepare/replay.js';
 import { classifySponsorFailureSubcode } from '../../prepare/prepareErrors.js';
 import type {
@@ -80,7 +82,6 @@ import { mist, type Mist } from '../../internal/brand.js';
 import {
   extractTxSender,
   GasOwnerMismatchError,
-  parseCurrentSuiTerminalForBytes,
   runPreflight,
   SenderSignatureError,
   signAndSubmit,
@@ -111,7 +112,7 @@ import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from '.
 // -------------------------------------------------------------
 
 export interface StudioPolicyContext {
-  readonly sui: SuiGrpcClient;
+  readonly sui: SuiEndpointSnapshot;
   readonly packageId?: string;
   readonly deepbookPackageId?: string;
   readonly promotionStore: PromotionStoreAdapter;
@@ -149,7 +150,7 @@ export interface StudioPrepareErrorFactory {
 }
 
 export interface StudioSponsorErrorMeta {
-  readonly gasUsed?: GasUsedFields | null;
+  readonly gasUsed?: GasUsedFields;
   readonly digest?: string;
   readonly subcode?: SponsorFailureSubcode;
 }
@@ -508,7 +509,7 @@ async function runStudioRequestValidation(
   }
 
   try {
-    state.kindTx = await d.deserializeUserTxKind(prepare.params.txKindBytes, options.context.sui);
+    state.kindTx = await d.deserializeUserTxKind(prepare.params.txKindBytes);
   } catch (err) {
     if (err instanceof PrepareValidationError) {
       throw prepare.errors.prepare(err.message, 'BAD_TX_KIND');
@@ -587,12 +588,13 @@ async function runStudioGasBoundBuild(
   userTx.setSender(prepare.params.senderAddress);
   userTx.setGasOwner(sponsorSlot.sponsorAddress);
   userTx.setGasBudget(config.maxClaimMist);
-  const dryRunBytes = await userTx.build({ client: options.context.sui });
-  const simResult = await options.context.sui.simulateTransaction({
-    transaction: dryRunBytes,
-    include: { effects: true },
+  const dryRunBytes = await buildSuiTransaction(options.context.sui, {
+    transaction: userTx,
   });
-  const simGasUsed = readDryRunGasUsed(simResult, dryRunBytes, prepare.errors);
+  const simResult = await simulateSuiTransaction(options.context.sui, {
+    transaction: dryRunBytes,
+  });
+  const simGasUsed = readDryRunGasUsed(simResult, prepare.errors);
   const { simGas } = computeExecutionCostClaim(simGasUsed);
   const reserveAmount: Mist = mist(simGas + GAS_VARIANCE_FIXED_MIST);
 
@@ -604,7 +606,9 @@ async function runStudioGasBoundBuild(
   }
 
   userTx.setGasBudget(reserveAmount);
-  const finalTxBytes = await userTx.build({ client: options.context.sui });
+  const finalTxBytes = await buildSuiTransaction(options.context.sui, {
+    transaction: userTx,
+  });
   const txBytesHash = createHash('sha256').update(finalTxBytes).digest('hex');
   state.buildResult = {
     txBytes: finalTxBytes,
@@ -870,12 +874,13 @@ async function runStudioPreflight(
   const preflight = await d.runPreflight(options.context.sui, sponsor.txBytes);
 
   if (!preflight.success) {
+    const failureMessage = suiExecutionErrorMessage(preflight.error);
     await d.releaseLedgerReservationWithLog(
       options.context.executionLedger,
       sponsor.params.receiptId,
       'preflight_simulation_failed',
     );
-    const subcode = d.classifySponsorFailureSubcode(preflight.reason, sponsorContext.packageId, {
+    const subcode = d.classifySponsorFailureSubcode(preflight.error, sponsorContext.packageId, {
       kind: 'direct',
       commands,
       deepbookPackageId: sponsorContext.deepbookPackageId,
@@ -890,9 +895,9 @@ async function runStudioPreflight(
         executionPathKey: prepared.executionPathKey,
       },
     );
-    setUnknownTerminal(state, 'preflight_failure', `preflight_failure: ${preflight.reason}`);
+    setUnknownTerminal(state, 'preflight_failure', `preflight_failure: ${failureMessage}`);
     throw sponsor.errors.sponsor(
-      `Preflight simulation failed: ${preflight.reason}`,
+      `Preflight simulation failed: ${failureMessage}`,
       'PREFLIGHT_FAILED',
       { subcode },
     );
@@ -917,21 +922,22 @@ async function classifyStudioSponsorResult(
   const identity = sponsor.params.verifiedIdentity;
 
   if (!result.success) {
+    const failureMessage = suiExecutionErrorMessage(result.error);
     if (result.isCongestion) {
       await d.releaseLedgerReservationWithLog(
         options.context.executionLedger,
         sponsor.params.receiptId,
         'congestion',
       );
-      setUnknownTerminal(state, 'congestion', `congestion: ${result.reason}`);
+      setUnknownTerminal(state, 'congestion', `congestion: ${failureMessage}`);
       state.sponsorResultDigest = result.digest;
-      throw sponsor.errors.sponsor(result.reason, 'SPONSOR_CONGESTION', {
+      throw sponsor.errors.sponsor(failureMessage, 'SPONSOR_CONGESTION', {
         digest: result.digest,
       });
     }
 
     const classifiedSubcode = d.classifySponsorFailureSubcode(
-      result.reason,
+      result.error,
       sponsorContext.packageId,
       {
         kind: 'direct',
@@ -939,7 +945,7 @@ async function classifyStudioSponsorResult(
         deepbookPackageId: sponsorContext.deepbookPackageId,
       },
     );
-    const revert = computeRevertAccounting(result.gasUsed, prepared.reservedGasMist);
+    const revert = computeRevertAccounting(result.gasUsed);
     const consumeOutcome = await d.consumeLedgerReservationWithLog(
       options.context.executionLedger,
       sponsor.params.receiptId,
@@ -949,13 +955,11 @@ async function classifyStudioSponsorResult(
         promotionId: sponsor.params.promotionId,
         userId: identity.userId,
         senderAddress: peekedPromotion.senderAddress,
-        txDigest: result.digest || null,
+        txDigest: result.digest,
       },
     );
     const releasedMist =
-      revert.actualMist !== null &&
-      consumeOutcome.ok &&
-      revert.actualMist <= prepared.reservedGasMist
+      consumeOutcome.ok && revert.actualMist <= prepared.reservedGasMist
         ? prepared.reservedGasMist - revert.actualMist
         : 0n;
     await appendFailedUsageRow(options.context.usageStore, {
@@ -963,7 +967,7 @@ async function classifyStudioSponsorResult(
       receiptId: sponsor.params.receiptId,
       userId: identity.userId,
       senderAddress: peekedPromotion.senderAddress,
-      txDigest: result.digest || null,
+      txDigest: result.digest,
       reservedGasMist: prepared.reservedGasMist,
       consumedGasMist: consumeOutcome.ok ? revert.consumeAmount : 0n,
       releasedGasMist: releasedMist,
@@ -983,34 +987,22 @@ async function classifyStudioSponsorResult(
     state.sponsorResultOutcome = 'onchain_revert';
     state.sponsorResultDigest = result.digest;
     const ledgerNote = consumeOutcome.ok ? '' : ` (ledger consume ${consumeOutcome.kind})`;
-    if (
-      revert.actualMist !== null &&
-      revert.grossGasMist !== null &&
-      revert.storageRebateMist !== null
-    ) {
-      state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-        deriveSponsoredExecutionEconomics({
-          // Promotion entitlement consumption is budget accounting, not
-          // settlement recovery paid back to the Host.
-          recoveredGasMist: 0n,
-          hostPaidGasMist: revert.actualMist,
-          hostFeeMist: 0n,
-          grossGasMist: revert.grossGasMist,
-          storageRebateMist: revert.storageRebateMist,
-          protocolFeeMist: null,
-          failureReason: `onchain_revert${ledgerNote}: ${result.reason}`,
-        }),
-      );
-    } else {
-      state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-        unknownSponsoredExecutionEconomics(
-          `${revert.triggerReason}${ledgerNote}: ${result.reason}`,
-        ),
-      );
-    }
+    state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
+      deriveSponsoredExecutionEconomics({
+        // Promotion entitlement consumption is budget accounting, not
+        // settlement recovery paid back to the Host.
+        recoveredGasMist: 0n,
+        hostPaidGasMist: revert.actualMist,
+        hostFeeMist: 0n,
+        grossGasMist: revert.grossGasMist,
+        storageRebateMist: revert.storageRebateMist,
+        protocolFeeMist: null,
+        failureReason: `onchain_revert${ledgerNote}: ${failureMessage}`,
+      }),
+    );
 
     throw sponsor.errors.sponsor(
-      `Transaction reverted on-chain: ${result.reason}`,
+      `Transaction reverted on-chain: ${failureMessage}`,
       'ONCHAIN_REVERT',
       { gasUsed: result.gasUsed, digest: result.digest, subcode: classifiedSubcode },
     );
@@ -1019,44 +1011,6 @@ async function classifyStudioSponsorResult(
   state.sponsorResultOutcome = 'success';
   state.sponsorResultDigest = result.digest;
   state.lastSuccessResult = result;
-
-  if (!result.gasUsed) {
-    const consumeOutcome = await d.consumeLedgerReservationWithLog(
-      options.context.executionLedger,
-      sponsor.params.receiptId,
-      prepared.reservedGasMist,
-      'gas_used_missing',
-      {
-        promotionId: sponsor.params.promotionId,
-        userId: identity.userId,
-        senderAddress: peekedPromotion.senderAddress,
-        txDigest: result.digest || null,
-      },
-    );
-    await appendFailedUsageRow(options.context.usageStore, {
-      promotionId: sponsor.params.promotionId,
-      receiptId: sponsor.params.receiptId,
-      userId: identity.userId,
-      senderAddress: peekedPromotion.senderAddress,
-      txDigest: result.digest || null,
-      reservedGasMist: prepared.reservedGasMist,
-      consumedGasMist: consumeOutcome.ok ? prepared.reservedGasMist : 0n,
-      releasedGasMist: 0n,
-      failureReason: 'gas_used_missing',
-    });
-    state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-      unknownSponsoredExecutionEconomics(
-        consumeOutcome.ok
-          ? 'GAS_EFFECTS_MISSING'
-          : `GAS_EFFECTS_MISSING (ledger consume ${consumeOutcome.kind})`,
-      ),
-    );
-    throw sponsor.errors.sponsor(
-      `Execution succeeded but gasUsed missing - cannot determine actual gas. Digest: ${result.digest}`,
-      'GAS_EFFECTS_MISSING',
-      { digest: result.digest },
-    );
-  }
 
   const actualGasMist: Mist = mist(computeExecutionCostClaim(result.gasUsed).simGas);
   state.actualGasMist = actualGasMist;
@@ -1414,63 +1368,35 @@ function promotionPrepareErrorForEligibility(
 }
 
 function readDryRunGasUsed(
-  simResult: unknown,
-  txBytes: Uint8Array,
+  simResult: SuiTransactionResult,
   errors: StudioPrepareErrorFactory,
 ): GasUsedFields {
-  const terminal = parseCurrentSuiTerminalForBytes(simResult, txBytes);
-  if (!terminal) {
-    throw errors.prepare('Dry-run returned a malformed terminal result', 'DRY_RUN_FAILED');
+  if (simResult.outcome === 'failure') {
+    throw errors.prepare(
+      `Dry-run failed: ${suiExecutionErrorMessage(simResult.error)}`,
+      'DRY_RUN_FAILED',
+    );
   }
-  if (terminal.kind === 'failure') {
-    throw errors.prepare(`Dry-run failed: ${terminal.error.message}`, 'DRY_RUN_FAILED');
-  }
-  if (!terminal.gasUsed) {
-    throw errors.prepare('Dry-run returned no gas usage', 'DRY_RUN_NO_GAS');
-  }
-  return terminal.gasUsed;
+  return simResult.effects.gasUsed;
 }
 
-function computeRevertAccounting(
-  gasUsed: GasUsedFields | null,
-  reservedGasMist: bigint,
-): {
-  readonly grossGasMist: bigint | null;
-  readonly storageRebateMist: bigint | null;
-  readonly actualMist: bigint | null;
+function computeRevertAccounting(gasUsed: GasUsedFields): {
+  readonly grossGasMist: bigint;
+  readonly storageRebateMist: bigint;
+  readonly actualMist: bigint;
   readonly consumeAmount: bigint;
-  readonly triggerReason: 'onchain_revert' | 'onchain_revert_gas_unknown';
+  readonly triggerReason: 'onchain_revert';
 } {
-  if (!gasUsed) {
-    return {
-      grossGasMist: null,
-      storageRebateMist: null,
-      actualMist: null,
-      consumeAmount: reservedGasMist,
-      triggerReason: 'onchain_revert_gas_unknown',
-    };
-  }
-
-  try {
-    const grossGasMist = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost);
-    const storageRebateMist = BigInt(gasUsed.storageRebate);
-    const actualMist = computeExecutionCostClaim(gasUsed).simGas;
-    return {
-      grossGasMist,
-      storageRebateMist,
-      actualMist,
-      consumeAmount: actualMist,
-      triggerReason: 'onchain_revert',
-    };
-  } catch {
-    return {
-      grossGasMist: null,
-      storageRebateMist: null,
-      actualMist: null,
-      consumeAmount: reservedGasMist,
-      triggerReason: 'onchain_revert_gas_unknown',
-    };
-  }
+  const grossGasMist = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost);
+  const storageRebateMist = BigInt(gasUsed.storageRebate);
+  const actualMist = computeExecutionCostClaim(gasUsed).simGas;
+  return {
+    grossGasMist,
+    storageRebateMist,
+    actualMist,
+    consumeAmount: actualMist,
+    triggerReason: 'onchain_revert',
+  };
 }
 
 function setUnknownTerminal(

@@ -2,7 +2,8 @@
  * LoginPage — wallet connect + signature authentication.
  *
  * Network is fetched from /relay/config at runtime, matching app-web.
- * dAppKit is created dynamically after the network is resolved.
+ * dAppKit is created only after the configured public endpoint proves the
+ * same live chain identity.
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -13,9 +14,10 @@ import {
   useCurrentAccount,
   ConnectModal,
 } from '@mysten/dapp-kit-react';
-import { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { parseRelayConfigResponse, type SuiNetwork } from '@stelis/contracts';
 import { getWallets } from '@mysten/wallet-standard';
-import { getSuiRpcUrl, type AppAdminNetwork } from '../suiRpc';
+import { createVerifiedAdminSuiClient } from '../suiRpc';
 
 import type { SuiSignPersonalMessageFeature } from '../types';
 
@@ -23,28 +25,25 @@ type LoginState = 'idle' | 'signing' | 'verifying' | 'error';
 
 // ── Network fetch ─────────────────────────────────────────────────────────
 
-const VALID_NETWORKS: readonly string[] = ['testnet', 'mainnet'];
-
-function isValidNetwork(v: unknown): v is AppAdminNetwork {
-  return typeof v === 'string' && VALID_NETWORKS.includes(v);
+interface VerifiedAdminSuiClient {
+  readonly network: SuiNetwork;
+  readonly client: SuiGrpcClient;
 }
 
-/** Fetch network from /relay/config, matching app-web. */
-async function fetchNetwork(): Promise<AppAdminNetwork> {
+/** Fetch the exact Host config, then prove the app-admin Sui client against it. */
+async function fetchVerifiedAdminSuiClient(): Promise<VerifiedAdminSuiClient> {
   const res = await fetch(buildApiUrl('/relay/config'), {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`/relay/config returned ${res.status}`);
-  const data = await res.json();
-  if (!isValidNetwork(data.network)) {
-    throw new Error(`Unexpected network from API: ${String(data.network)}`);
-  }
-  return data.network;
+  const config = parseRelayConfigResponse(await res.json());
+  const client = await createVerifiedAdminSuiClient(config.network);
+  return { network: config.network, client };
 }
 
 // ── Login form ─────────────────────────────────────────────────────────────
 
-function AdminLoginForm({ network }: { network: AppAdminNetwork }) {
+function AdminLoginForm({ network }: { network: SuiNetwork }) {
   const navigate = useNavigate();
   const account = useCurrentAccount();
   const [modalOpen, setModalOpen] = useState(false);
@@ -160,26 +159,27 @@ function AdminLoginForm({ network }: { network: AppAdminNetwork }) {
 // ── Page export ────────────────────────────────────────────────────────────
 
 export function LoginPage() {
-  const [network, setNetwork] = useState<AppAdminNetwork | null>(null);
+  const [verified, setVerified] = useState<VerifiedAdminSuiClient | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchNetwork()
-      .then(setNetwork)
+    fetchVerifiedAdminSuiClient()
+      .then(setVerified)
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to fetch config'));
   }, []);
 
   const dAppKit = useMemo(() => {
-    if (!network) return null;
+    if (!verified) return null;
     return createDAppKit({
-      networks: [network] as const,
-      createClient: (n) =>
-        new SuiGrpcClient({
-          network: n,
-          baseUrl: getSuiRpcUrl(n),
-        }),
+      networks: [verified.network] as const,
+      createClient: (network) => {
+        if (network !== verified.network) {
+          throw new TypeError('app-admin requested an unverified Sui network');
+        }
+        return verified.client;
+      },
     });
-  }, [network]);
+  }, [verified]);
 
   if (error) {
     return (
@@ -191,8 +191,8 @@ export function LoginPage() {
             className="login-btn"
             onClick={() => {
               setError(null);
-              fetchNetwork()
-                .then(setNetwork)
+              fetchVerifiedAdminSuiClient()
+                .then(setVerified)
                 .catch((e) => setError(e instanceof Error ? e.message : 'Failed'));
             }}
           >
@@ -203,7 +203,7 @@ export function LoginPage() {
     );
   }
 
-  if (!dAppKit || !network) {
+  if (!dAppKit || !verified) {
     return (
       <div className="login-page">
         <div className="login-card">
@@ -218,7 +218,7 @@ export function LoginPage() {
 
   return (
     <DAppKitProvider dAppKit={dAppKit}>
-      <AdminLoginForm network={network} />
+      <AdminLoginForm network={verified.network} />
     </DAppKitProvider>
   );
 }

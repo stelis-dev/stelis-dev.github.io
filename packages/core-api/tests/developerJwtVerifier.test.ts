@@ -71,6 +71,16 @@ function base64urlEncodeString(str: string): string {
   return base64urlEncode(new TextEncoder().encode(str));
 }
 
+function base64urlEncodeWithMalformedUtf8(prefix: string, suffix: string): string {
+  return base64urlEncode(
+    new Uint8Array([
+      ...new TextEncoder().encode(prefix),
+      0x80,
+      ...new TextEncoder().encode(suffix),
+    ]),
+  );
+}
+
 interface TestJwtOptions {
   header?: Record<string, unknown>;
   payload?: Record<string, unknown>;
@@ -223,6 +233,46 @@ describe('verifyDeveloperJwt', () => {
     await expect(verifyDeveloperJwt('not.a.valid.jwt', TRUST_CONFIG)).rejects.toThrow(
       'malformed token',
     );
+  });
+
+  it('rejects padded base64url header encoding', async () => {
+    const [header, payload, signature] = signTestJwt({}).split('.');
+    await expect(
+      verifyDeveloperJwt(`${header}=.${payload}.${signature}`, TRUST_CONFIG),
+    ).rejects.toThrow('invalid header JSON');
+  });
+
+  it('rejects invalid base64url payload alphabet', async () => {
+    const [header, payload, signature] = signTestJwt({}).split('.');
+    await expect(
+      verifyDeveloperJwt(`${header}.${payload}+.${signature}`, TRUST_CONFIG),
+    ).rejects.toThrow('invalid payload JSON');
+  });
+
+  it('rejects padded base64url signature encoding', async () => {
+    const [header, payload, signature] = signTestJwt({}).split('.');
+    await expect(
+      verifyDeveloperJwt(`${header}.${payload}.${signature}=`, TRUST_CONFIG),
+    ).rejects.toThrow('invalid signature encoding');
+  });
+
+  it('rejects malformed UTF-8 in a JSON-shaped header', async () => {
+    const malformedHeader = base64urlEncodeWithMalformedUtf8(
+      '{"alg":"RS256","typ":"JWT","note":"',
+      '"}',
+    );
+    const [, payload, signature] = signTestJwt({}).split('.');
+    await expect(
+      verifyDeveloperJwt(`${malformedHeader}.${payload}.${signature}`, TRUST_CONFIG),
+    ).rejects.toThrow('invalid header JSON');
+  });
+
+  it('rejects malformed UTF-8 in a JSON-shaped payload', async () => {
+    const malformedPayload = base64urlEncodeWithMalformedUtf8('{"iss":"', '"}');
+    const [header, , signature] = signTestJwt({}).split('.');
+    await expect(
+      verifyDeveloperJwt(`${header}.${malformedPayload}.${signature}`, TRUST_CONFIG),
+    ).rejects.toThrow('invalid payload JSON');
   });
 
   it('rejects unknown issuer', async () => {

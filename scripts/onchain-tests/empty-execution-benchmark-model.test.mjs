@@ -25,21 +25,10 @@ const REPORTED_DIGEST = toBase58(new Uint8Array(32).fill(2));
 const ATTEMPT_ID = '11111111-1111-4111-8111-111111111111';
 
 function currentSuiResult(digest, kind) {
-  const status =
-    kind === 'success'
-      ? { success: true, error: null }
-      : {
-          success: false,
-          error: { $kind: 'Unknown', message: 'failed', Unknown: null },
-        };
-  const transaction = {
-    digest,
-    status,
-    effects: { status, transactionDigest: digest },
-  };
-  return kind === 'success'
-    ? { $kind: 'Transaction', Transaction: transaction }
-    : { $kind: 'FailedTransaction', FailedTransaction: transaction };
+  const error = { kind: 'InsufficientGas', message: 'failed' };
+  const status = kind === 'success' ? { success: true, error: null } : { success: false, error };
+  const result = { outcome: kind, digest, effects: { status, transactionDigest: digest } };
+  return kind === 'success' ? result : { ...result, error };
 }
 
 test('token selection uses the SDK exact-type lookup and never a symbol', () => {
@@ -249,14 +238,6 @@ test('sponsor POST outcomes trust only current stage-bound Host failures', () =>
   );
   assert.equal(
     classifySponsorPostOutcome({
-      currentCode: 'GAS_EFFECTS_MISSING',
-      reportedDigest: EXPECTED_DIGEST,
-      expectedDigest: EXPECTED_DIGEST,
-    }),
-    'submitted_unverified',
-  );
-  assert.equal(
-    classifySponsorPostOutcome({
       currentCode: 'SPONSOR_FAILED',
       reportedDigest: null,
       expectedDigest: EXPECTED_DIGEST,
@@ -315,11 +296,11 @@ test('benchmark provenance cannot be replaced by record-local fields', () => {
 test('attempt journal is wallet-bound, monotonic, and terminal-proof exact', () => {
   assert.throws(
     () => currentSuiTerminalProof({ digest: EXPECTED_DIGEST, kind: 'success' }, EXPECTED_DIGEST),
-    /current raw transaction result/,
+    /exact gateway result/,
   );
   assert.throws(
     () => currentSuiTerminalProof(currentSuiResult(REPORTED_DIGEST, 'success'), EXPECTED_DIGEST),
-    /current raw transaction result/,
+    /exact gateway result/,
   );
   const provenance = {
     evidenceSchema: 'evidence-v1',

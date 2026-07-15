@@ -505,6 +505,61 @@ export interface SponsorRefillAccountWithdrawalResponse {
   recipient: string;
 }
 
+/** Public, credential-free view of the boot-qualified Sui RPC fleet. */
+export interface SuiRpcFleetStatus {
+  readonly endpoints: readonly {
+    readonly origin: string;
+    readonly role: 'primary' | 'secondary';
+  }[];
+}
+
+function containsAsciiControl(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Canonical public origin for one current Sui RPC endpoint.
+ *
+ * This validates the credential-free Admin projection only. The private
+ * transport base URL is app-api-owned and may include a provider path.
+ */
+export function canonicalizeSuiRpcOrigin(value: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.trim() === '' ||
+    value !== value.trim() ||
+    containsAsciiControl(value)
+  ) {
+    throw new TypeError('Sui RPC endpoint must be a non-empty HTTP(S) origin');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new TypeError('Sui RPC endpoint must be a valid HTTP(S) origin');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new TypeError('Sui RPC endpoint must use HTTP or HTTPS');
+  }
+  if (parsed.username || parsed.password) {
+    throw new TypeError('Sui RPC endpoint must not contain embedded credentials');
+  }
+  if (parsed.pathname !== '/') {
+    throw new TypeError('Sui RPC endpoint must use the origin root path');
+  }
+  if (parsed.search !== '') {
+    throw new TypeError('Sui RPC endpoint must not contain a query');
+  }
+  if (parsed.hash !== '') {
+    throw new TypeError('Sui RPC endpoint must not contain a fragment');
+  }
+  return parsed.origin;
+}
+
 export interface AdminSponsorOperationsResponse {
   sponsorOperations: SponsorOperationsStatus;
   primaryAddress: string | null;
@@ -529,16 +584,7 @@ export interface AdminSponsorOperationsResponse {
     deepbookPackageId: string | null;
   };
   studioEnabled: boolean;
-  rpcFleet: {
-    endpoints: Array<{
-      url: string;
-      role: 'primary' | 'secondary';
-      status: 'healthy' | 'cooldown';
-      cooldownRemainingMs: number;
-    }>;
-    totalEndpoints: number;
-    healthyEndpoints: number;
-  };
+  rpcFleet: SuiRpcFleetStatus;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -2289,51 +2335,39 @@ export function parseAdminSponsorOperationsResponse(
 
   const fleetLabel = `${label}.rpcFleet`;
   const fleet = record(raw.rpcFleet, fleetLabel);
-  onlyKeys(fleet, ['endpoints', 'totalEndpoints', 'healthyEndpoints'], fleetLabel);
+  onlyKeys(fleet, ['endpoints'], fleetLabel);
   if (!Array.isArray(fleet.endpoints)) {
     throw new HostWireParseError(`${fleetLabel}.endpoints must be an array`);
   }
   const endpoints = fleet.endpoints.map((endpointValue, index) => {
     const endpointLabel = `${fleetLabel}.endpoints[${index}]`;
     const endpoint = record(endpointValue, endpointLabel);
-    onlyKeys(endpoint, ['url', 'role', 'status', 'cooldownRemainingMs'], endpointLabel);
+    onlyKeys(endpoint, ['origin', 'role'], endpointLabel);
     if (endpoint.role !== 'primary' && endpoint.role !== 'secondary') {
       throw new HostWireParseError(`${endpointLabel}.role is invalid`);
     }
-    if (endpoint.status !== 'healthy' && endpoint.status !== 'cooldown') {
-      throw new HostWireParseError(`${endpointLabel}.status is invalid`);
-    }
     const role: 'primary' | 'secondary' = endpoint.role;
-    const status: 'healthy' | 'cooldown' = endpoint.status;
-    const cooldownRemainingMs = nonNegativeSafeIntegerField(
-      endpoint,
-      'cooldownRemainingMs',
-      endpointLabel,
-    );
-    if (
-      (status === 'healthy' && cooldownRemainingMs !== 0) ||
-      (status === 'cooldown' && cooldownRemainingMs === 0)
-    ) {
-      throw new HostWireParseError(`${endpointLabel}.status contradicts cooldownRemainingMs`);
+    const rawOrigin = nonEmptyStringField(endpoint, 'origin', endpointLabel);
+    let origin: string;
+    try {
+      origin = canonicalizeSuiRpcOrigin(rawOrigin);
+    } catch {
+      throw new HostWireParseError(`${endpointLabel}.origin is not a current Sui RPC origin`);
+    }
+    if (origin !== rawOrigin) {
+      throw new HostWireParseError(`${endpointLabel}.origin is not canonical`);
     }
     return {
-      url: nonEmptyStringField(endpoint, 'url', endpointLabel),
+      origin,
       role,
-      status,
-      cooldownRemainingMs,
     };
   });
-  const totalEndpoints = nonNegativeSafeIntegerField(fleet, 'totalEndpoints', fleetLabel);
-  const healthyEndpoints = nonNegativeSafeIntegerField(fleet, 'healthyEndpoints', fleetLabel);
   if (
-    healthyEndpoints > totalEndpoints ||
-    endpoints.length !== totalEndpoints ||
     endpoints.length === 0 ||
     endpoints[0]?.role !== 'primary' ||
-    endpoints.slice(1).some((endpoint) => endpoint.role !== 'secondary') ||
-    endpoints.filter((endpoint) => endpoint.status === 'healthy').length !== healthyEndpoints
+    endpoints.slice(1).some((endpoint) => endpoint.role !== 'secondary')
   ) {
-    throw new HostWireParseError(`${fleetLabel} counts contradict its endpoints`);
+    throw new HostWireParseError(`${fleetLabel}.endpoints must be non-empty and role-ordered`);
   }
 
   const network = raw.network;
@@ -2386,6 +2420,6 @@ export function parseAdminSponsorOperationsResponse(
       deepbookPackageId: nullableNonEmptyStringField(onChainIds, 'deepbookPackageId', idsLabel),
     },
     studioEnabled: booleanField(raw, 'studioEnabled', label),
-    rpcFleet: { endpoints, totalEndpoints, healthyEndpoints },
+    rpcFleet: { endpoints },
   };
 }

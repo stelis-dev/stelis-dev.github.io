@@ -19,8 +19,8 @@ function makeSnippets(
       code: `# Core SDK — gas abstraction + Relay API client
 npm install @stelis/sdk
 
-# Sui blockchain client
-npm install @mysten/sui
+# Exact current Sui blockchain client used by this SDK release
+npm install @mysten/sui@2.17.0
 
 # Wallet connector (React)
 npm install @mysten/dapp-kit-react

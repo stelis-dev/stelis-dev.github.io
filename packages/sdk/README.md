@@ -78,7 +78,9 @@ The supported npm entry points are:
 - `StelisSDK.executeSuiFirst()`
 - `StelisSDK.estimateGas()`
 - `StelisSDK.getExchangeRate()` — read the current settlement-token/SUI rate through the connected Host network
+- `StelisSDK.queryUserCredit()` — read current User Vault credit after proving the supplied Sui client network
 - `StelisSDK.getSettlementSwapPathForSettlementToken()` — resolve one Host-advertised current settlement swap path by exact coin type
+- `StelisSDK.checkSettlementSwapPathLiquidity()` — prove the supplied Sui client network and read current DeepBook pool liquidity
 - `StelisSDK.buildWithdrawPtb()` — build a vault withdrawal PTB
 - `StelisSDK.prepareSponsored()` — advanced 2-step flow (prepare → sign → sponsor)
 - `StelisSDK.executePromotionSponsored()` — promotion-specific execution (studio mode)
@@ -89,8 +91,6 @@ The supported npm entry points are:
 - `StelisIntegrityError` — S-16 integrity verification failures
 - `listAvailablePromotions()` — standalone server-to-server promotion discovery
 - `getPromotionUserState()` — standalone server-to-server promotion detail
-- `checkSettlementSwapPathLiquidity()` — DeepBook pool liquidity check
-- `queryUserCredit()` — on-chain vault/credit lookup
 - `parseRelayConfigResponse()` — strict parser for the current Host config wire shape
 - `STELIS_CONTRACT_IDS`, `DEEPBOOK_IDS` — built-in on-chain contract IDs
 - exported response, config, and promotion types
@@ -98,7 +98,7 @@ The supported npm entry points are:
 The server-only entry point `@stelis/sdk/server` exports:
 
 - `verifySettleEventAgainstExpected()` — verify an on-chain `SettleEvent` against backend-owned expected fields
-- `verifySettleEventInTransaction()` — apply the same verification to an already fetched current transaction result
+- `verifySettleEventResultAgainstExpected()` — verify an already fetched exact current transaction result without a second RPC read
 - `extractSettleEvents()` — extract decoded `SettleEvent` summaries for reconciliation scans
 - `ExpectedSettleEventFields`, `VerifiedSettleEvent`, and `ExtractedSettleEventSummary`
 
@@ -165,7 +165,7 @@ sequenceDiagram
 npm install @stelis/sdk
 ```
 
-**Peer Dependency**: `@mysten/sui` ^1.0.0 || ^2.0.0
+**Peer Dependency**: `@mysten/sui` 2.17.0
 
 ## Quick Start — StelisSDK (Recommended)
 
@@ -185,7 +185,10 @@ import { StelisSDK, STELIS_CONTRACT_IDS } from '@stelis/sdk';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 
 // 0. Create your own SuiGrpcClient.
-const suiClient = new SuiGrpcClient({ network: 'testnet' });
+const suiClient = new SuiGrpcClient({
+  network: 'testnet',
+  baseUrl: 'https://fullnode.testnet.sui.io:443',
+});
 
 // 1. Connect to a Host with package pinning (required for integrity protection).
 // Contract IDs are built into @stelis/sdk (bundled from the shared internal contract package).
@@ -438,12 +441,6 @@ const settlement = await verifySettleEventAgainstExpected(suiClient, sponsorDige
 console.log(settlement.orderIdHash);
 ```
 
-If the backend already fetched the current transaction result with events, use
-`verifySettleEventInTransaction(result, sponsorDigest, expected)` to avoid a
-second RPC read. It requires the exact successful Sui result union, matching
-digest, and requested events before applying the same compiled-schema and
-application-field checks.
-
 Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans only. Its warning logger is required because the returned array contains successful summaries only:
 
 ```typescript
@@ -597,7 +594,7 @@ console.log(result.orderId); // echoed only on sponsored path, undefined for dir
 - `tx` must not have gas fields preset (`setGasPayment`, `setGasBudget`, `setGasOwner`, `setGasPrice` throw)
 - Gas budget is computed from `simulateTransaction` + `DEFAULT_GAS_MARGIN_BPS`
 - Infra failures (`network`, `timeout`, `grpc`) trigger best-effort `executeSponsored` fallback
-- Deterministic failures (simulation abort, no gasUsed) throw immediately
+- Deterministic failures (simulation abort or malformed current Sui response) throw immediately
 
 > [!NOTE]
 > `path: 'sui' | 'sponsored'` is for debug/tracing only. Do not branch on it.
@@ -607,8 +604,9 @@ console.log(result.orderId); // echoed only on sponsored path, undefined for dir
 
 ## Monorepo-Only PTB Builders
 
-Low-level PTB builders (`buildSwapAndSettlePtb`, `buildSettleWithCreditPtb`)
-live in the monorepo source at `packages/core-relay/src/ptb/builders.ts` and are re-exported from `@stelis/core-relay/browser` for internal/server-side use. They are **not exported** from the `@stelis/sdk` npm entrypoint. `buildWithdrawPtb` is available via `StelisSDK.buildWithdrawPtb()`.
+Low-level settlement PTB builders are Host-internal and are not exported from
+the `@stelis/sdk` package. `buildWithdrawPtb` is available via
+`StelisSDK.buildWithdrawPtb()`.
 
 For npm consumers, the stable public path remains:
 
@@ -732,7 +730,7 @@ deducted in subsequent transactions.
 
 ## Settlement Swap Path Liquidity Check
 
-### `checkSettlementSwapPathLiquidity()` — Pre-flight Liquidity Verification
+### `StelisSDK.checkSettlementSwapPathLiquidity()` — Pre-flight Liquidity Verification
 
 Performs a mid_price query to verify active bid+ask orders exist.
 `mid_price > 0` is a reliable indicator: DeepBook only returns a non-zero
@@ -741,9 +739,7 @@ value when both bid and ask orders are present in the book.
 settlement swap path liquidity is checked via mid-price query instead.)
 
 ```typescript
-import { checkSettlementSwapPathLiquidity } from '@stelis/sdk';
-
-const status = await checkSettlementSwapPathLiquidity(suiClient, deepbookPkgId, settlementSwapPath);
+const status = await sdk.checkSettlementSwapPathLiquidity(suiClient, settlementSwapPath);
 // status.hasLiquidity  → boolean
 // status.status        → 'ok' | 'no_orders'
 // status.midPrice      → JSON-safe display number, or null if outside safe range

@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   createAuthRoutes: vi.fn(),
   createAdminRoutes: vi.fn(),
   createStudioRoutes: vi.fn(),
+  createAdminRedisAdapter: vi.fn(),
+  raiseAppApiAdminSessionNotBefore: vi.fn(),
 }));
 
 vi.mock('../src/boot.js', () => ({
@@ -34,13 +36,22 @@ vi.mock('../src/routes/studio.js', () => ({
   createStudioRoutes: mocks.createStudioRoutes,
 }));
 
+vi.mock('../src/adminRedis.js', () => ({
+  createAdminRedisAdapter: mocks.createAdminRedisAdapter,
+}));
+
+vi.mock('../src/adminSessionNotBefore.js', () => ({
+  raiseAppApiAdminSessionNotBefore: mocks.raiseAppApiAdminSessionNotBefore,
+}));
+
 import { createApp } from '../src/app.js';
 
 const JWT_SECRET = 'secret-that-must-not-leave-create-app';
 const HMAC_SECRET = 'internal-hmac-that-must-not-be-public';
 const ADMIN_ADDRESS = `0x${'aa'.repeat(32)}`;
 const contextInput = { sponsorLeaseHmacSecret: HMAC_SECRET, network: 'testnet' as const };
-const context = { runtime: 'context' };
+const context = { runtime: 'context', redis: { runtime: 'redis' }, dispose: vi.fn() };
+const adminRedis = { runtime: 'admin-redis' };
 
 function bootValidationResult() {
   return {
@@ -83,6 +94,8 @@ beforeEach(() => {
   mocks.createAuthRoutes.mockImplementation(() => new Hono());
   mocks.createAdminRoutes.mockImplementation(() => new Hono());
   mocks.createStudioRoutes.mockImplementation(() => new Hono());
+  mocks.createAdminRedisAdapter.mockReturnValue(adminRedis);
+  mocks.raiseAppApiAdminSessionNotBefore.mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -107,6 +120,14 @@ describe('createApp runtime input boundary', () => {
     expect(JSON.stringify(result.bootResult)).not.toContain(HMAC_SECRET);
 
     expect(mocks.createContext).toHaveBeenCalledWith(contextInput);
+    expect(mocks.createAdminRedisAdapter).toHaveBeenCalledWith(context.redis);
+    expect(mocks.raiseAppApiAdminSessionNotBefore).toHaveBeenCalledWith(
+      adminRedis,
+      expect.any(Number),
+    );
+    expect(mocks.createContext.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.raiseAppApiAdminSessionNotBefore.mock.invocationCallOrder[0],
+    );
     const [authContextPromise, authRuntime] = mocks.createAuthRoutes.mock.calls[0];
     await expect(authContextPromise).resolves.toBe(context);
     expect(typeof authRuntime.resolveClientIp).toBe('function');
@@ -188,6 +209,21 @@ describe('createApp runtime input boundary', () => {
     mocks.createContext.mockRejectedValueOnce(new Error('context boot failed'));
 
     await expect(createApp()).rejects.toThrow('context boot failed');
+    expect(mocks.raiseAppApiAdminSessionNotBefore).not.toHaveBeenCalled();
+    expect(mocks.createRelayRoutes).not.toHaveBeenCalled();
+    expect(mocks.createAuthRoutes).not.toHaveBeenCalled();
+    expect(mocks.createAdminRoutes).not.toHaveBeenCalled();
+    expect(mocks.createStudioRoutes).not.toHaveBeenCalled();
+  });
+
+  it('disposes a ready context when the post-readiness session cutoff fails', async () => {
+    mocks.raiseAppApiAdminSessionNotBefore.mockRejectedValueOnce(
+      new Error('session cutoff failed'),
+    );
+
+    await expect(createApp()).rejects.toThrow('session cutoff failed');
+
+    expect(context.dispose).toHaveBeenCalledOnce();
     expect(mocks.createRelayRoutes).not.toHaveBeenCalled();
     expect(mocks.createAuthRoutes).not.toHaveBeenCalled();
     expect(mocks.createAdminRoutes).not.toHaveBeenCalled();

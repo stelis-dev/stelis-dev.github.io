@@ -5,12 +5,11 @@
  * SplitCoins outputs are new coin objects: consuming one of those outputs must
  * not consume or taint the direct input coin from which it was split.
  */
-import type { Transaction } from '@mysten/sui/transactions';
+import type { Argument, CallArg, Transaction } from '@mysten/sui/transactions';
 import { normalizeStructTag, normalizeSuiObjectId } from '@mysten/sui/utils';
 import { decodeExactPureU64Base64 } from './decodeU64.js';
 import { extractObjectIdFromInput } from './ptbInputUtils.js';
-
-const DECIMAL_U64_RE = /^(?:0|[1-9]\d*)$/;
+import { parseSuiCallArg, parseSuiCommands } from './sui/suiTransactionShape.js';
 
 export interface PrefixCoinValue {
   readonly snapshotCoinIds: readonly string[];
@@ -32,7 +31,6 @@ export interface PrefixValueTrace {
   /** Exact carrier values that must fit u64 at the command where they occur. */
   readonly valueConstraints: readonly PrefixCoinValueConstraint[];
   readonly senderWithdrawalDebit: bigint;
-  readonly unaccountableSenderWithdrawal: boolean;
 }
 
 /** A structurally invalid prefix attempted to move one MergeCoins source twice. */
@@ -58,10 +56,6 @@ interface MutableCarrier {
   value: MutableCoinValue | null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
-}
-
 /** Normalize a Move struct type without turning malformed input into identity. */
 export function normalizeMoveStructType(value: string): string | null {
   try {
@@ -71,34 +65,25 @@ export function normalizeMoveStructType(value: string): string | null {
   }
 }
 
-function argumentInputIndex(arg: Record<string, unknown>): number | null {
-  return arg.$kind === 'Input' && Number.isInteger(arg.Input) && (arg.Input as number) >= 0
-    ? (arg.Input as number)
-    : null;
+function argumentInputIndex(arg: Argument): number | null {
+  return arg.$kind === 'Input' ? arg.Input : null;
 }
 
-function normalizedInputObjectId(
-  arg: Record<string, unknown>,
-  inputs: readonly Record<string, unknown>[],
-): string | null {
+function normalizedInputObjectId(arg: Argument, inputs: readonly CallArg[]): string | null {
   const index = argumentInputIndex(arg);
   if (index === null || index >= inputs.length) return null;
-  const objectId = extractObjectIdFromInput(inputs[index]!);
+  const objectId = extractObjectIdFromInput(inputs[index]! as unknown as Record<string, unknown>);
   return objectId ? normalizeSuiObjectId(objectId) : null;
 }
 
-function decodeExactSplitAmount(
-  arg: Record<string, unknown>,
-  inputs: readonly Record<string, unknown>[],
-): bigint | null {
+function decodeExactSplitAmount(arg: Argument, inputs: readonly CallArg[]): bigint | null {
   const index = argumentInputIndex(arg);
   if (index === null || index >= inputs.length) return null;
-  const input = asRecord(inputs[index]);
-  const pure = asRecord(input?.Pure);
-  if (input?.$kind !== 'Pure' || typeof pure?.bytes !== 'string') return null;
+  const input = inputs[index]!;
+  if (input.$kind !== 'Pure') return null;
 
   try {
-    return decodeExactPureU64Base64(pure.bytes);
+    return decodeExactPureU64Base64(input.Pure.bytes);
   } catch {
     return null;
   }
@@ -144,14 +129,14 @@ export function traceUserPrefixValue(
   settlementTokenType: string,
 ): PrefixValueTrace {
   const data = tx.getData();
-  const inputs = data.inputs as Record<string, unknown>[];
-  const commands = data.commands as Record<string, unknown>[];
+  const inputs = data.inputs.map((input, index) => parseSuiCallArg(input, `inputs[${index}]`));
+  const commands = parseSuiCommands(data.commands);
   const directCarriers = new Map<string, MutableCarrier>();
   const commandResults = new Map<number, readonly MutableCarrier[]>();
   const mergeSourceKeys = new Set<string>();
   const valueConstraints: PrefixCoinValueConstraint[] = [];
 
-  function directCarrier(arg: Record<string, unknown>): MutableCarrier | null {
+  function directCarrier(arg: Argument): MutableCarrier | null {
     const objectId = normalizedInputObjectId(arg, inputs);
     if (!objectId) return null;
 
@@ -168,23 +153,18 @@ export function traceUserPrefixValue(
     return carrier;
   }
 
-  function resultCoordinates(arg: Record<string, unknown>): [number, number] | null {
-    if (arg.$kind === 'Result' && Number.isInteger(arg.Result) && (arg.Result as number) >= 0) {
+  function resultCoordinates(arg: Argument): [number, number] | null {
+    if (arg.$kind === 'Result') {
       // Result(i) is valid only for a single-result command, in which case it
       // aliases NestedResult(i, 0).
-      return [arg.Result as number, 0];
+      return [arg.Result, 0];
     }
-    if (arg.$kind !== 'NestedResult' || !Array.isArray(arg.NestedResult)) return null;
+    if (arg.$kind !== 'NestedResult') return null;
     const [commandIndex, resultIndex] = arg.NestedResult;
-    return Number.isInteger(commandIndex) &&
-      (commandIndex as number) >= 0 &&
-      Number.isInteger(resultIndex) &&
-      (resultIndex as number) >= 0
-      ? [commandIndex as number, resultIndex as number]
-      : null;
+    return [commandIndex, resultIndex];
   }
 
-  function resolveCarrier(arg: Record<string, unknown>): MutableCarrier | null {
+  function resolveCarrier(arg: Argument): MutableCarrier | null {
     if (arg.$kind === 'Input') return directCarrier(arg);
     const coordinates = resultCoordinates(arg);
     if (!coordinates) return null;
@@ -194,14 +174,14 @@ export function traceUserPrefixValue(
     return results?.[resultIndex] ?? null;
   }
 
-  function mergeSourceKey(arg: Record<string, unknown>): string {
+  function mergeSourceKey(arg: Argument): string {
     const carrier = resolveCarrier(arg);
     if (carrier) return carrier.key;
     const coordinates = resultCoordinates(arg);
     if (coordinates) return `result:${coordinates[0]}:${coordinates[1]}`;
     const inputIndex = argumentInputIndex(arg);
     if (inputIndex !== null) return `input:${inputIndex}`;
-    return arg.$kind === 'GasCoin' ? 'gas-coin' : `unknown:${JSON.stringify(arg)}`;
+    return 'gas-coin';
   }
 
   function consume(carrier: MutableCarrier | null): void {
@@ -226,11 +206,8 @@ export function traceUserPrefixValue(
     commandResults.set(commandIndex, []);
 
     if (kind === 'SplitCoins') {
-      const split = asRecord(command.SplitCoins);
-      const sourceArg = asRecord(split?.coin);
-      const amountArgs = Array.isArray(split?.amounts) ? split.amounts.map(asRecord) : [];
-      const source = sourceArg ? resolveCarrier(sourceArg) : null;
-      const amounts = amountArgs.map((arg) => (arg ? decodeExactSplitAmount(arg, inputs) : null));
+      const source = resolveCarrier(command.SplitCoins.coin);
+      const amounts = command.SplitCoins.amounts.map((arg) => decodeExactSplitAmount(arg, inputs));
       const allAmountsExact = amounts.every((amount): amount is bigint => amount !== null);
 
       if (source?.available) {
@@ -255,22 +232,20 @@ export function traceUserPrefixValue(
     }
 
     if (kind === 'MergeCoins') {
-      const merge = asRecord(command.MergeCoins);
-      const targetArg = asRecord(merge?.destination);
-      const sourceArgs = Array.isArray(merge?.sources) ? merge.sources.map(asRecord) : [];
+      const targetArg = command.MergeCoins.destination;
+      const sourceArgs = command.MergeCoins.sources;
 
       // Validate the whole command before mutating carrier state so the error
       // cannot depend on source order within a command.
       for (const sourceArg of sourceArgs) {
-        if (!sourceArg) continue;
         const sourceKey = mergeSourceKey(sourceArg);
         if (mergeSourceKeys.has(sourceKey)) throw new PrefixValueTraceError(sourceKey);
         mergeSourceKeys.add(sourceKey);
       }
 
-      const target = targetArg ? resolveCarrier(targetArg) : null;
+      const target = resolveCarrier(targetArg);
       for (const sourceArg of sourceArgs) {
-        const source = sourceArg ? resolveCarrier(sourceArg) : null;
+        const source = resolveCarrier(sourceArg);
         if (target) mergeExactValues(target, source);
         if (source === target) {
           consume(target);
@@ -286,25 +261,17 @@ export function traceUserPrefixValue(
     }
 
     if (kind === 'TransferObjects') {
-      const transfer = asRecord(command.TransferObjects);
-      const objects = Array.isArray(transfer?.objects) ? transfer.objects.map(asRecord) : [];
-      for (const object of objects) consume(object ? resolveCarrier(object) : null);
+      for (const object of command.TransferObjects.objects) consume(resolveCarrier(object));
       continue;
     }
 
     if (kind === 'MakeMoveVec') {
-      const makeMoveVec = asRecord(command.MakeMoveVec);
-      const elements = Array.isArray(makeMoveVec?.elements)
-        ? makeMoveVec.elements.map(asRecord)
-        : [];
-      for (const element of elements) consume(element ? resolveCarrier(element) : null);
+      for (const element of command.MakeMoveVec.elements) consume(resolveCarrier(element));
       continue;
     }
 
     if (kind === 'MoveCall') {
-      const moveCall = asRecord(command.MoveCall);
-      const args = Array.isArray(moveCall?.arguments) ? moveCall.arguments.map(asRecord) : [];
-      for (const arg of args) markMoveCallUse(arg ? resolveCarrier(arg) : null);
+      for (const arg of command.MoveCall.arguments) markMoveCallUse(resolveCarrier(arg));
     }
   }
 
@@ -326,20 +293,29 @@ export function traceUserPrefixValue(
   return {
     directCoins,
     valueConstraints,
-    senderWithdrawalDebit: withdrawal.total,
-    unaccountableSenderWithdrawal: withdrawal.unaccountable,
+    senderWithdrawalDebit: withdrawal,
   };
 }
 
-/** Resolve both SDK-internal and BCS-roundtripped withdrawal-source shapes. */
+/** Resolve the exact current SDK withdrawal-source union. */
 export function resolveFundsWithdrawalSource(
   withdrawFrom: Record<string, unknown> | undefined,
 ): 'Sender' | 'Sponsor' | null {
   if (!withdrawFrom) return null;
-  if (withdrawFrom.$kind === 'Sender') return 'Sender';
-  if (withdrawFrom.$kind === 'Sponsor') return 'Sponsor';
-  if (withdrawFrom.Sender) return 'Sender';
-  if (withdrawFrom.Sponsor) return 'Sponsor';
+  if (
+    withdrawFrom.$kind === 'Sender' &&
+    withdrawFrom.Sender === true &&
+    !Object.prototype.hasOwnProperty.call(withdrawFrom, 'Sponsor')
+  ) {
+    return 'Sender';
+  }
+  if (
+    withdrawFrom.$kind === 'Sponsor' &&
+    withdrawFrom.Sponsor === true &&
+    !Object.prototype.hasOwnProperty.call(withdrawFrom, 'Sender')
+  ) {
+    return 'Sponsor';
+  }
   return null;
 }
 
@@ -348,68 +324,41 @@ export function resolveFundsWithdrawalSource(
  * Parseable reservations for other token types are unrelated and ignored.
  */
 function extractPrefixWithdrawalsFromInputs(
-  inputs: readonly Record<string, unknown>[],
+  inputs: readonly CallArg[],
   settlementTokenType: string,
-): { total: bigint; unaccountable: boolean } {
+): bigint {
   const normalizedPaymentType = normalizeStructTag(settlementTokenType);
   let total = 0n;
-  let unaccountable = false;
 
   for (const input of inputs) {
     if (input.$kind !== 'FundsWithdrawal') continue;
-    const fw = asRecord(input.FundsWithdrawal);
-    if (!fw) continue;
-    if (resolveFundsWithdrawalSource(asRecord(fw.withdrawFrom) ?? undefined) !== 'Sender') continue;
+    const fw = input.FundsWithdrawal;
+    if (fw.withdrawFrom.$kind !== 'Sender') continue;
 
-    const typeArg = asRecord(fw.typeArg);
-    const balanceType = typeArg?.Balance;
-    if (typeof balanceType !== 'string') {
-      unaccountable = true;
-      continue;
-    }
-
-    const normalizedWithdrawalType = normalizeMoveStructType(balanceType);
-    if (!normalizedWithdrawalType) {
-      unaccountable = true;
-      continue;
-    }
+    const normalizedWithdrawalType = normalizeStructTag(fw.typeArg.Balance);
     if (normalizedWithdrawalType !== normalizedPaymentType) continue;
 
-    const reservation = asRecord(fw.reservation);
-    const amount = reservation?.MaxAmountU64;
-    if (
-      reservation?.$kind !== 'MaxAmountU64' ||
-      typeof amount !== 'string' ||
-      !DECIMAL_U64_RE.test(amount)
-    ) {
-      unaccountable = true;
-      continue;
-    }
-    total += BigInt(amount);
+    total += BigInt(fw.reservation.MaxAmountU64);
   }
 
-  return { total, unaccountable };
+  return total;
 }
 
-export function extractPrefixWithdrawals(
-  tx: Transaction,
-  settlementTokenType: string,
-): { total: bigint; unaccountable: boolean } {
-  return extractPrefixWithdrawalsFromInputs(
-    tx.getData().inputs as Record<string, unknown>[],
-    settlementTokenType,
-  );
+export function extractPrefixWithdrawals(tx: Transaction, settlementTokenType: string): bigint {
+  const inputs = tx
+    .getData()
+    .inputs.map((input, index) => parseSuiCallArg(input, `inputs[${index}]`));
+  return extractPrefixWithdrawalsFromInputs(inputs, settlementTokenType);
 }
 
 /** Detect an explicit withdrawal from the sponsored transaction's gas owner. */
 export function containsSponsorWithdrawal(tx: Transaction): boolean {
-  const inputs = tx.getData().inputs as Record<string, unknown>[];
+  const inputs = tx
+    .getData()
+    .inputs.map((input, index) => parseSuiCallArg(input, `inputs[${index}]`));
   for (const input of inputs) {
     if (input.$kind !== 'FundsWithdrawal') continue;
-    const fw = asRecord(input.FundsWithdrawal);
-    if (fw && resolveFundsWithdrawalSource(asRecord(fw.withdrawFrom) ?? undefined) === 'Sponsor') {
-      return true;
-    }
+    if (input.FundsWithdrawal.withdrawFrom.$kind === 'Sponsor') return true;
   }
   return false;
 }

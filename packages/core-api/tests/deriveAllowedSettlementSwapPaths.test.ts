@@ -15,6 +15,7 @@ const DEEP = '0x' + 'de'.repeat(32) + '::deep::DEEP';
 const SUI = '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
 const POOL_A = '0x' + 'a1'.repeat(32);
 const POOL_B = '0x' + 'b2'.repeat(32);
+const DEEPBOOK_PACKAGE_ID = '0x' + 'db'.repeat(32);
 
 function settlementSwapPath(
   overrides: Partial<SingleHopSettlementSwapPath>,
@@ -37,7 +38,7 @@ function settlementSwapPath(
 function resolveAllowedSettlementSwapPaths(settlementSwapPaths: SingleHopSettlementSwapPath[]) {
   return resolvePrepareConfig({
     settlementSwapPaths,
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
   }).allowedSettlementSwapPaths;
 }
 
@@ -161,7 +162,7 @@ describe('resolvePrepareConfig — settlement swap path descriptor coverage', ()
     const settlementSwapPaths = [settlementSwapPath({})];
     const result = resolvePrepareConfig({
       settlementSwapPaths,
-      deepbookPackageId: '0xDEEPBOOK',
+      deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     });
 
     expect(result.supportedSettlementSwapPaths).toEqual(settlementSwapPaths);

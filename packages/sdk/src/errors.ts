@@ -3,31 +3,9 @@
  *
  * StelisSponsoredError — user-facing Host normalization or SDK-local sponsored-flow validation.
  * normalizeApiError   — maps StelisApiException → StelisSponsoredError.
- * isInfraError        — classifies transient network/RPC errors.
  */
 import { StelisApiException } from './client.js';
 import type { HostErrorMeta } from '@stelis/contracts';
-
-/**
- * Returns true for transient network/infrastructure errors that may resolve
- * when routed through a different endpoint (e.g. the Host's RPC node).
- * Deterministic failures (bad tx, wrong args) are NOT infra errors.
- *
- * Used only in sdk.ts — not a core-relay export (string heuristics are
- * SDK runtime policy, not shared trust-root math).
- */
-export function isInfraError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return (
-    msg.includes('fetch') ||
-    msg.includes('timeout') ||
-    msg.includes('network') ||
-    msg.includes('econnrefused') ||
-    msg.includes('grpc') ||
-    err.name === 'AbortError'
-  );
-}
 
 /**
  * User-friendly error thrown by sponsored-flow orchestration and local validation.

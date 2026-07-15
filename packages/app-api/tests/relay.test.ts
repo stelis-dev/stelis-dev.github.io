@@ -56,7 +56,6 @@ import { createRelayRoutes } from '../src/routes/relay.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import { buildSponsorUnavailableResponse } from '../src/sponsor-operations/gateResponse.js';
 import type { AppApiContext } from '../src/context.js';
-import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
 
@@ -163,7 +162,9 @@ function createMockCtx(): AppApiContext {
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
-    failoverTransport: new SuiRpcFailoverTransport([{ url: 'https://rpc.test.invalid' }]),
+    rpcFleet: {
+      endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' }],
+    },
     sponsoredLogsStore: {
       append: vi.fn().mockResolvedValue(undefined),
       getSummary: vi.fn(),
@@ -1000,7 +1001,11 @@ describe('relay routes', () => {
       // `handleSponsor.test.ts` (core-api).
       const coreApi = await import('@stelis/core-api');
       vi.mocked(coreApi.handleSponsor).mockRejectedValueOnce(
-        new coreApi.SponsorOnchainError('tx-digest-fail', 'MoveAbort', undefined),
+        new coreApi.SponsorOnchainError('tx-digest-fail', 'MoveAbort', undefined, {
+          computationCost: '10',
+          storageCost: '2',
+          storageRebate: '1',
+        }),
       );
 
       const res = await app.request('/relay/sponsor', {
@@ -1009,39 +1014,6 @@ describe('relay routes', () => {
         body: JSON.stringify(validSponsorBody),
       });
       expect(res.status).toBe(422);
-    });
-
-    it('returns 500 + GAS_EFFECTS_MISSING with the submitted digest on terminal processing failure', async () => {
-      // Post-submit terminal failure: execution succeeded but effects are missing
-      // `gasUsed` (Sui gRPC edge case). Locks the
-      // route-level invariant:
-      //   errorMap projects the contracts-owned code/status and preserves the
-      //   submitted digest so callers can reconcile the known on-chain result.
-      //
-      // Slot state refresh after this path is owned by the
-      // sponsor-terminal host callback inside `handleSponsor`. The
-      // callback preserves `outcome='success'` for the gasUsed-missing
-      // path so the per-slot balance write reflects the on-chain
-      // consumption. This is locked in `handleSponsor.test.ts`
-      // (core-api); the route does not fire a wake signal of its own.
-      const coreApi = await import('@stelis/core-api');
-      vi.mocked(coreApi.handleSponsor).mockRejectedValueOnce(
-        new coreApi.SponsorTerminalProcessingError(
-          'Execution succeeded but gasUsed missing — cannot verify economics. Digest: 0xdigest_exec_no_gas',
-          '0xdigest_exec_no_gas',
-        ),
-      );
-
-      const res = await app.request('/relay/sponsor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(validSponsorBody),
-      });
-      expect(res.status).toBe(500);
-      const body = await res.json();
-      expect(body.code).toBe('GAS_EFFECTS_MISSING');
-      expect(body.error).toBe('Internal server error');
-      expect(body.digest).toBe('0xdigest_exec_no_gas');
     });
 
     it('returns 503 + SPONSOR_CONGESTION on SponsorCongestionError', async () => {

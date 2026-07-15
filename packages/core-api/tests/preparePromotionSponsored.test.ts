@@ -30,11 +30,25 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64 } from '@mysten/sui/utils';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  grpcSimulationSuccess,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  suiEndpointSnapshotFixture,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const { buildSuiTransactionMock, simulateSuiTransactionMock } = vi.hoisted(() => ({
+  buildSuiTransactionMock: vi.fn(),
+  simulateSuiTransactionMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  buildSuiTransaction: buildSuiTransactionMock,
+  simulateSuiTransaction: simulateSuiTransactionMock,
+}));
 
 // ─────────────────────────────────────────────
 // Constants
@@ -94,47 +108,34 @@ async function buildCommandCountTxKindBytes(commandCount: number): Promise<strin
   return toBase64(kindBytes);
 }
 
-function createMockSui() {
-  return {
-    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
-        transaction,
-      ),
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
-}
+simulateSuiTransactionMock.mockImplementation(
+  async (_snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) =>
+    bindSuiResultToTransactionBytes(
+      suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, SIMULATION_GAS_USED),
+      input.transaction,
+    ),
+);
 
-/**
- * Extended mock that supports the full Transaction.build() gas-resolution path.
- *
- * Transaction.build({ client }) uses coreClientResolveTransactionPlugin when
- * client.core.resolveTransactionPlugin() returns undefined. That fallback calls
- * client.core.{getCurrentSystemState, getBalance, listCoins, getChainIdentifier}.
- *
- * Required only for tests that exercise the full prepare success path.
- * Tests that fail before step 6 (first build) can continue to use createMockSui().
- */
-function createMockSuiWithCore() {
-  return {
-    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
-        transaction,
-      ),
-    core: {
-      // Returns undefined → Transaction.build() falls back to coreClientResolveTransactionPlugin,
-      // which then calls the other core methods below for gas-price / gas-payment / expiration resolution.
-      resolveTransactionPlugin: () => undefined,
-      getCurrentSystemState: async () => ({
-        systemState: { referenceGasPrice: '1000', epoch: '100' },
-      }),
-      // Sufficient address balance so setGasPayment() skips coin-object selection and sets payment = [].
-      getBalance: async () => ({ balance: { addressBalance: '100000000000000' } }),
-      listCoins: async () => ({ objects: [] }),
-      // 32 ones in base58 = 32 zero bytes — valid ObjectDigest for ValidDuring.chain.
-      getChainIdentifier: async () => ({ chainIdentifier: '11111111111111111111111111111111' }),
-    },
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+buildSuiTransactionMock.mockImplementation(
+  async (
+    _snapshot: SuiEndpointSnapshot,
+    input: { readonly transaction: Transaction; readonly onlyTransactionKind?: boolean },
+  ) => {
+    const transaction = Transaction.from(input.transaction);
+    transaction.setGasPrice(1_000);
+    transaction.setGasPayment([
+      {
+        objectId: `0x${'99'.repeat(32)}`,
+        version: '1',
+        digest: '11111111111111111111111111111111',
+      },
+    ]);
+    return transaction.build({ onlyTransactionKind: input.onlyTransactionKind });
+  },
+);
+
+function createMockSui(): SuiEndpointSnapshot {
+  return suiEndpointSnapshotFixture();
 }
 
 // ─────────────────────────────────────────────
@@ -650,8 +651,7 @@ describe('handlePromotionPrepare', () => {
     const result = await handlePromotionPrepare(
       {
         ...ctx,
-        // Provide a full-path Sui mock required for Transaction.build() gas resolution.
-        sui: createMockSuiWithCore(),
+        sui: createMockSui(),
         prepareInflightLimiter: {
           tryAcquire: vi.fn().mockResolvedValue({ release: releaseFn }),
           inflight: 0,

@@ -11,7 +11,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
-import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
+import { STELIS_CONTRACT_IDS, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 import { makeCreditResult } from './helpers/currentFixtures.js';
 
 // ── Module-level mock: queryUserCredit ──────────────────────────────────────────
@@ -88,7 +89,22 @@ const BASE_CONFIG: RelayConfigResponse = {
 };
 
 function makeSuiClient(): SuiGrpcClient {
-  return { getReferenceGasPrice: vi.fn().mockResolvedValue(1000n) } as unknown as SuiGrpcClient;
+  return withSuiClientIdentity({});
+}
+
+function makeIdentityClient(input: {
+  network?: string;
+  getChainIdentifier: () => string;
+  getServiceInfo: ReturnType<typeof vi.fn>;
+}): SuiGrpcClient {
+  return {
+    network: input.network ?? 'testnet',
+    ledgerService: {
+      getServiceInfo: input.getServiceInfo.mockImplementation(async () => ({
+        response: { chainId: input.getChainIdentifier() },
+      })),
+    },
+  } as unknown as SuiGrpcClient;
 }
 
 async function createSDK(configOverrides?: Partial<RelayConfigResponse>): Promise<StelisSDK> {
@@ -300,5 +316,61 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     expect(result.hasLiquidity).toBe(true);
     expect(result.canSkipLiquidity).toBe(false);
     expect(Number(result.amountHuman)).toBeGreaterThan(0);
+  });
+});
+
+describe('StelisSDK supplied-client network proof', () => {
+  beforeEach(() => {
+    mockGetConfig.mockReset();
+    _creditResult = makeCreditResult();
+  });
+
+  it('rejects a client whose declared network differs from the connected Host', async () => {
+    const getServiceInfo = vi.fn();
+    const sdk = await createSDK();
+    const client = makeIdentityClient({
+      network: 'mainnet',
+      getChainIdentifier: () => SUI_CHAIN_IDENTIFIERS.testnet,
+      getServiceInfo,
+    });
+
+    await expect(sdk.queryUserCredit(client, ADDR)).rejects.toMatchObject({
+      kind: 'invalid_request',
+    });
+    expect(getServiceInfo).not.toHaveBeenCalled();
+  });
+
+  it('caches one successful live chain proof per supplied client', async () => {
+    const getServiceInfo = vi.fn();
+    const sdk = await createSDK();
+    const client = makeIdentityClient({
+      getChainIdentifier: () => SUI_CHAIN_IDENTIFIERS.testnet,
+      getServiceInfo,
+    });
+
+    await sdk.queryUserCredit(client, ADDR);
+    await sdk.queryUserCredit(client, ADDR);
+
+    expect(getServiceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes a rejected proof so the same corrected client can be proved again', async () => {
+    let chainIdentifier = '11111111111111111111111111111111';
+    const getServiceInfo = vi.fn();
+    const sdk = await createSDK();
+    const client = makeIdentityClient({
+      getChainIdentifier: () => chainIdentifier,
+      getServiceInfo,
+    });
+
+    await expect(sdk.queryUserCredit(client, ADDR)).rejects.toMatchObject({
+      kind: 'malformed_response',
+    });
+
+    chainIdentifier = SUI_CHAIN_IDENTIFIERS.testnet;
+    await expect(sdk.queryUserCredit(client, ADDR)).resolves.toMatchObject({
+      credit: expect.any(String),
+    });
+    expect(getServiceInfo).toHaveBeenCalledTimes(2);
   });
 });

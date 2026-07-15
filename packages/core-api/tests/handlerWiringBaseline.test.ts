@@ -38,9 +38,32 @@ import { computePolicyHash } from '../src/policyHash.js';
 
 // ─── Module mocks ──────────────────────────────────────────────────────────
 
-const { mockQueryUserCredit, mockPrepareBuildPipeline } = vi.hoisted(() => ({
+const {
+  mockQueryUserCredit,
+  mockPrepareBuildPipeline,
+  PACKAGE_ID,
+  CONFIG_ID,
+  REGISTRY_ID,
+  PAYOUT_ADDRESS,
+  SPONSOR_ADDRESS,
+  DEEPBOOK_PACKAGE_ID,
+  SETTLEMENT_TOKEN_TYPE,
+  POOL_ID,
+  VAULT_ONE_ID,
+  VAULT_TWO_ID,
+} = vi.hoisted(() => ({
   mockQueryUserCredit: vi.fn(),
   mockPrepareBuildPipeline: vi.fn(),
+  PACKAGE_ID: `0x${'11'.repeat(32)}`,
+  CONFIG_ID: `0x${'22'.repeat(32)}`,
+  REGISTRY_ID: `0x${'33'.repeat(32)}`,
+  PAYOUT_ADDRESS: `0x${'44'.repeat(32)}`,
+  SPONSOR_ADDRESS: `0x${'55'.repeat(32)}`,
+  DEEPBOOK_PACKAGE_ID: `0x${'66'.repeat(32)}`,
+  SETTLEMENT_TOKEN_TYPE: `0x${'77'.repeat(32)}::deep::DEEP`,
+  POOL_ID: `0x${'88'.repeat(32)}`,
+  VAULT_ONE_ID: `0x${'91'.repeat(32)}`,
+  VAULT_TWO_ID: `0x${'92'.repeat(32)}`,
 }));
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
@@ -66,10 +89,10 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
             {
               $kind: 'MoveCall',
               MoveCall: {
-                package: '0xPACKAGE',
+                package: PACKAGE_ID,
                 module: SETTLE_MODULE,
                 function: SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser,
-                typeArguments: ['0xDEEP::deep::DEEP'],
+                typeArguments: [SETTLEMENT_TOKEN_TYPE],
                 arguments: [],
               },
             },
@@ -100,8 +123,8 @@ const FAKE_TX_BYTES = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
 const FAKE_TX_BYTES_HASH = '3cf654795a1c99c8e41f69aaeb3ad9e03f1b64cb14efb3b9b3b46be771e3a5b4';
 
 const ONCHAIN_CONFIG = {
-  packageId: '0xPACKAGE',
-  configId: '0xCONFIG',
+  packageId: PACKAGE_ID,
+  configId: CONFIG_ID,
   maxClaimMist: 50_000_000n,
   minSettleMist: 0n,
   maxHostFeeMist: 500_000n,
@@ -176,14 +199,14 @@ const CREDIT_ONLY_PAYMENT_EVIDENCE = {
 const SUPPORTED_POOL = {
   hops: [
     {
-      poolId: '0xPOOL',
-      baseType: '0xDEEP::deep::DEEP',
+      poolId: POOL_ID,
+      baseType: SETTLEMENT_TOKEN_TYPE,
       quoteType: '0x2::sui::SUI',
       swapDirection: 'baseForQuote' as const,
       feeBps: 0,
     },
   ],
-  settlementTokenType: '0xDEEP::deep::DEEP',
+  settlementTokenType: SETTLEMENT_TOKEN_TYPE,
   settlementTokenSymbol: 'DEEP',
   settlementTokenDecimals: 6,
   lotSize: 1n,
@@ -214,15 +237,15 @@ function makeMockContext() {
     sui: {},
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        sponsorAddress: '0xSPONSOR42',
+        sponsorAddress: SPONSOR_ADDRESS,
       }),
       commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
-    vaultRegistryId: '0xREGISTRY',
+    packageId: PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
     abuseBlocker: {
       checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -243,7 +266,7 @@ function makeMockContext() {
       reserveNonce: vi.fn().mockResolvedValue(7n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -255,13 +278,13 @@ function makeMockContext() {
 
 function makeExtraCfg(): PrepareHandlerConfig {
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     supportedSettlementSwapPaths: [SUPPORTED_POOL],
     settlementSwapPathDescriptors: SETTLEMENT_SWAP_PATH_DESCRIPTORS,
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -291,9 +314,9 @@ function policyHashBytes(): Uint8Array {
 function mockSettleArgs(paymentInputTrace: PaymentInputTrace): void {
   const isCreditOnly = paymentInputTrace.settleVariantClass === 'credit';
   const settleArgs: ExtractedSettleArgs = {
-    configObjectId: '0xCONFIG',
-    registryObjectId: '0xREGISTRY',
-    settlementPayoutRecipient: '0xPAYOUT',
+    configObjectId: CONFIG_ID,
+    registryObjectId: REGISTRY_ID,
+    settlementPayoutRecipient: PAYOUT_ADDRESS,
     executionCostClaim: 1_800_000n,
     policyHash: policyHashBytes(),
     orderIdHash: new Uint8Array(0),
@@ -319,12 +342,15 @@ function mockSettleArgs(paymentInputTrace: PaymentInputTrace): void {
 }
 
 const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>
-  withPrepareAuthorization({
-    txKindBytes,
-    senderAddress: TEST_PREPARE_AUTH_SENDER,
-    settlementTokenType: '0xDEEP::deep::DEEP',
-    clientIp: '10.0.0.1',
-  });
+  withPrepareAuthorization(
+    {
+      txKindBytes,
+      senderAddress: TEST_PREPARE_AUTH_SENDER,
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+      clientIp: '10.0.0.1',
+    },
+    { packageId: PACKAGE_ID },
+  );
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
@@ -384,7 +410,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
 
   it('with_vault / address_balance — locks profile, claim, nonce, source', async () => {
     mockQueryUserCredit.mockResolvedValue({
-      vaultObjectId: '0xVAULT_1',
+      vaultObjectId: VAULT_ONE_ID,
       credit: '0',
       needsCreate: false,
       lastNonce: '0',
@@ -403,7 +429,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
     // Requested profile is credit_general (vault present); planner may downgrade to with_vault
     expect(buildInput.profile).toBe('credit_general');
-    expect(buildInput.vaultObjectId).toBe('0xVAULT_1');
+    expect(buildInput.vaultObjectId).toBe(VAULT_ONE_ID);
 
     const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
     expect(settleArgsCall.paymentInputTrace.source).toBe('address_balance');
@@ -423,7 +449,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
 
   it('credit_general / none_credit_only — locks credit-only path shape', async () => {
     mockQueryUserCredit.mockResolvedValue({
-      vaultObjectId: '0xVAULT_2',
+      vaultObjectId: VAULT_TWO_ID,
       credit: '999999999',
       needsCreate: false,
       lastNonce: '0',
@@ -442,7 +468,7 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
 
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
     expect(buildInput.profile).toBe('credit_general');
-    expect(buildInput.vaultObjectId).toBe('0xVAULT_2');
+    expect(buildInput.vaultObjectId).toBe(VAULT_TWO_ID);
 
     const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
     expect(settleArgsCall.paymentInputTrace.source).toBe('none_credit_only');

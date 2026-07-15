@@ -1,12 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SponsorResultMetadata } from '@stelis/core-api';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
 import type {
   RedisSponsorOperationsState,
   SlotWriteFields,
   SponsorRefillAccountWriteFields,
 } from '../../src/sponsor-operations/redisState.js';
+import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+
+const gateway = vi.hoisted(() => ({ getSuiBalance: vi.fn() }));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, getSuiBalance: gateway.getSuiBalance };
+});
+
 import { createSponsorResultStateUpdater } from '../../src/sponsor-operations/sponsorResultStateUpdater.js';
 
 const SLOT = '0xslot';
@@ -61,12 +70,20 @@ function stateStubs(options?: { staleSlot?: boolean; failSlot?: boolean; failAcc
   return { state, spendState, slotWrites, accountWrites };
 }
 
-function sui(getBalance: (owner: string) => Promise<string>): SuiGrpcClient {
-  return {
-    async getBalance({ owner }: { owner: string }) {
-      return { balance: { balance: await getBalance(owner) } };
-    },
-  } as unknown as SuiGrpcClient;
+const balanceReaders = new WeakMap<SuiEndpointSnapshot, (owner: string) => Promise<string>>();
+
+gateway.getSuiBalance.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { readonly owner: string }) => {
+    const readBalance = balanceReaders.get(snapshot);
+    if (!readBalance) throw new Error('Missing balance gateway fixture');
+    return { balance: await readBalance(input.owner) };
+  },
+);
+
+function sui(getBalance: (owner: string) => Promise<string>): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  balanceReaders.set(snapshot, getBalance);
+  return snapshot;
 }
 
 function updater(

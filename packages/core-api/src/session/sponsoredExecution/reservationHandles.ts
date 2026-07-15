@@ -518,7 +518,7 @@ function requireHandleLive(handle: { isLive(): boolean; reservationKind: string 
  *
  * The hook owns the route-specific build call
  * (`runGenericPrepareBuildPipeline` for generic,
- * `Transaction.build({ client })` for Studio); the runner stays
+ * `buildSuiTransaction` for Studio); the runner stays
  * route-agnostic and only consumes the typed result.
  */
 export interface GasBoundBuildResult {

@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { TransactionDataBuilder } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { SuiOperationError, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import type {
   SponsorRefillAccountDispatchLock,
   SponsorRefillAccountDispatchLockHandle,
@@ -17,6 +17,21 @@ import type {
   RedisSponsorOperationsState,
   SlotRead,
 } from '../../src/sponsor-operations/redisState.js';
+import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+
+const gateways = vi.hoisted(() => ({
+  buildSuiTransaction: vi.fn(),
+  executeSuiTransaction: vi.fn(),
+  getSuiBalance: vi.fn(),
+  getSuiTransactionEffects: vi.fn(),
+  simulateSuiTransaction: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, ...gateways };
+});
+
 import {
   createSponsorRefillAccountSpendCoordinator,
   createSuiSponsorRefillAccountSpendBoundary,
@@ -26,6 +41,10 @@ import {
 const SOURCE = `0x${'11'.repeat(32)}`;
 const ADMIN = `0x${'22'.repeat(32)}`;
 const SLOT = `0x${'33'.repeat(32)}`;
+
+function suiSnapshot(): SuiEndpointSnapshot {
+  return suiEndpointSnapshotFixture();
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -1245,38 +1264,34 @@ describe('Sponsor Refill Account spend coordinator', () => {
 });
 
 describe('Sui Sponsor Refill Account spend boundary', () => {
+  beforeEach(() => {
+    gateways.buildSuiTransaction.mockReset();
+    gateways.executeSuiTransaction.mockReset();
+    gateways.getSuiBalance.mockReset();
+    gateways.getSuiTransactionEffects.mockReset();
+    gateways.simulateSuiTransaction.mockReset();
+  });
+
   it('builds and signs one exact SDK transaction and reports its encoded gas budget and digest', async () => {
     const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(7));
     const sourceAddress = signer.toSuiAddress();
-    const resolveTransactionPlugin =
-      () =>
-      async (
-        data: {
-          gasData: {
-            budget: string | null;
-            owner: string | null;
-            payment: { objectId: string; version: string; digest: string }[] | null;
-            price: string | null;
-          };
-        },
-        _options: unknown,
-        next: () => Promise<void>,
-      ) => {
-        data.gasData.budget = '77';
-        data.gasData.owner = sourceAddress;
-        data.gasData.price = '1';
-        data.gasData.payment = [
+    gateways.buildSuiTransaction.mockImplementation(
+      async (_snapshot: SuiEndpointSnapshot, input: { transaction: Transaction }) => {
+        const transaction = input.transaction;
+        transaction.setGasBudget(77);
+        transaction.setGasOwner(sourceAddress);
+        transaction.setGasPrice(1);
+        transaction.setGasPayment([
           {
             objectId: `0x${'44'.repeat(32)}`,
             version: '1',
             digest: '11111111111111111111111111111111',
           },
-        ];
-        await next();
-      };
-    const sui = {
-      core: { resolveTransactionPlugin },
-    } as unknown as SuiGrpcClient;
+        ]);
+        return transaction.build();
+      },
+    );
+    const sui = suiSnapshot();
     const boundary = createSuiSponsorRefillAccountSpendBoundary({
       sui,
       signer,
@@ -1314,6 +1329,9 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
         },
       },
     ]);
+    expect(gateways.buildSuiTransaction).toHaveBeenCalledWith(sui, {
+      transaction: expect.anything(),
+    });
     await expect(
       boundary.validateSignedIdentity({
         sourceAddress,
@@ -1364,19 +1382,9 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
     ).rejects.toThrow('bytes do not match their digest');
   });
 
-  it('fails closed on malformed terminal unions and a submit bytes/digest mismatch', async () => {
+  it('uses the shared transaction/balance gateways and checks the submit digest first', async () => {
     const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(9));
-    const malformedTerminal = {
-      $kind: 'Transaction',
-      Transaction: {},
-      FailedTransaction: {},
-    };
-    const executeTransaction = vi.fn(async () => malformedTerminal);
-    const sui = {
-      simulateTransaction: vi.fn(async () => malformedTerminal),
-      getTransaction: vi.fn(async () => malformedTerminal),
-      executeTransaction,
-    } as unknown as SuiGrpcClient;
+    const sui = suiSnapshot();
     const boundary = createSuiSponsorRefillAccountSpendBoundary({
       sui,
       signer,
@@ -1384,141 +1392,92 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
     });
     const bytes = new Uint8Array([1, 2, 3, 4]);
     const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
+    gateways.simulateSuiTransaction.mockResolvedValue({
+      digest,
+      outcome: 'success',
+      effects: {},
+    });
+    gateways.getSuiTransactionEffects.mockResolvedValue({
+      digest,
+      outcome: 'success',
+      effects: {},
+    });
+    gateways.executeSuiTransaction.mockResolvedValue({
+      digest,
+      outcome: 'failure',
+      error: { kind: 'InvariantViolation' },
+      effects: {},
+    });
+    gateways.getSuiBalance.mockResolvedValue({ balance: '250' });
 
-    await expect(boundary.simulate(bytes)).rejects.toThrow('malformed terminal result');
-    await expect(boundary.lookup(digest)).rejects.toThrow('malformed terminal result');
-    await expect(boundary.submit(bytes, 'signature', digest)).rejects.toThrow(
-      'malformed terminal result',
-    );
+    await expect(boundary.simulate(bytes)).resolves.toEqual({ success: true, error: null });
+    await expect(boundary.lookup(digest)).resolves.toEqual({
+      status: 'found',
+      result: { digest, success: true, error: null },
+    });
+    await expect(boundary.submit(bytes, 'signature', digest)).resolves.toEqual({
+      digest,
+      success: false,
+      error: 'Sui execution failed (InvariantViolation)',
+    });
+    await expect(boundary.getBalance(ADMIN)).resolves.toBe(250n);
+    expect(gateways.simulateSuiTransaction).toHaveBeenCalledWith(sui, { transaction: bytes });
+    expect(gateways.getSuiTransactionEffects).toHaveBeenCalledWith(sui, { digest });
+    expect(gateways.executeSuiTransaction).toHaveBeenCalledWith(sui, {
+      transaction: bytes,
+      signatures: ['signature'],
+    });
+    expect(gateways.getSuiBalance).toHaveBeenCalledWith(sui, { owner: ADMIN });
 
-    executeTransaction.mockClear();
+    gateways.executeSuiTransaction.mockClear();
     await expect(boundary.submit(bytes, 'signature', `${digest}-corrupt`)).rejects.toThrow(
       'bytes do not match their digest',
     );
-    expect(executeTransaction).not.toHaveBeenCalled();
+    expect(gateways.executeSuiTransaction).not.toHaveBeenCalled();
   });
 
-  it('rejects a self-consistent simulation terminal for different transaction bytes', async () => {
-    const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(12));
-    const bytes = new Uint8Array([1, 2, 3, 4]);
-    const wrongDigest = TransactionDataBuilder.getDigestFromBytes(new Uint8Array([4, 3, 2, 1]));
-    const status = { success: true, error: null };
-    const terminal = {
-      $kind: 'Transaction',
-      Transaction: {
-        digest: wrongDigest,
-        status,
-        effects: { transactionDigest: wrongDigest, status },
-      },
-    };
+  it('preserves a failed gateway result and maps only exact typed not-found lookups', async () => {
+    const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(11));
+    const digest = TransactionDataBuilder.getDigestFromBytes(new Uint8Array([9, 8, 7]));
+    const sui = suiSnapshot();
     const boundary = createSuiSponsorRefillAccountSpendBoundary({
-      sui: { simulateTransaction: vi.fn(async () => terminal) } as unknown as SuiGrpcClient,
+      sui,
       signer,
       sourceAddress: signer.toSuiAddress(),
     });
-
-    await expect(boundary.simulate(bytes)).rejects.toThrow('malformed terminal result');
-  });
-
-  it('accepts a current failed terminal union and preserves its error message', async () => {
-    const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(11));
-    const digest = 'failed-digest';
-    const error = { $kind: 'Unknown', Unknown: null, message: 'chain rejected transaction' };
-    const status = { success: false, error };
-    const terminal = {
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        digest,
-        status,
-        effects: { transactionDigest: digest, status },
-      },
-    };
-    const boundary = createSuiSponsorRefillAccountSpendBoundary({
-      sui: { getTransaction: vi.fn(async () => terminal) } as unknown as SuiGrpcClient,
-      signer,
-      sourceAddress: signer.toSuiAddress(),
+    gateways.getSuiTransactionEffects.mockResolvedValueOnce({
+      digest,
+      outcome: 'failure',
+      error: { kind: 'InvariantViolation' },
+      effects: {},
     });
 
     await expect(boundary.lookup(digest)).resolves.toEqual({
       status: 'found',
-      result: { digest, success: false, error: 'chain rejected transaction' },
+      result: {
+        digest,
+        success: false,
+        error: 'Sui execution failed (InvariantViolation)',
+      },
     });
-  });
-
-  it.each([
-    { $kind: 'Unknown' },
-    {
-      $kind: 'Transaction',
-      Transaction: { digest: 'digest', status: { success: true, error: null } },
-    },
-    {
-      $kind: 'Transaction',
-      Transaction: {
-        digest: 'digest',
-        status: { success: true, error: null },
-        effects: {
-          transactionDigest: 'different',
-          status: { success: true, error: null },
-        },
-      },
-    },
-    {
-      $kind: 'Transaction',
-      Transaction: {
-        digest: 'digest',
-        status: { success: true, error: null },
-        effects: {
-          transactionDigest: 'digest',
-          status: { success: false, error: { $kind: 'Unknown', message: 'failure' } },
-        },
-      },
-    },
-    {
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        digest: 'digest',
-        status: { success: false, error: { $kind: 'Unknown', message: 'failure' } },
-        effects: {
-          transactionDigest: 'digest',
-          status: { success: false, error: { $kind: 'Unknown', message: 'failure' } },
-        },
-      },
-    },
-    {
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        digest: 'digest',
-        status: {
-          success: false,
-          error: {
-            $kind: 'MoveAbort',
-            MoveAbort: { location: '0x1::module', abortCode: '1' },
-            message: 'same summary',
-          },
-        },
-        effects: {
-          transactionDigest: 'digest',
-          status: {
-            success: false,
-            error: {
-              $kind: 'MoveAbort',
-              MoveAbort: { location: '0x2::module', abortCode: '2' },
-              message: 'same summary',
-            },
-          },
-        },
-      },
-    },
-  ])('rejects a terminal result that violates the current RPC union', async (terminal) => {
-    const signer = Ed25519Keypair.fromSecretKey(new Uint8Array(32).fill(10));
-    const boundary = createSuiSponsorRefillAccountSpendBoundary({
-      sui: { simulateTransaction: vi.fn(async () => terminal) } as unknown as SuiGrpcClient,
-      signer,
-      sourceAddress: signer.toSuiAddress(),
-    });
-
-    await expect(boundary.simulate(new Uint8Array([1]))).rejects.toThrow(
-      'malformed terminal result',
+    gateways.getSuiTransactionEffects.mockRejectedValueOnce(
+      new SuiOperationError('not_found', {
+        operation: 'get_transaction_effects',
+        attempt: 1,
+        maxAttempts: 1,
+        resourceId: digest,
+      }),
     );
+    await expect(boundary.lookup(digest)).resolves.toEqual({ status: 'not_found' });
+
+    gateways.getSuiTransactionEffects.mockRejectedValueOnce(
+      new SuiOperationError('not_found', {
+        operation: 'get_transaction_effects',
+        attempt: 1,
+        maxAttempts: 1,
+        resourceId: 'different-digest',
+      }),
+    );
+    await expect(boundary.lookup(digest)).rejects.toBeInstanceOf(SuiOperationError);
   });
 });

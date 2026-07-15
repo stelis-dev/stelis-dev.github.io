@@ -7,16 +7,20 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { SuiClientTypes } from '@mysten/sui/client';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { ExpectedSettleEventFields } from '@stelis/contracts';
 import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
-import { bindCurrentSuiResultToDigest } from '@stelis/core-relay/browser';
 import {
-  decodeSettleEvent,
+  getSuiTransactionEvents,
+  suiExecutionErrorMessage,
+  type SuiTransactionWithEventsResult,
+} from '@stelis/core-relay/browser';
+import {
+  decodeCanonicalSettleEvent,
   SETTLE_EVENT_TYPE,
   type DecodedSettleEvent,
 } from './settleEventDecoder.js';
+import { createSettlementSuiEndpoint } from './settlementSuiEndpoint.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -86,30 +90,23 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): {
   return { receiptId, orderIdHash, user: normalizedUser };
 }
 
-function malformedTransactionResult(digest: string): never {
-  throw new Error(`[Stelis] Transaction ${digest} returned a malformed or mismatched result`);
-}
-
 function verifiedSuccessPayload(
-  result: SuiClientTypes.TransactionResult<{ events: true }>,
+  result: SuiTransactionWithEventsResult,
   digest: string,
-): SuiClientTypes.Transaction<{ events: true }> {
-  const bound = bindCurrentSuiResultToDigest(result, digest);
-  if (!bound) malformedTransactionResult(digest);
-
-  if (bound.outcome === 'failure') {
-    throw new Error(`[Stelis] Transaction ${digest} failed: ${bound.errorMessage}`);
+): Extract<SuiTransactionWithEventsResult, { outcome: 'success' }> {
+  if (result.digest !== digest) {
+    throw new Error(`[Stelis] Transaction ${digest} returned a mismatched result`);
   }
-
-  if (!Array.isArray(bound.transaction.events)) {
-    throw new Error(`[Stelis] Transaction ${digest} did not include requested events`);
+  if (result.outcome === 'failure') {
+    throw new Error(
+      `[Stelis] Transaction ${digest} failed: ${suiExecutionErrorMessage(result.error)}`,
+    );
   }
-
-  return bound.transaction as unknown as SuiClientTypes.Transaction<{ events: true }>;
+  return result;
 }
 
 function verifySettleEvent(
-  payload: SuiClientTypes.Transaction<{ events: true }>,
+  payload: Extract<SuiTransactionWithEventsResult, { outcome: 'success' }>,
   digest: string,
   expected: ExpectedSettleEventFields,
   validatedExpected: ReturnType<typeof validateExpectedFields>,
@@ -119,7 +116,9 @@ function verifySettleEvent(
     throw new Error(`[Stelis] No events found in transaction ${digest}`);
   }
 
-  const settleEvents = events.filter((event) => event.eventType === SETTLE_EVENT_TYPE);
+  const settleEvents = events
+    .map(decodeCanonicalSettleEvent)
+    .filter((event): event is DecodedSettleEvent => event !== null);
   if (settleEvents.length === 0) {
     throw new Error(
       `[Stelis] SettleEvent not found in transaction ${digest}. ` +
@@ -132,7 +131,7 @@ function verifySettleEvent(
     );
   }
 
-  const verified = decodeSettleEvent(settleEvents[0]!.bcs);
+  const verified = settleEvents[0]!;
   const onChainReceiptId = normalizeHex(verified.receiptId);
   const onChainOrderIdHash = normalizeHex(verified.orderIdHash);
   const normalizedOnChainUser = verified.user;
@@ -187,18 +186,15 @@ function verifySettleEvent(
   return verified;
 }
 
-// ─────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────
-
 /**
- * Verify a SettleEvent in an already fetched current Sui transaction result.
+ * Verify an already-loaded, exact Sui transaction-and-events result.
  *
- * The requested digest must match the result payload. Only the current
- * successful `Transaction` union with an actual events array is accepted.
+ * The caller owns the network proof for the operation that produced `result`.
+ * This pure boundary exists so a caller that has already loaded the terminal
+ * result does not perform a second, potentially divergent event read.
  */
-export function verifySettleEventInTransaction(
-  result: SuiClientTypes.TransactionResult<{ events: true }>,
+export function verifySettleEventResultAgainstExpected(
+  result: SuiTransactionWithEventsResult,
   digest: string,
   expected: ExpectedSettleEventFields,
 ): VerifiedSettleEvent {
@@ -206,6 +202,10 @@ export function verifySettleEventInTransaction(
   const payload = verifiedSuccessPayload(result, digest);
   return verifySettleEvent(payload, digest, expected, validatedExpected);
 }
+
+// ─────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────
 
 /**
  * Verify an on-chain SettleEvent against application-owned expected values.
@@ -233,11 +233,8 @@ export async function verifySettleEventAgainstExpected(
   expected: ExpectedSettleEventFields,
 ): Promise<VerifiedSettleEvent> {
   const validatedExpected = validateExpectedFields(expected);
-
-  const result = await client.getTransaction({
-    digest,
-    include: { events: true },
-  });
+  const endpoint = await createSettlementSuiEndpoint(client);
+  const result = await getSuiTransactionEvents(endpoint, { digest });
   const payload = verifiedSuccessPayload(result, digest);
   return verifySettleEvent(payload, digest, expected, validatedExpected);
 }

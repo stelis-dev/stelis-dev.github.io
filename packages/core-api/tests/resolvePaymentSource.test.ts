@@ -1,8 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { traceUserPrefixValue } from '@stelis/core-relay';
+import {
+  createSuiEndpointSnapshot,
+  traceUserPrefixValue,
+  type SuiEndpointSnapshot,
+} from '@stelis/core-relay';
 import { resolvePaymentSource } from '../src/prepare/coinSelection.js';
+
+const gatewayMocks = vi.hoisted(() => ({
+  listAllSuiCoins: vi.fn(),
+  getSuiBalance: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  listAllSuiCoins: gatewayMocks.listAllSuiCoins,
+  getSuiBalance: gatewayMocks.getSuiBalance,
+}));
 
 const COIN_A = `0x${'aa'.repeat(32)}`;
 const COIN_B = `0x${'bb'.repeat(32)}`;
@@ -13,24 +28,22 @@ const SETTLEMENT_TOKEN = '0x2::sui::SUI';
 
 interface CoinPage {
   readonly objects: ReadonlyArray<{ objectId: string; balance: string }>;
-  readonly hasNextPage: boolean;
-  readonly cursor?: string | null;
 }
 
 function mockSui(pages: readonly CoinPage[], addressBalance = '0') {
-  let pageIndex = 0;
-  const listCoins = vi.fn().mockImplementation(async () => {
-    const page = pages[pageIndex++];
-    if (!page) throw new Error('Unexpected listCoins call');
-    return page;
-  });
-  const getBalance = vi.fn().mockResolvedValue({
-    balance: { coinBalance: '0', addressBalance },
+  const sui = createSuiEndpointSnapshot([{ network: 'testnet' } as unknown as SuiGrpcClient]);
+  const coins = pages.flatMap((page) => page.objects);
+  gatewayMocks.listAllSuiCoins.mockReset().mockResolvedValue(coins);
+  gatewayMocks.getSuiBalance.mockReset().mockResolvedValue({
+    coinType: SETTLEMENT_TOKEN,
+    balance: addressBalance,
+    coinBalance: '0',
+    addressBalance,
   });
   return {
-    sui: { listCoins, getBalance } as unknown as SuiGrpcClient,
-    listCoins,
-    getBalance,
+    sui,
+    listCoins: gatewayMocks.listAllSuiCoins,
+    getBalance: gatewayMocks.getSuiBalance,
   };
 }
 
@@ -38,7 +51,7 @@ function trace(tx: Transaction = new Transaction()) {
   return traceUserPrefixValue(tx, SETTLEMENT_TOKEN);
 }
 
-async function resolve(sui: SuiGrpcClient, tx: Transaction, required: bigint) {
+async function resolve(sui: SuiEndpointSnapshot, tx: Transaction, required: bigint) {
   return resolvePaymentSource(sui, OWNER, SETTLEMENT_TOKEN, required, 'SUI', trace(tx));
 }
 
@@ -47,25 +60,20 @@ describe('resolvePaymentSource — exact prefix value', () => {
     const tx = new Transaction();
     tx.splitCoins(tx.object(COIN_A), [100n]);
 
-    const exact = mockSui([
-      { objects: [{ objectId: COIN_A, balance: '1000' }], hasNextPage: false },
-    ]);
+    const exact = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }]);
     await expect(resolve(exact.sui, tx, 900n)).resolves.toEqual({
       source: 'coin_object',
       baseCoinId: COIN_A,
       mergeCoinIds: [],
       remainingBalance: 900n,
     });
-    expect(exact.listCoins).toHaveBeenCalledWith({
+    expect(exact.listCoins).toHaveBeenCalledWith(exact.sui, {
       owner: OWNER,
       coinType: SETTLEMENT_TOKEN,
     });
     expect(exact.getBalance).not.toHaveBeenCalled();
 
-    const short = mockSui(
-      [{ objects: [{ objectId: COIN_A, balance: '1000' }], hasNextPage: false }],
-      '0',
-    );
+    const short = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }], '0');
     await expect(resolve(short.sui, tx, 901n)).rejects.toMatchObject({
       code: 'INSUFFICIENT_BALANCE',
     });
@@ -75,10 +83,7 @@ describe('resolvePaymentSource — exact prefix value', () => {
     const tx = new Transaction();
     const dynamicAmount = tx.moveCall({ target: '0x2::example::dynamic_amount' });
     tx.splitCoins(tx.object(COIN_A), [dynamicAmount]);
-    const mock = mockSui(
-      [{ objects: [{ objectId: COIN_A, balance: '1000' }], hasNextPage: false }],
-      '0',
-    );
+    const mock = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }], '0');
 
     await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
@@ -95,7 +100,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_A, balance: '1000' },
           { objectId: COIN_B, balance: '200' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -116,7 +120,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_A, balance: '0' },
           { objectId: COIN_B, balance: '100' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -138,7 +141,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_A, balance: '100' },
           { objectId: COIN_B, balance: '1000' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -157,7 +159,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_A, balance: ((1n << 64n) - 1n).toString() },
           { objectId: COIN_B, balance: '1' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -176,7 +177,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_A, balance: '1000' },
           { objectId: COIN_B, balance: '200' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -199,7 +199,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
           { objectId: COIN_B, balance: '200' },
           { objectId: COIN_C, balance: '300' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -231,7 +230,6 @@ describe('resolvePaymentSource — exact prefix value', () => {
               { objectId: COIN_A, balance: '500' },
               { objectId: COIN_B, balance: '500' },
             ],
-            hasNextPage: false,
           },
         ],
         '0',
@@ -247,23 +245,23 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
   it('subtracts a same-token Sender withdrawal exactly once at the availability boundary', async () => {
     const tx = new Transaction();
     tx.withdrawal({ amount: 3_000n, type: SETTLEMENT_TOKEN });
-    const exact = mockSui([{ objects: [], hasNextPage: false }], '10000');
+    const exact = mockSui([{ objects: [] }], '10000');
 
     expect(trace(tx).senderWithdrawalDebit).toBe(3_000n);
     await expect(resolve(exact.sui, tx, 7_000n)).resolves.toEqual({
       source: 'address_balance',
       redeemAmount: 7_000n,
     });
-    expect(exact.listCoins).toHaveBeenCalledWith({
+    expect(exact.listCoins).toHaveBeenCalledWith(exact.sui, {
       owner: OWNER,
       coinType: SETTLEMENT_TOKEN,
     });
-    expect(exact.getBalance).toHaveBeenCalledWith({
+    expect(exact.getBalance).toHaveBeenCalledWith(exact.sui, {
       owner: OWNER,
       coinType: SETTLEMENT_TOKEN,
     });
 
-    const oneUnitShort = mockSui([{ objects: [], hasNextPage: false }], '10000');
+    const oneUnitShort = mockSui([{ objects: [] }], '10000');
     await expect(resolve(oneUnitShort.sui, tx, 7_001n)).rejects.toMatchObject({
       code: 'INSUFFICIENT_BALANCE',
     });
@@ -281,7 +279,6 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
             { objectId: COIN_C, balance: '1000' },
             { objectId: COIN_A, balance: '5000' },
           ],
-          hasNextPage: false,
         },
       ],
       '4000',
@@ -297,29 +294,11 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
   });
 });
 
-describe('resolvePaymentSource — paginated discovery', () => {
-  it('rejects an impossible discovered coin total above u64', async () => {
-    const mock = mockSui([
-      {
-        objects: [
-          { objectId: COIN_A, balance: ((1n << 64n) - 1n).toString() },
-          { objectId: COIN_B, balance: '1' },
-        ],
-        hasNextPage: false,
-      },
-    ]);
-
-    await expect(resolve(mock.sui, new Transaction(), 1n)).rejects.toMatchObject({
-      code: 'PAYMENT_COIN_CONFLICT',
-    });
-  });
-
-  it('stops once the selected page contains exact sufficient coin value', async () => {
+describe('resolvePaymentSource — complete gateway coin snapshot', () => {
+  it('selects exact sufficient value from the complete snapshot', async () => {
     const mock = mockSui([
       {
         objects: [{ objectId: COIN_A, balance: '1000' }],
-        hasNextPage: true,
-        cursor: 'unused-page',
       },
     ]);
 
@@ -331,18 +310,15 @@ describe('resolvePaymentSource — paginated discovery', () => {
     expect(mock.listCoins).toHaveBeenCalledOnce();
   });
 
-  it('does not stop before a later page resolves a prefix value constraint', async () => {
+  it('applies prefix constraints across the complete snapshot', async () => {
     const tx = new Transaction();
     tx.splitCoins(tx.object(COIN_A), [100n]);
     const mock = mockSui([
       {
         objects: [{ objectId: COIN_C, balance: '1000' }],
-        hasNextPage: true,
-        cursor: 'page-2',
       },
       {
         objects: [{ objectId: COIN_A, balance: '1000' }],
-        hasNextPage: false,
       },
     ]);
 
@@ -352,7 +328,7 @@ describe('resolvePaymentSource — paginated discovery', () => {
       mergeCoinIds: [COIN_C],
       remainingBalance: 1_900n,
     });
-    expect(mock.listCoins).toHaveBeenCalledTimes(2);
+    expect(mock.listCoins).toHaveBeenCalledOnce();
   });
 
   it('rejects a partially discovered merge constraint at pagination exhaustion', async () => {
@@ -364,7 +340,6 @@ describe('resolvePaymentSource — paginated discovery', () => {
           { objectId: COIN_A, balance: '100' },
           { objectId: COIN_C, balance: '1000' },
         ],
-        hasNextPage: false,
       },
     ]);
 
@@ -373,17 +348,13 @@ describe('resolvePaymentSource — paginated discovery', () => {
     });
   });
 
-  it('continues to a later page when that page is needed to cover the amount', async () => {
+  it('combines all exact coin values returned by the gateway', async () => {
     const mock = mockSui([
       {
         objects: [{ objectId: COIN_A, balance: '400' }],
-        hasNextPage: true,
-        cursor: 'page-2',
       },
       {
         objects: [{ objectId: COIN_B, balance: '600' }],
-        hasNextPage: false,
-        cursor: null,
       },
     ]);
 
@@ -393,37 +364,21 @@ describe('resolvePaymentSource — paginated discovery', () => {
       mergeCoinIds: [COIN_B],
       remainingBalance: 1_000n,
     });
-    expect(mock.listCoins).toHaveBeenCalledTimes(2);
-    expect(mock.listCoins.mock.calls[0]?.[0]).not.toHaveProperty('cursor');
-    expect(mock.listCoins.mock.calls[1]?.[0]).toMatchObject({ cursor: 'page-2' });
+    expect(mock.listCoins).toHaveBeenCalledOnce();
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
 
-  it('rejects a duplicate object returned on a later page', async () => {
+  it('rejects duplicate object identity in the complete snapshot', async () => {
     const mock = mockSui([
       {
         objects: [{ objectId: COIN_A, balance: '400' }],
-        hasNextPage: true,
-        cursor: 'page-2',
       },
       {
         objects: [{ objectId: COIN_A, balance: '400' }],
-        hasNextPage: false,
       },
     ]);
 
     await expect(resolve(mock.sui, new Transaction(), 1_000n)).rejects.toMatchObject({
-      code: 'PAYMENT_COIN_CONFLICT',
-    });
-  });
-
-  it('rejects pagination that repeats a cursor without reaching exhaustion', async () => {
-    const mock = mockSui([
-      { objects: [], hasNextPage: true, cursor: 'stuck' },
-      { objects: [], hasNextPage: true, cursor: 'stuck' },
-    ]);
-
-    await expect(resolve(mock.sui, new Transaction(), 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -432,9 +387,7 @@ describe('resolvePaymentSource — paginated discovery', () => {
 describe('resolvePaymentSource — integer boundaries', () => {
   it('keeps balances above Number.MAX_SAFE_INTEGER exact as bigint', async () => {
     const exact = 9_007_199_254_740_993n;
-    const mock = mockSui([
-      { objects: [{ objectId: COIN_A, balance: exact.toString() }], hasNextPage: false },
-    ]);
+    const mock = mockSui([{ objects: [{ objectId: COIN_A, balance: exact.toString() }] }]);
 
     await expect(resolve(mock.sui, new Transaction(), exact)).resolves.toMatchObject({
       source: 'coin_object',
@@ -443,7 +396,7 @@ describe('resolvePaymentSource — integer boundaries', () => {
   });
 
   it('rejects required amounts outside u64 before querying Sui', async () => {
-    const mock = mockSui([{ objects: [], hasNextPage: false }]);
+    const mock = mockSui([{ objects: [] }]);
 
     for (const invalid of [-1n, 1n << 64n]) {
       await expect(resolve(mock.sui, new Transaction(), invalid)).rejects.toMatchObject({
@@ -454,14 +407,12 @@ describe('resolvePaymentSource — integer boundaries', () => {
   });
 
   it('rejects non-decimal coin and address-balance strings', async () => {
-    const badCoin = mockSui([
-      { objects: [{ objectId: COIN_A, balance: '0x10' }], hasNextPage: false },
-    ]);
+    const badCoin = mockSui([{ objects: [{ objectId: COIN_A, balance: '0x10' }] }]);
     await expect(resolve(badCoin.sui, new Transaction(), 1n)).rejects.toMatchObject({
       code: 'INVALID_BALANCE_FORMAT',
     });
 
-    const badAddress = mockSui([{ objects: [], hasNextPage: false }], '1e6');
+    const badAddress = mockSui([{ objects: [] }], '1e6');
     await expect(resolve(badAddress.sui, new Transaction(), 1n)).rejects.toMatchObject({
       code: 'INVALID_BALANCE_FORMAT',
     });

@@ -95,8 +95,7 @@ export type ConsumeLedgerOutcome =
  * Post-signature ledger consume helper.
  *
  * Used by post-signature/post-submit promotion ledger updates
- * (post-signature uncertainty, on-chain revert with/without `gasUsed`,
- * post-success `GAS_EFFECTS_MISSING`, and success-side entitlement
+ * (post-signature uncertainty, on-chain revert, and success-side entitlement
  * consumption). Behavior contract:
  *
  *   - On `ConsumeResult.ok === true` returns `{ ok: true }`.

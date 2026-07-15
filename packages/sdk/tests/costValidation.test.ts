@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import { StelisSponsoredError } from '../src/errors.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
@@ -127,10 +128,7 @@ const MOCK_PREPARE_RESPONSE: RelayPrepareResponse = {
 };
 
 function makeMockSuiClient(): SuiGrpcClient {
-  return {
-    getReferenceGasPrice: vi.fn().mockResolvedValue(1000n),
-    listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
-  } as unknown as SuiGrpcClient;
+  return withSuiClientIdentity({});
 }
 
 async function createSDK(): Promise<StelisSDK> {

@@ -152,7 +152,7 @@ function respondAdminFailure(
   if (err instanceof PromotionLedgerValueError && allowedCodes.includes('ADMIN_UNPROCESSABLE')) {
     return respondMapped(c, codedHostError('ADMIN_UNPROCESSABLE', allowedCodes));
   }
-  const mapped = mapError(err, allowedCodes);
+  const mapped = mapError(err, allowedCodes, 'INTERNAL_ERROR');
   if (mapped) return respondMapped(c, mapped);
   return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
 }
@@ -388,7 +388,9 @@ export function createAdminRoutes(
           deepbookPackageId: ctx.prepareConfig.deepbookPackageId,
         },
         studioEnabled: ctx.studio !== null,
-        rpcFleet: ctx.failoverTransport.getAdminSnapshot(),
+        rpcFleet: {
+          endpoints: ctx.rpcFleet.endpoints.map((endpoint) => ({ ...endpoint })),
+        },
       };
       return c.json(parseAdminSponsorOperationsResponse(response));
     } catch (err) {

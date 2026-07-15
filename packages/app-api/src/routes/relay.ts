@@ -215,7 +215,7 @@ export function createRelayRoutes(
       if (err instanceof HostWireParseError) {
         return respondMapped(c, codedHostError('BAD_REQUEST', RELAY_PREPARE_ERROR_CODES));
       }
-      const mapped = mapError(err, RELAY_PREPARE_ERROR_CODES);
+      const mapped = mapError(err, RELAY_PREPARE_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[prepare] 500 error:', safeErrorSummary(err));
@@ -307,7 +307,7 @@ export function createRelayRoutes(
           ),
         );
       }
-      const mapped = mapError(err, RELAY_SPONSOR_ERROR_CODES);
+      const mapped = mapError(err, RELAY_SPONSOR_ERROR_CODES, 'SPONSOR_FAILED');
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[app-api /relay/sponsor] 500 error:', safeErrorSummary(err));

@@ -195,22 +195,18 @@ type RpcFleet = AdminSponsorOperationsResponse['rpcFleet'];
 function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
   return (
     <div className="admin-card">
-      <div className="admin-card-title">
-        RPC Fleet ({rpcFleet.healthyEndpoints}/{rpcFleet.totalEndpoints} healthy)
-      </div>
+      <div className="admin-card-title">RPC Endpoints ({rpcFleet.endpoints.length} qualified)</div>
       <table className="admin-table">
         <thead>
           <tr>
             <th>Endpoint</th>
             <th>Role</th>
-            <th>Status</th>
-            <th style={{ textAlign: 'right' }}>Cooldown</th>
           </tr>
         </thead>
         <tbody>
-          {rpcFleet.endpoints.map((ep) => (
-            <tr key={ep.url}>
-              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{ep.url}</td>
+          {rpcFleet.endpoints.map((ep, index) => (
+            <tr key={`${ep.role}:${index}`}>
+              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{ep.origin}</td>
               <td>
                 <span
                   style={{
@@ -220,14 +216,6 @@ function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
                 >
                   {ep.role}
                 </span>
-              </td>
-              <td>
-                <span style={{ color: ep.status === 'healthy' ? '#22c55e' : '#ef4444' }}>
-                  {ep.status}
-                </span>
-              </td>
-              <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                {ep.cooldownRemainingMs > 0 ? `${Math.ceil(ep.cooldownRemainingMs / 1000)}s` : '—'}
               </td>
             </tr>
           ))}
@@ -606,7 +594,7 @@ export function DashboardPage() {
         <SponsoredLogsKpi summary={sponsoredSummary} loading={sponsoredLoading} />
       </div>
 
-      {/* RPC Fleet */}
+      {/* Qualified RPC endpoints */}
       <RpcFleetCard rpcFleet={data.rpcFleet} />
 
       {/* Service Accounts */}

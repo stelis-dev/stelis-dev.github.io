@@ -337,11 +337,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: COUNT_BOTH,
     notes: 'Build-time dry-run rejection; subcode-level carve-out may apply.',
   },
-  DRY_RUN_NO_GAS: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Sui simulation returned no gasUsed — server-observed RPC anomaly.',
-  },
   UNACCOUNTABLE_WITHDRAWAL: {
     classification: 'manipulation',
     abuseImpact: SKIP_BOTH,
@@ -351,7 +346,7 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     classification: 'infra',
     abuseImpact: SKIP_BOTH,
     notes:
-      'Current quote acquisition includes external RPC and market-data failures, so callers are not penalized.',
+      'A completed DeepBook view did not provide a usable current quote; Sui operation failures remain internal errors.',
   },
   SLIPPAGE_EXCEEDED: {
     classification: 'normal',
@@ -715,11 +710,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: COUNT_BOTH,
     notes:
       'Shared sponsor recorder code for both routes; market subcodes increment the subject revert family.',
-  },
-  GAS_EFFECTS_MISSING: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Promotion-route post-success gasUsed missing.',
   },
   CONSUME_FAILED: {
     classification: 'infra',

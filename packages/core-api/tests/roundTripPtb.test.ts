@@ -18,8 +18,12 @@
 import { describe, it, expect } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
-import { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from '@stelis/core-relay/browser';
-import { parseSettleArgs, convertSdkCommands } from '@stelis/core-relay';
+import {
+  buildSwapAndSettlePtb,
+  buildSettleWithCreditPtb,
+  parseSettleArgs,
+  convertSdkCommands,
+} from '@stelis/core-relay';
 import { settlementParameterIndex } from '@stelis/contracts';
 
 // ─── Named addresses (file-level constants per AGENTS.md test policy) ────

@@ -96,8 +96,8 @@ export class SponsorOnchainError extends Error {
   constructor(
     public readonly digest: string,
     public readonly onchainError: string,
-    public readonly subcode?: SponsorFailureSubcode,
-    public readonly gasUsed?: GasUsedFields | null,
+    public readonly subcode: SponsorFailureSubcode | undefined,
+    public readonly gasUsed: GasUsedFields,
   ) {
     super(`Transaction reverted on-chain: ${onchainError}`);
     this.name = 'SponsorOnchainError';
@@ -115,19 +115,6 @@ export class SponsorCongestionError extends Error {
   ) {
     super(message);
     this.name = 'SponsorCongestionError';
-  }
-}
-
-/** Known on-chain success whose Host-side terminal processing could not complete. */
-export class SponsorTerminalProcessingError extends Error {
-  readonly code = 'GAS_EFFECTS_MISSING' as const;
-
-  constructor(
-    message: string,
-    public readonly digest: string,
-  ) {
-    super(message);
-    this.name = 'SponsorTerminalProcessingError';
   }
 }
 
@@ -178,8 +165,6 @@ export async function handleSponsor(
     sponsorOnchain: (digest, reason, subcode, gasUsed) =>
       new SponsorOnchainError(digest, reason, subcode, gasUsed),
     sponsorCongestion: (message, digest) => new SponsorCongestionError(message, digest),
-    sponsorTerminalProcessing: (message, digest) =>
-      new SponsorTerminalProcessingError(message, digest),
   };
 
   const options = {

@@ -54,14 +54,12 @@ export type {
 // Utilities
 // ─────────────────────────────────────────────
 
-export { checkSettlementSwapPathLiquidity } from './swap.js';
 export type { SettlementSwapPathLiquidityStatus } from './swap.js';
 
 // ─────────────────────────────────────────────
 // Credit query (shared trust root via core-relay)
 // ─────────────────────────────────────────────
 
-export { queryUserCredit, CreditQueryInconsistentStateError } from '@stelis/core-relay/browser';
 export type { CreditResult } from '@stelis/core-relay/browser';
 
 // ─────────────────────────────────────────────

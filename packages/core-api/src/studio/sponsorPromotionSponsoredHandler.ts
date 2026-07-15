@@ -2,7 +2,7 @@
  * sponsorPromotionSponsoredHandler — public Studio sponsor adapter over the
  * SponsoredExecution sponsor runner.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { SponsorResultCallback } from '../handlers/sponsorResult.js';
 import type { GasUsedFields } from '../session/sessionTypes.js';
 import {
@@ -37,8 +37,8 @@ import { runSponsorStateMachine } from '../session/sponsoredExecution/sponsorRun
 
 /** Dependencies injected by the host (app-api context). */
 export interface PromotionSponsorContext {
-  /** Sui gRPC client for preflight simulation + TX submission. */
-  sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for preflight simulation + TX submission. */
+  sui: SuiEndpointSnapshot;
   /**
    * Trusted Stelis package ID for the active network.
    *
@@ -86,7 +86,7 @@ export class PromotionSponsorError extends Error {
     message: string,
     public readonly code: PromotionSponsorErrorCode,
     public readonly meta: {
-      readonly gasUsed?: GasUsedFields | null;
+      readonly gasUsed?: GasUsedFields;
       readonly digest?: string;
       readonly subcode?: SponsorFailureSubcode;
     } = {},
@@ -125,7 +125,7 @@ export async function handlePromotionSponsor(
           message: string,
           code: PromotionSponsorErrorCode,
           meta?: {
-            readonly gasUsed?: GasUsedFields | null;
+            readonly gasUsed?: GasUsedFields;
             readonly digest?: string;
             readonly subcode?: SponsorFailureSubcode;
           },

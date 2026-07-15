@@ -35,9 +35,9 @@
  *     `sponsor_result_state_update_unhandled`.
  */
 
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SponsorResultCallback, SponsorResultMetadata } from '@stelis/core-api';
 import type { SponsorSlotState } from '@stelis/contracts';
+import { getSuiBalance, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import {
   logStructuredEvent,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
@@ -51,8 +51,8 @@ import { parseChainBalanceMist } from './balanceParsing.js';
 import type { SponsorRefillAccountSpendStateStore } from './accountSpendState.js';
 
 export interface SponsorResultCallbackDeps {
-  /** Sui gRPC client for bounded balance probes. */
-  readonly sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for bounded balance probes. */
+  readonly sui: SuiEndpointSnapshot;
   /** Shared Redis state store (write + read). */
   readonly state: RedisSponsorOperationsState;
   /** Account spend sequence used to reject stale Sponsor Refill Account probes. */
@@ -151,8 +151,8 @@ export function createSponsorResultStateUpdater(
         `sponsorResultStateUpdater.getSlotBalance(${slotAddress})`,
         deps.slotBalanceTimeoutMs,
         async () => {
-          const res = await deps.sui.getBalance({ owner: slotAddress });
-          return parseChainBalanceMist(res.balance.balance, `Slot ${slotAddress} balance`);
+          const res = await getSuiBalance(deps.sui, { owner: slotAddress });
+          return parseChainBalanceMist(res.balance, `Slot ${slotAddress} balance`);
         },
       );
     } catch (err) {

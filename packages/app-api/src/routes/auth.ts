@@ -89,7 +89,7 @@ function respondAuthFailure(
   if (err instanceof AdminAuthRequestContractError && allowedCodes.includes('BAD_REQUEST')) {
     return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
   }
-  const mapped = mapError(err, allowedCodes);
+  const mapped = mapError(err, allowedCodes, 'INTERNAL_ERROR');
   if (mapped) return respondMapped(c, mapped);
   return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
 }

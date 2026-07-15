@@ -145,11 +145,10 @@ export interface PromotionExecutionLedger {
    *
    * Used by both the success path (`actualGasMist` from successful
    * effects) and the post-signature/post-submit failure branches
-   * (post-signature uncertainty, on-chain revert with/without `gasUsed`,
-   * post-success `GAS_EFFECTS_MISSING`). Failure-path callers pass
-   * either the canonical `simGas` (revert with parseable `gasUsed`) or
-   * `prepared.reservedGasMist` (gasUsed absent / post-signature
-   * uncertainty) and append a `result: 'failed'` usage row with a
+   * (post-signature uncertainty and on-chain revert). Failure-path callers
+   * pass either the canonical `simGas` (validated on-chain effects) or
+   * `prepared.reservedGasMist` (post-signature uncertainty) and append a
+   * `result: 'failed'` usage row with a
    * branch-specific `failureReason`. Pre-submit failures and congestion
    * still call `release()` instead.
    *

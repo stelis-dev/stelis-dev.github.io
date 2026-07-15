@@ -20,7 +20,12 @@ import type { PrepareHandlerConfig, PrepareParams } from '../src/handlers/prepar
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
-import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import {
+  TEST_PREPARE_AUTH_PACKAGE_ID,
+  TEST_PREPARE_AUTH_SENDER,
+  withPrepareAuthorization,
+} from './prepareAuthTestHelpers.js';
+import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -42,11 +47,18 @@ vi.mock('@stelis/core-relay', async (importOriginal) => {
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 const MOCK_CREDIT = { vaultObjectId: null, credit: '0', needsCreate: true, lastNonce: '0' };
+const CONFIG_ID = `0x${'22'.repeat(32)}`;
+const REGISTRY_ID = `0x${'33'.repeat(32)}`;
+const PAYOUT_ADDRESS = `0x${'44'.repeat(32)}`;
+const SPONSOR_ADDRESS = `0x${'55'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'66'.repeat(32)}`;
+const POOL_ID = `0x${'77'.repeat(32)}`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 
 function makeCtx() {
   const onchainConfig = {
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+    configId: CONFIG_ID,
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
     maxHostFeeMist: 500_000n,
@@ -55,31 +67,21 @@ function makeCtx() {
   };
   return {
     network: 'testnet' as const,
-    sui: {
-      getObject: vi.fn().mockResolvedValue({ object: { json: onchainConfig } }),
-      getDynamicField: vi.fn(),
-      listOwnedObjects: vi.fn().mockResolvedValue({ objects: [] }),
-      listCoins: vi.fn().mockResolvedValue({ objects: [] }),
-      simulateTransaction: vi.fn().mockResolvedValue({
-        Transaction: {
-          status: { success: true },
-          effects: {
-            gasUsed: { computationCost: '1000000', storageCost: '500000', storageRebate: '200000' },
-          },
-        },
-      }),
-    },
+    // The build pipeline and credit query are mocked at their current
+    // boundaries in this validation-only suite. Do not invent raw Sui client
+    // methods that the exercised path never calls.
+    sui: suiEndpointSnapshotFixture(),
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        sponsorAddress: '0xSPONSOR',
+        sponsorAddress: SPONSOR_ADDRESS,
       }),
       commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
-    vaultRegistryId: '0xREGISTRY',
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
     abuseBlocker: {
       checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -97,11 +99,11 @@ function makeCtx() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -119,14 +121,14 @@ function makeExtraCfg(): PrepareHandlerConfig {
     {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xDEEP::deep::DEEP',
+          poolId: POOL_ID,
+          baseType: SETTLEMENT_TOKEN_TYPE,
           quoteType: '0x2::sui::SUI',
           swapDirection: 'baseForQuote' as const,
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -136,15 +138,15 @@ function makeExtraCfg(): PrepareHandlerConfig {
     },
   ];
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     supportedSettlementSwapPaths,
     settlementSwapPathDescriptors: createStaticSettlementSwapPathDescriptorMap(
       supportedSettlementSwapPaths,
     ),
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -160,12 +162,15 @@ async function makeValidTxKindBytes(): Promise<string> {
 }
 
 async function makeParams(txKindBytes: string): Promise<PrepareParams> {
-  return withPrepareAuthorization({
-    txKindBytes,
-    senderAddress: TEST_PREPARE_AUTH_SENDER,
-    settlementTokenType: '0xDEEP::deep::DEEP',
-    clientIp: '127.0.0.1',
-  });
+  return withPrepareAuthorization(
+    {
+      txKindBytes,
+      senderAddress: TEST_PREPARE_AUTH_SENDER,
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+      clientIp: '127.0.0.1',
+    },
+    { packageId: TEST_PREPARE_AUTH_PACKAGE_ID },
+  );
 }
 
 /**
@@ -233,7 +238,7 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
@@ -265,7 +270,7 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
@@ -295,7 +300,7 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
@@ -308,7 +313,7 @@ describe('handlePrepare — built-transaction validation rejection', () => {
     // authenticator; assert on its shape.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     const checkinArgs = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinArgs[0]).toBe('0xSPONSOR');
+    expect(checkinArgs[0]).toBe(SPONSOR_ADDRESS);
     expect(checkinArgs[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 });

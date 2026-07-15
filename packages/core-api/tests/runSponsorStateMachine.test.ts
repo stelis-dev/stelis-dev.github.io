@@ -43,10 +43,12 @@ import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { SponsorPool } from '../src/context.js';
 import { SponsorPostSignatureUncertaintyError } from '../src/session/sessionPrimitives.js';
+import { suiExecutionErrorMessage, type SuiExecutionError } from '@stelis/core-relay';
 import {
   runSponsorConsumePhase,
   type SponsorConsumePolicyAdapter,
 } from '../src/session/sponsorLifecycle.js';
+import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.js';
 
 // Force a single dependency edge on `runSponsorConsumePhase` so the
 // sub-runner contract stays exercised even when the runner under test
@@ -71,7 +73,7 @@ const TEST_USER_SIGNATURE = 'mock-user-sig';
 const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
   success: true,
   executionStage: 'on_chain',
-  digest: 'mock-digest',
+  digest: TEST_SUI_TRANSACTION_DIGEST,
   effects: undefined,
   gasUsed: {
     computationCost: '1000',
@@ -80,20 +82,32 @@ const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
   },
 };
 
+const MOVE_FAILURE: SuiExecutionError = {
+  kind: 'MovePrimitiveRuntimeError',
+};
+
+const CONGESTION_FAILURE: SuiExecutionError = {
+  kind: 'ExecutionCanceledDueToConsensusObjectCongestion',
+};
+
 const FAILED_EXEC_ONCHAIN: ExecResult = {
   success: false,
   executionStage: 'on_chain',
-  digest: 'failed-digest',
-  reason: 'MoveAbort',
+  digest: TEST_SUI_TRANSACTION_DIGEST,
+  error: MOVE_FAILURE,
   isCongestion: false,
-  gasUsed: null,
+  gasUsed: {
+    computationCost: '1000',
+    storageCost: '0',
+    storageRebate: '0',
+  },
 };
 
 const FAILED_EXEC_CONGESTION: ExecResult = {
   success: false,
   executionStage: 'after_sponsor_signature',
   digest: '',
-  reason: 'confirmed shared-object congestion',
+  error: CONGESTION_FAILURE,
   isCongestion: true,
   gasUsed: null,
 };
@@ -239,7 +253,9 @@ function makeMockHooks(opts: MakePolicyOptions = {}): {
         return;
       }
       if (result.success === false) {
-        throw new Error(`route-classified sponsor result failure: ${result.reason}`);
+        throw new Error(
+          `route-classified sponsor result failure: ${suiExecutionErrorMessage(result.error)}`,
+        );
       }
     },
     Release: (ctx) => {
@@ -441,7 +457,7 @@ describe('runSponsorStateMachine — generic happy path', () => {
 
     const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
 
-    expect(out.digest).toBe('mock-digest');
+    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
     expect(out.receiptId).toBe(TEST_RECEIPT_ID);
 
     // Order check (state-walk parity).
@@ -534,7 +550,7 @@ describe('runSponsorStateMachine — Studio happy path', () => {
 
     const out = await runSponsorStateMachine(host.host, makePromotionRequest(), policy, adapter);
 
-    expect(out.digest).toBe('mock-digest');
+    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
     expect(out.reservedGasMist).toBe('1400000');
 
     // PolicyPostconsumeChecks sees ctx WITHOUT ledger (about to mint).
@@ -742,7 +758,7 @@ describe('runSponsorStateMachine — Submit hook non-masking', () => {
     const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
 
     // Primary success path preserved — Submit's throw was swallowed.
-    expect(out.digest).toBe('mock-digest');
+    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
     expect(out.receiptId).toBe(TEST_RECEIPT_ID);
 
     // ClassifySponsorResult fired AFTER Submit's throw was swallowed.
@@ -791,7 +807,7 @@ describe('runSponsorStateMachine — Release hook non-masking', () => {
 
     const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
 
-    expect(out.digest).toBe('mock-digest');
+    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
     expect(out.receiptId).toBe(TEST_RECEIPT_ID);
   });
 

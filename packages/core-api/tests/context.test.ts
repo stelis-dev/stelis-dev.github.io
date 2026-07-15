@@ -1,231 +1,169 @@
 /**
- * context.ts — getConfig singleflight test.
+ * Host context tests for boot-qualified Sui state and config refreshes.
  *
- * Verifies that concurrent getConfig() calls share a single inflight RPC fetch
- * instead of issuing redundant sui.getObject() calls.
+ * Context construction consumes an immutable endpoint snapshot plus the exact
+ * Config/Vault state qualified by the Host at boot. Later Config refreshes use
+ * the shared core-relay gateway and retain the existing singleflight contract.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createHostContext, SponsorPool } from '../src/context.js';
-import type { HostContext } from '../src/context.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
+import { createHostContext, SponsorPool, type HostContext } from '../src/context.js';
+import type { HostChainState } from '../src/hostChainState.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareRequestNonceStore } from '../src/store/prepareRequestNonceStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryRateLimiter } from '../src/store/memoryRateLimiter.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.js';
+
+const gateway = vi.hoisted(() => ({ getSuiObject: vi.fn() }));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, getSuiObject: gateway.getSuiObject };
+});
 
 const SPONSOR_KP = Ed25519Keypair.generate();
-// Recipient must differ from sponsor (validateAddressConstraints)
-const RECIPIENT_ADDR = '0x' + 'ff'.repeat(32);
-// 32+ char HMAC secret for sponsor lease proofs.
+const RECIPIENT_ADDRESS = `0x${'ff'.repeat(32)}`;
+const PACKAGE_ID = `0x${'01'.repeat(32)}`;
+const CONFIG_ID = `0x${'02'.repeat(32)}`;
+const VAULT_REGISTRY_ID = `0x${'03'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'04'.repeat(32)}`;
+const VAULTS_TABLE_ID = `0x${'05'.repeat(32)}`;
 const TEST_HMAC_SECRET = 'context-test-hmac-secret-000000000000';
 
-function makeSponsorPool() {
-  return new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
+function makeSuiSnapshot(): SuiEndpointSnapshot {
+  return suiEndpointSnapshotFixture();
 }
 
-// Tests inject memory adapters explicitly; production wires Redis-backed
-// adapters in `app-api`.
-function makePrepareStore() {
-  return new MemoryPrepareStore(() => Promise.resolve());
+function makeInitialChainState(configVersion = 0n): HostChainState {
+  return Object.freeze({
+    config: Object.freeze({
+      packageId: PACKAGE_ID,
+      configId: CONFIG_ID,
+      maxClaimMist: 50_000_000n,
+      minSettleMist: 1_000n,
+      maxHostFeeMist: 100_000n,
+      protocolFlatFeeMist: 50_000n,
+      configVersion,
+      maxSpreadBps: 500n,
+    }),
+    vaultRegistryId: VAULT_REGISTRY_ID,
+    vaultsTableId: VAULTS_TABLE_ID,
+  });
 }
-function makePrepareRequestNonceStore() {
-  return new MemoryPrepareRequestNonceStore();
+
+function configObject(configVersion: bigint) {
+  return {
+    type: `${PACKAGE_ID}::config::Config`,
+    json: {
+      id: CONFIG_ID,
+      max_host_fee_mist: '100000',
+      protocol_flat_fee_mist: '50000',
+      max_claim_mist: '50000000',
+      min_settle_mist: '1000',
+      config_version: configVersion.toString(),
+      max_spread_bps: '500',
+    },
+  };
 }
-function makeInflightLimiter() {
-  return new MemoryPrepareInflight(2);
-}
-function makeRateLimiter() {
-  return new MemoryRateLimiter({ windowMs: 60_000, maxRequests: 20 });
-}
-function makeAbuseBlocker() {
-  return new MemoryAbuseBlocker();
+
+function makeContext(
+  options: {
+    readonly sui?: SuiEndpointSnapshot;
+    readonly initialChainState?: HostChainState;
+    readonly configCacheTtlMs?: number;
+  } = {},
+): HostContext {
+  return createHostContext({
+    network: 'testnet',
+    sui: options.sui ?? makeSuiSnapshot(),
+    sponsorPool: new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET }),
+    prepareStore: new MemoryPrepareStore(() => Promise.resolve()),
+    prepareRequestNonceStore: new MemoryPrepareRequestNonceStore(),
+    prepareInflightLimiter: new MemoryPrepareInflight(2),
+    rateLimiter: new MemoryRateLimiter({ windowMs: 60_000, maxRequests: 20 }),
+    abuseBlocker: new MemoryAbuseBlocker(),
+    packageId: PACKAGE_ID,
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: VAULT_REGISTRY_ID,
+    settlementPayoutRecipientAddress: RECIPIENT_ADDRESS,
+    initialChainState: options.initialChainState ?? makeInitialChainState(),
+    configCacheTtlMs: options.configCacheTtlMs,
+  });
 }
 
 describe('getConfig singleflight', () => {
-  let ctx: HostContext;
+  let context: HostContext | undefined;
 
   afterEach(() => {
-    ctx?.dispose();
+    context?.dispose();
+    gateway.getSuiObject.mockReset();
   });
 
-  it('concurrent getConfig() calls issue only one RPC fetch', async () => {
-    // Slow mock: resolves after 50ms to simulate real RPC latency
-    const getObjectFn = vi.fn().mockImplementation(
+  it('shares one core-relay Config refresh across concurrent callers', async () => {
+    gateway.getSuiObject.mockImplementation(
       () =>
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                object: {
-                  json: {
-                    max_host_fee_mist: '100000',
-                    protocol_flat_fee_mist: '50000',
-                    max_claim_mist: '50000000',
-                    min_settle_mist: '1000',
-                    config_version: '1',
-                    max_spread_bps: '500',
-                  },
-                },
-              }),
-            50,
-          ),
-        ),
+        new Promise((resolve) => {
+          setTimeout(() => resolve(configObject(1n)), 50);
+        }),
     );
+    const sui = makeSuiSnapshot();
+    context = makeContext({ sui, configCacheTtlMs: 0 });
 
-    ctx = createHostContext({
-      network: 'testnet',
-      suiRpcUrl: 'http://mock.local',
-      sponsorPool: makeSponsorPool(),
-      prepareStore: makePrepareStore(),
-      prepareRequestNonceStore: makePrepareRequestNonceStore(),
-      prepareInflightLimiter: makeInflightLimiter(),
-      rateLimiter: makeRateLimiter(),
-      abuseBlocker: makeAbuseBlocker(),
-      packageId: '0x' + '01'.repeat(32),
-      deepbookPackageId: '0x' + '04'.repeat(32),
-      configId: '0x' + '02'.repeat(32),
-      vaultRegistryId: '0x' + '03'.repeat(32),
-      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
-      configCacheTtlMs: 0, // disable cache so every call goes through singleflight
-    });
+    const [first, second, third] = await Promise.all([
+      context.getConfig(),
+      context.getConfig(),
+      context.getConfig(),
+    ]);
 
-    // Override the SUI client's getObject with our slow mock
-    (ctx.sui as unknown as Record<string, unknown>).getObject = getObjectFn;
-
-    // Fire 3 concurrent getConfig calls
-    const [r1, r2, r3] = await Promise.all([ctx.getConfig(), ctx.getConfig(), ctx.getConfig()]);
-
-    // All should return the same config
-    expect(r1).toEqual(r2);
-    expect(r2).toEqual(r3);
-    expect(r1.maxClaimMist).toBe(50_000_000n);
-
-    // Only 1 RPC call should have been made (singleflight)
-    expect(getObjectFn).toHaveBeenCalledTimes(1);
+    expect(first).toEqual(second);
+    expect(second).toEqual(third);
+    expect(first.maxClaimMist).toBe(50_000_000n);
+    expect(gateway.getSuiObject).toHaveBeenCalledTimes(1);
+    expect(gateway.getSuiObject).toHaveBeenCalledWith(sui, { objectId: CONFIG_ID });
   });
 
-  it('subsequent getConfig() after singleflight completes can fetch again', async () => {
+  it('starts a new gateway refresh after the previous singleflight completes', async () => {
     let callCount = 0;
-    const getObjectFn = vi.fn().mockImplementation(() => {
-      callCount++;
-      return Promise.resolve({
-        object: {
-          json: {
-            max_host_fee_mist: '100000',
-            protocol_flat_fee_mist: '50000',
-            max_claim_mist: '50000000',
-            min_settle_mist: '1000',
-            config_version: String(callCount),
-            max_spread_bps: '500',
-          },
-        },
-      });
+    gateway.getSuiObject.mockImplementation(() => {
+      callCount += 1;
+      return Promise.resolve(configObject(BigInt(callCount)));
     });
+    context = makeContext({ configCacheTtlMs: 0 });
 
-    ctx = createHostContext({
-      network: 'testnet',
-      suiRpcUrl: 'http://mock.local',
-      sponsorPool: makeSponsorPool(),
-      prepareStore: makePrepareStore(),
-      prepareRequestNonceStore: makePrepareRequestNonceStore(),
-      prepareInflightLimiter: makeInflightLimiter(),
-      rateLimiter: makeRateLimiter(),
-      abuseBlocker: makeAbuseBlocker(),
-      packageId: '0x' + '01'.repeat(32),
-      deepbookPackageId: '0x' + '04'.repeat(32),
-      configId: '0x' + '02'.repeat(32),
-      vaultRegistryId: '0x' + '03'.repeat(32),
-      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
-      configCacheTtlMs: 0,
-    });
-
-    (ctx.sui as unknown as Record<string, unknown>).getObject = getObjectFn;
-
-    // First call: fetches
-    const first = await ctx.getConfig();
-    expect(first.configVersion).toBe(1n);
-    expect(getObjectFn).toHaveBeenCalledTimes(1);
-
-    // Second call: cache 0ms TTL → re-fetches (not singleflight reuse since first completed)
-    const second = await ctx.getConfig();
-    expect(second.configVersion).toBe(2n);
-    expect(getObjectFn).toHaveBeenCalledTimes(2);
+    await expect(context.getConfig()).resolves.toMatchObject({ configVersion: 1n });
+    await expect(context.getConfig()).resolves.toMatchObject({ configVersion: 2n });
+    expect(gateway.getSuiObject).toHaveBeenCalledTimes(2);
   });
 });
 
-describe('suiClient injection', () => {
-  let ctx: HostContext;
+describe('boot-qualified Host inputs', () => {
+  let context: HostContext | undefined;
 
   afterEach(() => {
-    ctx?.dispose();
+    context?.dispose();
+    gateway.getSuiObject.mockReset();
   });
 
-  it('uses injected suiClient instead of constructing from suiRpcUrl', async () => {
-    const injectedGetObject = vi.fn().mockResolvedValue({
-      object: {
-        json: {
-          max_host_fee_mist: '200000',
-          protocol_flat_fee_mist: '10000',
-          max_claim_mist: '50000000',
-          min_settle_mist: '1000',
-          config_version: '42',
-          max_spread_bps: '500',
-        },
-      },
-    });
+  it('retains the injected endpoint snapshot and initial Config/Vault state without re-reading', async () => {
+    const sui = makeSuiSnapshot();
+    const initialChainState = makeInitialChainState(42n);
+    context = makeContext({ sui, initialChainState, configCacheTtlMs: 60_000 });
 
-    // Create a mock SuiGrpcClient-like object to inject
-    const mockSuiClient = {
-      getObject: injectedGetObject,
-    } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
-
-    ctx = createHostContext({
-      network: 'testnet',
-      suiRpcUrl: 'http://should-not-be-used.invalid',
-      suiClient: mockSuiClient,
-      sponsorPool: makeSponsorPool(),
-      prepareStore: makePrepareStore(),
-      prepareRequestNonceStore: makePrepareRequestNonceStore(),
-      prepareInflightLimiter: makeInflightLimiter(),
-      rateLimiter: makeRateLimiter(),
-      abuseBlocker: makeAbuseBlocker(),
-      packageId: '0x' + '01'.repeat(32),
-      deepbookPackageId: '0x' + '04'.repeat(32),
-      configId: '0x' + '02'.repeat(32),
-      vaultRegistryId: '0x' + '03'.repeat(32),
-      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
-      configCacheTtlMs: 0,
-    });
-
-    // ctx.sui should be the injected client, not one built from suiRpcUrl
-    expect(ctx.sui).toBe(mockSuiClient);
-
-    // getConfig should use the injected client
-    const config = await ctx.getConfig();
-    expect(config.configVersion).toBe(42n);
-    expect(injectedGetObject).toHaveBeenCalled();
+    expect(context.sui).toBe(sui);
+    expect(context.vaultsTableId).toBe(VAULTS_TABLE_ID);
+    await expect(context.getConfig()).resolves.toBe(initialChainState.config);
+    expect(gateway.getSuiObject).not.toHaveBeenCalled();
   });
 
-  it('falls back to suiRpcUrl when suiClient is not provided', () => {
-    ctx = createHostContext({
-      network: 'testnet',
-      suiRpcUrl: 'http://fallback.local',
-      sponsorPool: makeSponsorPool(),
-      prepareStore: makePrepareStore(),
-      prepareRequestNonceStore: makePrepareRequestNonceStore(),
-      prepareInflightLimiter: makeInflightLimiter(),
-      rateLimiter: makeRateLimiter(),
-      abuseBlocker: makeAbuseBlocker(),
-      packageId: '0x' + '01'.repeat(32),
-      deepbookPackageId: '0x' + '04'.repeat(32),
-      configId: '0x' + '02'.repeat(32),
-      vaultRegistryId: '0x' + '03'.repeat(32),
-      settlementPayoutRecipientAddress: RECIPIENT_ADDR,
-    });
+  it('rejects a snapshot whose network differs from the Host network', () => {
+    const mainnetSnapshot = suiEndpointSnapshotFixture('mainnet');
 
-    // ctx.sui should exist and be a real SuiGrpcClient (not undefined)
-    expect(ctx.sui).toBeDefined();
-    expect(typeof ctx.sui.getObject).toBe('function');
+    expect(() => makeContext({ sui: mainnetSnapshot })).toThrow(
+      'Sui endpoint snapshot network does not match Host network',
+    );
   });
 });

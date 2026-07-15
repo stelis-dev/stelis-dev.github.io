@@ -1,14 +1,17 @@
 /**
  * HostContext — framework-independent Host runtime configuration.
  *
- * Provides SuiGrpcClient, sponsor keypair pool, and cached on-chain Config.
+ * Provides the qualified Sui endpoint snapshot, sponsor keypair pool, and
+ * cached on-chain Config.
  * Pass this context to all handler functions.
  */
-import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiNetwork, SponsorSlotLeaseSummary } from '@stelis/contracts';
-import type { OnchainConfig, AllowedSettlementSwapPath } from '@stelis/core-relay';
-import { extractVaultTableId, extractMoveObjectFields } from '@stelis/core-relay';
+import type {
+  OnchainConfig,
+  AllowedSettlementSwapPath,
+  SuiEndpointSnapshot,
+} from '@stelis/core-relay';
 
 import type { PrepareStoreAdapter } from './store/prepareTypes.js';
 import type { PrepareRequestNonceStore } from './store/prepareRequestNonceStore.js';
@@ -35,6 +38,11 @@ import {
   SPONSOR_LEASE_HMAC_SECRET_MIN_LENGTH,
 } from './store/sponsorLeaseProof.js';
 import { assertSponsorSlotCount } from './sponsorSlotPolicy.js';
+import {
+  readOnchainConfig,
+  type HostChainState,
+  type HostChainStateIds,
+} from './hostChainState.js';
 
 const DEFAULT_CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -399,8 +407,8 @@ function isDisposable(obj: unknown): obj is Disposable {
 export interface HostRuntimeConfig {
   /** Target network */
   network: SuiNetwork;
-  /** Sui RPC URL (e.g. "http://127.0.0.1:9000") */
-  suiRpcUrl: string;
+  /** Immutable endpoint set that passed the Host boot reads. */
+  sui: SuiEndpointSnapshot;
   /** Deployed package ID */
   packageId: string;
   /** Config shared object ID */
@@ -416,6 +424,8 @@ export interface HostRuntimeConfig {
    * permitted.
    */
   deepbookPackageId: string;
+  /** Exact Config and VaultRegistry result produced during boot qualification. */
+  initialChainState: HostChainState;
   /** Config cache TTL in milliseconds. Default: DEFAULT_CONFIG_CACHE_TTL_MS. */
   configCacheTtlMs?: number;
   /**
@@ -455,12 +465,6 @@ export interface HostRuntimeConfig {
    */
   prepareInflightLimiter: PrepareInflightLimiter;
   /**
-   * Pre-constructed SuiGrpcClient to use instead of creating one from suiRpcUrl.
-   * When provided, suiRpcUrl is ignored for client construction.
-   * Use this to inject a multi-endpoint failover client from the host layer.
-   */
-  suiClient?: SuiGrpcClient;
-  /**
    * Settlement payout recipient address for execution cost claim plus quoted host fee (required).
    * Must differ from all sponsor addresses.
    * Canonicalized with normalizeSuiAddress at context creation.
@@ -487,7 +491,7 @@ export interface HostRuntimeConfig {
 
 export interface HostContext {
   network: SuiNetwork;
-  sui: SuiGrpcClient;
+  sui: SuiEndpointSnapshot;
   /**
    * Sponsor pool — checkout a slot before signing, checkin after TX completes.
    * Pool size = max concurrent sponsored TXs.
@@ -539,26 +543,10 @@ export interface HostContext {
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths: AllowedSettlementSwapPath[];
 
-  /**
-   * Cached VaultRegistry.vaults table ID.
-   * Resolved once in warmUp() — immutable per vault.move struct.
-   * ctx-local, keyed by vaultRegistryId at creation time.
-   */
-  vaultsTableId: string | null;
+  /** Boot-qualified immutable VaultRegistry.vaults table ID. */
+  readonly vaultsTableId: string;
   /** Returns cached on-chain Config. Auto-refreshes after TTL. */
   getConfig(): Promise<OnchainConfig>;
-  /**
-   * Eagerly loads and validates on-chain Config at server startup.
-   *
-   * createHostContext() is sync, so await cannot be used inside it.
-   * Call `await ctx.warmUp()` immediately after context creation to:
-   *   1. Validate Config object exists on-chain
-   *   2. Verify `max_host_fee_mist` / `protocol_flat_fee_mist` / `config_version` / `max_spread_bps` fields are present (fail-closed)
-   *   3. Pre-populate the cache so the first API request has no cold-start latency
-   *
-   * If warmUp() throws, the server should exit immediately.
-   */
-  warmUp(): Promise<void>;
   /**
    * Invalidates the cached on-chain Config, forcing a fresh fetch on the next getConfig() call.
    * Call this at the start of /sponsor to detect fee drift since /prepare time.
@@ -606,8 +594,10 @@ export interface HostContext {
  * construction time.
  */
 export function createHostContext(config: HostRuntimeConfig): HostContext {
-  const sui =
-    config.suiClient ?? new SuiGrpcClient({ network: config.network, baseUrl: config.suiRpcUrl });
+  const sui = config.sui;
+  if (sui.network !== config.network) {
+    throw new Error('createHostContext: Sui endpoint snapshot network does not match Host network');
+  }
 
   if (!config.sponsorPool) {
     throw new Error(
@@ -658,26 +648,26 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
     throw new Error('configCacheTtlMs must be a non-negative safe integer');
   }
 
-  let cachedConfig: OnchainConfig | null = null;
-  let cacheTimestamp = 0;
-  let inflightFetch: Promise<OnchainConfig> | null = null;
-
-  function parseOnchainNonNegativeBigInt(value: string | number, field: string): bigint {
-    if (typeof value === 'number') {
-      if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(`Config field ${field} must be a non-negative safe integer`);
-      }
-      return BigInt(value);
-    }
-    if (!/^(?:0|[1-9]\d*)$/.test(value)) {
-      throw new Error(`Config field ${field} must be a non-negative decimal integer string`);
-    }
-    return BigInt(value);
+  const chainIds: HostChainStateIds = {
+    packageId: canonicalizeAddress(config.packageId, 'packageId'),
+    configId: canonicalizeAddress(config.configId, 'configId'),
+    vaultRegistryId: canonicalizeAddress(config.vaultRegistryId, 'vaultRegistryId'),
+  };
+  if (
+    config.initialChainState.config.packageId !== chainIds.packageId ||
+    config.initialChainState.config.configId !== chainIds.configId ||
+    config.initialChainState.vaultRegistryId !== chainIds.vaultRegistryId
+  ) {
+    throw new Error('createHostContext: initial chain state does not match the configured objects');
   }
+
+  let cachedConfig: OnchainConfig = config.initialChainState.config;
+  let cacheTimestamp = Date.now();
+  let inflightFetch: Promise<OnchainConfig> | null = null;
 
   async function getConfig(): Promise<OnchainConfig> {
     const now = Date.now();
-    if (cachedConfig && now - cacheTimestamp < cacheTtl) {
+    if (now - cacheTimestamp < cacheTtl) {
       return cachedConfig;
     }
 
@@ -687,62 +677,8 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
 
     inflightFetch = (async () => {
       try {
-        const obj = await sui.getObject({
-          objectId: config.configId,
-          include: { json: true },
-        });
-
-        const objData = obj.object;
-        /** Minimal shape of the on-chain Config object JSON fields */
-        interface OnchainConfigFields {
-          max_host_fee_mist?: string | number | null;
-          protocol_flat_fee_mist?: string | number | null;
-          max_claim_mist?: string | number | null;
-          min_settle_mist?: string | number | null;
-          config_version?: string | number | null;
-          max_spread_bps?: string | number | null;
-        }
-        const fields = objData?.json as OnchainConfigFields | null | undefined;
-        if (!fields) {
-          throw new Error(`Config object ${config.configId} not found or not a Move object`);
-        }
-
-        // Fail-closed: throw immediately if fee fields are absent.
-        // Fees are read from the on-chain Config.
-        // Missing fields indicate a contract version mismatch and must block prepare/sponsor issuance.
-        if (
-          fields.max_host_fee_mist == null ||
-          fields.protocol_flat_fee_mist == null ||
-          fields.max_claim_mist == null ||
-          fields.min_settle_mist == null ||
-          fields.config_version == null ||
-          fields.max_spread_bps == null
-        ) {
-          throw new Error(
-            `Config object ${config.configId} missing required fields ` +
-              `(max_host_fee_mist, protocol_flat_fee_mist, config_version, max_spread_bps). ` +
-              `Ensure the deployed Config was created with the current contract version.`,
-          );
-        }
-
-        cachedConfig = {
-          packageId: config.packageId,
-          configId: config.configId,
-          maxClaimMist: parseOnchainNonNegativeBigInt(fields.max_claim_mist, 'max_claim_mist'),
-          minSettleMist: parseOnchainNonNegativeBigInt(fields.min_settle_mist, 'min_settle_mist'),
-          maxHostFeeMist: parseOnchainNonNegativeBigInt(
-            fields.max_host_fee_mist,
-            'max_host_fee_mist',
-          ),
-          protocolFlatFeeMist: parseOnchainNonNegativeBigInt(
-            fields.protocol_flat_fee_mist,
-            'protocol_flat_fee_mist',
-          ),
-          configVersion: parseOnchainNonNegativeBigInt(fields.config_version, 'config_version'),
-          maxSpreadBps: parseOnchainNonNegativeBigInt(fields.max_spread_bps, 'max_spread_bps'),
-        };
+        cachedConfig = await readOnchainConfig(sui, chainIds);
         cacheTimestamp = Date.now();
-
         return cachedConfig;
       } finally {
         inflightFetch = null;
@@ -755,9 +691,9 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
     network: config.network,
     sui,
     sponsorPool,
-    packageId: config.packageId,
-    configId: config.configId,
-    vaultRegistryId: config.vaultRegistryId,
+    packageId: chainIds.packageId,
+    configId: chainIds.configId,
+    vaultRegistryId: chainIds.vaultRegistryId,
     deepbookPackageId: config.deepbookPackageId,
     // All coordination adapters are host-injected (validated above);
     // there is no in-memory runtime default. Production hosts inject
@@ -772,26 +708,8 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
     prepareInflightLimiter: config.prepareInflightLimiter,
     settlementPayoutRecipientAddress: recipientAddr,
     allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
-    vaultsTableId: null,
+    vaultsTableId: config.initialChainState.vaultsTableId,
     getConfig,
-    async warmUp() {
-      await getConfig();
-      // Resolve and cache VaultRegistry.vaults table ID (immutable per vault.move).
-      // Uses exported helpers from @stelis/core-relay/creditQuery.
-      const registryObj = await sui.getObject({
-        objectId: config.vaultRegistryId,
-        include: { json: true },
-      });
-      const registryFields = extractMoveObjectFields(registryObj.object);
-      const tableId = extractVaultTableId(registryFields);
-      if (!tableId) {
-        throw new Error(
-          `VaultRegistry ${config.vaultRegistryId} is missing the vaults table ID. ` +
-            `Cannot start without cached tableId (fail-closed).`,
-        );
-      }
-      this.vaultsTableId = tableId;
-    },
     invalidateConfigCache(): void {
       // Force next getConfig() to fetch fresh from chain by resetting the cache timestamp.
       // This ensures /sponsor always re-reads fees before validation — detects any drift

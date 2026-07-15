@@ -19,12 +19,23 @@ import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { toBase64, toBase58 } from '@mysten/sui/utils';
 import { bcs } from '@mysten/sui/bcs';
-import { GAS_VARIANCE_FIXED_MIST, sha256Bytes } from '@stelis/core-relay';
+import {
+  CreditQueryInconsistentStateError,
+  GAS_VARIANCE_FIXED_MIST,
+  SuiOperationError,
+  convertSdkCommands,
+  sha256Bytes,
+  type CreditResult,
+  type SuiEndpointSnapshot,
+  type SuiTransactionResult,
+  type SuiTransactionWithEventsResult,
+} from '@stelis/core-relay';
 import {
   DEEPBOOK_MIN_OUT_ABORT,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
   SETTLE_WITH_CREDIT_FUNCTION,
   SLIPPAGE_CAP_BPS,
+  type MoveCallCommand,
 } from '@stelis/contracts';
 import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
@@ -35,7 +46,6 @@ import {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
-  SponsorTerminalProcessingError,
   SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from '../src/handlers/sponsor.js';
@@ -60,15 +70,28 @@ import type { PrepareStoreAdapter } from '../src/store/prepareTypes.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  congestedObjectsExecutionError,
-  grpcExecutionFailure,
-  grpcExecutionSuccess,
-  grpcSimulationFailure,
-  grpcSimulationSuccess,
-  moveAbortExecutionError,
-  unknownExecutionError,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  congestedSuiExecutionError,
+  suiExecutionFailure,
+  suiExecutionSuccess,
+  suiSimulationFailure,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+  moveAbortSuiExecutionError,
+  unclassifiedSuiExecutionError,
+  suiEndpointSnapshotFixture,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const suiGateways = vi.hoisted(() => ({
+  executeSuiTransaction: vi.fn(),
+  queryUserCredit: vi.fn(),
+  simulateSuiTransaction: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, ...suiGateways };
+});
 
 // ─────────────────────────────────────────────
 // Test constants
@@ -424,6 +447,22 @@ async function buildValidSignature(data: Uint8Array): Promise<string> {
   return signature;
 }
 
+function settlementCommandIndex(txBytes: Uint8Array): number {
+  const commands = convertSdkCommands(Transaction.from(txBytes).getData().commands);
+  const indexes = commands.flatMap((command, index) => {
+    if (command.kind !== 'MoveCall') return [];
+    const moveCall = command as MoveCallCommand;
+    return moveCall.packageId.toLowerCase() === MOCK_CONFIG.packageId.toLowerCase() &&
+      moveCall.module === 'settle'
+      ? [index]
+      : [];
+  });
+  if (indexes.length !== 1) {
+    throw new Error(`Expected exactly one Stelis settlement command, found ${indexes.length}`);
+  }
+  return indexes[0]!;
+}
+
 // ─────────────────────────────────────────────
 // Mock factories
 // ─────────────────────────────────────────────
@@ -497,60 +536,90 @@ function makeMockSponsorPool(): SponsorPoolAdapter {
   };
 }
 
-function makeMockSui(simResult?: unknown, execResult?: unknown) {
+interface MockSuiGateways {
+  readonly simulateGateway: ReturnType<
+    typeof vi.fn<(transaction: Uint8Array) => Promise<SuiTransactionResult>>
+  >;
+  readonly executeGateway: ReturnType<
+    typeof vi.fn<(transaction: Uint8Array) => Promise<SuiTransactionWithEventsResult>>
+  >;
+  readonly queryUserCreditGateway: ReturnType<
+    typeof vi.fn<
+      (
+        packageId: string,
+        vaultRegistryId: string,
+        userAddress: string,
+        vaultsTableId?: string,
+      ) => Promise<CreditResult>
+    >
+  >;
+}
+
+type MockSuiSnapshot = SuiEndpointSnapshot;
+
+const mockSuiGatewaysBySnapshot = new WeakMap<SuiEndpointSnapshot, MockSuiGateways>();
+
+function mockSuiGatewaysFor(snapshot: SuiEndpointSnapshot): MockSuiGateways {
+  const gateways = mockSuiGatewaysBySnapshot.get(snapshot);
+  if (!gateways) throw new Error('Missing Sui gateway fixture');
+  return gateways;
+}
+
+suiGateways.simulateSuiTransaction.mockImplementation(
+  (snapshot: SuiEndpointSnapshot, input: { readonly transaction: Uint8Array }) =>
+    mockSuiGatewaysFor(snapshot).simulateGateway(input.transaction),
+);
+suiGateways.executeSuiTransaction.mockImplementation(
+  (snapshot: SuiEndpointSnapshot, input: { readonly transaction: Uint8Array }) =>
+    mockSuiGatewaysFor(snapshot).executeGateway(input.transaction),
+);
+suiGateways.queryUserCredit.mockImplementation(
+  (
+    snapshot: SuiEndpointSnapshot,
+    packageId: string,
+    vaultRegistryId: string,
+    userAddress: string,
+    vaultsTableId?: string,
+  ) =>
+    mockSuiGatewaysFor(snapshot).queryUserCreditGateway(
+      packageId,
+      vaultRegistryId,
+      userAddress,
+      vaultsTableId,
+    ),
+);
+
+function makeMockSui(
+  simResult?: SuiTransactionResult,
+  execResult?: SuiTransactionWithEventsResult,
+): MockSuiSnapshot {
   const gasUsed = {
     computationCost: '3000000',
     storageCost: '2000000',
     storageRebate: '500000',
   };
-  return {
-    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        simResult ?? grpcSimulationSuccess('fixture-digest', gasUsed),
+  const snapshot = suiEndpointSnapshotFixture();
+  mockSuiGatewaysBySnapshot.set(snapshot, {
+    simulateGateway: vi.fn(async (transaction: Uint8Array) =>
+      bindSuiResultToTransactionBytes(
+        simResult ?? suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsed),
         transaction,
       ),
     ),
-    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        execResult ?? grpcExecutionSuccess('fixture-digest', gasUsed),
+    executeGateway: vi.fn(async (transaction: Uint8Array) =>
+      bindSuiResultToTransactionBytes(
+        execResult ?? suiExecutionSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsed),
         transaction,
       ),
     ),
-    getObject: vi.fn().mockResolvedValue({
-      object: {
-        json: {
-          max_host_fee_mist: '100000',
-          protocol_flat_fee_mist: '50000',
-          max_claim_mist: '50000000',
-          min_settle_mist: '1000000',
-          config_version: '1',
-          max_spread_bps: '500',
-        },
-      },
+    queryUserCreditGateway: vi.fn().mockResolvedValue({
+      vaultObjectId: null,
+      credit: '0',
+      needsCreate: true,
+      lastNonce: '0',
     }),
-  };
-}
-
-function executionSuccessWithoutValidGas(digest: string) {
-  const result = grpcExecutionSuccess(digest);
-  return {
-    ...result,
-    Transaction: {
-      ...result.Transaction,
-      effects: { ...result.Transaction.effects, gasUsed: {} },
-    },
-  };
-}
-
-function simulationSuccessWithoutValidGas(digest: string) {
-  const result = grpcSimulationSuccess(digest);
-  return {
-    ...result,
-    Transaction: {
-      ...result.Transaction,
-      effects: { ...result.Transaction.effects, gasUsed: {} },
-    },
-  };
+  });
+  return snapshot;
 }
 
 function makeMockContext(
@@ -558,7 +627,7 @@ function makeMockContext(
     prepareStore?: PrepareStoreAdapter;
     abuseBlocker?: AbuseBlockerAdapter;
     sponsorPool?: SponsorPoolAdapter;
-    sui?: ReturnType<typeof makeMockSui>;
+    sui?: MockSuiSnapshot;
     onSponsorResult?: HostContext['onSponsorResult'];
   } = {},
 ): HostContext {
@@ -566,12 +635,12 @@ function makeMockContext(
   const sui = overrides.sui ?? makeMockSui();
   return {
     network: 'testnet',
-    sui: sui as unknown as HostContext['sui'],
+    sui,
     sponsorPool,
     packageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
-    vaultsTableId: null,
+    vaultsTableId: M1_VAULTS_TABLE_ID,
     // Published DeepBook call-target ID retained for prepare/quote paths.
     // Abort classification uses the generated runtime identity instead.
     deepbookPackageId: MOCK_CONFIG.packageId,
@@ -594,7 +663,6 @@ function makeMockContext(
       maxSpreadBps: MOCK_CONFIG.maxSpreadBps,
     }),
     invalidateConfigCache: vi.fn(),
-    warmUp: vi.fn(),
     dispose: vi.fn(),
     onSponsorResult: overrides.onSponsorResult,
     prepareInflightLimiter: {} as HostContext['prepareInflightLimiter'],
@@ -609,48 +677,43 @@ const M1_VAULT_ID = '0x' + 'fa'.repeat(32);
 const M1_VAULTS_TABLE_ID = '0x' + 'ab'.repeat(32);
 
 function attachVaultLookup(
-  sui: ReturnType<typeof makeMockSui>,
+  sui: MockSuiSnapshot,
   mode:
     | { kind: 'no_vault' }
     | { kind: 'vault_exists' }
     | { kind: 'rpc_error'; err: Error }
     | { kind: 'inconsistent' },
 ): {
-  getDynamicField: ReturnType<typeof vi.fn>;
-  getObject: ReturnType<typeof vi.fn>;
+  queryUserCredit: ReturnType<typeof vi.fn>;
 } {
-  const originalGetObject = sui.getObject;
-  const getDynamicField = vi.fn();
-  const getObject = vi.fn(async (params: { objectId: string }) => {
-    if (params.objectId === M1_VAULT_ID) {
-      if (mode.kind === 'inconsistent') {
-        return { object: { json: {} } };
-      }
-      return {
-        object: {
-          json: {
-            credit: '0',
-            last_nonce: '0',
-          },
-        },
-      };
-    }
-    return originalGetObject(params);
-  });
+  const queryUserCredit = mockSuiGatewaysFor(sui).queryUserCreditGateway;
+  queryUserCredit.mockReset();
   if (mode.kind === 'no_vault') {
-    getDynamicField.mockRejectedValue({ code: 'dynamicFieldNotFound' });
-  } else if (mode.kind === 'rpc_error') {
-    getDynamicField.mockRejectedValue(mode.err);
-  } else {
-    getDynamicField.mockResolvedValue({
-      dynamicField: {
-        value: { bcs: bcs.Address.serialize(M1_VAULT_ID).toBytes() },
-      },
+    queryUserCredit.mockResolvedValue({
+      vaultObjectId: null,
+      credit: '0',
+      needsCreate: true,
+      lastNonce: '0',
     });
+  } else if (mode.kind === 'vault_exists') {
+    queryUserCredit.mockResolvedValue({
+      vaultObjectId: M1_VAULT_ID,
+      credit: '0',
+      needsCreate: false,
+      lastNonce: '0',
+    });
+  } else if (mode.kind === 'rpc_error') {
+    queryUserCredit.mockRejectedValue(mode.err);
+  } else {
+    queryUserCredit.mockRejectedValue(
+      new CreditQueryInconsistentStateError(
+        `Registry contains vault ${M1_VAULT_ID}, but the object is missing`,
+        M1_VAULT_ID,
+        SENDER,
+      ),
+    );
   }
-  (sui as unknown as { getDynamicField: typeof getDynamicField }).getDynamicField = getDynamicField;
-  sui.getObject = getObject;
-  return { getDynamicField, getObject };
+  return { queryUserCredit };
 }
 
 // ─────────────────────────────────────────────
@@ -715,7 +778,6 @@ describe('handleSponsor', () => {
       sui,
     });
     ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
-    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const result = await handleSponsor(
       ctx,
@@ -1117,7 +1179,10 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('InsufficientBalance'));
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      unclassifiedSuiExecutionError(),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1165,7 +1230,10 @@ describe('handleSponsor', () => {
       new Error('redis unreachable'),
     );
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('InsufficientBalance'));
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      unclassifiedSuiExecutionError(),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1210,14 +1278,17 @@ describe('handleSponsor', () => {
     }
   });
 
-  // ── 8: FailedTransaction $kind ─────────────────────────────────────────
+  // ── 8: Typed Move-abort simulation failure ─────────────────────────────
 
-  it('throws SponsorPreflightError on FailedTransaction $kind simulation', async () => {
+  it('throws SponsorPreflightError on a typed Move-abort simulation failure', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
-    const failedSim = grpcSimulationFailure('0xmove-abort', moveAbortExecutionError('MoveAbort'));
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({ abortCode: '999' }),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       abuseBlocker,
@@ -1254,11 +1325,15 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const staleNonceReason =
-      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::vault::check_and_advance_nonce, 1) in command 0';
-    const staleNonceSim = grpcSimulationFailure(
-      '0xstale',
-      moveAbortExecutionError(staleNonceReason, '1'),
+    const staleNonceSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: MOCK_CONFIG.packageId,
+        module: 'vault',
+        abortCode: '1',
+        constantName: 'EReplayNonce',
+      }),
     );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -1296,9 +1371,9 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const execResult = grpcExecutionFailure(
-      '0xrevert',
-      moveAbortExecutionError('MoveAbort(code: 7)', '7'),
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({ abortCode: '7' }),
       { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
     );
     const ctx = makeMockContext({
@@ -1320,6 +1395,7 @@ describe('handleSponsor', () => {
       computationCost: '1000000',
       storageCost: '1000000',
       storageRebate: '500000',
+      nonRefundableStorageFee: '0',
     });
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
@@ -1348,7 +1424,10 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const execResult = grpcExecutionFailure('0xcongested', congestedObjectsExecutionError());
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      congestedSuiExecutionError(),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1371,15 +1450,15 @@ describe('handleSponsor', () => {
 
   // ── 10b: Path A — top-level throw does NOT record ONCHAIN_REVERT ──────
 
-  it('Path A: top-level executeTransaction throw does not record ONCHAIN_REVERT', async () => {
+  it('Path A: execution gateway throw does not record ONCHAIN_REVERT', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    // Mock executeTransaction to throw (simulates RPC/network error)
+    // The typed execution gateway throws before a terminal result is proven.
     const sui = makeMockSui();
-    sui.executeTransaction = vi.fn().mockRejectedValue(new Error('connection refused'));
+    mockSuiGatewaysFor(sui).executeGateway.mockRejectedValue(new Error('connection refused'));
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1439,7 +1518,10 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const failedSim = grpcSimulationFailure('0xfail', unknownExecutionError('Fail'));
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      unclassifiedSuiExecutionError(),
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1468,11 +1550,15 @@ describe('handleSponsor', () => {
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
-    const execResult = grpcExecutionFailure('0xrevert2', unknownExecutionError('Abort'), {
-      computationCost: '1',
-      storageCost: '1',
-      storageRebate: '0',
-    });
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      unclassifiedSuiExecutionError(),
+      {
+        computationCost: '1',
+        storageCost: '1',
+        storageRebate: '0',
+      },
+    );
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
       sponsorPool,
@@ -1855,31 +1941,35 @@ describe('handleSponsor', () => {
     );
   });
 
-  // ── 19: L3 fail-closed when gasUsed is absent ─────────────────────────
+  // ── 19: Gateway fail-closed on malformed simulation response ──────────
 
-  it('throws SponsorPreflightError when preflight has no gasUsed (L3 fail-closed)', async () => {
+  it('propagates a malformed-response gateway error before signing and checks in the slot', async () => {
     const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
     const prepared = makePreparedEntry(txHash);
     const userSig = await buildValidSignature(txBytes);
 
-    // Terminal status is valid, but the gas summary is not usable.
-    const simResult = simulationSuccessWithoutValidGas('0xdigest_no_gas');
+    const malformed = new SuiOperationError('malformed_response', {
+      operation: 'simulate_transaction',
+      attempt: 1,
+      maxAttempts: 1,
+    });
+    const sui = makeMockSui();
+    mockSuiGatewaysFor(sui).simulateGateway.mockRejectedValue(malformed);
     const sponsorPool = makeMockSponsorPool();
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
-      sui: makeMockSui(simResult),
+      sui,
       sponsorPool,
     });
 
-    await expect(
-      handleSponsor(
-        ctx,
-        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-        CLIENT_IP,
-      ),
-    ).rejects.toThrow(SponsorPreflightError);
+    const err = await handleSponsor(
+      ctx,
+      { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
+      CLIENT_IP,
+    ).catch((cause: unknown) => cause);
 
-    // Slot must be checked in
+    expect(err).toBe(malformed);
+    expect(sponsorPool.sign).not.toHaveBeenCalled();
     expect(sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       PAYMENT_ID,
@@ -1900,8 +1990,8 @@ describe('handleSponsor', () => {
       storageCost: '500000',
       storageRebate: '3000000', // 3M > 1M + 0.5M = 1.5M → raw = -1.5M → clamp to 0
     };
-    const negativeGasSimResult = grpcSimulationSuccess('0xdigest_negative_gas', negativeGas);
-    const negativeGasExecResult = grpcExecutionSuccess('0xdigest_negative_gas', negativeGas);
+    const negativeGasSimResult = suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, negativeGas);
+    const negativeGasExecResult = suiExecutionSuccess(TEST_SUI_TRANSACTION_DIGEST, negativeGas);
     const sponsorPool = makeMockSponsorPool();
     const ctx = makeMockContext({
       prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -2047,10 +2137,10 @@ describe('handleSponsor', () => {
   });
 
   it('SponsorLeaseExpiredError has correct code property', () => {
-    const err = new SponsorLeaseExpiredError('0xsponsor-test');
+    const err = new SponsorLeaseExpiredError(SPONSOR_ADDRESS);
     expect(err.code).toBe('LEASE_EXPIRED');
     expect(err.name).toBe('SponsorLeaseExpiredError');
-    expect(err.message).toContain('0xsponsor-test');
+    expect(err.message).toContain(SPONSOR_ADDRESS);
   });
 
   // ── 22b: Preflight abort 101 → subcode: CLAIM_WOULD_EXCEED_MAX ───────
@@ -2061,11 +2151,15 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const reason =
-      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 0';
-    const failedSim = grpcSimulationFailure(
-      '0xfail_claim',
-      moveAbortExecutionError(reason, '101'),
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: MOCK_CONFIG.packageId,
+        module: 'settle',
+        abortCode: '101',
+        constantName: 'EClaimTooHigh',
+      }),
       { computationCost: '1000', storageCost: '500', storageRebate: '200' },
     );
     const ctx = makeMockContext({
@@ -2098,11 +2192,15 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const reason =
-      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 101) in command 0';
-    const execResult = grpcExecutionFailure(
-      '0xrevert_claim',
-      moveAbortExecutionError(reason, '101'),
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: MOCK_CONFIG.packageId,
+        module: 'settle',
+        abortCode: '101',
+        constantName: 'EClaimTooHigh',
+      }),
       { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
     );
     const ctx = makeMockContext({
@@ -2138,11 +2236,15 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const reason =
-      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 1';
-    const failedSim = grpcSimulationFailure(
-      '0xfail_spread',
-      moveAbortExecutionError(reason, '110'),
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: MOCK_CONFIG.packageId,
+        module: 'settle',
+        abortCode: '110',
+        constantName: 'ESpreadTooWide',
+      }),
       { computationCost: '1000', storageCost: '500', storageRebate: '200' },
     );
     const sui = makeMockSui(failedSim);
@@ -2154,7 +2256,6 @@ describe('handleSponsor', () => {
       sui,
     });
     ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
-    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2181,11 +2282,15 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const reason =
-      'MoveAbort(0x1111111111111111111111111111111111111111111111111111111111111111::settle, 110) in command 1';
-    const execResult = grpcExecutionFailure(
-      '0xrevert_spread',
-      moveAbortExecutionError(reason, '110'),
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: MOCK_CONFIG.packageId,
+        module: 'settle',
+        abortCode: '110',
+        constantName: 'ESpreadTooWide',
+      }),
       { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
     );
     const sui = makeMockSui(undefined, execResult);
@@ -2197,7 +2302,6 @@ describe('handleSponsor', () => {
       sui,
     });
     ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
-    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2225,10 +2329,18 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const abuseBlocker = makeMockAbuseBlocker();
     const sponsorPool = makeMockSponsorPool();
-    const reason = `Transaction resolution failed: MoveAbort in 2nd command, abort code: ${DEEPBOOK_MIN_OUT_ABORT.code}, in '${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::${DEEPBOOK_MIN_OUT_ABORT.modulePath}' (instruction 165)`;
-    const failedSim = grpcSimulationFailure(
-      '0xfail_slippage',
-      moveAbortExecutionError(reason, String(DEEPBOOK_MIN_OUT_ABORT.code)),
+    const deepbookModule = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::')[0]!;
+    const deepbookFunction = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::')[1]!;
+    const failedSim = suiSimulationFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+        module: deepbookModule,
+        functionName: deepbookFunction,
+        abortCode: String(DEEPBOOK_MIN_OUT_ABORT.code),
+        constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
+      }),
       { computationCost: '1000', storageCost: '500', storageRebate: '200' },
     );
     const sui = makeMockSui(failedSim);
@@ -2240,7 +2352,6 @@ describe('handleSponsor', () => {
       sui,
     });
     ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
-    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2267,10 +2378,18 @@ describe('handleSponsor', () => {
     const userSig = await buildValidSignature(txBytes);
     const sponsorPool = makeMockSponsorPool();
     const abuseBlocker = makeMockAbuseBlocker();
-    const reason = `Transaction resolution failed: MoveAbort in 2nd command, abort code: ${DEEPBOOK_MIN_OUT_ABORT.code}, in '${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::${DEEPBOOK_MIN_OUT_ABORT.modulePath}' (instruction 165)`;
-    const execResult = grpcExecutionFailure(
-      '0xrevert_slippage',
-      moveAbortExecutionError(reason, String(DEEPBOOK_MIN_OUT_ABORT.code)),
+    const deepbookModule = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::')[0]!;
+    const deepbookFunction = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::')[1]!;
+    const execResult = suiExecutionFailure(
+      TEST_SUI_TRANSACTION_DIGEST,
+      moveAbortSuiExecutionError({
+        command: settlementCommandIndex(txBytes),
+        packageId: DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+        module: deepbookModule,
+        functionName: deepbookFunction,
+        abortCode: String(DEEPBOOK_MIN_OUT_ABORT.code),
+        constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
+      }),
       { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
     );
     const sui = makeMockSui(undefined, execResult);
@@ -2282,7 +2401,6 @@ describe('handleSponsor', () => {
       sui,
     });
     ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
-    (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
 
     const err = await handleSponsor(
       ctx,
@@ -2596,71 +2714,6 @@ describe('handleSponsor', () => {
     });
   });
 
-  // ── Post-submit gasUsed-missing → terminal-processing failure ──────────
-  //
-  // Locks four characteristics of the post-submit `success + !gasUsed`
-  // path:
-  //   1. Error classification: SponsorTerminalProcessingError(GAS_EFFECTS_MISSING)
-  //      — NOT SponsorPreflightError (would invite unsafe retries).
-  //   2. Observability: `SPONSOR_EXEC_GAS_USED_MISSING` structured warn
-  //      event with the locked payload (route, digest, receipt_id,
-  //      sender, client_ip, sponsor_address, execution_path_key).
-  //   3. No abuse attribution: server-observed edge case on a successfully
-  //      submitted TX — must not increment any abuse counter.
-  //   4. Cleanup: slot is checked in via the finally block.
-
-  it('post-submit gasUsed-missing: terminal-processing error + structured warn log + no abuse + slot checkin', async () => {
-    const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-    const prepared = makePreparedEntry(txHash);
-    const userSig = await buildValidSignature(txBytes);
-
-    // Terminal evidence is valid, but the gas summary is unusable.
-    const execResultNoGas = executionSuccessWithoutValidGas('0xdigest_exec_no_gas');
-    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const sponsorPool = makeMockSponsorPool();
-    const abuseBlocker = makeMockAbuseBlocker();
-    const ctx = makeMockContext({
-      prepareStore: makeMockPrepareStore(prepared, prepared),
-      // Preflight simulation succeeds WITH gasUsed (postconsume passes).
-      // Execution succeeds WITHOUT gasUsed (sponsor result bug site).
-      sui: makeMockSui(undefined, execResultNoGas),
-      sponsorPool,
-      abuseBlocker,
-    });
-
-    const err = await handleSponsor(
-      ctx,
-      { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-      CLIENT_IP,
-    ).catch((e: unknown) => e);
-
-    // (1) Error classification
-    expect(err).toBeInstanceOf(SponsorTerminalProcessingError);
-    expect((err as SponsorTerminalProcessingError).code).toBe('GAS_EFFECTS_MISSING');
-    expect((err as SponsorTerminalProcessingError).digest).toBe(suiDigest(txBytes));
-    expect((err as SponsorTerminalProcessingError).message).toContain(suiDigest(txBytes));
-    expect(err).not.toBeInstanceOf(SponsorPreflightError);
-
-    // (2) Observability: SPONSOR_EXEC_GAS_USED_MISSING warn event with locked payload
-    const missingGasLog = findStructuredLog(consoleWarnSpy, 'SPONSOR_EXEC_GAS_USED_MISSING');
-    expect(missingGasLog).toBeDefined();
-    expect(missingGasLog!['route']).toBe('generic');
-    expect(missingGasLog!['digest']).toBe(suiDigest(txBytes));
-    expect(missingGasLog!['receipt_id']).toBe(PAYMENT_ID);
-    expect(missingGasLog!['sender']).toBe(SENDER);
-    expect(missingGasLog!['client_ip']).toBe(CLIENT_IP);
-    expect(missingGasLog!['sponsor_address']).toBe(SPONSOR_ADDRESS);
-    expect(missingGasLog!['execution_path_key']).toBe('credit');
-
-    // (3) No abuse attribution on this path
-    expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
-
-    // (4) Slot is checked in with the committed txBytesHash
-    expect(sponsorPool.checkin).toHaveBeenCalledWith(SPONSOR_ADDRESS, PAYMENT_ID, txHash);
-
-    consoleWarnSpy.mockRestore();
-  });
-
   // ── Sponsor result host callback behavior ──────────────────────────
   //
   // `ctx.onSponsorResult` is expected to:
@@ -2743,57 +2796,13 @@ describe('handleSponsor', () => {
       expect(order).toEqual(['checkin', 'callback']);
     });
 
-    it('post-submit gasUsed-missing → outcome=success (slot balance was consumed)', async () => {
-      // This path still reports `success` to the host callback because
-      // the slot's balance change is authoritative from submit onwards,
-      // even if a later throw reports missing gasUsed.
-      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-      const prepared = makePreparedEntry(txHash);
-      const userSig = await buildValidSignature(txBytes);
-      const execResultNoGas = executionSuccessWithoutValidGas('0xdigest_exec_no_gas');
-      const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const probe = collectingCallback();
-      const ctx = makeMockContext({
-        prepareStore: makeMockPrepareStore(prepared, prepared),
-        sui: makeMockSui(undefined, execResultNoGas),
-        onSponsorResult: probe.callback,
-      });
-
-      const err = await handleSponsor(
-        ctx,
-        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-        CLIENT_IP,
-      ).catch((e: unknown) => e);
-
-      expect(err).toBeInstanceOf(SponsorTerminalProcessingError);
-      expect((err as SponsorTerminalProcessingError).code).toBe('GAS_EFFECTS_MISSING');
-      expect((err as SponsorTerminalProcessingError).digest).toBe(suiDigest(txBytes));
-
-      // Sponsor result callback sees success because the TX really did submit.
-      expect(probe.calls).toHaveLength(1);
-      expect(probe.calls[0]).toMatchObject({
-        sponsorAddress: SPONSOR_ADDRESS,
-        outcome: 'success',
-        executionStage: 'on_chain',
-        digest: suiDigest(txBytes),
-      });
-      // Economics block: gasUsed-missing edge path → unknown economics
-      // with the SPONSOR_EXEC_GAS_USED_MISSING failureReason.
-      expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
-      if (probe.calls[0].economics.economicsStatus === 'unknown') {
-        expect(probe.calls[0].economics.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
-      }
-      consoleWarnSpy.mockRestore();
-    });
-
     it('on-chain revert → outcome=onchain_revert with digest from error', async () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      // Use the current Sui client's discriminated terminal union.
-      const execRevert = grpcExecutionFailure(
-        '0xreverted_digest',
-        moveAbortExecutionError('MoveAbort(code: 7)', '7'),
+      const execRevert = suiExecutionFailure(
+        TEST_SUI_TRANSACTION_DIGEST,
+        moveAbortSuiExecutionError({ abortCode: '7' }),
         { computationCost: '1000000', storageCost: '1000000', storageRebate: '500000' },
       );
       const probe = collectingCallback();
@@ -2820,9 +2829,11 @@ describe('handleSponsor', () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
-      // `signAndSubmit` classifies shared-object congestion via the
-      // `$kind: 'FailedTransaction'` wrapper + congestion error kind.
-      const execCongestion = grpcExecutionFailure('0xcongested', congestedObjectsExecutionError());
+      // `signAndSubmit` classifies the current gateway's typed congestion kind.
+      const execCongestion = suiExecutionFailure(
+        TEST_SUI_TRANSACTION_DIGEST,
+        congestedSuiExecutionError(),
+      );
       const probe = collectingCallback();
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
@@ -2845,8 +2856,8 @@ describe('handleSponsor', () => {
     it('RPC exception after signing remains uncertain even when its message mentions congestion', async () => {
       // Generic post-signature branch parity check with the promotion
       // handler. `signAndSubmit` issues the sponsor signature inside
-      // `pool.sign()` before calling `executeTransaction()`.
-      // Any non-congestion `executeTransaction` throw therefore happens
+      // `pool.sign()` before calling the execution gateway.
+      // Any non-congestion gateway throw therefore happens
       // post-signature, and the TX may have reached the network and
       // burned gas. `executionStage` is the recorder authority;
       // Diagnostic text cannot turn a rejected RPC promise into confirmed
@@ -2856,11 +2867,9 @@ describe('handleSponsor', () => {
       const userSig = await buildValidSignature(txBytes);
       const probe = collectingCallback();
       const sui = makeMockSui();
-      sui.executeTransaction = vi
-        .fn()
-        .mockRejectedValue(
-          new Error('ExecutionCancelledDueToSharedObjectCongestion: rpc transport rejected'),
-        );
+      mockSuiGatewaysFor(sui).executeGateway.mockRejectedValue(
+        new Error('ExecutionCancelledDueToSharedObjectCongestion: rpc transport rejected'),
+      );
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
         sui,
@@ -2889,13 +2898,18 @@ describe('handleSponsor', () => {
       }
     });
 
-    it('missing terminal result after sponsor signature is typed as post-signature uncertainty', async () => {
+    it('typed malformed execution response after sponsor signature is post-signature uncertainty', async () => {
       const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
       const probe = collectingCallback();
+      const malformed = new SuiOperationError('malformed_response', {
+        operation: 'execute_transaction',
+        attempt: 1,
+        maxAttempts: 1,
+      });
       const sui = makeMockSui();
-      sui.executeTransaction = vi.fn().mockResolvedValue({ $kind: 'Transaction' });
+      mockSuiGatewaysFor(sui).executeGateway.mockRejectedValue(malformed);
       const ctx = makeMockContext({
         prepareStore: makeMockPrepareStore(prepared, prepared),
         sui,
@@ -2918,90 +2932,13 @@ describe('handleSponsor', () => {
         digest: suiDigest(txBytes),
       });
       expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
-    });
-
-    it('rejects a hybrid terminal union instead of selecting one branch', async () => {
-      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-      const prepared = makePreparedEntry(txHash);
-      const userSig = await buildValidSignature(txBytes);
-      const success = grpcExecutionSuccess('0xhybrid');
-      const failure = grpcExecutionFailure(
-        '0xhybrid',
-        moveAbortExecutionError('MoveAbort(code: 7)', '7'),
-      );
-      const sui = makeMockSui();
-      sui.executeTransaction = vi.fn().mockResolvedValue({
-        ...success,
-        FailedTransaction: failure.FailedTransaction,
-      });
-      const probe = collectingCallback();
-      const ctx = makeMockContext({
-        prepareStore: makeMockPrepareStore(prepared, prepared),
-        sui,
-        onSponsorResult: probe.callback,
-      });
-
-      const err = await handleSponsor(
-        ctx,
-        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-        CLIENT_IP,
-      ).catch((cause: unknown) => cause);
-
-      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
-      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
-      expect(probe.calls).toHaveLength(1);
-      expect(probe.calls[0]).toMatchObject({
-        outcome: 'internal_error',
-        executionStage: 'after_sponsor_signature',
-        route: 'generic',
-      });
-    });
-
-    it('rejects disagreement between transaction and effects status', async () => {
-      const { encodedTxBytes, txBytes, txHash } = await buildValidTx(SPONSOR_ADDRESS);
-      const prepared = makePreparedEntry(txHash);
-      const userSig = await buildValidSignature(txBytes);
-      const success = grpcExecutionSuccess('0xstatus-mismatch');
-      const failure = grpcExecutionFailure(
-        '0xstatus-mismatch',
-        moveAbortExecutionError('MoveAbort(code: 9)', '9'),
-      );
-      const sui = makeMockSui();
-      sui.executeTransaction = vi.fn().mockResolvedValue({
-        ...success,
-        Transaction: {
-          ...success.Transaction,
-          effects: {
-            ...success.Transaction.effects,
-            status: failure.FailedTransaction.status,
-          },
-        },
-      });
-      const probe = collectingCallback();
-      const ctx = makeMockContext({
-        prepareStore: makeMockPrepareStore(prepared, prepared),
-        sui,
-        onSponsorResult: probe.callback,
-      });
-
-      const err = await handleSponsor(
-        ctx,
-        { txBytes: encodedTxBytes, userSignature: userSig, receiptId: PAYMENT_ID },
-        CLIENT_IP,
-      ).catch((cause: unknown) => cause);
-
-      expect(err).toBeInstanceOf(SponsorSubmissionUncertainError);
-      expect((err as SponsorSubmissionUncertainError).digest).toBe(suiDigest(txBytes));
-      expect(probe.calls).toHaveLength(1);
-      expect(probe.calls[0]).toMatchObject({
-        outcome: 'internal_error',
-        executionStage: 'after_sponsor_signature',
-        route: 'generic',
+      expect((err as SponsorSubmissionUncertainError).cause).toMatchObject({
+        cause: malformed,
       });
     });
 
     it('pre-sign pool.sign() rejection does not carry post-signature uncertainty', async () => {
-      // `pool.sign()` runs before `executeTransaction()` inside
+      // `pool.sign()` runs before the execution gateway inside
       // `signAndSubmit`.
       // A `SponsorLeaseExpiredError` from `pool.sign()` therefore
       // means the sponsor signature was never issued, so the
@@ -3058,7 +2995,7 @@ describe('handleSponsor', () => {
       const probe = collectingCallback();
       // computation + storage = 800_000; storageRebate = 2_000_000 →
       // rawNet = -1_200_000 → clamp to 0.
-      const successExec = grpcExecutionSuccess('tx-success-rebate', {
+      const successExec = suiExecutionSuccess(TEST_SUI_TRANSACTION_DIGEST, {
         computationCost: '500000',
         storageCost: '300000',
         storageRebate: '2000000',
@@ -3110,7 +3047,7 @@ describe('handleSponsor', () => {
       const prepared = makePreparedEntry(txHash);
       const userSig = await buildValidSignature(txBytes);
       const executionDigest = suiDigest(txBytes);
-      const successExec = grpcExecutionSuccess(executionDigest, {
+      const successExec = suiExecutionSuccess(executionDigest, {
         computationCost: '500000',
         storageCost: '300000',
         storageRebate: '2000000',
@@ -3164,9 +3101,9 @@ describe('handleSponsor', () => {
       const probe = collectingCallback();
       // computation + storage = 1_000_000; storageRebate = 1_500_000
       // → rawNet = -500_000 → clamp to 0.
-      const failedExec = grpcExecutionFailure(
-        'tx-revert-rebate',
-        unknownExecutionError('rebate-positive revert'),
+      const failedExec = suiExecutionFailure(
+        TEST_SUI_TRANSACTION_DIGEST,
+        unclassifiedSuiExecutionError(),
         {
           computationCost: '700000',
           storageCost: '300000',
@@ -3192,7 +3129,9 @@ describe('handleSponsor', () => {
       if (probe.calls[0].economics.economicsStatus === 'known') {
         expect(probe.calls[0].economics.recoveredGasMist).toBe('0');
         expect(probe.calls[0].economics.hostPaidGasMist).toBe('0');
-        expect(probe.calls[0].economics.failureReason).toBe('rebate-positive revert');
+        expect(probe.calls[0].economics.failureReason).toBe(
+          'Sui execution failed (InvariantViolation)',
+        );
         // grossGasMist + storageRebateMist preserved verbatim from the
         // raw effects so operators can still read the actual on-chain
         // numbers; only the derived `hostPaidGasMist` is clamped.
@@ -3255,8 +3194,7 @@ describe('handleSponsor', () => {
       opts: { needsAllowedSettlementSwapPaths?: boolean } = {},
     ): HostContext {
       const ctx = makeMockContext(ctxOverrides);
-      // Pre-cached vaultsTableId so queryUserCredit skips the registry fetch.
-      (ctx as { vaultsTableId: string }).vaultsTableId = M1_VAULTS_TABLE_ID;
+      // makeMockContext supplies the boot-qualified vaults table snapshot.
       // Swap PTBs need an allowed settlement swap path entry so postconsume L2 passes.
       if (opts.needsAllowedSettlementSwapPaths !== false) {
         ctx.allowedSettlementSwapPaths = [SWAP_ALLOWED_ROUTE];
@@ -3288,18 +3226,24 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('REPREPARE_REQUIRED');
       // Vault re-query was invoked exactly once.
-      expect(lookup.getDynamicField).toHaveBeenCalledTimes(1);
+      expect(lookup.queryUserCredit).toHaveBeenCalledTimes(1);
+      expect(lookup.queryUserCredit).toHaveBeenCalledWith(
+        MOCK_CONFIG.packageId,
+        MOCK_CONFIG.vaultRegistryId,
+        SENDER,
+        M1_VAULTS_TABLE_ID,
+      );
       // No abuse counter increment (drift, not user manipulation).
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
-      // Preflight (sui.simulateTransaction) MUST NOT be reached when the
+      // The preflight gateway MUST NOT be reached when the
       // vault-drift gate fires. If preflight ran first the
       // on-chain `EVaultAlreadyRegistered` abort would return as
       // `SPONSOR_PREFLIGHT_FAILED` + IP-counter pressure, violating the
       // drift contract (no abuse, drift event emitted).
-      expect(sui.simulateTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).simulateGateway).not.toHaveBeenCalled();
       // Sponsor sign / submit are not reached.
       expect(sponsorPool.sign).not.toHaveBeenCalled();
-      expect(sui.executeTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).executeGateway).not.toHaveBeenCalled();
       // SPONSOR_DRIFT_OBSERVED payload contract — pricing-and-validation.md
       // §Sponsor Failure Classification: stage / subcode / route / receipt_id /
       // sender / client_ip. The promotion-only `promotion_id` field must NOT
@@ -3337,12 +3281,12 @@ describe('handleSponsor', () => {
       );
 
       expect(result.digest).toBeDefined();
-      expect(lookup.getDynamicField).toHaveBeenCalledTimes(1);
+      expect(lookup.queryUserCredit).toHaveBeenCalledTimes(1);
       // When the vault-drift check passes (no drift), preflight runs
       // afterwards. This locks the gasOwner → vault check → preflight order.
-      expect(sui.simulateTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSuiGatewaysFor(sui).simulateGateway).toHaveBeenCalledTimes(1);
       expect(sponsorPool.sign).toHaveBeenCalledTimes(1);
-      expect(sui.executeTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSuiGatewaysFor(sui).executeGateway).toHaveBeenCalledTimes(1);
     });
 
     // Regression lock: the vault-drift gate must run before preflight so
@@ -3356,12 +3300,15 @@ describe('handleSponsor', () => {
       // `EVaultAlreadyRegistered` abort. The test asserts preflight is
       // never invoked, so this stub value would be observed only if the
       // ordering regressed.
-      const vaultAlreadyRegisteredSim = grpcSimulationFailure(
-        '0xstubbed-not-reached',
-        moveAbortExecutionError(
-          `MoveAbort(${MOCK_CONFIG.packageId}::vault::register_vault, 1) in command 0`,
-          '1',
-        ),
+      const vaultAlreadyRegisteredSim = suiSimulationFailure(
+        TEST_SUI_TRANSACTION_DIGEST,
+        moveAbortSuiExecutionError({
+          command: settlementCommandIndex(txBytes),
+          packageId: MOCK_CONFIG.packageId,
+          module: 'vault',
+          abortCode: '1',
+          constantName: 'EVaultAlreadyRegistered',
+        }),
       );
       const sui = makeMockSui(vaultAlreadyRegisteredSim);
       const lookup = attachVaultLookup(sui, { kind: 'vault_exists' });
@@ -3384,14 +3331,14 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('REPREPARE_REQUIRED');
       // Preflight is short-circuited.
-      expect(sui.simulateTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).simulateGateway).not.toHaveBeenCalled();
       // Vault re-query DID run.
-      expect(lookup.getDynamicField).toHaveBeenCalledTimes(1);
+      expect(lookup.queryUserCredit).toHaveBeenCalledTimes(1);
       // No abuse on either address or IP counter.
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
       // Sponsor sign + submit not reached.
       expect(sponsorPool.sign).not.toHaveBeenCalled();
-      expect(sui.executeTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).executeGateway).not.toHaveBeenCalled();
       // The handler emits SPONSOR_DRIFT_OBSERVED with the right stage; it does NOT
       // emit a preflight-failure record because preflight never ran.
       const driftLog = findStructuredLog(consoleInfoSpy, 'SPONSOR_DRIFT_OBSERVED');
@@ -3421,9 +3368,9 @@ describe('handleSponsor', () => {
         CLIENT_IP,
       );
 
-      expect(lookup.getDynamicField).not.toHaveBeenCalled();
+      expect(lookup.queryUserCredit).not.toHaveBeenCalled();
       // Credit path bypasses the vault re-query but still runs preflight + sign.
-      expect(sui.simulateTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSuiGatewaysFor(sui).simulateGateway).toHaveBeenCalledTimes(1);
     });
 
     it('with_vault PTB → vault re-query is NOT invoked (handler-level lock for swap_and_settle_with_vault_*)', async () => {
@@ -3459,11 +3406,11 @@ describe('handleSponsor', () => {
       );
 
       expect(result.digest).toBeDefined();
-      expect(lookup.getDynamicField).not.toHaveBeenCalled();
+      expect(lookup.queryUserCredit).not.toHaveBeenCalled();
       // With-vault path bypasses the vault re-query but still runs preflight + sign.
-      expect(sui.simulateTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSuiGatewaysFor(sui).simulateGateway).toHaveBeenCalledTimes(1);
       expect(sponsorPool.sign).toHaveBeenCalledTimes(1);
-      expect(sui.executeTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSuiGatewaysFor(sui).executeGateway).toHaveBeenCalledTimes(1);
     });
 
     it('new_user PTB + queryUserCredit RPC error → SPONSOR_FAILED, no sign, no abuse, drift log', async () => {
@@ -3490,9 +3437,9 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
       // Fail-closed BEFORE preflight + sign + submit.
-      expect(sui.simulateTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).simulateGateway).not.toHaveBeenCalled();
       expect(sponsorPool.sign).not.toHaveBeenCalled();
-      expect(sui.executeTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).executeGateway).not.toHaveBeenCalled();
       // Sponsor-time vault re-query failure records no abuse:
       // server-observable transient/inconsistent state, not user manipulation.
       expect(abuseBlocker.recordSponsorFailure).not.toHaveBeenCalled();
@@ -3532,7 +3479,7 @@ describe('handleSponsor', () => {
       expect(err).toBeInstanceOf(SponsorValidationError);
       expect((err as SponsorValidationError).code).toBe('SPONSOR_FAILED');
       // Fail-closed BEFORE preflight + sign + submit.
-      expect(sui.simulateTransaction).not.toHaveBeenCalled();
+      expect(mockSuiGatewaysFor(sui).simulateGateway).not.toHaveBeenCalled();
       expect(sponsorPool.sign).not.toHaveBeenCalled();
       // Sponsor-time vault re-query failure records no abuse.
       // Registry/vault inconsistency is a server-observable trust-root drift,

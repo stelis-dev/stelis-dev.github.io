@@ -1,4 +1,4 @@
-import { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { RelayConfigResponse, RelayPrepareResponse } from '@stelis/contracts';
 
 export type {

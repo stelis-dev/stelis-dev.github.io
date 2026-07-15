@@ -1,13 +1,12 @@
 /**
  * DeepBook v3 Swap utilities for the Stelis SDK.
  *
- * SDK-specific functions:
- *   - checkSettlementSwapPathLiquidity(): UX helper for settlement swap path status display
+ * Internal SDK liquidity projection consumed by the network-proving
+ * StelisSDK.checkSettlementSwapPathLiquidity() method.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SingleHopSettlementSwapPath } from './types.js';
 
-import { batchGetHopMidPrices } from '@stelis/core-relay/browser';
+import { batchGetHopMidPrices, type SuiEndpointSnapshot } from '@stelis/core-relay/browser';
 import { bigintToSafeNumberOrNull, formatRatioDecimal } from './numberFormat.js';
 
 /** DeepBook's fixed-point scale for raw mid-price values. Internal SDK authority. */
@@ -104,15 +103,19 @@ export interface SettlementSwapPathLiquidityStatus {
  * `mid_price > 0` means bid+ask orders exist on both sides of the book,
  * which is the liquidity signal used by the current SDK flow.
  */
-export async function checkSettlementSwapPathLiquidity(
-  client: SuiGrpcClient,
+export async function readSettlementSwapPathLiquidity(
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   settlementSwapPath: SingleHopSettlementSwapPath,
 ): Promise<SettlementSwapPathLiquidityStatus> {
   const label = `${settlementSwapPath.settlementTokenSymbol}/SUI`;
 
   // Query all hop mid-prices in a single batch call
-  const hopPrices = await batchGetHopMidPrices(client, deepbookPackageId, settlementSwapPath.hops);
+  const hopPrices = await batchGetHopMidPrices(
+    snapshot,
+    deepbookPackageId,
+    settlementSwapPath.hops,
+  );
   const composedMidPriceRaw = composeSettlementTokenToSuiMidPrice(settlementSwapPath, hopPrices);
 
   // Build per-hop status for diagnostic display

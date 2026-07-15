@@ -42,6 +42,7 @@ import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import type { GenericPreparedTxDraft } from '../src/store/prepareTypes.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
+import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.js';
 
 // ─── Test constants ─────────────────────────────────────────────────────
 
@@ -152,25 +153,6 @@ async function buildValidSignature(data: Uint8Array): Promise<string> {
   return signature;
 }
 
-function makeMockSui() {
-  return {
-    simulateTransaction: vi.fn(),
-    executeTransaction: vi.fn(),
-    getObject: vi.fn().mockResolvedValue({
-      object: {
-        json: {
-          max_host_fee_mist: '100000',
-          protocol_flat_fee_mist: '50000',
-          max_claim_mist: '50000000',
-          min_settle_mist: '1000000',
-          config_version: '1',
-          max_spread_bps: '500',
-        },
-      },
-    }),
-  };
-}
-
 interface E2EHarness {
   redis: FakeRedisClient;
   prepareStore: RedisPrepareStore;
@@ -200,13 +182,16 @@ async function buildHarness(): Promise<E2EHarness> {
 
   const ctx: HostContext = {
     network: 'testnet',
-    sui: makeMockSui() as unknown as HostContext['sui'],
+    // Corruption is rejected before any chain operation. Keep this fixture at
+    // the current snapshot boundary instead of advertising unused raw RPC
+    // methods from an obsolete client shape.
+    sui: suiEndpointSnapshotFixture(),
     sponsorPool: sponsorPool as unknown as HostContext['sponsorPool'],
     packageId: MOCK_CONFIG.packageId,
     deepbookPackageId: MOCK_CONFIG.packageId,
     configId: MOCK_CONFIG.configId,
     vaultRegistryId: MOCK_CONFIG.vaultRegistryId,
-    vaultsTableId: null,
+    vaultsTableId: `0x${'44'.repeat(32)}`,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker: new MemoryAbuseBlocker() as unknown as HostContext['abuseBlocker'],
     prepareStore,
@@ -231,7 +216,6 @@ async function buildHarness(): Promise<E2EHarness> {
       maxSpreadBps: MOCK_CONFIG.maxSpreadBps,
     }),
     invalidateConfigCache: vi.fn(),
-    warmUp: vi.fn(),
     dispose: vi.fn(),
   };
 

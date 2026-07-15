@@ -5,6 +5,7 @@
  * Persisted boundary type remains `PreparedTxEntry` in store/prepareTypes.ts.
  */
 import type { PreparedTxEntry } from '../store/prepareTypes.js';
+import type { SuiExecutionError } from '@stelis/core-relay';
 
 // ─────────────────────────────────────────────
 // Preflight simulation result
@@ -23,7 +24,7 @@ export interface GasUsedFields {
  */
 export type PreflightResult =
   | { success: true; gasUsed: GasUsedFields }
-  | { success: false; reason: string };
+  | { success: false; error: SuiExecutionError };
 
 // ─────────────────────────────────────────────
 // TX execution result
@@ -43,13 +44,13 @@ export type ExecResult =
       executionStage: 'on_chain';
       digest: string;
       effects: unknown;
-      gasUsed: GasUsedFields | null;
+      gasUsed: GasUsedFields;
     }
   | {
       success: false;
       executionStage: 'after_sponsor_signature';
       digest: string;
-      reason: string;
+      error: SuiExecutionError;
       isCongestion: true;
       gasUsed: null;
     }
@@ -57,18 +58,14 @@ export type ExecResult =
       success: false;
       executionStage: 'on_chain';
       digest: string;
-      reason: string;
+      error: SuiExecutionError;
       isCongestion: false;
       /**
-       * Gas paid for the on-chain attempt (extracted from FailedTransaction
-       * effects or status-based failure effects when available). Sponsored
-       * execution recorder uses this to mark `economicsStatus = "known"`
-       * for onchain reverts that consumed gas. `null` when a validated
-       * on-chain terminal result has no canonical gas summary. Transport
-       * errors do not produce this variant, and confirmed congestion uses
-       * the separate `isCongestion: true` variant above.
+       * Exact gas paid for the validated on-chain terminal result. Transport
+       * errors do not produce this variant, and confirmed congestion uses the
+       * separate `isCongestion: true` variant above.
        */
-      gasUsed: GasUsedFields | null;
+      gasUsed: GasUsedFields;
     };
 
 // ─────────────────────────────────────────────

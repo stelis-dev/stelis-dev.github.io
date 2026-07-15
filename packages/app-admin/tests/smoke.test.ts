@@ -7,7 +7,19 @@
  * 3. Component exports exist and are renderable
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { hostErrorPublicMessage } from '@stelis/contracts';
+import { hostErrorPublicMessage, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
+
+const { assertSuiNetworkMock } = vi.hoisted(() => ({
+  assertSuiNetworkMock: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@stelis/core-relay/browser', () => ({
+  assertSuiNetwork: assertSuiNetworkMock,
+  createSuiEndpointSnapshot: (endpoints: readonly { network: string }[]) => ({
+    endpointCount: endpoints.length,
+    network: endpoints[0]!.network,
+  }),
+}));
 
 // ── API Client tests ───────────────────────────────────────────────────────
 
@@ -235,14 +247,10 @@ describe('API client', () => {
       rpcFleet: {
         endpoints: [
           {
-            url: 'https://primary.rpc.test',
+            origin: 'https://primary.rpc.test',
             role: 'primary',
-            status: 'healthy',
-            cooldownRemainingMs: 0,
           },
         ],
-        totalEndpoints: 1,
-        healthyEndpoints: 1,
       },
     };
     vi.stubGlobal(
@@ -263,6 +271,55 @@ describe('API client', () => {
       }),
     );
     expect(result.network).toBe('testnet');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...mockPool,
+            rpcFleet: {
+              endpoints: [
+                { origin: 'https://primary.rpc.test', role: 'primary' },
+                { origin: 'https://primary.rpc.test', role: 'secondary' },
+              ],
+            },
+          }),
+      }),
+    );
+    await expect(getSponsorOperations()).resolves.toMatchObject({
+      rpcFleet: {
+        endpoints: [
+          { origin: 'https://primary.rpc.test', role: 'primary' },
+          { origin: 'https://primary.rpc.test', role: 'secondary' },
+        ],
+      },
+    });
+
+    for (const origin of [
+      'https://user:secret@primary.rpc.test',
+      'https://primary.rpc.test/provider/path',
+      'https://primary.rpc.test?token=secret',
+      'https://primary.rpc.test#fragment',
+      'https://primary.rpc.test\n',
+      'https://PRIMARY.rpc.test:443',
+    ]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              ...mockPool,
+              rpcFleet: {
+                endpoints: [{ origin, role: 'primary' }],
+              },
+            }),
+        }),
+      );
+      await expect(getSponsorOperations()).rejects.toThrow(/current Sui RPC origin|canonical/);
+    }
   });
 
   it('getBlocklist returns { blocklist: [...] } matching server contract', async () => {
@@ -421,6 +478,29 @@ describe('Sui RPC selection', () => {
 
     expect(getSuiRpcUrl('testnet')).toBe('https://fullnode.testnet.sui.io:443');
     expect(getSuiRpcUrl('mainnet')).toBe('https://fullnode.mainnet.sui.io:443');
+  });
+
+  it('returns an app-admin client only after proving the Host network chain identity', async () => {
+    assertSuiNetworkMock.mockResolvedValueOnce(undefined);
+    const { createVerifiedAdminSuiClient } = await import('../src/suiRpc');
+
+    const client = await createVerifiedAdminSuiClient('testnet');
+
+    expect(client.network).toBe('testnet');
+    expect(assertSuiNetworkMock).toHaveBeenCalledWith(
+      expect.objectContaining({ network: 'testnet', endpointCount: 1 }),
+      {
+        network: 'testnet',
+        chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+      },
+    );
+  });
+
+  it('does not return a client when live chain identity proof fails', async () => {
+    assertSuiNetworkMock.mockRejectedValueOnce(new Error('chain mismatch'));
+    const { createVerifiedAdminSuiClient } = await import('../src/suiRpc');
+
+    await expect(createVerifiedAdminSuiClient('testnet')).rejects.toThrow('chain mismatch');
   });
 });
 

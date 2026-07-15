@@ -12,7 +12,7 @@
  * On-chain queries and dry-run are mocked — integration testing
  * requires a live network or more elaborate test infrastructure.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64 } from '@mysten/sui/utils';
@@ -20,64 +20,103 @@ import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepar
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { PrepareValidationError, MAX_TX_KIND_BYTES } from '../src/prepare/replay.js';
 import { PrepareOverloadError } from '../src/store/prepareErrors.js';
+import { CreditQueryInconsistentStateError } from '@stelis/core-relay';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import {
+  suiEndpointSnapshotFixture,
+  TEST_SUI_TRANSACTION_DIGEST,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const gateway = vi.hoisted(() => ({
+  getSuiBalance: vi.fn(),
+  listAllSuiCoins: vi.fn(),
+  queryUserCredit: vi.fn(),
+  simulateSuiTransaction: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, ...gateway };
+});
 
 /** Valid-format test address (64-hex) for use in tests that reach BCS serialize. */
 const TEST_SENDER_ADDR = TEST_PREPARE_AUTH_SENDER;
+const PACKAGE_ID = `0x${'01'.repeat(32)}`;
+const CONFIG_ID = `0x${'02'.repeat(32)}`;
+const VAULT_REGISTRY_ID = `0x${'03'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'04'.repeat(32)}`;
+const VAULTS_TABLE_ID = `0x${'05'.repeat(32)}`;
+const PAYOUT_ADDRESS = `0x${'06'.repeat(32)}`;
+const SPONSOR_ADDRESS = `0x${'07'.repeat(32)}`;
+const POOL_ID = `0x${'08'.repeat(32)}`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'09'.repeat(32)}::deep::DEEP`;
+const UNSUPPORTED_SETTLEMENT_TOKEN_TYPE = `0x${'0a'.repeat(32)}::token::TOKEN`;
+
+beforeEach(() => {
+  gateway.getSuiBalance.mockReset().mockResolvedValue({
+    coinType: '0x2::sui::SUI',
+    balance: '0',
+    coinBalance: '0',
+    addressBalance: '0',
+  });
+  gateway.listAllSuiCoins.mockReset().mockResolvedValue([]);
+  gateway.queryUserCredit.mockReset().mockResolvedValue({
+    vaultObjectId: null,
+    credit: '0',
+    needsCreate: true,
+    lastNonce: '0',
+  });
+  gateway.simulateSuiTransaction.mockReset().mockResolvedValue({
+    digest: TEST_SUI_TRANSACTION_DIGEST,
+    outcome: 'success',
+    effects: {
+      gasUsed: {
+        computationCost: '1000000',
+        storageCost: '500000',
+        storageRebate: '200000',
+        nonRefundableStorageFee: '0',
+      },
+    },
+  });
+});
 
 // ─── Mock HostContext factory ────────────────────────────────────────────
 
 function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string } | null }) {
   const onchainConfig = {
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
+    packageId: PACKAGE_ID,
+    configId: CONFIG_ID,
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
     maxHostFeeMist: 50_000n,
     protocolFlatFeeMist: 0n,
     configVersion: 1n,
+    maxSpreadBps: 500n,
   };
+  const sui = suiEndpointSnapshotFixture();
 
   return {
     ctx: {
       network: 'testnet' as const,
-      sui: {
-        core: {
-          getMoveFunction: vi.fn().mockRejectedValue(new Error('mock: no move function')),
-        },
-        getObject: vi.fn().mockRejectedValue(new Error('mock: no on-chain')),
-        getDynamicField: vi.fn(),
-        listOwnedObjects: vi.fn().mockResolvedValue({ objects: [] }),
-        listCoins: vi.fn().mockResolvedValue({ objects: [] }),
-        simulateTransaction: vi.fn().mockResolvedValue({
-          Transaction: {
-            status: { success: true },
-            effects: {
-              gasUsed: {
-                computationCost: '1000000',
-                storageCost: '500000',
-                storageRebate: '200000',
-              },
-            },
-          },
-        }),
-      },
+      sui,
       sponsorPool: {
         checkout: vi
           .fn()
           .mockResolvedValue(
             overrides?.checkoutResult !== undefined
               ? overrides.checkoutResult
-              : { sponsorAddress: '0xSPONSOR' },
+              : { sponsorAddress: SPONSOR_ADDRESS },
           ),
         commit: vi.fn().mockResolvedValue(undefined),
         checkin: vi.fn().mockResolvedValue(undefined),
         sign: vi.fn(),
       },
-      packageId: '0xPACKAGE',
-      configId: '0xCONFIG',
-      vaultRegistryId: '0xREGISTRY',
+      packageId: PACKAGE_ID,
+      configId: CONFIG_ID,
+      vaultRegistryId: VAULT_REGISTRY_ID,
+      vaultsTableId: VAULTS_TABLE_ID,
+      deepbookPackageId: DEEPBOOK_PACKAGE_ID,
       rateLimiter: {},
       abuseBlocker: {
         checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -100,8 +139,10 @@ function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string
         inflight: 0,
         capacity: 10,
       },
-      settlementPayoutRecipientAddress: '0xPAYOUT',
+      settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
       getConfig: vi.fn().mockResolvedValue(onchainConfig),
+      invalidateConfigCache: vi.fn(),
+      dispose: vi.fn(),
     } as unknown as Parameters<typeof handlePrepare>[0],
     onchainConfig,
   };
@@ -112,14 +153,14 @@ function makeExtraCfg(): PrepareHandlerConfig {
     {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xDEEP::deep::DEEP',
+          poolId: POOL_ID,
+          baseType: SETTLEMENT_TOKEN_TYPE,
           quoteType: '0x2::sui::SUI',
           swapDirection: 'baseForQuote' as const,
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -129,12 +170,12 @@ function makeExtraCfg(): PrepareHandlerConfig {
     },
   ];
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote',
       },
     ],
@@ -154,13 +195,16 @@ async function makeValidTxKindBytes(): Promise<string> {
 }
 
 async function makeParams(overrides?: Partial<PrepareParams>): Promise<PrepareParams> {
-  return withPrepareAuthorization({
-    txKindBytes: '',
-    senderAddress: TEST_SENDER_ADDR,
-    settlementTokenType: '0xDEEP::deep::DEEP',
-    clientIp: '127.0.0.1',
-    ...overrides,
-  });
+  return withPrepareAuthorization(
+    {
+      txKindBytes: '',
+      senderAddress: TEST_SENDER_ADDR,
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+      clientIp: '127.0.0.1',
+      ...overrides,
+    },
+    { packageId: PACKAGE_ID },
+  );
 }
 
 async function makeParamsWithRequestShapeOverride(
@@ -245,8 +289,7 @@ describe('handlePrepare', () => {
 
     await expectPrepareError(ctx, params, makeExtraCfg(), 'P1_SPONSOR_WITHDRAWAL_FORBIDDEN');
     expect(ctx.prepareInflightLimiter.tryAcquire).not.toHaveBeenCalled();
-    expect(ctx.sui.getDynamicField).not.toHaveBeenCalled();
-    expect(ctx.sui.getObject).not.toHaveBeenCalled();
+    expect(gateway.queryUserCredit).not.toHaveBeenCalled();
     expect(ctx.getConfig).not.toHaveBeenCalled();
     expect(ctx.sponsorPool.checkout).not.toHaveBeenCalled();
     expect(ctx.sponsorPool.checkin).not.toHaveBeenCalled();
@@ -262,7 +305,7 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({
       txKindBytes,
-      settlementTokenType: '0xUNSUPPORTED::token::TOKEN',
+      settlementTokenType: UNSUPPORTED_SETTLEMENT_TOKEN_TYPE,
     });
 
     await expectPrepareError(ctx, params, makeExtraCfg(), 'UNSUPPORTED_SETTLEMENT_TOKEN');
@@ -272,28 +315,23 @@ describe('handlePrepare', () => {
 
   it('rejects when no sponsor slots available', async () => {
     const { ctx } = makeMockContext({ checkoutResult: null });
-    // queryUserCredit + getConfig now run before checkout.
-    // Provide vaultsTableId so queryUserCredit skips getObject; getDynamicField
-    // rejects with a "not found"-shaped error so it returns needsCreate: true.
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
     await expectPrepareError(ctx, params, makeExtraCfg(), 'NO_SPONSOR_SLOT');
+    expect(gateway.queryUserCredit).toHaveBeenCalledWith(
+      ctx.sui,
+      PACKAGE_ID,
+      VAULT_REGISTRY_ID,
+      TEST_SENDER_ADDR,
+      VAULTS_TABLE_ID,
+    );
   });
 
   // ── Slot release on failure (await checkin) ──────────────────────────────
 
   it('releases slot on post-checkout failure (await checkin)', async () => {
     const { ctx } = makeMockContext();
-    // queryUserCredit now runs before checkout — must succeed.
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     // prepareStore.reserveNonce runs after checkout — make it throw to
     // simulate a post-checkout failure.
     ctx.prepareStore.reserveNonce = vi.fn().mockRejectedValue(new Error('nonce store error'));
@@ -307,7 +345,7 @@ describe('handlePrepare', () => {
     // we assert on the receiptIdHex shape rather than a fixed value.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     const checkinCall = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinCall[0]).toBe('0xSPONSOR');
+    expect(checkinCall[0]).toBe(SPONSOR_ADDRESS);
     expect(checkinCall[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
@@ -315,11 +353,6 @@ describe('handlePrepare', () => {
 
   it('releases pending nonce reservation on post-checkout failure', async () => {
     const { ctx } = makeMockContext();
-    // queryUserCredit must succeed (pre-checkout)
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     // reserveNonce succeeds — a pending reservation is created
     ctx.prepareStore.reserveNonce = vi.fn().mockResolvedValue(5n);
     // runGenericPrepareBuildPipeline fails (mid-price query) — triggers catch block after reserveNonce
@@ -356,11 +389,6 @@ describe('handlePrepare', () => {
 
   it('checkin called exactly once — no double-release on post-checkout failure', async () => {
     const { ctx } = makeMockContext();
-    // queryUserCredit runs before checkout — must succeed.
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     ctx.prepareStore.reserveNonce = vi.fn().mockRejectedValue(new Error('nonce store error'));
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
@@ -371,7 +399,7 @@ describe('handlePrepare', () => {
     // receiptId is the lease authenticator. Assert on its
     // shape rather than a fixed value.
     const checkinArgs = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinArgs[0]).toBe('0xSPONSOR');
+    expect(checkinArgs[0]).toBe(SPONSOR_ADDRESS);
     expect(checkinArgs[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
@@ -379,8 +407,7 @@ describe('handlePrepare', () => {
     // queryUserCredit now runs before checkout. If it throws,
     // no slot has been checked out → no checkin should happen.
     const { ctx } = makeMockContext();
-    // Force queryUserCredit to throw by not providing vaultsTableId
-    // and having getObject reject.
+    gateway.queryUserCredit.mockRejectedValueOnce(new Error('mock: no on-chain'));
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes });
 
@@ -395,18 +422,13 @@ describe('handlePrepare', () => {
 
   it('returns VAULT_STATE_INCONSISTENT with vaultId and userAddress meta when registry has vault but object is missing', async () => {
     const { ctx } = makeMockContext();
-    ctx.vaultsTableId = '0xTABLE';
-    const { bcs } = await import('@mysten/sui/bcs');
     const vaultId = '0x' + 'bb'.repeat(32);
-    // getDynamicField returns a vault ID (registry entry exists)
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockResolvedValue({
-      dynamicField: {
-        value: { bcs: bcs.Address.serialize(vaultId).toBytes() },
-      },
-    });
-    // getObject rejects with objectNotFound (vault object missing)
-    (ctx.sui.getObject as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('Object not found'), { code: 'objectNotFound' }),
+    gateway.queryUserCredit.mockRejectedValueOnce(
+      new CreditQueryInconsistentStateError(
+        `Registry contains vault ${vaultId}, but the object is missing`,
+        vaultId,
+        TEST_SENDER_ADDR,
+      ),
     );
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
@@ -463,9 +485,8 @@ describe('handlePrepare', () => {
 
     ctx.prepareStore.checkUserQuota = vi.fn();
 
-    // The call will fail at queryUserCredit (mock: no on-chain) but that
-    // is downstream of where a user-quota gate would run on the promotion
-    // path. The key assertion is that the generic handler never invokes it.
+    // The call will fail in later build work. The key assertion is that the
+    // generic handler never invokes the promotion-only user quota.
     await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow();
     expect(ctx.prepareStore.checkUserQuota).not.toHaveBeenCalled();
   });
@@ -593,7 +614,7 @@ describe('handlePrepare', () => {
       gasMarginBps: 0,
     });
 
-    // Will fail later at queryUserCredit, but should NOT fail at BPS validation.
+    // Will fail in later build work, but should NOT fail at BPS validation.
     try {
       await handlePrepare(ctx, params, makeExtraCfg());
     } catch (err) {
@@ -629,11 +650,6 @@ describe('handlePrepare', () => {
       inflight: 1,
       capacity: 10,
     };
-    // queryUserCredit must succeed for checkout to be reached
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
@@ -652,10 +668,6 @@ describe('handlePrepare', () => {
       inflight: 1,
       capacity: 10,
     };
-    ctx.vaultsTableId = '0xTABLE';
-    (ctx.sui.getDynamicField as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('dynamic field not found'), { code: 'dynamicFieldNotFound' }),
-    );
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 

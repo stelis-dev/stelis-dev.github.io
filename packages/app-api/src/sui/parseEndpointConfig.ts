@@ -12,12 +12,32 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import type { RpcMetadata } from '@protobuf-ts/runtime-rpc';
 import type { SuiNetwork } from '@stelis/contracts';
-import type { SuiRpcEndpointConfig } from './failoverTransport.js';
+import {
+  canonicalizeSuiRpcBaseUrl,
+  normalizeSuiRpcHeaderName,
+  normalizeSuiRpcMetadata,
+  type SuiRpcEndpointConfig,
+  type SuiRpcMetadata,
+} from './endpointClient.js';
 import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
 
 const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
+const ENDPOINT_KEYS = ['baseUrl', 'localDevelopmentEndpoint', 'auth'] as const;
+const AUTH_KEYS = ['header', 'valueEnv', 'prefix'] as const;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  position: string,
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) {
+      throw new Error(`${position}: unsupported field "${key}"`);
+    }
+  }
+}
 
 // ─────────────────────────────────────────────
 // Parser
@@ -55,6 +75,7 @@ export function parseEndpointConfigJson(
   const rawEndpoints = selectNetworkEndpointSection(raw, network);
 
   const results: SuiRpcEndpointConfig[] = [];
+  const endpointBaseUrls = new Set<string>();
 
   for (let i = 0; i < rawEndpoints.length; i++) {
     const pos = `endpoint[${i}]`;
@@ -70,41 +91,37 @@ export function parseEndpointConfigJson(
       );
     }
     const entry = rawEndpoints[i] as Record<string, unknown>;
+    assertOnlyKeys(entry, ENDPOINT_KEYS, pos);
 
-    // Validate url
-    if (typeof entry.url !== 'string' || entry.url.trim() === '') {
-      throw new Error(`${pos}: "url" must be a non-empty string`);
+    // Validate the exact gRPC-web base URL.
+    if (typeof entry.baseUrl !== 'string' || entry.baseUrl.trim() === '') {
+      throw new Error(`${pos}: "baseUrl" must be a non-empty string`);
     }
-    const url = entry.url.trim();
-    let localDevelopmentEndpoint = false;
+    const rawBaseUrl = entry.baseUrl;
     if (entry.localDevelopmentEndpoint !== undefined) {
       if (typeof entry.localDevelopmentEndpoint !== 'boolean') {
         throw new Error(`${pos}: "localDevelopmentEndpoint" must be a boolean when provided`);
       }
-      localDevelopmentEndpoint = entry.localDevelopmentEndpoint;
     }
 
     let parsed: URL;
+    let baseUrl: string;
     try {
-      parsed = new URL(url);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        throw new Error(`Unsupported protocol: ${parsed.protocol}`);
-      }
-      if (parsed.username || parsed.password) {
-        throw new Error(
-          'URL contains embedded credentials (user:pass@host). Use auth.valueEnv instead.',
-        );
-      }
+      baseUrl = canonicalizeSuiRpcBaseUrl(rawBaseUrl);
+      parsed = new URL(baseUrl);
     } catch (err) {
       throw new Error(
-        `${pos}: invalid URL "${redactEndpointUrl(url)}": ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
+        `${pos}: invalid baseUrl "${redactEndpointUrl(rawBaseUrl)}": ${redactSensitiveText(err instanceof Error ? err.message : String(err))}`,
       );
     }
+    if (endpointBaseUrls.has(baseUrl)) {
+      throw new Error(`${pos}: duplicates an existing Sui RPC endpoint`);
+    }
+    endpointBaseUrls.add(baseUrl);
 
-    const hasAuthConfig = entry.auth != null;
-    const hasStaticMeta = entry.meta != null;
+    const hasAuthConfig = entry.auth !== undefined;
     if (parsed.protocol === 'http:') {
-      if (!localDevelopmentEndpoint) {
+      if (entry.localDevelopmentEndpoint !== true) {
         throw new Error(
           `${pos}: HTTP RPC endpoints require localDevelopmentEndpoint=true and are only allowed for unauthenticated local development endpoints`,
         );
@@ -114,36 +131,24 @@ export function parseEndpointConfigJson(
           `${pos}: HTTP RPC endpoints with localDevelopmentEndpoint=true must use localhost, 127.0.0.1, or ::1`,
         );
       }
-      if (hasAuthConfig || hasStaticMeta) {
-        throw new Error(`${pos}: HTTP RPC endpoints must not carry auth or meta headers`);
+      if (hasAuthConfig) {
+        throw new Error(`${pos}: HTTP RPC endpoints must not carry auth headers`);
       }
+    } else if (entry.localDevelopmentEndpoint !== undefined) {
+      throw new Error(`${pos}: "localDevelopmentEndpoint" is valid only for local HTTP endpoints`);
     }
 
-    // Resolve meta — start with static meta if provided
-    // RpcMetadata values must be string or string[] per protobuf-ts spec.
-    const resolvedMeta: RpcMetadata = {};
-    if (entry.meta != null) {
-      if (typeof entry.meta !== 'object' || Array.isArray(entry.meta)) {
-        throw new Error(`${pos}: "meta" must be an object`);
-      }
-      const metaObj = entry.meta as Record<string, unknown>;
-      for (const [key, val] of Object.entries(metaObj)) {
-        if (typeof val === 'string') {
-          resolvedMeta[key] = val;
-        } else if (Array.isArray(val) && val.every((v): v is string => typeof v === 'string')) {
-          resolvedMeta[key] = val;
-        } else {
-          throw new Error(`${pos}: meta["${key}"] must be a string or string[]; got ${typeof val}`);
-        }
-      }
-    }
+    // Resolved transport metadata is environment-derived only. It uses a
+    // null-prototype map so valid HTTP names such as "__proto__" remain data.
+    const resolvedMeta = Object.create(null) as SuiRpcMetadata;
 
     // Resolve auth → inject into meta
-    if (entry.auth != null) {
-      if (typeof entry.auth !== 'object' || Array.isArray(entry.auth)) {
+    if (hasAuthConfig) {
+      if (typeof entry.auth !== 'object' || entry.auth === null || Array.isArray(entry.auth)) {
         throw new Error(`${pos}: "auth" must be an object`);
       }
       const auth = entry.auth as Record<string, unknown>;
+      assertOnlyKeys(auth, AUTH_KEYS, `${pos}.auth`);
       if (typeof auth.header !== 'string' || auth.header.trim() === '') {
         throw new Error(`${pos}: "auth.header" must be a non-empty string`);
       }
@@ -157,8 +162,16 @@ export function parseEndpointConfigJson(
         );
       }
 
-      const headerName = auth.header.trim();
+      let headerName: string;
+      try {
+        headerName = normalizeSuiRpcHeaderName(auth.header);
+      } catch (error) {
+        throw new Error(`${pos}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       const envName = auth.valueEnv.trim();
+      if (envName !== auth.valueEnv || !ENV_NAME.test(envName)) {
+        throw new Error(`${pos}: "auth.valueEnv" must be an uppercase environment variable name`);
+      }
       const prefix = typeof auth.prefix === 'string' ? auth.prefix : '';
 
       const secretValue = envLookup(envName);
@@ -172,31 +185,15 @@ export function parseEndpointConfigJson(
       resolvedMeta[headerName] = `${prefix}${secretValue}`;
     }
 
-    // Validate fetchInit — it must not carry custom headers or transport-owned fields.
-    let fetchInit: SuiRpcEndpointConfig['fetchInit'];
-    if (entry.fetchInit != null) {
-      if (typeof entry.fetchInit !== 'object' || Array.isArray(entry.fetchInit)) {
-        throw new Error(`${pos}: "fetchInit" must be an object`);
-      }
-      const fi = entry.fetchInit as Record<string, unknown>;
-      // Reject forbidden fields that GrpcWebFetchTransport excludes
-      for (const forbidden of ['body', 'headers', 'method', 'signal']) {
-        if (forbidden in fi) {
-          throw new Error(
-            `${pos}: "fetchInit.${forbidden}" is forbidden — ` +
-              (forbidden === 'headers'
-                ? 'use "meta" or "auth" for custom headers'
-                : `"${forbidden}" is managed by the transport`),
-          );
-        }
-      }
-      fetchInit = fi as SuiRpcEndpointConfig['fetchInit'];
+    let meta: SuiRpcMetadata | undefined;
+    try {
+      meta = normalizeSuiRpcMetadata(resolvedMeta);
+    } catch (error) {
+      throw new Error(`${pos}: ${error instanceof Error ? error.message : String(error)}`);
     }
-
     results.push({
-      url,
-      meta: Object.keys(resolvedMeta).length > 0 ? resolvedMeta : undefined,
-      fetchInit,
+      baseUrl,
+      meta,
     });
   }
 

@@ -1,9 +1,10 @@
 # Canonical Sui Chain Identifiers
 
 The runtime source of truth is `SUI_CHAIN_IDENTIFIERS` in
-`@stelis/contracts`. `validateChainIdentity.ts` consumes that table to verify
-that configured RPC endpoints connect to the correct network at boot time;
-manual deployed-Host tests consume the same table before submitting.
+`@stelis/contracts`. `qualifiedSuiRpc.ts` compares every configured endpoint's
+core-relay-validated chain identifier against that table before the endpoint
+can enter the immutable accepted snapshot. Manual deployed-Host tests consume
+the same table before submitting.
 
 ## Values
 
@@ -21,12 +22,14 @@ network is reset (which has not happened for mainnet).
 
 ## Verification method
 
-Query any healthy Sui gRPC v2 endpoint:
+Use the core-relay chain-identifier gateway over an endpoint-pinned snapshot:
 
 ```ts
 import { SuiGrpcClient } from '@mysten/sui/grpc';
+import { createSuiEndpointSnapshot, getSuiChainIdentifier } from '@stelis/core-relay';
+
 const client = new SuiGrpcClient({ network: 'testnet', baseUrl: '<endpoint>' });
-const { chainIdentifier } = await client.core.getChainIdentifier();
+const { chainIdentifier } = await getSuiChainIdentifier(createSuiEndpointSnapshot([client]));
 ```
 
 Re-verify from at least two independent endpoints before trusting a new value.

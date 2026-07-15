@@ -25,7 +25,6 @@ const {
   MockSponsorPreflightError,
   MockSponsorOnchainError,
   MockSponsorCongestionError,
-  MockSponsorTerminalProcessingError,
   MockSponsorLeaseExpiredError,
   MockBlockCheckUnavailableError,
 } = vi.hoisted(() => {
@@ -95,7 +94,13 @@ const {
     constructor(
       public readonly digest: string,
       public readonly onchainError: string,
-      public readonly subcode?: string,
+      public readonly subcode: string | undefined,
+      public readonly gasUsed: {
+        computationCost: string;
+        storageCost: string;
+        storageRebate: string;
+        nonRefundableStorageFee: string;
+      },
     ) {
       super(`Transaction reverted on-chain: ${onchainError}`);
       this.name = 'SponsorOnchainError';
@@ -108,16 +113,6 @@ const {
     ) {
       super(message);
       this.name = 'SponsorCongestionError';
-    }
-  }
-  class _SponsorTerminalProcessingError extends Error {
-    readonly code = 'GAS_EFFECTS_MISSING' as const;
-    constructor(
-      message: string,
-      public readonly digest: string,
-    ) {
-      super(message);
-      this.name = 'SponsorTerminalProcessingError';
     }
   }
   class _SponsorLeaseExpiredError extends Error {
@@ -159,7 +154,6 @@ const {
     MockSponsorPreflightError: _SponsorPreflightError,
     MockSponsorOnchainError: _SponsorOnchainError,
     MockSponsorCongestionError: _SponsorCongestionError,
-    MockSponsorTerminalProcessingError: _SponsorTerminalProcessingError,
     MockSponsorLeaseExpiredError: _SponsorLeaseExpiredError,
     MockBlockCheckUnavailableError: _BlockCheckUnavailableError,
   };
@@ -194,7 +188,6 @@ vi.mock('@stelis/core-api', async () => {
     SponsorPreflightError: MockSponsorPreflightError,
     SponsorOnchainError: MockSponsorOnchainError,
     SponsorCongestionError: MockSponsorCongestionError,
-    SponsorTerminalProcessingError: MockSponsorTerminalProcessingError,
     SponsorLeaseExpiredError: MockSponsorLeaseExpiredError,
     BlockCheckUnavailableError: MockBlockCheckUnavailableError,
   };
@@ -212,7 +205,6 @@ vi.mock('../src/developerJwtVerifyCallback.js', async () => {
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import type { AppApiContext } from '../src/context.js';
-import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
 
@@ -258,7 +250,9 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
     studioGlobalAllowedTargets: studioEnabled ? new Set<string>() : null,
     developerJwtTrustConfig: studioEnabled ? TEST_TRUST_CONFIG : null,
     developerJwtVerifyUrl: null,
-    failoverTransport: new SuiRpcFailoverTransport([{ url: 'https://rpc.test.invalid' }]),
+    rpcFleet: {
+      endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' }],
+    },
     redis: {} as never,
     sponsorOperations: {
       readState: vi.fn().mockResolvedValue({

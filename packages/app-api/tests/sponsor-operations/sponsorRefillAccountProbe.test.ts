@@ -1,18 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
 import type { SponsorRefillAccountWriteFields } from '../../src/sponsor-operations/redisState.js';
+import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+
+const gateway = vi.hoisted(() => ({ getSuiBalance: vi.fn() }));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, getSuiBalance: gateway.getSuiBalance };
+});
+
 import { probeAndWriteSponsorRefillAccountState } from '../../src/sponsor-operations/sponsorRefillAccountProbe.js';
 
 const ACCOUNT = `0x${'55'.repeat(32)}`;
 
-function suiBalance(result: string | Error): SuiGrpcClient {
-  return {
-    async getBalance() {
-      if (result instanceof Error) throw result;
-      return { balance: { balance: result } };
-    },
-  } as unknown as SuiGrpcClient;
+const balanceResults = new WeakMap<SuiEndpointSnapshot, string | Error>();
+
+gateway.getSuiBalance.mockImplementation(async (snapshot: SuiEndpointSnapshot) => {
+  const result = balanceResults.get(snapshot);
+  if (result === undefined) throw new Error('Missing balance gateway fixture');
+  if (result instanceof Error) throw result;
+  return { balance: result };
+});
+
+function suiBalance(result: string | Error): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  balanceResults.set(snapshot, result);
+  return snapshot;
 }
 
 function spendState(options?: {

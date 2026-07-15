@@ -5,10 +5,6 @@
  * `../structuredEventLog.ts`. Redis-backed admin audit logs written
  * by `packages/app-api/src/adminAuditLog.ts` are a separate observability
  * path and are out of scope for this file.
- *
- * The app-api Sui failover transport additionally emits a typed, endpoint-
- * scoped event family at its owning boundary. The complete operator-facing
- * summary is in `docs/operations.md#observability`.
  */
 
 // ─────────────────────────────────────────────
@@ -35,7 +31,6 @@ export const SPONSOR_FAILURE_RECORDED = 'SPONSOR_FAILURE_RECORDED';
 export const SPONSOR_FAILURE_RECORDER_FAILED = 'SPONSOR_FAILURE_RECORDER_FAILED';
 export const ABUSE_BLOCK_CHECK_FAILED = 'ABUSE_BLOCK_CHECK_FAILED';
 export const SPONSOR_SENDER_STORE_DIVERGENCE = 'SPONSOR_SENDER_STORE_DIVERGENCE';
-export const SPONSOR_EXEC_GAS_USED_MISSING = 'SPONSOR_EXEC_GAS_USED_MISSING';
 export const SPONSOR_DRIFT_OBSERVED = 'SPONSOR_DRIFT_OBSERVED';
 export const SETTLEMENT_ECONOMICS_EXECUTION = 'SETTLEMENT_ECONOMICS_EXECUTION';
 export const SETTLEMENT_ECONOMICS_LOG_FAILED = 'SETTLEMENT_ECONOMICS_LOG_FAILED';

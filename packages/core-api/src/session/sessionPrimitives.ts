@@ -5,22 +5,24 @@
  * handleSponsor (generic) and handlePromotionSponsor (promotion).
  *
  * Mode-specific policy (generic re-validation, promotion entitlement)
- * remains internal. The narrow current-Sui result parser is also consumed by
- * app-api so Host execution boundaries share one fail-closed SDK-union authority.
+ * remains internal. Current Sui responses reach these helpers only after the
+ * core-relay operation gateways validate their exact SDK unions.
  */
 import { createHash } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { verifyTransactionSignature } from '@mysten/sui/verify';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
-import { bindCurrentSuiResultToBytes, bindCurrentSuiResultToDigest } from '@stelis/core-relay';
+import {
+  executeSuiTransaction,
+  simulateSuiTransaction,
+  type SuiEndpointSnapshot,
+  type SuiExecutionErrorKind,
+} from '@stelis/core-relay';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_CHECKIN_FAILED } from '../observability/events.js';
 import type { SponsorPoolAdapter } from '../context.js';
 import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
-import type { PreflightResult, ExecResult, ConsumeOutcome, GasUsedFields } from './sessionTypes.js';
+import type { PreflightResult, ExecResult, ConsumeOutcome } from './sessionTypes.js';
 // ─────────────────────────────────────────────
 // txBytes decode
 // ─────────────────────────────────────────────
@@ -195,231 +197,24 @@ export class GasOwnerMismatchError extends Error {
 // Preflight simulation
 // ─────────────────────────────────────────────
 
-type RuntimeRecord = Record<string, unknown>;
-type CurrentExecutionErrorKind = SuiClientTypes.ExecutionError['$kind'];
-
-const CURRENT_EXECUTION_ERROR_KIND = {
-  MoveAbort: true,
-  SizeError: true,
-  CommandArgumentError: true,
-  TypeArgumentError: true,
-  PackageUpgradeError: true,
-  IndexError: true,
-  CoinDenyListError: true,
-  CongestedObjects: true,
-  ObjectIdError: true,
-  Unknown: true,
-} as const satisfies Record<CurrentExecutionErrorKind, true>;
-
-const CURRENT_EXECUTION_ERROR_KINDS = Object.keys(
-  CURRENT_EXECUTION_ERROR_KIND,
-) as CurrentExecutionErrorKind[];
-
-type NormalizedExecutionError = {
-  readonly kind: CurrentExecutionErrorKind;
-  readonly message: string;
-};
-
-type NormalizedExecutionStatus =
-  | { readonly success: true; readonly error: null }
-  | { readonly success: false; readonly error: NormalizedExecutionError };
-
-type ParsedSuiTransactionResult =
-  | {
-      readonly kind: 'success';
-      readonly digest: string;
-      readonly effects: RuntimeRecord;
-      readonly gasUsed: GasUsedFields | null;
-    }
-  | {
-      readonly kind: 'failure';
-      readonly digest: string;
-      readonly effects: RuntimeRecord;
-      readonly gasUsed: GasUsedFields | null;
-      readonly error: NormalizedExecutionError;
-    };
-
-function isRuntimeRecord(value: unknown): value is RuntimeRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isCurrentExecutionErrorKind(value: unknown): value is CurrentExecutionErrorKind {
-  return typeof value === 'string' && Object.hasOwn(CURRENT_EXECUTION_ERROR_KIND, value);
-}
-
-function readCurrentExecutionError(value: unknown): NormalizedExecutionError | null {
-  if (!isRuntimeRecord(value) || typeof value.message !== 'string') return null;
-  if (!isCurrentExecutionErrorKind(value.$kind)) return null;
-
-  const kind = value.$kind;
-  for (const candidate of CURRENT_EXECUTION_ERROR_KINDS) {
-    const hasPayload = Object.prototype.hasOwnProperty.call(value, candidate);
-    if ((candidate === kind) !== hasPayload) return null;
-  }
-
-  if (kind === 'Unknown') {
-    if (value.Unknown !== null) return null;
-  } else if (kind === 'CongestedObjects') {
-    const payload = value.CongestedObjects;
-    if (
-      !isRuntimeRecord(payload) ||
-      typeof payload.name !== 'string' ||
-      !Array.isArray(payload.objects) ||
-      !payload.objects.every((objectId) => typeof objectId === 'string')
-    ) {
-      return null;
-    }
-  } else if (value[kind] == null) {
-    return null;
-  }
-
-  return { kind, message: value.message };
-}
-
-function readCurrentExecutionStatus(value: unknown): NormalizedExecutionStatus | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (value.success === true) {
-    return value.error === null ? { success: true, error: null } : null;
-  }
-  if (value.success !== false) return null;
-  const error = readCurrentExecutionError(value.error);
-  return error ? { success: false, error } : null;
-}
-
-function isCanonicalGasAmount(value: unknown): value is string {
-  return typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value);
-}
-
-function normalizeGasUsed(value: unknown): GasUsedFields | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (
-    !isCanonicalGasAmount(value.computationCost) ||
-    !isCanonicalGasAmount(value.storageCost) ||
-    !isCanonicalGasAmount(value.storageRebate)
-  ) {
-    return null;
-  }
-  return {
-    computationCost: value.computationCost,
-    storageCost: value.storageCost,
-    storageRebate: value.storageRebate,
-  };
-}
-
-function readTerminalPayload(
-  value: unknown,
-  expectedSuccess: boolean,
-): {
-  readonly digest: string;
-  readonly status: NormalizedExecutionStatus;
-  readonly effects: RuntimeRecord;
-  readonly gasUsed: GasUsedFields | null;
-} | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (typeof value.digest !== 'string' || value.digest.length === 0) return null;
-
-  const status = readCurrentExecutionStatus(value.status);
-  if (!status || status.success !== expectedSuccess) return null;
-  if (!isRuntimeRecord(value.effects)) return null;
-
-  const effectsStatus = readCurrentExecutionStatus(value.effects.status);
-  if (!effectsStatus || !isDeepStrictEqual(value.status, value.effects.status)) return null;
-  if (value.effects.transactionDigest !== value.digest) return null;
-
-  return {
-    digest: value.digest,
-    status,
-    effects: value.effects,
-    gasUsed: normalizeGasUsed(value.effects.gasUsed),
-  };
-}
-
-function parseCurrentSuiTerminal(value: unknown): ParsedSuiTransactionResult | null {
-  if (!isRuntimeRecord(value)) return null;
-
-  if (value.$kind === 'Transaction') {
-    if (value.FailedTransaction !== undefined) return null;
-    const payload = readTerminalPayload(value.Transaction, true);
-    if (!payload || !payload.status.success) return null;
-    return {
-      kind: 'success',
-      digest: payload.digest,
-      effects: payload.effects,
-      gasUsed: payload.gasUsed,
-    };
-  }
-
-  if (value.$kind === 'FailedTransaction') {
-    if (value.Transaction !== undefined) return null;
-    const payload = readTerminalPayload(value.FailedTransaction, false);
-    if (!payload || payload.status.success) return null;
-    return {
-      kind: 'failure',
-      digest: payload.digest,
-      effects: payload.effects,
-      gasUsed: payload.gasUsed,
-      error: payload.status.error,
-    };
-  }
-
-  return null;
-}
-
-/**
- * Parse a current Sui terminal result and bind it to the transaction bytes
- * that produced the RPC request.
- *
- * `parseCurrentSuiTerminal()` proves only that the returned terminal union
- * is internally self-consistent. That is not enough at an execution boundary:
- * an internally valid result for a different transaction must never drive
- * sponsor accounting, lease release, or a public response. This helper is the
- * single authority for that request/result binding.
- */
-export function parseCurrentSuiTerminalForBytes(
-  value: unknown,
-  txBytes: Uint8Array,
-): ParsedSuiTransactionResult | null {
-  if (!bindCurrentSuiResultToBytes(value, txBytes)) return null;
-  return parseCurrentSuiTerminal(value);
-}
-
-/** Bind a current Sui terminal result to a digest-owned lookup request. */
-export function parseCurrentSuiTerminalForDigest(
-  value: unknown,
-  expectedDigest: string,
-): ParsedSuiTransactionResult | null {
-  if (!bindCurrentSuiResultToDigest(value, expectedDigest)) return null;
-  return parseCurrentSuiTerminal(value);
-}
-
-function isConfirmedCongestion(kind: CurrentExecutionErrorKind): boolean {
-  return kind === 'CongestedObjects';
+function isConfirmedCongestion(kind: SuiExecutionErrorKind): boolean {
+  return kind === 'CongestedObjects' || kind === 'ExecutionCanceledDueToConsensusObjectCongestion';
 }
 
 /**
  * Run preflight simulation and return a normalized result.
- * Does NOT throw on simulation failure — returns `{ success: false, reason }`.
+ * Does NOT throw on simulation failure — returns the structured execution error.
  * Throws only on infrastructure errors (network, RPC).
  */
 export async function runPreflight(
-  sui: SuiGrpcClient,
+  sui: SuiEndpointSnapshot,
   txBytes: Uint8Array,
 ): Promise<PreflightResult> {
-  const simResult = await sui.simulateTransaction({
-    transaction: txBytes,
-    include: { effects: true },
-  });
-  const terminal = parseCurrentSuiTerminalForBytes(simResult, txBytes);
-  if (!terminal) {
-    return { success: false, reason: 'Simulation returned malformed terminal result' };
+  const result = await simulateSuiTransaction(sui, { transaction: txBytes });
+  if (result.outcome === 'failure') {
+    return { success: false, error: result.error };
   }
-  if (terminal.kind === 'failure') {
-    return { success: false, reason: terminal.error.message };
-  }
-  if (!terminal.gasUsed) {
-    return { success: false, reason: 'Simulation returned no valid gasUsed' };
-  }
-  return { success: true, gasUsed: terminal.gasUsed };
+  return { success: true, gasUsed: result.effects.gasUsed };
 }
 
 // ─────────────────────────────────────────────
@@ -454,8 +249,8 @@ export async function runPreflight(
  * post-signature branch from failures that cannot have submitted a sponsor-
  * signed transaction.
  *
- * `cause` carries the underlying RPC or terminal-shape error so callers can
- * preserve the original public error message after recording the typed stage.
+ * `cause` is retained only for internal reconciliation and diagnostics. Public
+ * route errors are fixed typed errors and must not expose or parse this text.
  */
 export class SponsorPostSignatureUncertaintyError extends Error {
   readonly executionStage = 'after_sponsor_signature' as const;
@@ -472,7 +267,7 @@ export class SponsorPostSignatureUncertaintyError extends Error {
 
 export async function signAndSubmit(
   pool: SponsorPoolAdapter,
-  sui: SuiGrpcClient,
+  sui: SuiEndpointSnapshot,
   sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
@@ -494,24 +289,18 @@ export async function signAndSubmit(
   const sponsorSig = await pool.sign(sponsorAddress, receiptId, txBytes);
 
   try {
-    const execResult = await sui.executeTransaction({
+    const result = await executeSuiTransaction(sui, {
       transaction: txBytes,
       signatures: [userSignature, sponsorSig.signature],
-      include: { effects: true, events: true },
     });
 
-    const terminal = parseCurrentSuiTerminalForDigest(execResult, expectedDigest);
-    if (!terminal) {
-      throw new Error('Transaction execution returned malformed terminal result');
-    }
-
-    if (terminal.kind === 'failure') {
-      if (isConfirmedCongestion(terminal.error.kind)) {
+    if (result.outcome === 'failure') {
+      if (isConfirmedCongestion(result.error.kind)) {
         return {
           success: false,
           executionStage: 'after_sponsor_signature',
-          digest: terminal.digest,
-          reason: terminal.error.message,
+          digest: result.digest,
+          error: result.error,
           isCongestion: true,
           gasUsed: null,
         };
@@ -519,19 +308,19 @@ export async function signAndSubmit(
       return {
         success: false,
         executionStage: 'on_chain',
-        digest: terminal.digest,
-        reason: terminal.error.message,
+        digest: result.digest,
+        error: result.error,
         isCongestion: false,
-        gasUsed: terminal.gasUsed,
+        gasUsed: result.effects.gasUsed,
       };
     }
 
     return {
       success: true,
       executionStage: 'on_chain',
-      digest: terminal.digest,
-      effects: terminal.effects,
-      gasUsed: terminal.gasUsed,
+      digest: result.digest,
+      effects: result.effects,
+      gasUsed: result.effects.gasUsed,
     };
   } catch (submitErr) {
     if (submitErr instanceof SponsorPostSignatureUncertaintyError) {

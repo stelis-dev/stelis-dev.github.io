@@ -19,8 +19,8 @@ import { PREPARE_TTL_MS, buildPolicyFields } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
 
 const MOCK_CONFIG: OnchainConfig = {
-  packageId: '0xPACKAGE',
-  configId: '0xCONFIG',
+  packageId: `0x${'11'.repeat(32)}`,
+  configId: `0x${'22'.repeat(32)}`,
   maxClaimMist: 50_000_000n,
   minSettleMist: 1_000_000n,
   maxHostFeeMist: 50_000n,

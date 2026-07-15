@@ -3,13 +3,11 @@ import { useCurrentAccount, useCurrentClient, useDAppKit } from '@mysten/dapp-ki
 import { Transaction } from '@mysten/sui/transactions';
 import { useSDK } from '../hooks/useSDK';
 import { TransactionStatus } from './TransactionStatus';
-import {
-  checkSettlementSwapPathLiquidity,
-  type SettlementSwapPathLiquidityStatus,
-} from '@stelis/sdk';
+import type { SettlementSwapPathLiquidityStatus } from '@stelis/sdk';
 import { getSelectedSettlementSwapPath } from '../constants';
 import { SANDBOX_CARD_STYLE } from './cardStyles';
 import { parseDecimalToSmallestUnit, parsePercentToBps } from '../amount';
+import { createSuiEndpointSnapshot, listAllSuiCoins } from '@stelis/core-relay/browser';
 
 interface TransferFormProps {
   onTxSuccess?: () => void;
@@ -59,7 +57,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
   useEffect(() => {
     if (!sdk || !client || !settlementSwapPath) return;
     let cancelled = false;
-    checkSettlementSwapPathLiquidity(client, sdk.deepbookPackageId, settlementSwapPath)
+    sdk
+      .checkSettlementSwapPathLiquidity(client, settlementSwapPath)
       .then((s: SettlementSwapPathLiquidityStatus) => {
         if (!cancelled) setLiquidity(s);
       })
@@ -139,9 +138,8 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
       if (settlementSwapPath && sdk) {
         addLog('🔍 Checking settlement swap path status...');
         try {
-          const settlementSwapPathCheck = await checkSettlementSwapPathLiquidity(
+          const settlementSwapPathCheck = await sdk.checkSettlementSwapPathLiquidity(
             client,
-            sdk.deepbookPackageId,
             settlementSwapPath,
           );
           for (const hop of settlementSwapPathCheck.hops) {
@@ -167,16 +165,10 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
 
       const tx = new Transaction();
 
-      const coins = await (
-        client as unknown as {
-          listCoins: (args: {
-            owner: string;
-            coinType: string;
-          }) => Promise<{ objects: { objectId: string; balance: string }[] }>;
-        }
-      ).listCoins({ owner: account.address, coinType: settlementTokenType });
-
-      const coinObjects = coins.objects ?? [];
+      const coinObjects = await listAllSuiCoins(createSuiEndpointSnapshot([client]), {
+        owner: account.address,
+        coinType: settlementTokenType,
+      });
       if (coinObjects.length === 0) throw new Error(`No ${SETTLEMENT_TOKEN_LABEL} found in wallet`);
 
       // Merge all coins → split transfer amount.
@@ -230,7 +222,6 @@ export function TransferForm({ onTxSuccess, settlementSwapPathIndex = 0 }: Trans
       setStatus('success');
       addLog('✅ Transfer complete! Digest: ' + result.digest);
       onTxSuccess?.();
-      client.waitForTransaction({ digest: result.digest }).then(() => onTxSuccess?.());
     } catch (e: unknown) {
       setStatus('error');
       const msg = e instanceof Error ? e.message : 'Unknown error';

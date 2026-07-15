@@ -19,8 +19,8 @@
  *     failure (promoted to fail-fast boot), matching the first bullet.
  */
 
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SponsorSlotState } from '@stelis/contracts';
+import { getSuiBalance, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import type {
   SponsorRefillAccountWriteFields,
   RedisSponsorOperationsState,
@@ -32,7 +32,7 @@ import { parseChainBalanceMist } from './balanceParsing.js';
 import type { SponsorRefillAccountSpendStateStore } from './accountSpendState.js';
 
 export interface BootstrapSponsorOperationsDeps {
-  readonly sui: SuiGrpcClient;
+  readonly sui: SuiEndpointSnapshot;
   readonly state: RedisSponsorOperationsState;
   readonly slotAddresses: readonly string[];
   readonly sponsorRefillAccountAddress: string;
@@ -91,8 +91,8 @@ async function syncOneSlot(
       `bootstrap.getSlotBalance(${slotAddress})`,
       deps.slotBalanceTimeoutMs,
       async () => {
-        const res = await deps.sui.getBalance({ owner: slotAddress });
-        return parseChainBalanceMist(res.balance.balance, `Slot ${slotAddress} balance`);
+        const res = await getSuiBalance(deps.sui, { owner: slotAddress });
+        return parseChainBalanceMist(res.balance, `Slot ${slotAddress} balance`);
       },
     );
     fields = {
@@ -127,8 +127,10 @@ async function syncSponsorRefillAccount(deps: BootstrapSponsorOperationsDeps): P
       'bootstrap.getSponsorRefillAccountBalance',
       deps.sponsorRefillAccountBalanceTimeoutMs,
       async () => {
-        const res = await deps.sui.getBalance({ owner: deps.sponsorRefillAccountAddress });
-        return parseChainBalanceMist(res.balance.balance, 'Sponsor refill account balance');
+        const res = await getSuiBalance(deps.sui, {
+          owner: deps.sponsorRefillAccountAddress,
+        });
+        return parseChainBalanceMist(res.balance, 'Sponsor refill account balance');
       },
     );
     fields = {

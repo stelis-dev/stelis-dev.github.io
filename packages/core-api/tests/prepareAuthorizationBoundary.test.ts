@@ -10,7 +10,18 @@ import {
   PREPARE_AUTHORIZATION_TTL_MS,
 } from '../src/prepare/prepareAuthorization.js';
 import { PrepareOverloadError } from '../src/store/prepareErrors.js';
-import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import {
+  TEST_PREPARE_AUTH_PACKAGE_ID,
+  TEST_PREPARE_AUTH_SENDER,
+  withPrepareAuthorization,
+} from './prepareAuthTestHelpers.js';
+
+const CONFIG_ID = `0x${'22'.repeat(32)}`;
+const REGISTRY_ID = `0x${'33'.repeat(32)}`;
+const PAYOUT_ADDRESS = `0x${'44'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'55'.repeat(32)}`;
+const POOL_ID = `0x${'66'.repeat(32)}`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'77'.repeat(32)}::deep::DEEP`;
 
 async function makeValidTxKindBytes(): Promise<string> {
   const tx = new Transaction();
@@ -30,7 +41,7 @@ async function makeSignedParams(overrides: Partial<PrepareParams> = {}): Promise
     {
       txKindBytes: await makeValidTxKindBytes(),
       senderAddress: TEST_PREPARE_AUTH_SENDER,
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       clientIp: '127.0.0.1',
       ...inputOverrides,
     },
@@ -39,6 +50,7 @@ async function makeSignedParams(overrides: Partial<PrepareParams> = {}): Promise
       prepareAuthorizationTimestampMs,
       prepareAuthorizationRequestNonce,
       prepareAuthorizationSignature,
+      packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
     },
   );
 }
@@ -53,9 +65,9 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
       checkin: vi.fn(),
       sign: vi.fn(),
     },
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
-    vaultRegistryId: '0xREGISTRY',
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
     abuseBlocker: {
       checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -73,7 +85,7 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
       reserveNonce: vi.fn(),
       releaseReservation: vi.fn(),
     },
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn(),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue(null),
@@ -88,14 +100,14 @@ function makeExtraCfg(): PrepareHandlerConfig {
     {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xDEEP::deep::DEEP',
+          poolId: POOL_ID,
+          baseType: SETTLEMENT_TOKEN_TYPE,
           quoteType: '0x2::sui::SUI',
           swapDirection: 'baseForQuote' as const,
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -105,12 +117,12 @@ function makeExtraCfg(): PrepareHandlerConfig {
     },
   ];
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     quotedHostFeeMist: 0n,
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote',
       },
     ],
@@ -143,10 +155,10 @@ describe('prepare authorization boundary', () => {
       {
         txKindBytes: await makeValidTxKindBytes(),
         senderAddress: TEST_PREPARE_AUTH_SENDER,
-        settlementTokenType: '0xDEEP::deep::DEEP',
+        settlementTokenType: SETTLEMENT_TOKEN_TYPE,
         clientIp: '127.0.0.1',
       },
-      { keypair: wrongKeypair },
+      { keypair: wrongKeypair, packageId: TEST_PREPARE_AUTH_PACKAGE_ID },
     );
 
     await expectAuthError(params, 'PREPARE_AUTH_SIGNATURE_INVALID');

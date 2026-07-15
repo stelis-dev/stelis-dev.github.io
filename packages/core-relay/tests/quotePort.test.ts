@@ -32,9 +32,11 @@ import {
 } from '../src/market-policy/quotePort.js';
 import { MarketQuoteUnavailableError } from '../src/market-policy/errors.js';
 import { SlippageQueryError } from '../src/deepbookErrors.js';
+import { SuiOperationError } from '../src/sui/suiOperation.js';
 import type { MarketQuotePort } from '../src/market-policy/types.js';
+import type { SuiEndpointSnapshot } from '../src/sui/suiOperation.js';
 
-const FAKE_CLIENT = {} as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+const FAKE_SNAPSHOT = {} as SuiEndpointSnapshot;
 const FAKE_PKG = '0xdeepbook';
 
 function makeHop(swapDirection: 'baseForQuote' | 'quoteForBase'): DeepBookPoolHop {
@@ -55,32 +57,42 @@ beforeEach(() => {
 describe('createDeepbookQuotePort.quoteHopOutput', () => {
   it('routes baseForQuote to getQuantityOut and returns the bigint result', async () => {
     helperState.getQuantityOut.mockResolvedValueOnce(27_000_000n);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
     const hop = makeHop('baseForQuote');
 
     const result = await port.quoteHopOutput(hop, 1_000_000n);
 
     expect(result).toBe(27_000_000n);
     expect(helperState.getQuantityOut).toHaveBeenCalledTimes(1);
-    expect(helperState.getQuantityOut).toHaveBeenCalledWith(FAKE_CLIENT, FAKE_PKG, hop, 1_000_000n);
+    expect(helperState.getQuantityOut).toHaveBeenCalledWith(
+      FAKE_SNAPSHOT,
+      FAKE_PKG,
+      hop,
+      1_000_000n,
+    );
   });
 
   it('routes quoteForBase to getQuantityOut and returns the bigint result', async () => {
     helperState.getQuantityOut.mockResolvedValueOnce(37_000_000n);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
     const hop = makeHop('quoteForBase');
 
     const result = await port.quoteHopOutput(hop, 2_000_000n);
 
     expect(result).toBe(37_000_000n);
-    expect(helperState.getQuantityOut).toHaveBeenCalledWith(FAKE_CLIENT, FAKE_PKG, hop, 2_000_000n);
+    expect(helperState.getQuantityOut).toHaveBeenCalledWith(
+      FAKE_SNAPSHOT,
+      FAKE_PKG,
+      hop,
+      2_000_000n,
+    );
   });
 
   it('maps SlippageQueryError to MarketQuoteUnavailableError and preserves the message', async () => {
     helperState.getQuantityOut.mockRejectedValueOnce(
-      new SlippageQueryError('get_quantity_out RPC failed: upstream RPC: 503'),
+      new SlippageQueryError('get_quantity_out: unexpected return tuple'),
     );
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
 
     let thrown: unknown = null;
     try {
@@ -90,13 +102,18 @@ describe('createDeepbookQuotePort.quoteHopOutput', () => {
     }
 
     expect(thrown).toBeInstanceOf(MarketQuoteUnavailableError);
-    expect((thrown as Error).message).toBe('get_quantity_out RPC failed: upstream RPC: 503');
+    expect((thrown as Error).message).toBe('get_quantity_out: unexpected return tuple');
+    expect((thrown as Error).cause).toBeInstanceOf(SlippageQueryError);
   });
 
-  it('rethrows non-SlippageQueryError errors unwrapped', async () => {
-    const generic = new Error('unexpected');
-    helperState.getQuantityOut.mockRejectedValueOnce(generic);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+  it('preserves typed Sui operation errors', async () => {
+    const operationError = new SuiOperationError('transport_unavailable', {
+      operation: 'simulate_move_view',
+      attempt: 1,
+      maxAttempts: 1,
+    });
+    helperState.getQuantityOut.mockRejectedValueOnce(operationError);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
 
     let thrown: unknown = null;
     try {
@@ -105,7 +122,7 @@ describe('createDeepbookQuotePort.quoteHopOutput', () => {
       thrown = err;
     }
 
-    expect(thrown).toBe(generic);
+    expect(thrown).toBe(operationError);
     expect(thrown).not.toBeInstanceOf(MarketQuoteUnavailableError);
   });
 });
@@ -118,7 +135,7 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
       deepRequiredAmount: 5_000n,
     };
     helperState.getInputForTargetOutput.mockResolvedValueOnce(expectedQuote);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
     const hop = makeHop('baseForQuote');
 
     const result = await port.quoteHopInputForTarget(hop, 27_000_000n);
@@ -126,7 +143,7 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
     expect(result).toBe(expectedQuote); // pass-through, no mutation
     expect(helperState.getInputForTargetOutput).toHaveBeenCalledTimes(1);
     expect(helperState.getInputForTargetOutput).toHaveBeenCalledWith(
-      FAKE_CLIENT,
+      FAKE_SNAPSHOT,
       FAKE_PKG,
       hop,
       27_000_000n,
@@ -140,14 +157,14 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
       deepRequiredAmount: 0n,
     };
     helperState.getInputForTargetOutput.mockResolvedValueOnce(expectedQuote);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
     const hop = makeHop('quoteForBase');
 
     const result = await port.quoteHopInputForTarget(hop, 37_000_000n);
 
     expect(result).toBe(expectedQuote);
     expect(helperState.getInputForTargetOutput).toHaveBeenCalledWith(
-      FAKE_CLIENT,
+      FAKE_SNAPSHOT,
       FAKE_PKG,
       hop,
       37_000_000n,
@@ -156,9 +173,9 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
 
   it('maps SlippageQueryError to MarketQuoteUnavailableError and preserves the message', async () => {
     helperState.getInputForTargetOutput.mockRejectedValueOnce(
-      new SlippageQueryError('get_base_quantity_in RPC failed: grpc unavailable'),
+      new SlippageQueryError('get_base_quantity_in: unexpected return tuple'),
     );
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
 
     let thrown: unknown = null;
     try {
@@ -168,13 +185,14 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
     }
 
     expect(thrown).toBeInstanceOf(MarketQuoteUnavailableError);
-    expect((thrown as Error).message).toBe('get_base_quantity_in RPC failed: grpc unavailable');
+    expect((thrown as Error).message).toBe('get_base_quantity_in: unexpected return tuple');
+    expect((thrown as Error).cause).toBeInstanceOf(SlippageQueryError);
   });
 
   it('rethrows non-SlippageQueryError errors unwrapped', async () => {
     const generic = new Error('boom');
     helperState.getInputForTargetOutput.mockRejectedValueOnce(generic);
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
 
     let thrown: unknown = null;
     try {
@@ -193,7 +211,7 @@ describe('createDeepbookQuotePort.quoteHopInputForTarget', () => {
       quantityInActualOutputSmallest: 1n,
       deepRequiredAmount: 0n,
     });
-    const port = createDeepbookQuotePort(FAKE_CLIENT, FAKE_PKG);
+    const port = createDeepbookQuotePort(FAKE_SNAPSHOT, FAKE_PKG);
 
     await port.quoteHopInputForTarget(makeHop('baseForQuote'), 1n);
 

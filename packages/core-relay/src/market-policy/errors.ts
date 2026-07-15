@@ -4,8 +4,8 @@
 export class MarketQuoteUnavailableError extends Error {
   override readonly name = 'MarketQuoteUnavailableError';
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super(message, options);
   }
 }
 

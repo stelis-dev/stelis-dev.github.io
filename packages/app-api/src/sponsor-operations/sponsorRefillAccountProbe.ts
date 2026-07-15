@@ -1,4 +1,4 @@
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { getSuiBalance, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import {
   logStructuredEvent,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
@@ -14,7 +14,7 @@ export type SponsorRefillAccountProbeWriteFailureSource =
   | 'admin_sponsor_operations_sponsor_refill_account_update';
 
 export interface SponsorRefillAccountProbeDeps {
-  readonly sui: SuiGrpcClient;
+  readonly sui: SuiEndpointSnapshot;
   readonly spendState: SponsorRefillAccountSpendStateStore;
   readonly sponsorRefillAccountAddress: string;
   readonly refillTargetMist: bigint | null;
@@ -64,8 +64,10 @@ export async function probeAndWriteSponsorRefillAccountState(
       options.operation,
       deps.sponsorRefillAccountBalanceTimeoutMs,
       async () => {
-        const res = await deps.sui.getBalance({ owner: deps.sponsorRefillAccountAddress });
-        return parseChainBalanceMist(res.balance.balance, 'Sponsor refill account balance');
+        const res = await getSuiBalance(deps.sui, {
+          owner: deps.sponsorRefillAccountAddress,
+        });
+        return parseChainBalanceMist(res.balance, 'Sponsor refill account balance');
       },
     );
     observedBalance = balance;

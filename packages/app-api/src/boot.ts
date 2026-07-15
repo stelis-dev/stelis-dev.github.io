@@ -1,8 +1,9 @@
 /**
  * [app-api] Boot/instrumentation — runs before the server starts.
  *
- * Validates all required env vars, establishes Redis connectivity,
- * and determines runtime mode (generic-only vs. generic+studio).
+ * Validates all required env vars and determines runtime mode
+ * (generic-only vs. generic+studio). Runtime resources are created only after
+ * every boot input and Sui endpoint has qualified.
  *
  * Shared references:
  *   - parseSponsorKey, parseSponsorKeys → @stelis/core-api
@@ -20,8 +21,15 @@ import {
   canonicalizeAddress,
   validateAddressConstraints,
   parseTrustedProxyHops,
+  readHostChainState,
+  type HostChainState,
 } from '@stelis/core-api';
-import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
+import {
+  STELIS_CONTRACT_IDS,
+  DEEPBOOK_IDS,
+  requireContractId,
+  type SingleHopSettlementSwapPath,
+} from '@stelis/contracts';
 import {
   SPONSOR_BALANCE_REFILL_TARGET_MIST,
   SPONSOR_BALANCE_WARN_MIST,
@@ -32,26 +40,19 @@ import {
   parseOptionalPositiveIntegerEnv,
   parseRequiredPositiveIntegerEnv,
 } from './env.js';
-import { createRedisClient } from './redisClient.js';
 import { loadRpcConfig } from './sui/parseEndpointConfig.js';
-import { createSuiClient } from './sui/createSuiClient.js';
-import {
-  redactEndpointUrl,
-  redactSensitiveText,
-  safeErrorSummary,
-} from '@stelis/core-api/observability';
-import { validateChainIdentity } from './sui/validateChainIdentity.js';
+import { redactEndpointUrl, redactSensitiveText } from '@stelis/core-api/observability';
+import { qualifySuiRpcEndpoints } from './sui/qualifiedSuiRpc.js';
 import {
   getSettlementSwapPathRegistryPath,
   parseSettlementSwapPathRegistryJson,
+  resolveSettlementSwapPathRegistry,
 } from './settlementSwapPathRegistry.js';
 import { canonicalizePromotionTarget, parseDeveloperJwtTrustConfig } from '@stelis/core-api/studio';
 import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
 import type { ContextRuntimeInput } from './context.js';
 import type { AdminAuthRuntimeConfig } from './adminAuth.js';
-import { createAdminRedisAdapter } from './adminRedis.js';
-import { raiseAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
 
 /** Runtime mode resolved at boot — determines which route groups are active. */
 export interface BootSummary {
@@ -220,7 +221,8 @@ export async function runBootValidation(): Promise<BootValidationResult> {
   }
 
   // ── 3b. settlement-swap-paths.json format validation ───────────────
-  // Early fail-fast for format issues. Full on-chain derivation happens in context init.
+  // Early fail-fast for format issues. Full on-chain derivation is part of
+  // each endpoint's actual boot qualification below.
   const settlementSwapPathRegistryPath = getSettlementSwapPathRegistryPath();
   let settlementSwapPathRegistryRaw: string;
   try {
@@ -232,8 +234,6 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         'Restore the tracked packages/app-api/settlement-swap-paths.json config file and configure the active NETWORK section before starting app-api.',
     );
   }
-  // Capture the first pool ID for downstream simulateTransaction capability probe.
-  // parseSettlementSwapPathRegistryJson guarantees non-empty registry with valid pool IDs.
   let settlementSwapPathRegistryJson: unknown;
   try {
     settlementSwapPathRegistryJson = JSON.parse(settlementSwapPathRegistryRaw);
@@ -246,7 +246,6 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     settlementSwapPathRegistryJson,
     network,
   );
-  const simulateProbePoolId = settlementSwapPathRegistryEntries[0].poolId;
 
   // ── 4. Trusted proxy hops validation ─────────────────────────────────────
   const trustedProxyHops = resolveTrustedProxyHopsForBoot({
@@ -392,88 +391,49 @@ export async function runBootValidation(): Promise<BootValidationResult> {
 
   const corsAllowedOrigins = parseCorsAllowedOrigins(environment.CORS_ORIGINS);
 
-  // ── 10. Redis connectivity + admin not_before key ────────────────────
-  const redis = await createRedisClient(redisUrl);
-  try {
-    await raiseAppApiAdminSessionNotBefore(createAdminRedisAdapter(redis), Date.now());
-  } finally {
-    await redis.dispose();
-  }
-
-  // ── 10a. Load RPC fleet + validate chain identity ─────────────────────────
+  // ── 10. Qualify the immutable Sui endpoint boundary ──────────────────────
   const rpcEndpoints = loadRpcConfig(network, undefined, (name) => environment[name]);
-
-  // ── Endpoint verification: chain identity + functional probe ──────────
-  // 1. Chain identity: each endpoint must return correct chainIdentifier
-  const chainResult = await validateChainIdentity(network, rpcEndpoints);
-  // eslint-disable-next-line no-console
-  console.log(`[app-api] Chain identity verified: ${chainResult.chainIdentifier} (${network})`);
-
-  // 2. Functional probe: chain-verified endpoints must also pass getObject +
-  //    getCoinMetadata + simulateTransaction capability checks. Probe logic
-  //    lives in ./sui/probeEndpointCapabilities (unit-testable).
-  const { probeEndpointCapabilities } = await import('./sui/probeEndpointCapabilities.js');
-  const stelisConfigId = contractIds!.configId;
-  const deepCoinType = deepbookIds!.deepType;
-  const functionalResults = await Promise.all(
-    rpcEndpoints.map(async (ep) => {
-      const chainOk = chainResult.endpointResults.some((r) => r.url === ep.url && r.error === null);
-      if (!chainOk) return { url: ep.url, ok: false, reason: 'chain identity failed' };
-
-      const { GrpcWebFetchTransport } = await import('@protobuf-ts/grpcweb-transport');
-      const transport = new GrpcWebFetchTransport({
-        baseUrl: ep.url,
-        fetchInit: ep.fetchInit,
-        meta: ep.meta ?? {},
+  const hostChainStateIds = Object.freeze({
+    packageId: contractIds!.packageId,
+    configId: contractIds!.configId,
+    vaultRegistryId: contractIds!.vaultRegistryId,
+  });
+  const qualifiedSui = await qualifySuiRpcEndpoints<{
+    readonly initialHostChainState: HostChainState;
+    readonly settlementSwapPaths: readonly SingleHopSettlementSwapPath[];
+  }>({
+    network,
+    endpoints: rpcEndpoints,
+    qualify: async ({ snapshot, signal }) => {
+      const [initialHostChainState, settlementSwapPaths] = await Promise.all([
+        readHostChainState(snapshot, hostChainStateIds, signal),
+        resolveSettlementSwapPathRegistry(
+          snapshot,
+          deepbookIds!.packageId,
+          settlementSwapPathRegistryEntries,
+          signal,
+        ),
+      ]);
+      return Object.freeze({
+        initialHostChainState,
+        settlementSwapPaths: Object.freeze([...settlementSwapPaths]),
       });
-      const probeClient = new (await import('@mysten/sui/grpc')).SuiGrpcClient({
-        network,
-        transport,
-      });
-
-      const result = await probeEndpointCapabilities(probeClient, {
-        stelisConfigId,
-        deepCoinType,
-        simulateProbePoolId,
-      });
-      return { url: ep.url, ...result };
-    }),
-  );
-
-  const verified = rpcEndpoints.filter((ep) =>
-    functionalResults.some((r) => r.url === ep.url && r.ok),
-  );
-  const rejected = functionalResults.filter((r) => !r.ok);
-
-  if (rejected.length > 0) {
+    },
+  });
+  if (qualifiedSui.rejected.length > 0) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[app-api] RPC endpoint(s) excluded: ` +
-        rejected
-          .map((r) => `${redactEndpointUrl(r.url)}: ${safeErrorSummary(r.reason)}`)
-          .join('; '),
+      `[app-api] RPC endpoint(s) excluded: ${qualifiedSui.rejected
+        .map((endpoint) => `${endpoint.url}: ${endpoint.kind}`)
+        .join('; ')}`,
     );
-  }
-  if (verified.length === 0) {
-    throw new Error('[app-api] No usable RPC endpoints after verification.');
   }
   // eslint-disable-next-line no-console
   console.log(
-    `[app-api] Sui RPC: ${verified.length}/${rpcEndpoints.length} endpoint(s) verified — ` +
-      verified.map((ep) => redactEndpointUrl(ep.url)).join(', '),
+    `[app-api] Sui RPC: ${qualifiedSui.snapshot.endpointCount}/${rpcEndpoints.length} endpoint(s) qualified — ` +
+      qualifiedSui.adminSnapshot.endpoints.map((endpoint) => endpoint.origin).join(', '),
   );
-
-  const {
-    client: suiClient,
-    primaryClient: primarySuiClient,
-    failoverTransport,
-  } = createSuiClient({
-    network,
-    endpoints: verified,
-  });
-
-  // On-chain contract probe is already done in the functional probe above
-  // (each verified endpoint successfully read the Config object).
+  const primaryQualification = qualifiedSui.primaryQualification;
 
   // ── 10. Studio auto-detect ─────────────────────────────────────────────
   // Studio auth uses developer JWT trust (STUDIO_DEVELOPER_JWT_TRUST_JSON).
@@ -561,10 +521,10 @@ export async function runBootValidation(): Promise<BootValidationResult> {
           vaultRegistryId: contractIds!.vaultRegistryId,
         },
         deepbookPackageId: deepbookIds!.packageId,
-        suiClient,
-        primarySuiClient,
-        failoverTransport,
-        settlementSwapPathRegistryEntries,
+        sui: qualifiedSui.snapshot,
+        rpcFleet: qualifiedSui.adminSnapshot,
+        initialHostChainState: primaryQualification.initialHostChainState,
+        settlementSwapPaths: primaryQualification.settlementSwapPaths,
         sponsorKeys,
         sponsorLeaseHmacSecret: leaseHmacSecret,
         settlementPayoutRecipientAddress: recipientAddr,

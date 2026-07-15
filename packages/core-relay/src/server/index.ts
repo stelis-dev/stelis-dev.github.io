@@ -4,14 +4,15 @@ export {
   validatePaymentInputIntegrity,
 } from '../paymentInputIntegrity.js';
 export { findUniqueSettleCommandIndex } from '../settleCommand.js';
+// Host prepare classification may inspect only authority-created resolution
+// failures; browser/public errors never expose the retained structured value.
+export { getSuiRejectedExecutionError } from '../sui/suiOperation.js';
 
 export type {
   PaymentInputTrace,
   PaymentInputIntegrityExpectation,
   PaymentInputSource,
 } from '../paymentInputIntegrity.js';
-
-export { base64urlDecode } from './base64url.js';
 
 export type {
   StaticSettlementSwapPathDescriptor,

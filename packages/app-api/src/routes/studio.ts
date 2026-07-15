@@ -124,7 +124,7 @@ export function createStudioRoutes(
 
       return c.json(parsePromotionListResponse({ promotions: items, nextCursor: page.nextCursor }));
     } catch (err) {
-      const mapped = mapError(err, STUDIO_LIST_ERROR_CODES);
+      const mapped = mapError(err, STUDIO_LIST_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       return respondMapped(c, codedHostError('INTERNAL_ERROR', STUDIO_LIST_ERROR_CODES));
     }
@@ -170,7 +170,7 @@ export function createStudioRoutes(
       } satisfies PromotionDetailResponse;
       return c.json(response);
     } catch (err) {
-      const mapped = mapError(err, STUDIO_DETAIL_ERROR_CODES);
+      const mapped = mapError(err, STUDIO_DETAIL_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       return respondMapped(c, codedHostError('INTERNAL_ERROR', STUDIO_DETAIL_ERROR_CODES));
     }
@@ -232,7 +232,7 @@ export function createStudioRoutes(
       const response = { entitlement: result.entitlement } satisfies PromotionClaimResponse;
       return c.json(response, 201);
     } catch (err) {
-      const mapped = mapError(err, STUDIO_CLAIM_ERROR_CODES);
+      const mapped = mapError(err, STUDIO_CLAIM_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       return respondMapped(c, codedHostError('INTERNAL_ERROR', STUDIO_CLAIM_ERROR_CODES));
     }
@@ -317,7 +317,7 @@ export function createStudioRoutes(
       if (err instanceof HostWireParseError) {
         return respondMapped(c, codedHostError('BAD_REQUEST', PROMOTION_PREPARE_ERROR_CODES));
       }
-      const mapped = mapError(err, PROMOTION_PREPARE_ERROR_CODES);
+      const mapped = mapError(err, PROMOTION_PREPARE_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[app-api /studio/promotions/:id/prepare] 500 error:', safeErrorSummary(err));
@@ -409,7 +409,7 @@ export function createStudioRoutes(
       if (err instanceof HostWireParseError) {
         return respondMapped(c, codedHostError('BAD_REQUEST', PROMOTION_SPONSOR_ERROR_CODES));
       }
-      const mapped = mapError(err, PROMOTION_SPONSOR_ERROR_CODES);
+      const mapped = mapError(err, PROMOTION_SPONSOR_ERROR_CODES, 'SPONSOR_FAILED');
       if (mapped) return respondMapped(c, mapped);
       // eslint-disable-next-line no-console
       console.error('[app-api /studio/promotions/:id/sponsor] 500 error:', safeErrorSummary(err));

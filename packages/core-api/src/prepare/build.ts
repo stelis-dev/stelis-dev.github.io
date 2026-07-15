@@ -30,7 +30,9 @@ import {
   PrefixValueTraceError,
   SlippageQueryError,
   traceUserPrefixValue,
+  simulateSuiTransaction,
   type PrefixValueTrace,
+  type SuiTransactionResult,
 } from '@stelis/core-relay';
 import {
   createDeepbookQuotePort,
@@ -66,7 +68,6 @@ import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_BUILD_STAGE } from '../observability/events.js';
 import { createHash } from 'crypto';
 import { mist, unBps, type Mist } from '../internal/brand.js';
-import { parseCurrentSuiTerminalForBytes } from '../session/sessionPrimitives.js';
 import type {
   BuildContext,
   GenericPrepareBuildOutput,
@@ -189,26 +190,15 @@ type CreditProbeMeasurement =
   | { outcome: 'skipped' };
 
 function extractSuccessfulDryRunGas(
-  simResult: unknown,
-  dryRunBytes: Uint8Array,
+  result: SuiTransactionResult,
   stelisPackageId: string,
   commands: readonly PtbCommand[],
   meta: PrepareErrorMeta,
 ): SimulationGasUsed {
-  const terminal = parseCurrentSuiTerminalForBytes(simResult, dryRunBytes);
-  if (!terminal) {
-    throw new PrepareValidationError(
-      'DRY_RUN_FAILED',
-      'Dry-run returned a malformed terminal result',
-    );
+  if (result.outcome === 'failure') {
+    throw classifyDryRunFailure(result.error, stelisPackageId, commands, meta);
   }
-  if (terminal.kind === 'failure') {
-    throw classifyDryRunFailure(terminal.error.message, stelisPackageId, commands, meta);
-  }
-  if (!terminal.gasUsed) {
-    throw new PrepareValidationError('DRY_RUN_NO_GAS', 'Dry-run returned no gas usage');
-  }
-  return terminal.gasUsed;
+  return result.effects.gasUsed;
 }
 
 async function dryRunForGas(
@@ -249,11 +239,10 @@ async function dryRunForGas(
     throw err;
   }
 
-  let simResult: Awaited<ReturnType<typeof ctx.sui.simulateTransaction>>;
+  let simResult: SuiTransactionResult;
   try {
-    simResult = await ctx.sui.simulateTransaction({
+    simResult = await simulateSuiTransaction(ctx.sui, {
       transaction: dryRunBytes,
-      include: { effects: true },
     });
   } catch (err) {
     logPrepareBuildStage('dryrun_simulate_failed', {
@@ -271,18 +260,18 @@ async function dryRunForGas(
   // `extractSuccessfulDryRunGas` may still throw below. Dual emit on extract
   // failure (simulated + dryrun_extract_failed) is intentional.
   logPrepareBuildStage(completedStage, {
-    has_transaction: Boolean(simResult.Transaction),
+    outcome: simResult.outcome,
   });
 
   try {
-    return extractSuccessfulDryRunGas(simResult, dryRunBytes, ctx.packageId, commands, meta);
+    return extractSuccessfulDryRunGas(simResult, ctx.packageId, commands, meta);
   } catch (err) {
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
       pool_id: poolId,
       settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-      has_transaction: Boolean(simResult.Transaction),
+      outcome: simResult.outcome,
       completed_stage_emitted: true,
       ...quoteRpcStatsLogFields(quoteStats, false),
       phase_complete: false,
@@ -313,12 +302,6 @@ function materializePrefixValueTrace(
       throw new PrepareValidationError('PAYMENT_COIN_CONFLICT', error.message);
     }
     throw error;
-  }
-  if (trace.unaccountableSenderWithdrawal) {
-    throw new PrepareValidationError(
-      'UNACCOUNTABLE_WITHDRAWAL',
-      'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
-    );
   }
   return trace;
 }
@@ -1270,7 +1253,7 @@ async function runPreparePass(
       rpcStats.midPriceCalls += 1;
       rpcStats.midPriceTotalMs += Date.now() - midPriceStartedAt;
     } catch (err) {
-      // Mid-price RPC failed before any quote-solve work. Without this emit
+      // Mid-price query failed before any quote-solve work. Without this emit
       // the request would have zero failure-stage observability for the
       // mid-price axis. Partial timing reflects the elapsed duration of the
       // failed attempt; mid_price_calls is 0 because the success-path

@@ -248,7 +248,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       makeMetadata({
         economics: {
           economicsStatus: 'unknown',
-          failureReason: 'SPONSOR_EXEC_GAS_USED_MISSING',
+          failureReason: 'post_signature_uncertainty: Sui RPC transport was unavailable',
         },
       }),
     );
@@ -261,7 +261,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     expect(e.storageRebateMist).toBeNull();
     expect(e.hostFeeMist).toBeNull();
     expect(e.protocolFeeMist).toBeNull();
-    expect(e.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
+    expect(e.failureReason).toBe('post_signature_uncertainty: Sui RPC transport was unavailable');
   });
 
   it('promotion mode carries promotionId / userId; orderIdHash null', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
-import { convertSdkCommands, extractObjectIdFromInput } from '@stelis/core-relay';
+import { convertSdkCommands, projectSuiInputIdentity } from '@stelis/core-relay';
 import {
   extractSettlePaymentInputContract,
   validatePaymentInputIntegrity,
@@ -59,7 +59,8 @@ function splitSourceObjectId(
     | undefined;
   const inputIndex = payload?.coin?.Input;
   if (typeof inputIndex !== 'number') return null;
-  return extractObjectIdFromInput(inputs[inputIndex] as Record<string, unknown>);
+  const identity = projectSuiInputIdentity(inputs[inputIndex]);
+  return identity.startsWith('Object:') ? identity.slice('Object:'.length) : null;
 }
 
 describe('single-coin prefix value to final payment', () => {

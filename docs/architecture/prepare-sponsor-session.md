@@ -276,8 +276,8 @@ preflight/dry-run) while the IP counter still applies):
    New-user User Vault drift re-query runs here, before preflight, only when the
    stored-hash-verified PTB calls `swap_and_settle_new_user_*` on the trusted Stelis
    package (predicate `isNewUserSettleMoveCall(builtCommands, packageId)`).
-   Calls `queryUserCredit(ctx.sui, ctx.vaultRegistryId, senderAddress,
-ctx.vaultsTableId ?? undefined)`. If the vault now exists →
+   Calls `queryUserCredit(ctx.sui, ctx.packageId, ctx.vaultRegistryId,
+   senderAddress, ctx.vaultsTableId)`. If the vault now exists →
    `REPREPARE_REQUIRED` + `SPONSOR_DRIFT_OBSERVED { stage:
 'new_user_vault_exists', subcode: 'NEW_USER_VAULT_EXISTS' }`, no abuse
    counter (neither IP nor address); slot checkin via existing finally.

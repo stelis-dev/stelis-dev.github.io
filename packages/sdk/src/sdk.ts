@@ -11,25 +11,42 @@
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64, toHex } from '@mysten/sui/utils';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
-import { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { buildWithdrawPtb } from './ptb.js';
 import { StelisClient, StelisApiException } from './client.js';
-import { queryUserCredit, CreditQueryInconsistentStateError } from '@stelis/core-relay/browser';
+import {
+  queryUserCredit as queryUserCreditThroughGateway,
+  CreditQueryInconsistentStateError,
+  type CreditResult,
+} from '@stelis/core-relay/browser';
 import { verifyPtbIntegrity, verifyPromotionPtbIntegrity } from './integrity.js';
 import { assertNoGasPreset } from '@stelis/core-relay/browser';
 import {
+  assertSuiNetwork,
+  buildSuiTransaction,
   computeExecutionCostClaim,
-  bindCurrentSuiResultToBytes,
+  createSuiEndpointSnapshot,
   DEFAULT_GAS_MARGIN_BPS,
   encodePrepareAuthorizationMessage,
   extractSettleTransactionFieldsFromTxBytes,
   sha256Bytes,
   validateSettleTransactionFields,
   validateGenericUserTransactionKind,
+  type SuiEndpointSnapshot,
+  SuiOperationError,
+  executeSuiTransaction,
+  getSuiBalance,
+  simulateSuiTransaction,
+  suiExecutionErrorMessage,
 } from '@stelis/core-relay/browser';
-import { STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId } from '@stelis/contracts';
+import {
+  STELIS_CONTRACT_IDS,
+  DEEPBOOK_IDS,
+  SUI_CHAIN_IDENTIFIERS,
+  requireContractId,
+} from '@stelis/contracts';
 import { parseRelayConfig } from './connection.js';
-import { isInfraError, normalizeApiError, StelisSponsoredError } from './errors.js';
+import { normalizeApiError, StelisSponsoredError } from './errors.js';
 import {
   bigintToSafeNumberOrNull,
   formatRatioDecimal,
@@ -52,11 +69,23 @@ import type {
   PromotionSponsorResponse,
 } from './types.js';
 import { batchGetHopMidPrices } from '@stelis/core-relay/browser';
-import { composeSettlementTokenToSuiMidPrice, DEEPBOOK_MID_PRICE_SCALING } from './swap.js';
+import {
+  composeSettlementTokenToSuiMidPrice,
+  DEEPBOOK_MID_PRICE_SCALING,
+  readSettlementSwapPathLiquidity,
+  type SettlementSwapPathLiquidityStatus,
+} from './swap.js';
 
 const SUI_DECIMALS = 9;
 const DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST = 5_000_000;
 const PREPARE_REQUEST_NONCE_BYTES = 16;
+
+function isSuiInfrastructureFailure(error: unknown): boolean {
+  return (
+    error instanceof SuiOperationError &&
+    (error.kind === 'deadline_exceeded' || error.kind === 'transport_unavailable')
+  );
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -104,6 +133,7 @@ export class StelisSDK {
   private _vaultRegistryId: string;
   private _deepbookPackageId: string;
   private _deepType: string;
+  private readonly _suiEndpointProofs = new WeakMap<SuiGrpcClient, Promise<SuiEndpointSnapshot>>();
 
   /** Deployment network */
   get network(): RelayConfig['network'] {
@@ -154,6 +184,38 @@ export class StelisSDK {
       'DEEPBOOK_PACKAGE_ID',
     );
     this._deepType = requireContractId(DEEPBOOK_IDS[network]?.deepType, 'DEEP_TYPE');
+  }
+
+  /** Prove one caller-supplied client against the connected Host network once. */
+  private async _suiEndpoints(client: SuiGrpcClient): Promise<SuiEndpointSnapshot> {
+    const cached = this._suiEndpointProofs.get(client);
+    if (cached) return cached;
+
+    const snapshot = createSuiEndpointSnapshot([client]);
+    const proof = assertSuiNetwork(snapshot, {
+      network: this._relayConfig.network,
+      chainIdentifier: SUI_CHAIN_IDENTIFIERS[this._relayConfig.network],
+    }).then(() => snapshot);
+    this._suiEndpointProofs.set(client, proof);
+    try {
+      return await proof;
+    } catch (error) {
+      if (this._suiEndpointProofs.get(client) === proof) {
+        this._suiEndpointProofs.delete(client);
+      }
+      throw error;
+    }
+  }
+
+  /** Query current User Vault credit after proving the supplied client network. */
+  async queryUserCredit(client: SuiGrpcClient, userAddress: string): Promise<CreditResult> {
+    const endpoints = await this._suiEndpoints(client);
+    return queryUserCreditThroughGateway(
+      endpoints,
+      this._packageId,
+      this._vaultRegistryId,
+      userAddress,
+    );
   }
 
   /**
@@ -230,6 +292,19 @@ export class StelisSDK {
   }
 
   /**
+   * Read current liquidity for one Host-advertised settlement swap path.
+   * The SDK proves the supplied client against the connected Host network and
+   * supplies the fixed DeepBook package identity itself.
+   */
+  async checkSettlementSwapPathLiquidity(
+    client: SuiGrpcClient,
+    settlementSwapPath: SingleHopSettlementSwapPath,
+  ): Promise<SettlementSwapPathLiquidityStatus> {
+    const endpoints = await this._suiEndpoints(client);
+    return readSettlementSwapPathLiquidity(endpoints, this._deepbookPackageId, settlementSwapPath);
+  }
+
+  /**
    * Query exchange rate for a settlement token.
    *
    * DeepBook mid_price is scaled by 1e9 and represents
@@ -249,11 +324,12 @@ export class StelisSDK {
     rateDisplay: string;
     hopMidPrices: bigint[];
   }> {
+    const endpoints = await this._suiEndpoints(client);
     const settlementSwapPath = this.getSettlementSwapPathForSettlementToken(settlementTokenType);
 
     // Query all hop mid-prices in a single batch
     const hopPrices = await batchGetHopMidPrices(
-      client,
+      endpoints,
       this.deepbookPackageId,
       settlementSwapPath.hops,
     );
@@ -322,6 +398,7 @@ export class StelisSDK {
       gasMarginBps?: number;
     },
   ): Promise<GasEstimateResult> {
+    const endpoints = await this._suiEndpoints(client);
     const intentGasBudget = opts.intentGasBudget ?? DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST;
     const gasMarginBps = opts.gasMarginBps ?? DEFAULT_GAS_MARGIN_BPS;
 
@@ -353,7 +430,12 @@ export class StelisSDK {
     );
 
     // 3. Vault/credit check for profile determination
-    const credit = await queryUserCredit(client, this._vaultRegistryId, opts.addr);
+    const credit = await queryUserCreditThroughGateway(
+      endpoints,
+      this._packageId,
+      this._vaultRegistryId,
+      opts.addr,
+    );
     const hasVault = !!(credit.vaultObjectId && !credit.needsCreate);
     const vaultCredit = parseDecimalBigInt(credit.credit, 'vault credit');
     const profile = !hasVault
@@ -458,11 +540,15 @@ export class StelisSDK {
     tx: Transaction,
     opts: PrepareSponsoredOptions,
   ): Promise<PrepareSponsoredResult> {
+    const endpoints = await this._suiEndpoints(opts.client);
     this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
 
     // Build TransactionKind bytes from user commands
     tx.setSender(opts.addr);
-    const kindBytes = await tx.build({ client: opts.client, onlyTransactionKind: true });
+    const kindBytes = await buildSuiTransaction(endpoints, {
+      transaction: tx,
+      onlyTransactionKind: true,
+    });
     const txKindBytes = toBase64(kindBytes);
     const userTx = Transaction.fromKind(kindBytes);
     const userCommandValidation = validateGenericUserTransactionKind(
@@ -497,34 +583,6 @@ export class StelisSDK {
     const prepareAuthorizationSignature = await opts.prepareAuthorizationSigner(
       encodePrepareAuthorizationMessage(prepareAuthorizationFields),
     );
-
-    // ── Preflight: best-effort, fail-open ───────────────────────────────────
-    // Reject only on deterministic failures (no vault + no payment coins).
-    // RPC errors → skip preflight, let server decide.
-    try {
-      const preCredit = await queryUserCredit(opts.client, this._vaultRegistryId, opts.addr);
-      const preHasVault = !!(preCredit.vaultObjectId && !preCredit.needsCreate);
-      const preVaultCredit = parseDecimalBigInt(preCredit.credit, 'vault credit');
-
-      if (!preHasVault || preVaultCredit === 0n) {
-        // Swap path required → check settlement token existence
-        // If host supports address balance payment, skip this check —
-        // the server will resolve coin objects vs address balance at /prepare time.
-        // Address balance payment is always enabled — server resolves
-        // coin objects vs address balance at /prepare time. No preflight
-        // coin-existence check needed.
-      }
-      // credit > 0 but insufficient? → do NOT reject (non-authoritative hint).
-      // Server 422 INSUFFICIENT_BALANCE is the authoritative result.
-    } catch (err) {
-      // Deterministic preflight rejection → always throw
-      if (err instanceof StelisApiException) throw err;
-      // Programming errors (TypeError, RangeError, etc.) → re-throw to expose bugs
-      if (!(err instanceof Error)) throw err;
-      // Only swallow network/RPC errors (fetch failures, timeouts, gRPC issues)
-      if (!isInfraError(err)) throw err;
-      // RPC failure → skip preflight, let server decide
-    }
 
     // Call /prepare — Host handles settle build, dry-run, slot checkout
     const prepareRes = await this._client.prepare({
@@ -584,15 +642,19 @@ export class StelisSDK {
     // Unexpected errors are logged so they are visible in dev without breaking the flow.
     let vaultId: string | null = null;
     try {
-      const credit = await queryUserCredit(opts.client, this._vaultRegistryId, opts.addr);
+      const credit = await queryUserCreditThroughGateway(
+        endpoints,
+        this._packageId,
+        this._vaultRegistryId,
+        opts.addr,
+      );
       vaultId = credit.vaultObjectId;
     } catch (err) {
       const expected =
-        err instanceof CreditQueryInconsistentStateError ||
-        (err instanceof Error && isInfraError(err));
+        err instanceof CreditQueryInconsistentStateError || err instanceof SuiOperationError;
       if (!expected) {
         // eslint-disable-next-line no-console
-        console.warn('[StelisSDK] post-prepare vault query unexpected error:', err);
+        console.warn('[StelisSDK] post-prepare vault query failed with an unexpected local error');
       }
     }
 
@@ -626,7 +688,10 @@ export class StelisSDK {
    *
    * @example
    * ```ts
-   * const suiClient = new SuiGrpcClient({ network: 'testnet' });
+   * const suiClient = new SuiGrpcClient({
+   *   network: 'testnet',
+   *   baseUrl: 'https://fullnode.testnet.sui.io:443',
+   * });
    * const sdk = await StelisSDK.connect(endpoint);
    * try {
    *   const result = await sdk.executeSponsored(tx, {
@@ -706,17 +771,18 @@ export class StelisSDK {
   ): Promise<ExecuteSuiFirstResult> {
     // ── UX Guard ──────────────────────────────────────────────────────────
     assertNoGasPreset(tx);
+    const endpoints = await this._suiEndpoints(opts.client);
 
     // ── Step 1: SUI balance (infra failure → best-effort sponsored) ─────────
     let suiBalance: bigint;
     try {
-      const balRes = await opts.client.getBalance({
+      const balRes = await getSuiBalance(endpoints, {
         owner: opts.addr,
         coinType: '0x2::sui::SUI',
       });
-      suiBalance = parseDecimalBigInt(balRes.balance.balance, 'SUI balance');
+      suiBalance = parseDecimalBigInt(balRes.balance, 'SUI balance');
     } catch (err) {
-      if (isInfraError(err)) {
+      if (isSuiInfrastructureFailure(err)) {
         // best-effort: executeSponsored shares the same opts.client — may also fail
         const r = await this.executeSponsored(tx, opts);
         return { path: 'sponsored', digest: r.digest, effects: r.effects, orderId: r.orderId };
@@ -726,68 +792,44 @@ export class StelisSDK {
 
     // ── Step 2: dry-run gasBudget (RPC only in try; deterministic failures outside) ──
     tx.setSender(opts.addr);
-    let sim: unknown;
+    let sim: Awaited<ReturnType<typeof simulateSuiTransaction>>;
     let simBytes: Uint8Array;
     try {
-      simBytes = await tx.build({ client: opts.client });
-      sim = await opts.client.simulateTransaction({
+      simBytes = await buildSuiTransaction(endpoints, { transaction: tx });
+      sim = await simulateSuiTransaction(endpoints, {
         transaction: simBytes,
-        include: { effects: true },
       });
     } catch (err) {
-      if (isInfraError(err)) {
+      if (isSuiInfrastructureFailure(err)) {
         const r = await this.executeSponsored(tx, opts);
         return { path: 'sponsored', digest: r.digest, effects: r.effects, orderId: r.orderId };
       }
       throw err;
     }
     // Deterministic failures — outside catch so message strings can't be misclassified.
-    const boundSimulation = bindCurrentSuiResultToBytes(sim, simBytes);
-    if (!boundSimulation) {
-      throw new Error('[StelisSDK] Simulation returned a malformed or mismatched result');
+    if (sim.outcome === 'failure') {
+      throw new Error(`[StelisSDK] Simulation failed: ${suiExecutionErrorMessage(sim.error)}`);
     }
-    if (boundSimulation.outcome === 'failure') {
-      throw new Error(`[StelisSDK] Simulation failed: ${boundSimulation.errorMessage}`);
-    }
-    const simulationEffects = boundSimulation.transaction.effects;
-    const gasUsed =
-      typeof simulationEffects === 'object' &&
-      simulationEffects !== null &&
-      !Array.isArray(simulationEffects)
-        ? (simulationEffects as Record<string, unknown>).gasUsed
-        : undefined;
-    if (!gasUsed)
-      throw new Error('[StelisSDK] Simulation returned no gasUsed — cannot determine gas budget');
-    const { grossGas } = computeExecutionCostClaim(
-      gasUsed as import('@stelis/core-relay/browser').SimulationGasUsed,
-    );
+    const { grossGas } = computeExecutionCostClaim(sim.effects.gasUsed);
     const gasBudget = (grossGas * BigInt(10000 + DEFAULT_GAS_MARGIN_BPS)) / 10000n;
 
     // ── Step 3a: SUI sufficient — execute directly ────────────────────────
     if (suiBalance >= gasBudget) {
       const directTx = Transaction.from(tx); // clone — do not mutate original
       directTx.setGasBudget(gasBudget);
-      const builtBytes = await directTx.build({ client: opts.client });
+      const builtBytes = await buildSuiTransaction(endpoints, { transaction: directTx });
       const signature = await opts.signer(toBase64(builtBytes));
-      const res = await opts.client.executeTransaction({
+      const res = await executeSuiTransaction(endpoints, {
         transaction: builtBytes, // Uint8Array
         signatures: [signature],
-        include: { effects: true },
       });
-      const boundExecution = bindCurrentSuiResultToBytes(res, builtBytes);
-      if (!boundExecution) {
-        throw new Error('[StelisSDK] Transaction returned a malformed or mismatched result');
-      }
-      if (boundExecution.outcome === 'failure') {
-        throw new Error(`[StelisSDK] Transaction failed: ${boundExecution.errorMessage}`);
-      }
-      if (boundExecution.transaction.effects === undefined) {
-        throw new Error('[StelisSDK] Transaction returned no requested effects');
+      if (res.outcome === 'failure') {
+        throw new Error(`[StelisSDK] Transaction failed: ${suiExecutionErrorMessage(res.error)}`);
       }
       return {
         path: 'sui',
-        digest: boundExecution.digest,
-        effects: boundExecution.transaction.effects,
+        digest: res.digest,
+        effects: res.effects,
       };
     }
 
@@ -833,9 +875,14 @@ export class StelisSDK {
       );
     }
 
+    const endpoints = await this._suiEndpoints(opts.client);
+
     // Build TransactionKind bytes
     tx.setSender(opts.addr);
-    const kindBytes = await tx.build({ client: opts.client, onlyTransactionKind: true });
+    const kindBytes = await buildSuiTransaction(endpoints, {
+      transaction: tx,
+      onlyTransactionKind: true,
+    });
     const txKindBytes = toBase64(kindBytes);
 
     const result = await this._client.promotionPrepare(
@@ -891,7 +938,10 @@ export class StelisSDK {
    *
    * @example
    * ```ts
-   * const suiClient = new SuiGrpcClient({ network: 'testnet' });
+   * const suiClient = new SuiGrpcClient({
+   *   network: 'testnet',
+   *   baseUrl: 'https://fullnode.testnet.sui.io:443',
+   * });
    * // studioEndpoint: true is required — promotion methods are rejected at call time
    * // if the SDK was not connected in studio mode.
    * const sdk = await StelisSDK.connect(endpoint, { studioEndpoint: true });

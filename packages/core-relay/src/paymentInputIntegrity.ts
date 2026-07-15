@@ -12,6 +12,7 @@ import type { SettleArgs } from './types.js';
 import { decodeExactPureU64Base64 } from './decodeU64.js';
 import { extractObjectIdFromInput } from './ptbInputUtils.js';
 import { normalizeMoveStructType, resolveFundsWithdrawalSource } from './prefixValueTrace.js';
+import { parseSuiArgument, parseSuiCallArg } from './sui/suiTransactionShape.js';
 
 const SUI_FRAMEWORK_ADDRESS = normalizeSuiAddress('0x2');
 
@@ -160,9 +161,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 const DECIMAL_U64_RE = /^(?:0|[1-9]\d*)$/;
+const U64_MAX = 18_446_744_073_709_551_615n;
 
-function parseDecimalU64(value: string, label: string): bigint {
-  if (!DECIMAL_U64_RE.test(value)) {
+function parseCurrentU64(value: unknown, label: string): bigint {
+  if (typeof value === 'number') {
+    if (Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+    throw new Error(`${label} must be a current unsigned u64`);
+  }
+  if (typeof value !== 'string' || !DECIMAL_U64_RE.test(value) || BigInt(value) > U64_MAX) {
     throw new Error(`${label} must be a non-negative decimal integer string`);
   }
   return BigInt(value);
@@ -175,26 +181,19 @@ function isSameStructType(actual: string, expected: string): boolean {
 }
 
 function parseCommandRef(arg: unknown): CommandRef | null {
-  const record = asRecord(arg);
-  if (!record || typeof record.$kind !== 'string') return null;
-
-  if (record.$kind === 'Input' && typeof record.Input === 'number') {
-    return { kind: 'Input', input: record.Input };
+  let current;
+  try {
+    current = parseSuiArgument(arg);
+  } catch {
+    return null;
   }
-  if (record.$kind === 'Result' && typeof record.Result === 'number') {
-    return { kind: 'Result', command: record.Result };
-  }
-  if (
-    record.$kind === 'NestedResult' &&
-    Array.isArray(record.NestedResult) &&
-    record.NestedResult.length === 2 &&
-    typeof record.NestedResult[0] === 'number' &&
-    typeof record.NestedResult[1] === 'number'
-  ) {
+  if (current.$kind === 'Input') return { kind: 'Input', input: current.Input };
+  if (current.$kind === 'Result') return { kind: 'Result', command: current.Result };
+  if (current.$kind === 'NestedResult') {
     return {
       kind: 'NestedResult',
-      command: record.NestedResult[0],
-      result: record.NestedResult[1],
+      command: current.NestedResult[0],
+      result: current.NestedResult[1],
     };
   }
   return null;
@@ -234,43 +233,32 @@ function decodeFundsWithdrawal(
   if (!ref || ref.kind !== 'Input') {
     throw new Error('Expected Input reference for FundsWithdrawal');
   }
-  const input = asRecord(inputs[ref.input]);
-  if (!input) {
+  if (ref.input >= inputs.length) {
     throw new Error(`Input[${ref.input}] is not an object`);
   }
+  const input = parseSuiCallArg(inputs[ref.input], `inputs[${ref.input}]`);
   if (input.$kind !== 'FundsWithdrawal') {
     throw new Error(`Input[${ref.input}] is not a FundsWithdrawal`);
   }
 
-  const fw = asRecord(input.FundsWithdrawal);
-  const reservation = asRecord(fw?.reservation);
-  if (
-    !reservation ||
-    reservation.$kind !== 'MaxAmountU64' ||
-    typeof reservation.MaxAmountU64 !== 'string'
-  ) {
-    throw new Error(`FundsWithdrawal input ${ref.input} has no MaxAmountU64 reservation`);
-  }
-
-  const typeArg = asRecord(fw?.typeArg);
-  if (!typeArg || typeof typeArg.Balance !== 'string') {
-    throw new Error(`FundsWithdrawal input ${ref.input} has no Balance typeArg`);
-  }
-  if (!isSameStructType(typeArg.Balance, expectedType)) {
+  const withdrawal = input.FundsWithdrawal;
+  if (!isSameStructType(withdrawal.typeArg.Balance, expectedType)) {
     throw new Error(
-      `FundsWithdrawal type ${typeArg.Balance} does not match settlement token ${expectedType}`,
+      `FundsWithdrawal type ${withdrawal.typeArg.Balance} does not match settlement token ${expectedType}`,
     );
   }
 
-  const withdrawFrom = asRecord(fw?.withdrawFrom);
-  if (resolveFundsWithdrawalSource(withdrawFrom ?? undefined) !== 'Sender') {
+  if (
+    resolveFundsWithdrawalSource(withdrawal.withdrawFrom as unknown as Record<string, unknown>) !==
+    'Sender'
+  ) {
     throw new Error(
       `FundsWithdrawal input ${ref.input} must withdraw from Sender for payment integrity`,
     );
   }
 
-  return parseDecimalU64(
-    reservation.MaxAmountU64,
+  return parseCurrentU64(
+    withdrawal.reservation.MaxAmountU64,
     `FundsWithdrawal input ${ref.input} MaxAmountU64`,
   );
 }
@@ -329,7 +317,7 @@ function collectFundingInputUses(
 
   for (let commandIndex = 0; commandIndex < commands.length; commandIndex++) {
     const counts = new Map<number, number>();
-    visit(commands[commandIndex]?.arguments ?? [], counts);
+    visit(commands[commandIndex]!.arguments, counts);
     for (const [inputIndex, occurrences] of counts) {
       uses.push({ commandIndex, inputIndex, occurrences });
     }
@@ -598,6 +586,7 @@ export function extractPaymentInputTrace(
   inputs: unknown[],
   settleCmd: MoveCallCommand,
 ): PaymentInputTrace {
+  inputs = inputs.map((input, index) => parseSuiCallArg(input, `inputs[${index}]`));
   const entry = (
     SETTLEMENT_ENTRY_FUNCTIONS as Readonly<
       Record<string, (typeof SETTLEMENT_ENTRY_FUNCTIONS)[keyof typeof SETTLEMENT_ENTRY_FUNCTIONS]>

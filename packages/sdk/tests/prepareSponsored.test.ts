@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
@@ -139,13 +140,8 @@ const MOCK_PREPARE_RESPONSE: RelayPrepareResponse = {
 const prepareAuthorizationSigner = vi.fn().mockResolvedValue('prepare-signature');
 
 // ── Mock SuiClient ─────────────────────────────────────────────────────────────
-function makeMockSuiClient(overrides?: { listCoins?: ReturnType<typeof vi.fn> }): SuiGrpcClient {
-  return {
-    getReferenceGasPrice: vi.fn().mockResolvedValue(1000n),
-    listCoins:
-      overrides?.listCoins ?? vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
-    // Minimal mocks for tx.build
-  } as unknown as SuiGrpcClient;
+function makeMockSuiClient(): SuiGrpcClient {
+  return withSuiClientIdentity({});
 }
 
 // ── SDK factory — uses the mocked StelisClient public boundary ─────────────────
@@ -419,11 +415,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
   });
 });
 
-// ─────────────────────────────────────────────
-// Preflight coverage
-// ─────────────────────────────────────────────
-
-describe('StelisSDK.prepareSponsored — preflight checks', () => {
+describe('StelisSDK.prepareSponsored — post-prepare information', () => {
   beforeEach(() => {
     mockPrepare.mockReset();
     mockPrepare.mockResolvedValue(MOCK_PREPARE_RESPONSE);
@@ -437,101 +429,13 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     mockGetConfig.mockReset();
   });
 
-  // ── Preflight: no coin check — server handles source resolution ─────
-  it('proceeds to /prepare even when no vault and no coins (server resolves from address balance)', async () => {
-    _creditResult = makeCreditResult({ needsCreate: true });
-    const sdk = await createSDK();
-    const listCoins = vi.fn().mockResolvedValue({ objects: [] });
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient({ listCoins }),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    // Should proceed to /prepare — server resolves coin vs address balance
-    expect(mockPrepare).toHaveBeenCalledTimes(1);
-    expect(result.txBytes).toBe('base64MockTxBytes');
-  });
-
-  // ── Preflight: proceeds when coins exist ────────────────────────────
-  it('proceeds to /prepare when no vault but coins exist', async () => {
-    _creditResult = makeCreditResult({ needsCreate: true });
-    const sdk = await createSDK();
-    const listCoins = vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] });
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient({ listCoins }),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    expect(mockPrepare).toHaveBeenCalledTimes(1);
-    expect(result.txBytes).toBe('base64MockTxBytes');
-  });
-
-  // ── Preflight: skips coin check for credit_general ──────────────────
-  it('skips preflight coin check when vault has credit', async () => {
-    _creditResult = makeCreditResult({ vaultObjectId: '0xVault', credit: '999999999' });
-    const sdk = await createSDK();
-    const listCoins = vi.fn();
-
-    await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient({ listCoins }),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    // listCoins should NOT have been called — credit covers everything
-    expect(listCoins).not.toHaveBeenCalled();
-    expect(mockPrepare).toHaveBeenCalledTimes(1);
-  });
-
-  // ── Preflight: fail-open on RPC error ───────────────────────────────
-  it('proceeds to /prepare when preflight RPC fails (fail-open)', async () => {
-    // queryUserCredit will throw a network error (simulated via mock)
-    const { queryUserCredit: mockQueryCredit } = await import('@stelis/core-relay/browser');
-    const originalImpl = (mockQueryCredit as ReturnType<typeof vi.fn>).getMockImplementation();
-    (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error('fetch failed: network timeout'),
-    );
-
-    const sdk = await createSDK();
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient(),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    // Should have proceeded to /prepare despite preflight RPC failure
-    expect(mockPrepare).toHaveBeenCalledTimes(1);
-    expect(result.txBytes).toBe('base64MockTxBytes');
-
-    // Restore original mock
-    if (originalImpl) {
-      (mockQueryCredit as ReturnType<typeof vi.fn>).mockImplementation(originalImpl);
-    }
-  });
-
-  // ── Post-prepare vault query failure does not abort flow ──────────
   it('returns vaultId=null when post-prepare queryUserCredit fails', async () => {
     const { queryUserCredit: mockQueryCredit } = await import('@stelis/core-relay/browser');
     const sdk = await createSDK();
 
-    // First call (preflight) succeeds, second call (post-prepare) fails
-    let callCount = 0;
-    (mockQueryCredit as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 1) {
-        return { ..._creditResult };
-      }
-      throw new Error('transient RPC failure');
-    });
+    (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('unexpected local failure'),
+    );
 
     const result = await sdk.prepareSponsored(new Transaction(), {
       client: makeMockSuiClient(),
@@ -543,25 +447,5 @@ describe('StelisSDK.prepareSponsored — preflight checks', () => {
     // /prepare succeeded — result should be returned with vaultId=null
     expect(result.txBytes).toBe('base64MockTxBytes');
     expect(result.vaultId).toBeNull();
-  });
-
-  // ── CreditQueryInconsistentStateError in preflight propagates ─────
-  it('propagates CreditQueryInconsistentStateError from preflight (not swallowed as infra error)', async () => {
-    const { queryUserCredit: mockQueryCredit, CreditQueryInconsistentStateError } =
-      await import('@stelis/core-relay/browser');
-    (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new CreditQueryInconsistentStateError('vault missing', '0xVAULT', '0xUSER'),
-    );
-
-    const sdk = await createSDK();
-
-    await expect(
-      sdk.prepareSponsored(new Transaction(), {
-        client: makeMockSuiClient(),
-        addr: ADDR,
-        settlementToken: { type: DEEP_TYPE },
-        prepareAuthorizationSigner,
-      }),
-    ).rejects.toThrow(CreditQueryInconsistentStateError);
   });
 });

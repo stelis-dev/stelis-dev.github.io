@@ -37,6 +37,8 @@ import type {
 } from '../src/store/prepareTypes.js';
 import type { HostContext } from '../src/context.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
+import type { SuiExecutionError } from '@stelis/core-relay';
+import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const SENDER = `0x${'11'.repeat(32)}`;
@@ -50,6 +52,9 @@ const GAS_USED = {
   storageCost: '200',
   storageRebate: '100',
   nonRefundableStorageFee: '0',
+};
+const MOVE_FAILURE: SuiExecutionError = {
+  kind: 'MovePrimitiveRuntimeError',
 };
 
 class TestSponsorError extends Error {
@@ -75,8 +80,6 @@ const errors: GenericSponsorErrorFactory = {
     new TestSponsorError('SPONSOR_ONCHAIN_FAILED', reason, subcode, digest, gasUsed),
   sponsorCongestion: (message, digest) =>
     new TestSponsorError('SPONSOR_CONGESTION', message, undefined, digest),
-  sponsorTerminalProcessing: (message, digest) =>
-    new TestSponsorError('GAS_EFFECTS_MISSING', message, undefined, digest),
 };
 
 function makePrepared(overrides: Partial<GenericPreparedTxEntry> = {}): GenericPreparedTxEntry {
@@ -713,7 +716,10 @@ describe('generic sponsor postconsume hooks', () => {
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          runPreflight: vi.fn(async () => ({ success: false as const, reason: 'MoveAbort(110)' })),
+          runPreflight: vi.fn(async () => ({
+            success: false as const,
+            error: MOVE_FAILURE,
+          })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
         },
@@ -749,15 +755,15 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     const failed: ExecResult = {
       success: false,
       executionStage: 'on_chain',
-      digest: '0xdead',
-      reason: 'MoveAbort(101)',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
+      error: MOVE_FAILURE,
       isCongestion: false,
       gasUsed: GAS_USED,
     };
 
     await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), failed)).rejects.toMatchObject({
       code: 'SPONSOR_ONCHAIN_FAILED',
-      digest: '0xdead',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
     });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
@@ -780,7 +786,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
       executionStage: 'on_chain',
-      digest: '0xok',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
     };
@@ -790,7 +796,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     const projected = projectGenericSponsorResult(makeSponsorOptions(), state);
 
     expect(projected).toEqual({
-      digest: '0xok',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       executionCostClaim: '5000',
       orderId: 'order-1',
@@ -799,7 +805,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       expect.objectContaining({
         outcome: 'success',
         route: 'generic',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         receiptId: RECEIPT_ID,
         senderAddress: SENDER,
         economics: expect.objectContaining({ economicsStatus: 'known' }),
@@ -822,7 +828,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       const success: Extract<ExecResult, { success: true }> = {
         success: true,
         executionStage: 'on_chain',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         effects: { status: 'ok' },
         gasUsed: GAS_USED,
       };
@@ -836,7 +842,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       expect(callbackFailedLog).toMatchObject({
         source: 'sponsor_handler',
         route: 'generic',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         outcome: 'success',
       });
     } finally {

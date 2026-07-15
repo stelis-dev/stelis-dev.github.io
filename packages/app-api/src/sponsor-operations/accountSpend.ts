@@ -1,6 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { SuiClientTypes } from '@mysten/sui/client';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { fromBase64, fromHex, normalizeSuiAddress, toBase64 } from '@mysten/sui/utils';
@@ -10,9 +8,16 @@ import {
   type SuiNetwork,
 } from '@stelis/contracts';
 import {
-  parseCurrentSuiTerminalForBytes,
-  parseCurrentSuiTerminalForDigest,
-} from '@stelis/core-api';
+  buildSuiTransaction,
+  executeSuiTransaction,
+  getSuiBalance,
+  getSuiTransactionEffects,
+  simulateSuiTransaction,
+  SuiOperationError,
+  suiExecutionErrorMessage,
+  type SuiEndpointSnapshot,
+  type SuiTransactionResult,
+} from '@stelis/core-relay';
 import type {
   SponsorRefillAccountDispatchLock,
   SponsorRefillAccountDispatchLockHandle,
@@ -190,34 +195,26 @@ function isRuntimeRecord(value: unknown): value is RuntimeRecord {
 }
 
 function parseCurrentTransactionResult(
-  raw: SuiClientTypes.TransactionResult<{ effects: true }>,
+  transaction: SuiTransactionResult,
   expectedDigest: string,
 ): SponsorRefillAccountChainResult {
-  const transaction = parseCurrentSuiTerminalForDigest(raw, expectedDigest);
-  if (transaction === null) {
-    throw new Error('Sponsor Refill Account transaction returned a malformed terminal result');
+  if (transaction.digest !== expectedDigest) {
+    throw new Error('Sponsor Refill Account transaction digest does not match its request');
   }
   return {
     digest: expectedDigest,
-    success: transaction.kind === 'success',
-    error: transaction.kind === 'success' ? null : transaction.error.message,
+    success: transaction.outcome === 'success',
+    error: transaction.outcome === 'success' ? null : suiExecutionErrorMessage(transaction.error),
   };
 }
 
-function parseSimulationResult(
-  raw: SuiClientTypes.SimulateTransactionResult<{ effects: true }>,
-  transactionBytes: Uint8Array,
-): {
+function parseSimulationResult(transaction: SuiTransactionResult): {
   success: boolean;
   error: string | null;
 } {
-  const transaction = parseCurrentSuiTerminalForBytes(raw, transactionBytes);
-  if (transaction === null) {
-    throw new Error('Sponsor Refill Account simulation returned a malformed terminal result');
-  }
-  return transaction.kind === 'success'
+  return transaction.outcome === 'success'
     ? { success: true, error: null }
-    : { success: false, error: transaction.error.message };
+    : { success: false, error: suiExecutionErrorMessage(transaction.error) };
 }
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -327,7 +324,7 @@ function assertCompiledSpendIdentity(input: {
 }
 
 export function createSuiSponsorRefillAccountSpendBoundary(input: {
-  readonly sui: SuiGrpcClient;
+  readonly sui: SuiEndpointSnapshot;
   readonly signer: Ed25519Keypair;
   readonly sourceAddress: string;
 }): SponsorRefillAccountSpendBoundary {
@@ -362,7 +359,7 @@ export function createSuiSponsorRefillAccountSpendBoundary(input: {
       transaction.transferObjects([coin], destinationAddress);
       transaction.setSender(input.sourceAddress);
 
-      const transactionBytes = await transaction.build({ client: input.sui });
+      const transactionBytes = await buildSuiTransaction(input.sui, { transaction });
       const decoded = TransactionDataBuilder.fromBytes(transactionBytes).snapshot();
       const gasBudgetRaw = decoded.gasData.budget;
       const gasBudgetMist = gasBudgetRaw == null ? '' : String(gasBudgetRaw);
@@ -395,20 +392,22 @@ export function createSuiSponsorRefillAccountSpendBoundary(input: {
 
     async simulate(transactionBytes) {
       return parseSimulationResult(
-        await input.sui.simulateTransaction({
+        await simulateSuiTransaction(input.sui, {
           transaction: transactionBytes,
-          include: { effects: true },
         }),
-        transactionBytes,
       );
     },
 
     async lookup(digest) {
       try {
-        const result = await input.sui.getTransaction({ digest, include: { effects: true } });
+        const result = await getSuiTransactionEffects(input.sui, { digest });
         return { status: 'found', result: parseCurrentTransactionResult(result, digest) };
       } catch (error) {
-        if (error instanceof Error && error.message === `Transaction ${digest} not found`) {
+        if (
+          error instanceof SuiOperationError &&
+          error.kind === 'not_found' &&
+          error.diagnostic.resourceId === digest
+        ) {
           return { status: 'not_found' };
         }
         throw error;
@@ -422,18 +421,17 @@ export function createSuiSponsorRefillAccountSpendBoundary(input: {
         );
       }
       return parseCurrentTransactionResult(
-        await input.sui.executeTransaction({
+        await executeSuiTransaction(input.sui, {
           transaction: transactionBytes,
           signatures: [signature],
-          include: { effects: true },
         }),
         expectedDigest,
       );
     },
 
     async getBalance(address) {
-      const result = await input.sui.getBalance({ owner: address });
-      return parseChainBalanceMist(result.balance.balance, `Address ${address} balance`);
+      const result = await getSuiBalance(input.sui, { owner: address });
+      return parseChainBalanceMist(result.balance, `Address ${address} balance`);
     },
   };
 }

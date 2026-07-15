@@ -6,7 +6,7 @@
  * keeping the existing Studio route behavior as the target.
  */
 import { describe, test, expect, vi } from 'vitest';
-import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
+import { Transaction } from '@mysten/sui/transactions';
 import { toBase58, toBase64 } from '@mysten/sui/utils';
 import {
   buildStudioPreparedDraftFields,
@@ -36,13 +36,28 @@ import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../src/store/pre
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
 import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
-import type { OnchainConfig } from '@stelis/core-relay';
+import type { OnchainConfig, SuiEndpointSnapshot, SuiExecutionError } from '@stelis/core-relay';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
-  grpcSimulationFailure,
-  grpcSimulationSuccess,
-  unknownExecutionError,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  congestedSuiExecutionError,
+  suiSimulationFailure,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+  unclassifiedSuiExecutionError,
+  suiEndpointSnapshotFixture,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const { simulateSuiTransactionMock } = vi.hoisted(() => ({
+  simulateSuiTransactionMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  simulateSuiTransaction: simulateSuiTransactionMock,
+}));
+
+const SUI = suiEndpointSnapshotFixture();
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const PROMOTION_ID = 'promo-1';
@@ -58,6 +73,10 @@ const GAS_USED = {
   storageCost: '500',
   storageRebate: '200',
 };
+const MOVE_FAILURE: SuiExecutionError = {
+  kind: 'MovePrimitiveRuntimeError',
+};
+const CONGESTION_FAILURE = congestedSuiExecutionError();
 const ALLOWED_TARGET = `0x${'88'.repeat(32)}::example::act`;
 
 class TestStudioError extends Error {
@@ -173,7 +192,7 @@ function makeContext(
   } as unknown as PromotionExecutionLedger;
 
   return {
-    sui: {} as StudioPolicyContext['sui'],
+    sui: SUI,
     packageId: `0x${'66'.repeat(32)}`,
     deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     promotionStore: {
@@ -386,12 +405,14 @@ describe('studio prepare hooks', () => {
   test('GasBoundBuild returns measured gas and policy exposes only route-owned draft fields', async () => {
     const txKindBytes = await buildTxKindBytes();
     const kindTx = makeBuildReadyTransaction();
-    const ctx = makeContext({
-      sui: {
-        simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-          grpcSimulationSuccess(TransactionDataBuilder.getDigestFromBytes(transaction), GAS_USED),
+    simulateSuiTransactionMock.mockImplementationOnce(
+      async (_snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) =>
+        bindSuiResultToTransactionBytes(
+          suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, GAS_USED),
+          input.transaction,
         ),
-      } as unknown as StudioPolicyContext['sui'],
+    );
+    const ctx = makeContext({
       getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
     });
     const options = makePrepareOptions({
@@ -439,96 +460,55 @@ describe('studio prepare hooks', () => {
     });
   });
 
-  test.each([
-    {
-      name: 'legacy partial result',
-      simulationResult: () => ({
-        Transaction: {
-          status: { success: true },
-          effects: { gasUsed: GAS_USED },
+  test('GasBoundBuild rejects a validated simulation failure with the specific boundary error', async () => {
+    const txKindBytes = await buildTxKindBytes();
+    const kindTx = makeBuildReadyTransaction();
+    simulateSuiTransactionMock.mockImplementationOnce(
+      async (_snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) =>
+        bindSuiResultToTransactionBytes(
+          suiSimulationFailure(
+            TEST_SUI_TRANSACTION_DIGEST,
+            unclassifiedSuiExecutionError(),
+            GAS_USED,
+          ),
+          input.transaction,
+        ),
+    );
+    const ctx = makeContext({
+      getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
+    });
+    const { policy } = createStudioExecutionPolicy(
+      makePrepareOptions({
+        ctx,
+        txKindBytes,
+        deps: {
+          deserializeUserTxKind: vi.fn(async () => kindTx),
         },
       }),
-      expected: {
-        code: 'DRY_RUN_FAILED',
-        message: 'Dry-run returned a malformed terminal result',
-      },
-    },
-    {
-      name: 'typed failed transaction',
-      simulationResult: (digest: string) =>
-        grpcSimulationFailure(
-          digest,
-          unknownExecutionError('unit-8 typed dry-run failure'),
-          GAS_USED,
-        ),
-      expected: {
-        code: 'DRY_RUN_FAILED',
-        message: 'Dry-run failed: unit-8 typed dry-run failure',
-      },
-    },
-    {
-      name: 'current-union success without gas',
-      simulationResult: (digest: string) => {
-        const success = grpcSimulationSuccess(digest, GAS_USED);
-        return {
-          ...success,
-          Transaction: {
-            ...success.Transaction,
-            effects: {
-              ...success.Transaction.effects,
-              gasUsed: undefined,
-            },
-          },
-        };
-      },
-      expected: {
-        code: 'DRY_RUN_NO_GAS',
-        message: 'Dry-run returned no gas usage',
-      },
-    },
-  ])(
-    'GasBoundBuild rejects $name with the specific boundary error',
-    async ({ simulationResult, expected }) => {
-      const txKindBytes = await buildTxKindBytes();
-      const kindTx = makeBuildReadyTransaction();
-      const ctx = makeContext({
-        sui: {
-          simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-            simulationResult(TransactionDataBuilder.getDigestFromBytes(transaction)),
-          ),
-        } as unknown as StudioPolicyContext['sui'],
-        getConfig: vi.fn(async () => ({ maxClaimMist: 10_000_000n }) as OnchainConfig),
-      });
-      const { policy } = createStudioExecutionPolicy(
-        makePrepareOptions({
-          ctx,
-          txKindBytes,
-          deps: {
-            deserializeUserTxKind: vi.fn(async () => kindTx),
-          },
-        }),
-      );
-      const hookContext = {
-        receiptId: RECEIPT_ID,
-        senderAddress: SENDER,
-        clientIp: '127.0.0.1',
-      } as const;
+    );
+    const hookContext = {
+      receiptId: RECEIPT_ID,
+      senderAddress: SENDER,
+      clientIp: '127.0.0.1',
+    } as const;
 
-      await policy.hooks.RequestValidation(hookContext);
-      await policy.hooks.ChainSnapshot(hookContext);
+    await policy.hooks.RequestValidation(hookContext);
+    await policy.hooks.ChainSnapshot(hookContext);
 
-      await expect(
-        policy.hooks.GasBoundBuild(hookContext, {
-          reservationHandles: {
-            sponsorSlot: reconstructReservationHandles.sponsorSlot({
-              sponsorAddress: SPONSOR,
-              receiptId: RECEIPT_ID,
-            }),
-          },
-        }),
-      ).rejects.toMatchObject(expected);
-    },
-  );
+    await expect(
+      policy.hooks.GasBoundBuild(hookContext, {
+        reservationHandles: {
+          sponsorSlot: reconstructReservationHandles.sponsorSlot({
+            sponsorAddress: SPONSOR,
+            receiptId: RECEIPT_ID,
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'DRY_RUN_FAILED',
+      message: 'Dry-run failed: Sui execution failed (InvariantViolation)',
+    });
+  });
 });
 
 describe('studio sponsor preconsume', () => {
@@ -750,7 +730,10 @@ describe('studio sponsor postconsume hooks', () => {
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          runPreflight: vi.fn(async () => ({ success: false as const, reason: 'MoveAbort(9)' })),
+          runPreflight: vi.fn(async () => ({
+            success: false as const,
+            error: MOVE_FAILURE,
+          })),
           releaseLedgerReservationWithLog:
             releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
           recordSponsorFailureForAbuse:
@@ -802,7 +785,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
       executionStage: 'on_chain',
-      digest: '0xok',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
     };
@@ -818,7 +801,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       releasedGasMist: (RESERVED_GAS - 1300n).toString(),
     });
     expect(projected).toEqual({
-      digest: '0xok',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       actualGasMist: '1300',
     });
@@ -827,7 +810,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
         outcome: 'success',
         executionStage: 'on_chain',
         route: 'promotion',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         promotionId: PROMOTION_ID,
         userId: USER_ID,
         economics: expect.objectContaining({ economicsStatus: 'known' }),
@@ -857,7 +840,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       const success: Extract<ExecResult, { success: true }> = {
         success: true,
         executionStage: 'on_chain',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         effects: { status: 'ok' },
         gasUsed: GAS_USED,
       };
@@ -871,7 +854,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       expect(callbackFailedLog).toMatchObject({
         source: 'sponsor_handler',
         route: 'promotion',
-        digest: '0xok',
+        digest: TEST_SUI_TRANSACTION_DIGEST,
         outcome: 'success',
       });
     } finally {
@@ -898,8 +881,8 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const failed: ExecResult = {
       success: false,
       executionStage: 'on_chain',
-      digest: '0xrevert',
-      reason: 'MoveAbort(101)',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
+      error: MOVE_FAILURE,
       isCongestion: false,
       gasUsed: GAS_USED,
     };
@@ -912,7 +895,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       RECEIPT_ID,
       1300n,
       'onchain_revert',
-      expect.objectContaining({ txDigest: '0xrevert' }),
+      expect.objectContaining({ txDigest: TEST_SUI_TRANSACTION_DIGEST }),
     );
     expect(usageRows[0]).toMatchObject({
       result: 'failed',
@@ -945,7 +928,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       success: false,
       executionStage: 'after_sponsor_signature',
       digest: '',
-      reason: 'confirmed shared-object congestion',
+      error: CONGESTION_FAILURE,
       isCongestion: true,
       gasUsed: null,
     };
@@ -959,46 +942,6 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       'congestion',
     );
     expect(state.sponsor?.sponsorResultOutcome).toBe('congestion');
-  });
-
-  test('ClassifySponsorResult consumes reserved gas on GAS_EFFECTS_MISSING without releasing', async () => {
-    const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
-    const usageRows: CreateUsageEventInput[] = [];
-    const { policy, state } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        ctx: makeContext({}, usageRows),
-        deps: {
-          consumeLedgerReservationWithLog:
-            consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
-        },
-      }),
-    );
-    seedSponsorState(state);
-    const success: Extract<ExecResult, { success: true }> = {
-      success: true,
-      executionStage: 'on_chain',
-      digest: '0xmissing-gas',
-      effects: { status: 'ok' },
-      gasUsed: null,
-    };
-
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), success)).rejects.toMatchObject({
-      code: 'GAS_EFFECTS_MISSING',
-    });
-    expect(consumeLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      RESERVED_GAS,
-      'gas_used_missing',
-      expect.objectContaining({ txDigest: '0xmissing-gas' }),
-    );
-    expect(usageRows[0]).toMatchObject({
-      result: 'failed',
-      failureReason: 'gas_used_missing',
-      consumedGasMist: RESERVED_GAS.toString(),
-      releasedGasMist: '0',
-    });
-    expect(state.sponsor?.sponsorResultOutcome).toBe('success');
   });
 
   test('ClassifySponsorResult maps post-success ledger consume failure to CONSUME_FAILED known loss', async () => {
@@ -1018,7 +961,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
       executionStage: 'on_chain',
-      digest: '0xconsume-failed',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
     };
@@ -1067,7 +1010,7 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
       executionStage: 'on_chain',
-      digest: '0xconsume-threw',
+      digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       gasUsed: GAS_USED,
     };

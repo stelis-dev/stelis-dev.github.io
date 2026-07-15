@@ -1,5 +1,5 @@
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type {
   PaymentInputSource,
   StaticSettlementSwapPathDescriptor,
@@ -8,7 +8,7 @@ import type { Bps, Mist } from '../internal/brand.js';
 
 /** Context needed for the build phase. */
 export interface BuildContext {
-  sui: SuiGrpcClient;
+  sui: SuiEndpointSnapshot;
   packageId: string;
   configId: string;
   vaultRegistryId: string;

@@ -30,6 +30,7 @@ import {
   computeExecutionCostClaim,
   queryUserCredit,
   sha256Bytes,
+  suiExecutionErrorMessage,
   validateNonlossSponsor,
   validateGenericSettlementTransaction,
   validateGenericUserTransactionKind,
@@ -70,7 +71,6 @@ import {
   PREPARE_STAGE,
   SETTLEMENT_ECONOMICS_EXECUTION,
   SETTLEMENT_ECONOMICS_LOG_FAILED,
-  SPONSOR_EXEC_GAS_USED_MISSING,
   SPONSOR_SENDER_STORE_DIVERGENCE,
   SPONSOR_RESULT_CALLBACK_FAILED,
 } from '../../observability/events.js';
@@ -139,10 +139,9 @@ export interface GenericSponsorErrorFactory {
     digest: string,
     reason: string,
     subcode: SponsorFailureSubcode | undefined,
-    gasUsed: GasUsedFields | null,
+    gasUsed: GasUsedFields,
   ): Error;
   sponsorCongestion(message: string, digest: string): Error;
-  sponsorTerminalProcessing(message: string, digest: string): Error;
 }
 
 export interface GenericExecutionPolicyOptions {
@@ -565,7 +564,7 @@ async function runGenericRequestValidation(
   state.slippageBps = slippageResult.value;
   state.gasMarginBps = gasMarginResult.value;
 
-  const userTx = await d.deserializeUserTxKind(prepare.params.txKindBytes, options.hostContext.sui);
+  const userTx = await d.deserializeUserTxKind(prepare.params.txKindBytes);
   const env = buildPrepareEnv(options.hostContext);
   const validationResult = validateGenericUserTransactionKind(
     userTx,
@@ -628,9 +627,10 @@ async function runGenericChainSnapshot(
     const [credit, config] = await Promise.all([
       d.queryUserCredit(
         options.hostContext.sui,
+        options.hostContext.packageId,
         options.hostContext.vaultRegistryId,
         prepare.params.senderAddress,
-        options.hostContext.vaultsTableId ?? undefined,
+        options.hostContext.vaultsTableId,
       ),
       options.hostContext.getConfig(),
     ]);
@@ -984,9 +984,10 @@ async function runGenericPolicyPostconsumeChecks(
   try {
     credit = await d.queryUserCredit(
       options.hostContext.sui,
+      options.hostContext.packageId,
       options.hostContext.vaultRegistryId,
       txSender,
-      options.hostContext.vaultsTableId ?? undefined,
+      options.hostContext.vaultsTableId,
     );
   } catch (err) {
     if (err instanceof CreditQueryInconsistentStateError) {
@@ -1045,7 +1046,8 @@ async function runGenericPreflight(
   const preflight = await d.runPreflight(options.hostContext.sui, sponsor.txBytes);
 
   if (!preflight.success) {
-    const subcode = classifySponsorFailureSubcode(preflight.reason, options.hostContext.packageId, {
+    const failureMessage = suiExecutionErrorMessage(preflight.error);
+    const subcode = classifySponsorFailureSubcode(preflight.error, options.hostContext.packageId, {
       kind: 'settlement',
       commands: revalidation.commands,
     });
@@ -1058,9 +1060,9 @@ async function runGenericPreflight(
     );
     state.sponsorResultOutcome = 'preflight_failure';
     state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-      unknownSponsoredExecutionEconomics(`preflight_failure: ${preflight.reason}`),
+      unknownSponsoredExecutionEconomics(`preflight_failure: ${failureMessage}`),
     );
-    throw sponsor.errors.sponsorPreflight(preflight.reason, subcode);
+    throw sponsor.errors.sponsorPreflight(failureMessage, subcode);
   }
 
   state.preflightGasUsed = preflight.gasUsed;
@@ -1107,16 +1109,17 @@ async function classifyGenericSponsorResult(
   const txSender = requireValue(state.txSender, 'tx sender');
 
   if (!result.success) {
+    const failureMessage = suiExecutionErrorMessage(result.error);
     if (result.isCongestion) {
       state.sponsorResultOutcome = 'congestion';
       state.sponsorResultDigest = result.digest;
       state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
         unknownSponsoredExecutionEconomics('congestion'),
       );
-      throw sponsor.errors.sponsorCongestion(result.reason, result.digest);
+      throw sponsor.errors.sponsorCongestion(failureMessage, result.digest);
     }
 
-    const subcode = classifySponsorFailureSubcode(result.reason, options.hostContext.packageId, {
+    const subcode = classifySponsorFailureSubcode(result.error, options.hostContext.packageId, {
       kind: 'settlement',
       commands: revalidation.commands,
     });
@@ -1129,14 +1132,8 @@ async function classifyGenericSponsorResult(
     );
     state.sponsorResultOutcome = 'onchain_revert';
     state.sponsorResultDigest = result.digest;
-    if (result.gasUsed) {
-      state.sponsorResultEconomics = deriveOnchainRevertEconomics(result.reason, result.gasUsed);
-    } else {
-      state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-        unknownSponsoredExecutionEconomics(`onchain_revert: ${result.reason}`),
-      );
-    }
-    throw sponsor.errors.sponsorOnchain(result.digest, result.reason, subcode, result.gasUsed);
+    state.sponsorResultEconomics = deriveOnchainRevertEconomics(failureMessage, result.gasUsed);
+    throw sponsor.errors.sponsorOnchain(result.digest, failureMessage, subcode, result.gasUsed);
   }
 
   state.sponsorResultOutcome = 'success';
@@ -1146,29 +1143,6 @@ async function classifyGenericSponsorResult(
   if (revalidation.settleArgs.orderIdHash.length === 32) {
     state.sponsorResultOrderIdHash = Buffer.from(revalidation.settleArgs.orderIdHash).toString(
       'hex',
-    );
-  }
-
-  if (!result.gasUsed) {
-    logStructuredEvent(
-      SPONSOR_EXEC_GAS_USED_MISSING,
-      {
-        route: 'generic',
-        digest: result.digest,
-        receipt_id: prepared.receiptId,
-        sender: txSender,
-        client_ip: ctx.clientIp,
-        sponsor_address: prepared.sponsorAddress,
-        execution_path_key: prepared.executionPathKey,
-      },
-      'warn',
-    );
-    state.sponsorResultEconomics = serializeSponsoredExecutionEconomics(
-      unknownSponsoredExecutionEconomics('SPONSOR_EXEC_GAS_USED_MISSING'),
-    );
-    throw sponsor.errors.sponsorTerminalProcessing(
-      `Execution succeeded but gasUsed missing — cannot verify economics. Digest: ${result.digest}`,
-      result.digest,
     );
   }
 

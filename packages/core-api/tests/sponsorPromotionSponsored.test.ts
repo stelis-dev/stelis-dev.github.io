@@ -12,7 +12,6 @@
  *   - sender signature cryptographic verification
  *   - hash mismatch (tamper detection)
  *   - gas overrun
- *   - gasUsed missing → fail-closed
  *   - use window expiry
  *   - successful flow (simulate → sign → execute → consume)
  */
@@ -32,6 +31,7 @@ import { SponsorPool } from '../src/context.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase64, toHex, toBase58 } from '@mysten/sui/utils';
+import type { SuiEndpointSnapshot, SuiExecutionError } from '@stelis/core-relay';
 import type {
   PromotionPreparedTxDraft,
   PromotionPreparedTxEntry,
@@ -42,14 +42,28 @@ import type {
   SponsorResultMetadata,
 } from '../src/handlers/sponsorResult.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  congestedObjectsExecutionError,
-  grpcExecutionFailure,
-  grpcExecutionSuccess,
-  grpcSimulationFailure,
-  grpcSimulationSuccess,
-  moveAbortExecutionError,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  congestedSuiExecutionError,
+  moveAbortSuiExecutionError,
+  suiExecutionFailure,
+  suiExecutionSuccess,
+  suiSimulationFailure,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+  suiEndpointSnapshotFixture,
+  unclassifiedSuiExecutionError,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const { executeSuiTransactionMock, simulateSuiTransactionMock } = vi.hoisted(() => ({
+  executeSuiTransactionMock: vi.fn(),
+  simulateSuiTransactionMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  executeSuiTransaction: executeSuiTransactionMock,
+  simulateSuiTransaction: simulateSuiTransactionMock,
+}));
 
 // ─────────────────────────────────────────────
 // Constants
@@ -117,130 +131,66 @@ async function buildSignedTx() {
   };
 }
 
-function createMockSui(opts?: {
-  simFail?: boolean;
-  simFailReason?: string;
-  execFail?: boolean;
-  execFailReason?: string;
-  execCongestion?: boolean;
+interface MockSuiOptions {
+  simulationError?: SuiExecutionError;
+  executionError?: SuiExecutionError;
   highGas?: boolean;
-  noGasUsed?: boolean;
-  /**
-   * Simulate a non-congestion `executeTransaction` throw —
-   * `signAndSubmit` rethrows after the sponsor signature was already
-   * issued by `pool.sign()`. The Studio sponsor sign/submit port must
-   * consume the full reserved amount and emit the reconciliation event.
-   */
   submitThrows?: boolean;
   submitThrowMessage?: string;
-  /**
-   * Simulate an on-chain revert that DOES carry `gasUsed` in
-   * the failure-path effects. The default `execFail: true` returns a
-   * FailedTransaction with a non-canonical gas summary, exercising the
-   * `onchain_revert_gas_unknown` branch.
-   */
-  revertWithGasUsed?: boolean;
-  /**
-   * Regression input: simulate a revert whose `gasUsed` produces a
-   * non-positive `simGas` (rebate >= computation + storage — e.g. a
-   * delete-objects-only TX that reverts post-effects). The handler
-   * must still classify this as `onchain_revert` (gasUsed present;
-   * 0-clamp via `computeExecutionCostClaim.simGas`), NOT
-   * `onchain_revert_gas_unknown`.
-   */
   zeroNetRevert?: boolean;
-}) {
-  const gasCost = opts?.highGas
+}
+
+interface SetupOptions extends MockSuiOptions {
+  /** Capture every usage row for failure-path economics assertions. */
+  withUsageCapture?: boolean;
+}
+
+const mockSuiOptions = new WeakMap<object, MockSuiOptions>();
+
+function gasUsedFor(opts: MockSuiOptions) {
+  return opts.highGas
     ? { computationCost: '999999999999', storageCost: '500000000', storageRebate: '200000' }
-    : opts?.zeroNetRevert
+    : opts.zeroNetRevert
       ? // computation + storage − rebate = 700_000 + 300_000 - 1_500_000 < 0
         // → simGas clamps to 0n.
         { computationCost: '700000', storageCost: '300000', storageRebate: '1500000' }
       : { computationCost: '1000000', storageCost: '500000', storageRebate: '200000' };
+}
 
-  return {
-    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) => {
-      if (opts?.simFail) {
-        const reason = opts.simFailReason ?? 'sim-error';
-        return bindGrpcResultToTransactionBytes(
-          grpcSimulationFailure('fixture-digest', moveAbortExecutionError(reason), gasCost),
-          transaction,
-        );
-      }
-      return bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', gasCost),
-        transaction,
-      );
-    },
-    executeTransaction: async ({ transaction }: { transaction: Uint8Array }) => {
-      if (opts?.submitThrows) {
-        throw new Error(opts.submitThrowMessage ?? 'rpc transport error');
-      }
-      if (opts?.execFail) {
-        const reason = opts.execFailReason ?? 'exec-error';
-        const error = opts.execCongestion
-          ? congestedObjectsExecutionError(reason)
-          : moveAbortExecutionError(reason);
-        const failed = grpcExecutionFailure('fixture-digest', error, gasCost);
-        if (opts.revertWithGasUsed || opts.execCongestion) {
-          return bindGrpcResultToTransactionBytes(failed, transaction);
-        }
-        return bindGrpcResultToTransactionBytes(
-          {
-            ...failed,
-            FailedTransaction: {
-              ...failed.FailedTransaction,
-              effects: {
-                ...failed.FailedTransaction.effects,
-                gasUsed: {},
-              },
-            },
-          },
-          transaction,
-        );
-      }
-      const success = grpcExecutionSuccess('fixture-digest', gasCost);
-      if (!opts?.noGasUsed) return bindGrpcResultToTransactionBytes(success, transaction);
-      return bindGrpcResultToTransactionBytes(
-        {
-          ...success,
-          Transaction: {
-            ...success.Transaction,
-            effects: {
-              ...success.Transaction.effects,
-              gasUsed: {},
-            },
-          },
-        },
-        transaction,
-      );
-    },
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+simulateSuiTransactionMock.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) => {
+    const opts = mockSuiOptions.get(snapshot) ?? {};
+    const result = opts.simulationError
+      ? suiSimulationFailure(TEST_SUI_TRANSACTION_DIGEST, opts.simulationError, gasUsedFor(opts))
+      : suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsedFor(opts));
+    return bindSuiResultToTransactionBytes(result, input.transaction);
+  },
+);
+
+executeSuiTransactionMock.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) => {
+    const opts = mockSuiOptions.get(snapshot) ?? {};
+    if (opts.submitThrows) {
+      throw new Error(opts.submitThrowMessage ?? 'rpc transport error');
+    }
+    const result = opts.executionError
+      ? suiExecutionFailure(TEST_SUI_TRANSACTION_DIGEST, opts.executionError, gasUsedFor(opts))
+      : suiExecutionSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsedFor(opts));
+    return bindSuiResultToTransactionBytes(result, input.transaction);
+  },
+);
+
+function createMockSui(opts: MockSuiOptions = {}): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  mockSuiOptions.set(snapshot, opts);
+  return snapshot;
 }
 
 // ─────────────────────────────────────────────
 // Setup
 // ─────────────────────────────────────────────
 
-async function setup(opts?: {
-  simFail?: boolean;
-  simFailReason?: string;
-  execFail?: boolean;
-  execFailReason?: string;
-  execCongestion?: boolean;
-  highGas?: boolean;
-  noGasUsed?: boolean;
-  submitThrows?: boolean;
-  submitThrowMessage?: string;
-  revertWithGasUsed?: boolean;
-  zeroNetRevert?: boolean;
-  /**
-   * When set, an in-memory usageStore captures every
-   * `usageStore.append()` call so tests can verify failure-path
-   * `result: 'failed'` rows are emitted with the right `failureReason`.
-   */
-  withUsageCapture?: boolean;
-}) {
+async function setup(opts: SetupOptions = {}) {
   const executionLedger = new MemoryPromotionExecutionLedger();
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
@@ -682,7 +632,9 @@ describe('handlePromotionSponsor', () => {
   });
 
   test('releases reservation on preflight failure', async () => {
-    const { ctx, signed, receiptId, executionLedger } = await setup({ simFail: true });
+    const { ctx, signed, receiptId, executionLedger } = await setup({
+      simulationError: unclassifiedSuiExecutionError(),
+    });
 
     await expect(
       handlePromotionSponsor(ctx, {
@@ -707,7 +659,9 @@ describe('handlePromotionSponsor', () => {
   // counter to the studio_user kind so a Sui key rotation cannot evade the
   // accumulated failure history.
   test('records studio-user abuse on preflight failure', async () => {
-    const { ctx, signed, receiptId } = await setup({ simFail: true });
+    const { ctx, signed, receiptId } = await setup({
+      simulationError: unclassifiedSuiExecutionError(),
+    });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
     await expect(
@@ -741,7 +695,9 @@ describe('handlePromotionSponsor', () => {
   // try/catch, and this test verifies the route-level behavior that mirrors
   // the generic path in `handleSponsor.test.ts`.
   test('preserves PromotionSponsorError when abuse blocker recordSponsorFailure throws', async () => {
-    const { ctx, signed, receiptId } = await setup({ simFail: true });
+    const { ctx, signed, receiptId } = await setup({
+      simulationError: unclassifiedSuiExecutionError(),
+    });
     const recordSpy = vi
       .spyOn(ctx.abuseBlocker, 'recordSponsorFailure')
       .mockRejectedValue(new Error('redis unreachable'));
@@ -793,7 +749,9 @@ describe('handlePromotionSponsor', () => {
 
   test('logs LEDGER_RELEASE_FAILED_IN_HANDLER when ledger.release returns failure', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { ctx, signed, receiptId } = await setup({ simFail: true });
+    const { ctx, signed, receiptId } = await setup({
+      simulationError: unclassifiedSuiExecutionError(),
+    });
 
     ctx.executionLedger.release = async () => ({ ok: false, reason: 'reservation_not_found' });
 
@@ -819,7 +777,9 @@ describe('handlePromotionSponsor', () => {
 
   test('logs LEDGER_RELEASE_THREW_IN_HANDLER when ledger.release throws', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { ctx, signed, receiptId } = await setup({ simFail: true });
+    const { ctx, signed, receiptId } = await setup({
+      simulationError: unclassifiedSuiExecutionError(),
+    });
 
     ctx.executionLedger.release = async () => {
       throw new Error('release exploded');
@@ -846,13 +806,12 @@ describe('handlePromotionSponsor', () => {
   });
 
   test('on-chain revert terminalizes the active reservation (consume, not release)', async () => {
-    // Post-signature/post-submit revert without `gasUsed` consumes
-    // `prepared.reservedGasMist` (the gas-unknown branch consumes the
-    // full reserved amount). The active-reservation lock asserts the
-    // reservation is no longer in flight; `consumedGasAllowanceMist`
-    // would be `'0'` under a release policy, so this assertion also
-    // locks the consume-not-release contract for this branch.
-    const { ctx, signed, receiptId, executionLedger } = await setup({ execFail: true });
+    // The exact gateway supplies canonical gas effects for every terminal
+    // result. The active-reservation lock asserts the reservation is no
+    // longer in flight, while the amount locks actual-gas accounting.
+    const { ctx, signed, receiptId, executionLedger } = await setup({
+      executionError: unclassifiedSuiExecutionError(),
+    });
 
     await expect(
       handlePromotionSponsor(ctx, {
@@ -869,16 +828,21 @@ describe('handlePromotionSponsor', () => {
     expect(ent).not.toBeNull();
     expect(ent!.activeReservationReceiptId).toBeNull();
     expect(ent!.activeReservationAmountMist).toBeNull();
-    // Full reserved consume (no gasUsed branch).
-    expect(ent!.consumedGasAllowanceMist).toBe('2000000');
+    expect(ent!.consumedGasAllowanceMist).toBe('1300000');
   });
 
   // The actual promotion command is 0x2::coin::Coin. A Stelis abort string at
   // that outer command is impossible provenance and must stay unclassified.
   test('does not classify an unrelated Stelis abort string for a promotion coin command', async () => {
     const { ctx, signed, receiptId } = await setup({
-      simFail: true,
-      simFailReason: 'MoveAbort(0xabc::vault::check_and_advance_nonce, 1) in command 0',
+      simulationError: moveAbortSuiExecutionError({
+        command: 0,
+        packageId: '0xabc',
+        module: 'vault',
+        functionName: 'check_and_advance_nonce',
+        constantName: 'EReplayNonce',
+        abortCode: '1',
+      }),
     });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
@@ -911,8 +875,7 @@ describe('handlePromotionSponsor', () => {
   // Public subcode is reserved for recognized `SponsorFailureSubcode` values.
   test('keeps unclassified preflight failure subcode internal (public meta.subcode undefined)', async () => {
     const { ctx, signed, receiptId } = await setup({
-      simFail: true,
-      simFailReason: 'unrecognized RPC error string',
+      simulationError: unclassifiedSuiExecutionError(),
     });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
@@ -943,8 +906,14 @@ describe('handlePromotionSponsor', () => {
   // The same provenance rule applies to the terminal execution result.
   test('does not classify an unrelated Stelis on-chain abort for a promotion coin command', async () => {
     const { ctx, signed, receiptId } = await setup({
-      execFail: true,
-      execFailReason: 'MoveAbort(0xabc::vault::check_and_advance_nonce, 1) in command 0',
+      executionError: moveAbortSuiExecutionError({
+        command: 0,
+        packageId: '0xabc',
+        module: 'vault',
+        functionName: 'check_and_advance_nonce',
+        constantName: 'EReplayNonce',
+        abortCode: '1',
+      }),
     });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
@@ -976,7 +945,9 @@ describe('handlePromotionSponsor', () => {
   // literal in abuse meta only — the fallback literal is never exposed
   // as a public `meta.subcode` on `PromotionSponsorError`.
   test('falls back to onchain_revert subcode in abuse meta and keeps public meta.subcode undefined', async () => {
-    const { ctx, signed, receiptId } = await setup({ execFail: true });
+    const { ctx, signed, receiptId } = await setup({
+      executionError: unclassifiedSuiExecutionError(),
+    });
     const recordSpy = vi.spyOn(ctx.abuseBlocker, 'recordSponsorFailure');
 
     const err = await handlePromotionSponsor(ctx, {
@@ -1004,20 +975,10 @@ describe('handlePromotionSponsor', () => {
   });
 
   test('congestion returns SPONSOR_CONGESTION with digest, releases reservation, and does NOT record abuse', async () => {
-    const { ctx, signed, receiptId, executionLedger } = await setup();
+    const { ctx, signed, receiptId, executionLedger } = await setup({
+      executionError: congestedSuiExecutionError(),
+    });
     const abuseBlocker = ctx.abuseBlocker;
-
-    // Only the current SDK CongestedObjects terminal kind proves that the
-    // sponsor-signed transaction was cancelled before on-chain execution.
-    (ctx.sui as unknown as { executeTransaction: unknown }).executeTransaction = async ({
-      transaction,
-    }: {
-      transaction: Uint8Array;
-    }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcExecutionFailure('fixture-digest', congestedObjectsExecutionError()),
-        transaction,
-      );
 
     const recordSpy = vi.spyOn(abuseBlocker, 'recordSponsorFailure');
 
@@ -1159,35 +1120,6 @@ describe('handlePromotionSponsor', () => {
     expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
   });
 
-  test('fail-closed when gasUsed missing from execution effects', async () => {
-    const { ctx, signed, receiptId, executionLedger } = await setup({ noGasUsed: true });
-
-    await expect(
-      handlePromotionSponsor(ctx, {
-        promotionId: TEST_PROMO_ID,
-        receiptId,
-        txBytes: signed.txBytesBase64,
-        userSignature: signed.userSignature,
-        verifiedIdentity: buildIdentity(),
-        clientIp: '127.0.0.1',
-      }),
-    ).rejects.toThrow(/cannot determine actual gas/);
-
-    // Verify reservation terminalization. The post-success
-    // `GAS_EFFECTS_MISSING` branch CONSUMES the full reserved amount
-    // (release would leak the user's allowance because the TX executed
-    // on-chain), so the active reservation must be cleared by consume —
-    // not release. The detailed consumed-amount + usage row assertions
-    // are locked in the `post-signature/post-submit ledger consume
-    // policy` describe block; this test only asserts that the active
-    // reservation pointer is dropped.
-    const ent = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
-    expect(ent).not.toBeNull();
-    expect(ent!.activeReservationReceiptId).toBeNull();
-    expect(ent!.activeReservationAmountMist).toBeNull();
-    expect(ent!.consumedGasAllowanceMist).toBe('2000000');
-  });
-
   test('releases reservation when consume returns expired (PREPARED_TX_EXPIRED)', async () => {
     const { ctx, signed, receiptId, executionLedger, prepareStore } = await setup();
 
@@ -1222,15 +1154,10 @@ describe('handlePromotionSponsor', () => {
     // amount (release leaks; reaper hold also leaks at TTL). Active
     // reservation must be terminalized; `consumedGasAllowanceMist`
     // advanced by the full reserved amount.
-    const { ctx, signed, receiptId, executionLedger } = await setup();
-
-    // Replace executeTransaction with a rejected promise to simulate
-    // infrastructure failure (connection refused, timeout, etc.).
-    ctx.sui = {
-      ...ctx.sui,
-      simulateTransaction: ctx.sui.simulateTransaction.bind(ctx.sui),
-      executeTransaction: vi.fn().mockRejectedValue(new Error('connection refused')),
-    } as unknown as typeof ctx.sui;
+    const { ctx, signed, receiptId, executionLedger } = await setup({
+      submitThrows: true,
+      submitThrowMessage: 'connection refused',
+    });
 
     const err = await handlePromotionSponsor(ctx, {
       promotionId: TEST_PROMO_ID,
@@ -2139,40 +2066,6 @@ describe('handlePromotionSponsor', () => {
     expect(probe.order).toEqual(['checkin', 'callback']);
   });
 
-  test('host callback: post-success gasUsed-missing → outcome=success', async () => {
-    // Submit succeeded on-chain, but effects normalisation dropped
-    // `gasUsed`. Slot balance was drained; the primary error transport
-    // remains `PromotionSponsorError('GAS_EFFECTS_MISSING')`, but the
-    // sponsor result callback must see `success` for slot-state purposes.
-    const { ctx, signed, receiptId } = await setup({ noGasUsed: true });
-    const probe = collectingPromotionCallback();
-    ctx.onSponsorResult = probe.callback;
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('GAS_EFFECTS_MISSING');
-    expect(probe.calls).toHaveLength(1);
-    expect(probe.calls[0]).toMatchObject({
-      outcome: 'success',
-      executionStage: 'on_chain',
-      route: 'promotion',
-    });
-    // Economics: gasUsed-missing edge path → unknown economics with
-    // GAS_EFFECTS_MISSING failureReason.
-    expect(probe.calls[0].economics.economicsStatus).toBe('unknown');
-    if (probe.calls[0].economics.economicsStatus === 'unknown') {
-      expect(probe.calls[0].economics.failureReason).toBe('GAS_EFFECTS_MISSING');
-    }
-  });
-
   test('host callback: post-success ledger throw keeps known unrecovered gas loss', async () => {
     const { ctx, signed, receiptId, executionLedger } = await setup();
     const probe = collectingPromotionCallback();
@@ -2257,13 +2150,8 @@ describe('handlePromotionSponsor', () => {
 //   - post-signature uncertainty → consume(reservedGasMist), UsageEvent
 //     `post_signature_uncertainty`, reconciliation event,
 //     no `release()`.
-//   - on-chain revert with `gasUsed` → consume(actualGasMist), UsageEvent
+//   - on-chain revert → consume(actualGasMist), UsageEvent
 //     `onchain_revert`, no `release()`.
-//   - on-chain revert without `gasUsed` → consume(reservedGasMist),
-//     UsageEvent `onchain_revert_gas_unknown`, no `release()`.
-//   - GAS_EFFECTS_MISSING → consume(reservedGasMist), UsageEvent
-//     `gas_used_missing`, response code stays `GAS_EFFECTS_MISSING`,
-//     no `release()`.
 //   - Pre-submit + congestion remain `release()`.
 
 describe('post-signature/post-submit ledger consume policy', () => {
@@ -2326,9 +2214,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
 
   test('on-chain revert with gasUsed consumes actualGasMist (not reservedGasMist), appends onchain_revert usage row', async () => {
     const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      execFail: true,
-      execFailReason: 'arbitrary on-chain abort',
-      revertWithGasUsed: true,
+      executionError: unclassifiedSuiExecutionError(),
       withUsageCapture: true,
     });
     const sponsorResults: SponsorResultMetadata[] = [];
@@ -2378,17 +2264,12 @@ describe('post-signature/post-submit ledger consume policy', () => {
   });
 
   test('on-chain revert with gasUsed but zero net (rebate ≥ computation+storage) stays onchain_revert with 0 consume + full surplus released', async () => {
-    // Regression for the `> 0n` vs `>= 0n` discriminator. Previously the
-    // handler routed a delete-objects-only revert (rebate exceeds
-    // computation + storage) into the `onchain_revert_gas_unknown`
-    // branch and consumed the full reserved amount, even though
-    // `gasUsed` was present and the canonical clamp says simGas === 0.
-    // Acceptance: `gasUsed` present → `onchain_revert`; consumed=0;
+    // Regression for a delete-objects-only revert where rebate exceeds
+    // computation + storage. The exact gateway always supplies gasUsed,
+    // and the canonical clamp makes simGas === 0. Acceptance: consumed=0;
     // released=full reserved (delta-release surplus).
     const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      execFail: true,
-      execFailReason: 'rebate-positive revert',
-      revertWithGasUsed: true,
+      executionError: unclassifiedSuiExecutionError(),
       zeroNetRevert: true,
       withUsageCapture: true,
     });
@@ -2410,68 +2291,11 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(entitlement!.consumedGasAllowanceMist).toBe('0');
     expect(BigInt(entitlement!.remainingGasAllowanceMist)).toBe(BigInt(PER_USER_ALLOWANCE));
 
-    // Audit row: failureReason stays `onchain_revert`, NOT `_gas_unknown`.
+    // Audit row keeps the one current on-chain-revert classification.
     const failedRow = usageRows.find((r) => r.failureReason === 'onchain_revert');
     expect(failedRow).toBeDefined();
     expect(failedRow!.consumedGasMist).toBe('0');
     expect(failedRow!.releasedGasMist).toBe('2000000');
-    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
-    // Negative regression: must not have written the gas-unknown variant.
-    expect(usageRows.find((r) => r.failureReason === 'onchain_revert_gas_unknown')).toBeUndefined();
-  });
-
-  test('on-chain revert without gasUsed consumes full reserved, appends onchain_revert_gas_unknown usage row', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      execFail: true,
-      execFailReason: 'no effects revert',
-      withUsageCapture: true,
-    });
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('ONCHAIN_REVERT');
-
-    const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
-    expect(entitlement!.consumedGasAllowanceMist).toBe('2000000');
-
-    const failedRow = usageRows.find((r) => r.failureReason === 'onchain_revert_gas_unknown');
-    expect(failedRow).toBeDefined();
-    expect(failedRow!.consumedGasMist).toBe('2000000');
-    expect(failedRow!.releasedGasMist).toBe('0');
-  });
-
-  test('post-success GAS_EFFECTS_MISSING consumes full reserved, appends gas_used_missing usage row, response code unchanged', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      noGasUsed: true,
-      withUsageCapture: true,
-    });
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('GAS_EFFECTS_MISSING');
-
-    const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
-    expect(entitlement!.consumedGasAllowanceMist).toBe('2000000');
-
-    const failedRow = usageRows.find((r) => r.failureReason === 'gas_used_missing');
-    expect(failedRow).toBeDefined();
-    expect(failedRow!.consumedGasMist).toBe('2000000');
     expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
   });
 
@@ -2479,7 +2303,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // Lock that the remaining `releaseLedgerReservationWithLog()` call
     // sites are limited to pre-submit / no-gas-burn / congestion
     // branches. This test wraps `executionLedger.release` with a spy
-    // and exercises all four post-signature/post-submit branches in
+    // and exercises both current post-signature/post-submit branches in
     // turn; each must reach its primary error WITHOUT touching
     // `release()`.
     const branches: Array<{
@@ -2493,19 +2317,12 @@ describe('post-signature/post-submit ledger consume policy', () => {
         expectedCode: 'SPONSOR_SUBMISSION_UNCERTAIN',
       },
       {
-        label: 'on-chain revert with gasUsed',
-        opts: { execFail: true, revertWithGasUsed: true, withUsageCapture: true },
+        label: 'on-chain revert',
+        opts: {
+          executionError: unclassifiedSuiExecutionError(),
+          withUsageCapture: true,
+        },
         expectedCode: 'ONCHAIN_REVERT',
-      },
-      {
-        label: 'on-chain revert without gasUsed',
-        opts: { execFail: true, withUsageCapture: true },
-        expectedCode: 'ONCHAIN_REVERT',
-      },
-      {
-        label: 'GAS_EFFECTS_MISSING',
-        opts: { noGasUsed: true, withUsageCapture: true },
-        expectedCode: 'GAS_EFFECTS_MISSING',
       },
     ];
     for (const branch of branches) {
@@ -2531,8 +2348,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // `LEDGER_CONSUME_THREW_IN_HANDLER` with the attempted amount +
     // branch context for operator reconciliation.
     const { ctx, signed, receiptId, executionLedger } = await setup({
-      execFail: true,
-      revertWithGasUsed: true,
+      executionError: unclassifiedSuiExecutionError(),
       withUsageCapture: true,
     });
     vi.spyOn(executionLedger, 'consume').mockRejectedValue(new Error('redis transport down'));
@@ -2580,8 +2396,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // already been swept by the reaper or terminal-guard between submit
     // and the post-submit consume, NOT an adapter throw.
     const { ctx, signed, receiptId, executionLedger } = await setup({
-      execFail: true,
-      revertWithGasUsed: true,
+      executionError: unclassifiedSuiExecutionError(),
       withUsageCapture: true,
     });
     const releaseSpy = vi.spyOn(executionLedger, 'release');
@@ -2679,48 +2494,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('malformed terminal result after sponsor signature uses the uncertain consume path, not pre-sign release', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      withUsageCapture: true,
-    });
-    (ctx.sui as unknown as { executeTransaction: () => Promise<unknown> }).executeTransaction =
-      async () => ({
-        $kind: 'Transaction',
-        Transaction: {
-          digest: 'malformed-effects-digest',
-          status: { success: true, error: null },
-          effects: {},
-        },
-      });
-    const calls: SponsorResultMetadata[] = [];
-    ctx.onSponsorResult = (metadata) => {
-      calls.push(metadata);
-    };
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((cause: unknown) => cause);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('SPONSOR_SUBMISSION_UNCERTAIN');
-    expect((err as PromotionSponsorError).meta.digest).toBe(suiDigest(signed.txBytes));
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      outcome: 'internal_error',
-      executionStage: 'after_sponsor_signature',
-      route: 'promotion',
-    });
-    expect(usageRows.some((row) => row.failureReason === 'post_signature_uncertainty')).toBe(true);
-    const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
-    expect(entitlement?.activeReservationReceiptId).toBeNull();
-    expect(BigInt(entitlement?.consumedGasAllowanceMist ?? '0')).toBeGreaterThan(0n);
-  });
-
   test('on-chain revert + consume() returns ok=false keeps known on-chain gas loss and the ledger failure reason', async () => {
     // A failed-path consume() on the on-chain-revert branch must still
     // send `outcome='onchain_revert'` to the host callback with the
@@ -2729,9 +2502,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // `PromotionSponsorError` message; the inner branch already set
     // `sponsorResultOutcome='onchain_revert'` so the gate skips it.
     const { ctx, signed, receiptId, executionLedger } = await setup({
-      execFail: true,
-      revertWithGasUsed: true,
-      execFailReason: 'arbitrary on-chain abort',
+      executionError: unclassifiedSuiExecutionError(),
       withUsageCapture: true,
     });
     const calls: SponsorResultMetadata[] = [];
@@ -2778,7 +2549,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
       );
       expect(calls[0]!.economics.failureReason).toContain('onchain_revert');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume failed');
-      expect(calls[0]!.economics.failureReason).toContain('arbitrary on-chain abort');
+      expect(calls[0]!.economics.failureReason).toContain(
+        'Sui execution failed (InvariantViolation)',
+      );
     }
     expect(calls[0]!.economics.failureReason).not.toMatch(/Transaction reverted on-chain:/);
 
@@ -2789,9 +2562,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // Symmetric to the consume()-ok-false test above, but exercising
     // the adapter-throw branch of the failure-path consume helper.
     const { ctx, signed, receiptId, executionLedger } = await setup({
-      execFail: true,
-      revertWithGasUsed: true,
-      execFailReason: 'arbitrary on-chain abort',
+      executionError: unclassifiedSuiExecutionError(),
       withUsageCapture: true,
     });
     const calls: SponsorResultMetadata[] = [];
@@ -2824,93 +2595,15 @@ describe('post-signature/post-submit ledger consume policy', () => {
       );
       expect(calls[0]!.economics.failureReason).toContain('onchain_revert');
       expect(calls[0]!.economics.failureReason).toContain('ledger consume threw');
-      expect(calls[0]!.economics.failureReason).toContain('arbitrary on-chain abort');
+      expect(calls[0]!.economics.failureReason).toContain(
+        'Sui execution failed (InvariantViolation)',
+      );
     }
     // The redis error stays in the LEDGER_CONSUME_THREW_IN_HANDLER
     // structured event, not in the sponsor result economics stamp — the
     // failureReason carries the on-chain revert reason (the primary
     // operational signal), not the secondary infra error.
     expect(calls[0]!.economics.failureReason).not.toMatch(/redis transport down/);
-
-    consoleErrorSpy.mockRestore();
-  });
-
-  test('GAS_EFFECTS_MISSING + consume() returns ok=false: sponsor result callback economics stays unknown with GAS_EFFECTS_MISSING reason and outcome=success', async () => {
-    // Post-success gas-effects-missing keeps `sponsorResultOutcome='success'`
-    // because the slot balance change is authoritative from submit
-    // onwards; the post-success accounting throws afterwards. A failing
-    // consume() must not regress that to internal_error nor synthesize a
-    // new economics string from the thrown PromotionSponsorError.
-    const { ctx, signed, receiptId, executionLedger } = await setup({
-      noGasUsed: true,
-      withUsageCapture: true,
-    });
-    const calls: SponsorResultMetadata[] = [];
-    ctx.onSponsorResult = (metadata) => {
-      calls.push(metadata);
-    };
-    vi.spyOn(executionLedger, 'consume').mockResolvedValue({
-      ok: false,
-      reason: 'reservation_not_found',
-    });
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('GAS_EFFECTS_MISSING');
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.outcome).toBe('success');
-    expect(calls[0]!.economics.economicsStatus).toBe('unknown');
-    if (calls[0]!.economics.economicsStatus === 'unknown') {
-      // Handler appends the ledger-consume kind to the GAS_EFFECTS_MISSING
-      // reason so operators see both signals on the row.
-      expect(calls[0]!.economics.failureReason).toContain('GAS_EFFECTS_MISSING');
-      expect(calls[0]!.economics.failureReason).toContain('ledger consume failed');
-    }
-
-    consoleErrorSpy.mockRestore();
-  });
-
-  test('GAS_EFFECTS_MISSING + consume() throws: sponsor result callback economics preserves GAS_EFFECTS_MISSING reason and outcome=success', async () => {
-    const { ctx, signed, receiptId, executionLedger } = await setup({
-      noGasUsed: true,
-      withUsageCapture: true,
-    });
-    const calls: SponsorResultMetadata[] = [];
-    ctx.onSponsorResult = (metadata) => {
-      calls.push(metadata);
-    };
-    vi.spyOn(executionLedger, 'consume').mockRejectedValue(new Error('redis transport down'));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const err = await handlePromotionSponsor(ctx, {
-      promotionId: TEST_PROMO_ID,
-      receiptId,
-      txBytes: signed.txBytesBase64,
-      userSignature: signed.userSignature,
-      verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
-    }).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(PromotionSponsorError);
-    expect((err as PromotionSponsorError).code).toBe('GAS_EFFECTS_MISSING');
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.outcome).toBe('success');
-    expect(calls[0]!.economics.economicsStatus).toBe('unknown');
-    if (calls[0]!.economics.economicsStatus === 'unknown') {
-      expect(calls[0]!.economics.failureReason).toContain('GAS_EFFECTS_MISSING');
-      expect(calls[0]!.economics.failureReason).toContain('ledger consume threw');
-    }
 
     consoleErrorSpy.mockRestore();
   });
@@ -2989,9 +2682,7 @@ describe('post-signature/post-submit ledger consume policy', () => {
 
   test('congestion still releases (entitlement consumed=0)', async () => {
     const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
-      execFail: true,
-      execFailReason: 'confirmed shared-object congestion',
-      execCongestion: true,
+      executionError: congestedSuiExecutionError(),
       withUsageCapture: true,
     });
 

@@ -60,6 +60,7 @@ export type {
   AdminSponsoredExecutionLogEntry,
   SponsorRefillAccountWithdrawalRequest,
   AdminSponsorOperationsResponse,
+  SuiRpcFleetStatus,
 } from './hostWire.js';
 
 export {
@@ -112,6 +113,7 @@ export {
   parseSponsorRefillAccountWithdrawalRequest,
   parseSponsorRefillAccountWithdrawalResponse,
   parseAdminSponsorOperationsResponse,
+  canonicalizeSuiRpcOrigin,
 } from './hostWire.js';
 
 export type {
@@ -196,6 +198,7 @@ export {
   settlementSwapDirectionFromSwapDirections,
   SUI_TYPE,
   SUI_CHAIN_IDENTIFIERS,
+  DEEPBOOK_RUNTIME_PACKAGE_ID,
   DEEPBOOK_IDS,
   STELIS_CONTRACT_IDS,
   requireContractId,

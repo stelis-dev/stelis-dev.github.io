@@ -61,20 +61,14 @@ const SPONSOR_OPERATIONS_DATA = {
   rpcFleet: {
     endpoints: [
       {
-        url: 'https://primary.rpc.test',
+        origin: 'https://primary.rpc.test',
         role: 'primary',
-        status: 'healthy',
-        cooldownRemainingMs: 0,
       },
       {
-        url: 'https://secondary.rpc.test',
+        origin: 'https://secondary.rpc.test',
         role: 'secondary',
-        status: 'cooldown',
-        cooldownRemainingMs: 12_000,
       },
     ],
-    totalEndpoints: 2,
-    healthyEndpoints: 1,
   },
   sponsorOperations: {
     gateErrorCode: null,
@@ -384,7 +378,7 @@ describe('DashboardPage integration', () => {
     expect(screen.queryByText('Loss Count')).toBeNull();
   });
 
-  it('renders RPC Fleet above Service Accounts', async () => {
+  it('renders the immutable qualified RPC endpoints above Service Accounts', async () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
@@ -396,10 +390,10 @@ describe('DashboardPage integration', () => {
     render(<DirectOutletProvider element={<DashboardPage />} />);
 
     await waitFor(() => {
-      expect(screen.getByText('RPC Fleet (1/2 healthy)')).toBeDefined();
+      expect(screen.getByText('RPC Endpoints (2 qualified)')).toBeDefined();
     });
 
-    const rpcFleetCard = screen.getByText('RPC Fleet (1/2 healthy)').closest('.admin-card');
+    const rpcFleetCard = screen.getByText('RPC Endpoints (2 qualified)').closest('.admin-card');
     const serviceAccountsCard = screen.getByText('Service Accounts').closest('.admin-card');
     expect(rpcFleetCard).not.toBeNull();
     expect(serviceAccountsCard).not.toBeNull();
@@ -408,7 +402,7 @@ describe('DashboardPage integration', () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.getByText('https://primary.rpc.test')).toBeDefined();
-    expect(screen.getByText('12s')).toBeDefined();
+    expect(screen.getByText('https://secondary.rpc.test')).toBeDefined();
   });
 
   it('renders sponsor operations gate status in the Sponsor Slots stat card', async () => {
@@ -1452,7 +1446,7 @@ describe('ConfigPage integration', () => {
     );
   });
 
-  it('does not render RPC Fleet on the config page', async () => {
+  it('does not render the qualified RPC endpoint snapshot on the config page', async () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
@@ -1468,7 +1462,7 @@ describe('ConfigPage integration', () => {
       expect(screen.getByText('Sponsor Operations')).toBeDefined();
     });
 
-    expect(screen.queryByText('RPC Fleet (1/2 healthy)')).toBeNull();
+    expect(screen.queryByText('RPC Endpoints (2 qualified)')).toBeNull();
     expect(screen.queryByText('Sponsor Operations Gate')).toBeNull();
   });
 });

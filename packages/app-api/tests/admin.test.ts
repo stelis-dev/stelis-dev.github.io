@@ -67,7 +67,6 @@ import { createAdminRoutes, type AdminRoutesRuntimeInput } from '../src/routes/a
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../src/sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
-import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
 
 const ADMIN_ADDRESS = '0x' + 'a'.repeat(64);
 
@@ -127,10 +126,6 @@ function createMockCtx(): AppApiContext {
           slots: [{ address: '0xslot', leased: false }],
         }),
       },
-      sui: {
-        getBalance: vi.fn().mockResolvedValue({ balance: { balance: '1000000000' } }),
-        getTransaction: vi.fn().mockResolvedValue({ digest: 'mock-digest', effects: {} }),
-      },
       getConfig: vi.fn().mockResolvedValue({
         maxHostFeeMist: 1000n,
         protocolFlatFeeMist: 100n,
@@ -172,9 +167,14 @@ function createMockCtx(): AppApiContext {
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
     developerJwtVerifyUrl: null,
-    failoverTransport: new SuiRpcFailoverTransport([
-      { url: 'https://fullnode.testnet.sui.io:443' },
-    ]),
+    rpcFleet: Object.freeze({
+      endpoints: Object.freeze([
+        Object.freeze({
+          origin: 'https://fullnode.testnet.sui.io',
+          role: 'primary' as const,
+        }),
+      ]),
+    }),
     redis: mockRedis as never,
     sponsorOperations: {
       // Default returns a healthy single-slot state. Individual tests
@@ -478,12 +478,10 @@ describe('admin routes', () => {
       await expectHostError(res, 'BAD_REQUEST');
     });
 
-    it('preserves failureReason verbatim for success+post-submit-failure rows', async () => {
-      // Lock for the UI invariant: post-submit accounting failures
-      // (`SPONSOR_EXEC_GAS_USED_MISSING`, `PROMOTION_LEDGER_CONSUME_FAILED`)
-      // keep `outcome === 'success'` per handler contract. The API response
-      // MUST emit `failureReason` so app-admin can render it inline; if
-      // the API silently dropped it, operators would see "success" alone.
+    it('preserves failureReason verbatim for current post-submit result rows', async () => {
+      // A post-signature uncertainty has unknown economics, while a confirmed
+      // Promotion success may still carry a ledger-consume diagnostic. The API
+      // must preserve both without manufacturing numeric certainty.
       (mockCtx.sponsoredLogsStore.getSummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         mode: 'all',
         sponsoredExecutions: '2',
@@ -495,13 +493,13 @@ describe('admin routes', () => {
         {
           createdAt: '2026-04-26T16:00:00Z',
           mode: 'generic',
-          outcome: 'success',
-          receiptId: 'r-gas-missing',
-          digest: 'digest-gas-missing',
+          outcome: 'internal_error',
+          receiptId: 'r-post-signature-uncertain',
+          digest: 'digest-post-signature-uncertain',
           senderAddress: '0xsender',
           sponsorAddress: '0xsponsor',
           executionPathKey: 'generic:path',
-          orderIdHash: 'order-hash-gas-missing',
+          orderIdHash: 'order-hash-post-signature-uncertain',
           promotionId: null,
           userId: null,
           economicsStatus: 'unknown',
@@ -513,7 +511,7 @@ describe('admin routes', () => {
           protocolFeeMist: null,
           grossGasMist: null,
           storageRebateMist: null,
-          failureReason: 'SPONSOR_EXEC_GAS_USED_MISSING',
+          failureReason: 'post_signature_uncertainty: Sui RPC transport was unavailable',
         },
         {
           createdAt: '2026-04-26T16:00:01Z',
@@ -543,8 +541,10 @@ describe('admin routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.entries).toHaveLength(2);
-      expect(body.entries[0].outcome).toBe('success');
-      expect(body.entries[0].failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
+      expect(body.entries[0].outcome).toBe('internal_error');
+      expect(body.entries[0].failureReason).toBe(
+        'post_signature_uncertainty: Sui RPC transport was unavailable',
+      );
       expect(body.entries[1].outcome).toBe('success');
       expect(body.entries[1].failureReason).toBe(
         'PROMOTION_LEDGER_CONSUME_FAILED: budget_unavailable',
@@ -2147,18 +2147,24 @@ describe('admin routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
 
-      // rpcFleet must exist even for single plain URL
-      expect(body.rpcFleet).toBeDefined();
-      expect(body.rpcFleet.totalEndpoints).toBeGreaterThanOrEqual(1);
-      expect(typeof body.rpcFleet.healthyEndpoints).toBe('number');
-      expect(Array.isArray(body.rpcFleet.endpoints)).toBe(true);
+      expect(body.rpcFleet).toEqual({
+        endpoints: [
+          {
+            origin: 'https://fullnode.testnet.sui.io',
+            role: 'primary',
+          },
+        ],
+      });
+      expect(body.rpcFleet.totalEndpoints).toBeUndefined();
+      expect(body.rpcFleet.healthyEndpoints).toBeUndefined();
+      expect(body.rpcFleet.endpointCount).toBeUndefined();
 
       // Each endpoint has safe fields only
       for (const ep of body.rpcFleet.endpoints) {
-        expect(typeof ep.url).toBe('string');
+        expect(typeof ep.origin).toBe('string');
         expect(['primary', 'secondary']).toContain(ep.role);
-        expect(['healthy', 'cooldown']).toContain(ep.status);
-        expect(typeof ep.cooldownRemainingMs).toBe('number');
+        expect(ep.status).toBeUndefined();
+        expect(ep.cooldownRemainingMs).toBeUndefined();
 
         // Must NOT contain secret fields
         expect(ep.meta).toBeUndefined();

@@ -18,7 +18,23 @@ Ignored local runtime files must not be committed.
 
 RPC endpoints are configured in `packages/app-api/rpc.json`, not in environment variables.
 
-The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the Host reads only the section selected by `NETWORK`, validates those endpoints against the selected network, checks required object and coin metadata reads, and probes transaction simulation support. Endpoints that fail verification are excluded. If the selected section is empty or no usable endpoint remains, boot fails.
+The file is a network-keyed object with `testnet` and `mainnet` endpoint arrays. At boot, the Host reads only the section selected by `NETWORK`. Each endpoint must report the exact configured chain identifier and independently complete the actual Config, VaultRegistry, settlement swap-path object, coin-metadata, and Move-view reads used to construct the Host. Endpoints that fail qualification are excluded without changing their configured order. If the selected section is empty or no endpoint qualifies, boot fails.
+
+Each endpoint accepts `baseUrl` plus optional `auth` header configuration.
+`baseUrl` is the private HTTP(S) gRPC-web base URL. Provider paths are
+preserved; credentials, queries, and fragments are rejected. Endpoint secrets
+therefore live only in the boot environment named by `auth.valueEnv`, not in
+the tracked JSON file.
+`auth` contains `header`, `valueEnv`, and optional `prefix`; the secret value is
+read from the boot environment snapshot. `localDevelopmentEndpoint: true` is
+accepted only for unauthenticated loopback HTTP endpoints. Unknown fields and
+header values containing ASCII control characters fail boot. Literal metadata
+headers are not part of the tracked configuration language.
+
+Admin status exposes only each accepted endpoint's origin and configured role.
+It never exposes the private provider path or authentication metadata.
+
+The accepted clients form one immutable ordered snapshot. Validated reads and simulations try each accepted endpoint at most once. Every attempt is capped at 30 seconds and the whole operation is capped at `accepted endpoint count * 30 seconds`. Signed transaction execution uses the primary accepted endpoint exactly once and is never automatically resubmitted; subsequent effects, event, object, coin, and balance reads use the validated read policy.
 
 The shipped Stelis contract ID table currently supports testnet only. The
 mainnet RPC and settlement swap path sections do not by themselves make a
@@ -173,7 +189,7 @@ When `SPONSOR_OPERATIONS_REFILL_ENABLED=true`,
 
 Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
 
-Refill and withdrawal share `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` while preparing one Sponsor Refill Account spend. The account HASH stores the current operation intent and, before submission, its exact signed transaction bytes, signature, gas budget, and digest. The spend flow uses a primary-pinned Sui client; a terminal digest must be visible there before the following balance is accepted or another spend is reserved. Once that transaction result is confirmed, the mutable slot balance classifies current health but does not keep the global spend active until a target is observed. Boot recovery does not wait for a dead process's remaining efficiency-lock TTL; durable operation identity and CAS keep every recovery driver on the same signed transaction. The lock TTL only releases abandoned mutex ownership and is not a transaction-safety boundary.
+Refill and withdrawal share `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` while preparing one Sponsor Refill Account spend. The account HASH stores the current operation intent and, before submission, its exact signed transaction bytes, signature, gas budget, and digest. Signed submission uses the primary endpoint exactly once. Recovery, terminal-digest lookup, and balance observation use the immutable boot-qualified endpoint snapshot in configured order and accept only responses bound to the stored digest or requested account. Once that transaction result is confirmed, the mutable slot balance classifies current health but does not keep the global spend active until a target is observed. Boot recovery does not wait for a dead process's remaining efficiency-lock TTL; durable operation identity and CAS keep every recovery driver on the same signed transaction. The lock TTL only releases abandoned mutex ownership and is not a transaction-safety boundary.
 
 An admin withdrawal `503` with code `WITHDRAWAL_PENDING` is an uncertain outcome, not permission to create another withdrawal intent. The signed message, nonce key, durable spend, and browser retry record are bound to the boot-selected network. app-admin stores the exact signed request in session storage before submission and retries those same fields after a pending response or page reload. Redis retains the accepted request's terminal outcome for the configured admin-session duration after acceptance, so an exact retry remains stable after a later account spend replaces the active account record. A request that encounters a different active spend only recovers that spend; it never chains the incoming withdrawal or refill into the same call. Such an incoming withdrawal receives `409 WITHDRAWAL_NOT_ACCEPTED`, and app-admin discards that unaccepted signed request instead of treating it as recovery work.
 
@@ -254,7 +270,7 @@ Current structured event families:
 | Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
 | Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY` |
 | Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `LEDGER_CONSUME_FAILED_IN_HANDLER`, `LEDGER_CONSUME_THREW_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
-| Redis and RPC infrastructure | `REDIS_SCAN_UNAVAILABLE`, `SUI_RPC_FAILOVER`, `SUI_RPC_ENDPOINT_COOLDOWN`, `SUI_RPC_ALL_EXHAUSTED` |
+| Redis infrastructure | `REDIS_SCAN_UNAVAILABLE` |
 
 Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.
 

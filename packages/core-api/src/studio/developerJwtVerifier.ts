@@ -18,11 +18,9 @@
 
 import { createVerify, createPublicKey, type KeyObject } from 'node:crypto';
 
-// base64url helpers — canonical owner is @stelis/core-relay/server.
-import { base64urlDecode } from '@stelis/core-relay/server';
-
 // Shared Sui address validation helper.
 import { canonicalizeAddress } from '../addressConstraints.js';
+import { decodeBase64url } from './base64url.js';
 
 // ─────────────────────────────────────────────
 // Trust config types (single issuer).
@@ -69,6 +67,8 @@ const ALGORITHM_MAP: Record<string, string> = {
   RS256: 'RSA-SHA256',
   ES256: 'SHA256',
 };
+
+const JWT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 export const DEVELOPER_JWT_CLOCK_LEEWAY_SECONDS = 60;
 
@@ -222,7 +222,7 @@ export async function verifyDeveloperJwt(
   // Header
   let header: { alg?: string; typ?: string };
   try {
-    header = JSON.parse(new TextDecoder().decode(base64urlDecode(headerB64)));
+    header = JSON.parse(JWT_UTF8_DECODER.decode(decodeBase64url(headerB64)));
   } catch {
     throw new Error('developer JWT: invalid header JSON');
   }
@@ -239,7 +239,7 @@ export async function verifyDeveloperJwt(
   // JWT payload
   let payload: Record<string, unknown>;
   try {
-    payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64)));
+    payload = JSON.parse(JWT_UTF8_DECODER.decode(decodeBase64url(payloadB64)));
   } catch {
     throw new Error('developer JWT: invalid payload JSON');
   }
@@ -263,7 +263,13 @@ export async function verifyDeveloperJwt(
 
   // ── 4. Signature verification ────────────────────────────────
   const signingInput = `${headerB64}.${payloadB64}`;
-  const signatureBytes = base64urlDecode(signatureB64);
+  let signatureBytes: Uint8Array;
+  try {
+    if (signatureB64.length === 0) throw new Error('empty signature');
+    signatureBytes = decodeBase64url(signatureB64);
+  } catch {
+    throw new Error('developer JWT: invalid signature encoding');
+  }
   const publicKey: KeyObject = createPublicKey(trustConfig.publicKeyPem);
   validatePublicKeyForAlgorithm(publicKey, trustConfig.algorithm, 'developer JWT publicKeyPem');
 

@@ -33,7 +33,7 @@ import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { bcs } from '@mysten/sui/bcs';
 import { toBase64, toBase58 } from '@mysten/sui/utils';
-import { GAS_VARIANCE_FIXED_MIST } from '@stelis/core-relay';
+import { GAS_VARIANCE_FIXED_MIST, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import { SETTLE_WITH_CREDIT_FUNCTION, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 
@@ -41,14 +41,29 @@ import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy
 // Module mocks (vi.hoisted ensures availability in factories)
 // ─────────────────────────────────────────────
 
-const { mockQueryUserCredit, mockPrepareBuildPipeline } = vi.hoisted(() => ({
+const {
+  mockQueryUserCredit,
+  mockPrepareBuildPipeline,
+  mockBuildSuiTransaction,
+  mockSimulateSuiTransaction,
+  mockExecuteSuiTransaction,
+} = vi.hoisted(() => ({
   mockQueryUserCredit: vi.fn(),
   mockPrepareBuildPipeline: vi.fn(),
+  mockBuildSuiTransaction: vi.fn(),
+  mockSimulateSuiTransaction: vi.fn(),
+  mockExecuteSuiTransaction: vi.fn(),
 }));
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
   const original = await importOriginal<typeof import('@stelis/core-relay')>();
-  return { ...original, queryUserCredit: mockQueryUserCredit };
+  return {
+    ...original,
+    queryUserCredit: mockQueryUserCredit,
+    buildSuiTransaction: mockBuildSuiTransaction,
+    simulateSuiTransaction: mockSimulateSuiTransaction,
+    executeSuiTransaction: mockExecuteSuiTransaction,
+  };
 });
 
 vi.mock('../src/prepare/build.js', async (importOriginal) => {
@@ -91,10 +106,61 @@ import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMem
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import { withPrepareAuthorization } from './prepareAuthTestHelpers.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  grpcExecutionSuccess,
-  grpcSimulationSuccess,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  suiEndpointSnapshotFixture,
+  suiExecutionSuccess,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+  type TestGasUsed,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const gatewayGasUsed = new WeakMap<object, TestGasUsed>();
+
+function gasUsedFor(snapshot: SuiEndpointSnapshot): TestGasUsed {
+  const gasUsed = gatewayGasUsed.get(snapshot);
+  if (!gasUsed) throw new Error('Missing gateway gas fixture');
+  return gasUsed;
+}
+
+mockSimulateSuiTransaction.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) =>
+    bindSuiResultToTransactionBytes(
+      suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsedFor(snapshot)),
+      input.transaction,
+    ),
+);
+
+mockExecuteSuiTransaction.mockImplementation(
+  async (snapshot: SuiEndpointSnapshot, input: { transaction: Uint8Array }) =>
+    bindSuiResultToTransactionBytes(
+      suiExecutionSuccess(TEST_SUI_TRANSACTION_DIGEST, gasUsedFor(snapshot)),
+      input.transaction,
+    ),
+);
+
+mockBuildSuiTransaction.mockImplementation(
+  async (
+    _snapshot: SuiEndpointSnapshot,
+    input: { readonly transaction: Transaction; readonly onlyTransactionKind?: boolean },
+  ) => {
+    const transaction = Transaction.from(input.transaction);
+    transaction.setGasPrice(1_000);
+    transaction.setGasPayment([
+      {
+        objectId: `0x${'99'.repeat(32)}`,
+        version: '1',
+        digest: '11111111111111111111111111111111',
+      },
+    ]);
+    return transaction.build({ onlyTransactionKind: input.onlyTransactionKind });
+  },
+);
+
+function gatewaySnapshot(gasUsed: TestGasUsed): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  gatewayGasUsed.set(snapshot, gasUsed);
+  return snapshot;
+}
 
 // ─────────────────────────────────────────────
 // Shared identities + secrets
@@ -212,38 +278,13 @@ async function makeEmptyUserTxKindBytes(): Promise<string> {
   return toBase64(kindBytes);
 }
 
-function genericMockSui() {
+function genericMockSui(): SuiEndpointSnapshot {
   const gasUsed = {
     computationCost: '3000000',
     storageCost: '2000000',
     storageRebate: '500000',
   };
-  return {
-    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', gasUsed),
-        transaction,
-      ),
-    ),
-    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcExecutionSuccess('fixture-digest', gasUsed),
-        transaction,
-      ),
-    ),
-    getObject: vi.fn().mockResolvedValue({
-      object: {
-        json: {
-          max_host_fee_mist: GENERIC_MOCK_CONFIG.maxHostFeeMist.toString(),
-          protocol_flat_fee_mist: GENERIC_MOCK_CONFIG.protocolFlatFeeMist.toString(),
-          max_claim_mist: GENERIC_MOCK_CONFIG.maxClaimMist.toString(),
-          min_settle_mist: GENERIC_MOCK_CONFIG.minSettleMist.toString(),
-          config_version: GENERIC_MOCK_CONFIG.configVersion.toString(),
-          max_spread_bps: GENERIC_MOCK_CONFIG.maxSpreadBps.toString(),
-        },
-      },
-    }),
-  };
+  return gatewaySnapshot(gasUsed);
 }
 
 interface GenericHarness {
@@ -296,12 +337,12 @@ function makeGenericHarness(): GenericHarness {
 
   const ctx: HostContext = {
     network: 'testnet',
-    sui: sui as unknown as HostContext['sui'],
+    sui,
     sponsorPool,
     packageId: GENERIC_MOCK_CONFIG.packageId,
     configId: GENERIC_MOCK_CONFIG.configId,
     vaultRegistryId: GENERIC_MOCK_CONFIG.vaultRegistryId,
-    vaultsTableId: null,
+    vaultsTableId: '0x' + '34'.repeat(32),
     deepbookPackageId: extraCfg.deepbookPackageId,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker,
@@ -323,7 +364,6 @@ function makeGenericHarness(): GenericHarness {
       maxSpreadBps: GENERIC_MOCK_CONFIG.maxSpreadBps,
     }),
     invalidateConfigCache: vi.fn(),
-    warmUp: vi.fn(),
     dispose: vi.fn(),
     onSponsorResult: undefined,
   };
@@ -554,44 +594,17 @@ const STUDIO_ALLOWED_TARGET =
 const STUDIO_GLOBAL_ALLOWED_TARGETS = new Set([canonicalizePromotionTarget(STUDIO_ALLOWED_TARGET)]);
 
 /**
- * Mock SuiGrpcClient for the Studio prepare path. Studio prepare invokes
- * `userTx.build({ client })` for both the dry-run and final builds; that
- * triggers the gas-resolution plugin which calls `core.{getCurrentSystemState,
- * getBalance, listCoins, getChainIdentifier}`. Sponsor-side
- * simulate/execute also live here so the same client serves both
- * requests in the harness.
+ * Build one endpoint snapshot for the Studio prepare path. Transaction
+ * construction, simulation, and execution are mocked at their current shared
+ * gateway boundaries.
  */
-function studioMockSui() {
+function studioMockSui(): SuiEndpointSnapshot {
   const gasUsed = {
     computationCost: '1000000',
     storageCost: '500000',
     storageRebate: '200000',
   };
-  return {
-    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', gasUsed),
-        transaction,
-      ),
-    ),
-    executeTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcExecutionSuccess('fixture-digest', gasUsed),
-        transaction,
-      ),
-    ),
-    core: {
-      resolveTransactionPlugin: () => undefined,
-      getCurrentSystemState: async () => ({
-        systemState: { referenceGasPrice: '1000', epoch: '100' },
-      }),
-      getBalance: async () => ({ balance: { addressBalance: '100000000000000' } }),
-      listCoins: async () => ({ objects: [] }),
-      getChainIdentifier: async () => ({
-        chainIdentifier: '11111111111111111111111111111111',
-      }),
-    },
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+  return gatewaySnapshot(gasUsed);
 }
 
 interface StudioHarness {

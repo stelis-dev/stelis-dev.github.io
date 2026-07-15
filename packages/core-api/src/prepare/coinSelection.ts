@@ -5,9 +5,13 @@
  * This module owns chain discovery and selection. The PTB compiler receives the
  * selected object IDs and amounts and performs no discovery of its own.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
-import type { PrefixValueTrace } from '@stelis/core-relay';
+import {
+  getSuiBalance,
+  listAllSuiCoins,
+  type PrefixValueTrace,
+  type SuiEndpointSnapshot,
+} from '@stelis/core-relay';
 import type { SwapFundingResolution } from './settlePlanTypes.js';
 import { PrepareValidationError } from './replay.js';
 
@@ -128,9 +132,10 @@ function resolveCoinCandidates(
 
 /**
  * Prove every exact command-time carrier value that can belong to the selected
- * token. Before pagination exhaustion, a missing snapshot ID remains unresolved
- * because it may appear on a later page. At exhaustion, a constraint with no
- * matching IDs belongs to another token; a partial match is structurally invalid.
+ * token. Before the immutable coin snapshot scan is exhausted, a missing object
+ * remains unresolved because it may appear later in RPC order. At exhaustion,
+ * a constraint with no matching objects belongs to another token; a partial
+ * match is structurally invalid.
  */
 function validateValueConstraints(
   discovered: ReadonlyMap<string, bigint>,
@@ -212,12 +217,13 @@ function resolveCoinObjectFunding(
 /**
  * Determine the exact source for the settlement-token swap input.
  *
- * Coin pages are loaded until safely resolved coin values cover the request.
- * If they do not, discovery continues to exhaustion before address-balance or
- * mixed funding is selected. Cursor or object duplication fails closed.
+ * All coin pages are read as one endpoint-consistent operation. Selection then
+ * walks that immutable result in RPC order and stops at the first safely
+ * resolved prefix whose value covers the request. Address-balance or mixed
+ * funding is considered only after the coin result is exhausted.
  */
 export async function resolvePaymentSource(
-  sui: SuiGrpcClient,
+  sui: SuiEndpointSnapshot,
   owner: string,
   coinType: string,
   requiredAmount: bigint,
@@ -225,37 +231,22 @@ export async function resolvePaymentSource(
   prefixTrace: PrefixValueTrace,
 ): Promise<SwapFundingResolution> {
   const required = normalizeRequiredAmount(requiredAmount, tokenSymbol);
-  if (prefixTrace.unaccountableSenderWithdrawal) {
-    throw new PrepareValidationError(
-      'UNACCOUNTABLE_WITHDRAWAL',
-      'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
-    );
-  }
-
   const discovered = new Map<string, bigint>();
-  const seenCursors = new Set<string>();
-  let cursor: string | null = null;
-  let exhausted = false;
+  const coins = await listAllSuiCoins(sui, { owner, coinType });
 
-  while (!exhausted) {
-    const page = await sui.listCoins({
-      owner,
-      coinType,
-      ...(cursor === null ? {} : { cursor }),
-    });
-    for (const coin of page.objects ?? []) {
-      const objectId = canonicalObjectId(coin.objectId, 'Coin object ID');
-      if (discovered.has(objectId)) {
-        throw new PrepareValidationError(
-          'PAYMENT_COIN_CONFLICT',
-          `Coin discovery returned duplicate object ${objectId}.`,
-        );
-      }
-      discovered.set(objectId, parseRpcBalance(coin.balance, `Coin ${objectId} balance`));
+  for (let index = 0; index < coins.length; index += 1) {
+    const coin = coins[index]!;
+    const objectId = canonicalObjectId(coin.objectId, 'Coin object ID');
+    if (discovered.has(objectId)) {
+      throw new PrepareValidationError(
+        'PAYMENT_COIN_CONFLICT',
+        `Coin discovery returned duplicate object ${objectId}.`,
+      );
     }
+    discovered.set(objectId, parseRpcBalance(coin.balance, `Coin ${objectId} balance`));
 
-    const pageExhausted = !page.hasNextPage;
-    const constraintsResolved = validateValueConstraints(discovered, prefixTrace, pageExhausted);
+    const exhausted = index === coins.length - 1;
+    const constraintsResolved = validateValueConstraints(discovered, prefixTrace, exhausted);
     const candidates = resolveCoinCandidates(discovered, prefixTrace);
     const coinBalance = totalCandidateBalance(candidates);
     if (constraintsResolved && candidates.length > 0 && coinBalance >= required) {
@@ -264,25 +255,14 @@ export async function resolvePaymentSource(
         ...resolveCoinObjectFunding(candidates),
       };
     }
-
-    exhausted = pageExhausted;
-    if (!exhausted) {
-      const nextCursor = page.cursor;
-      if (!nextCursor || seenCursors.has(nextCursor)) {
-        throw new PrepareValidationError(
-          'PAYMENT_COIN_CONFLICT',
-          'Coin discovery pagination did not advance to a new cursor.',
-        );
-      }
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
-    }
   }
+
+  if (coins.length === 0) validateValueConstraints(discovered, prefixTrace, true);
 
   const candidates = resolveCoinCandidates(discovered, prefixTrace);
   const coinBalance = totalCandidateBalance(candidates);
-  const balanceResult = await sui.getBalance({ owner, coinType });
-  const addressBalance = parseRpcBalance(balanceResult.balance.addressBalance, 'Address balance');
+  const balanceResult = await getSuiBalance(sui, { owner, coinType });
+  const addressBalance = parseRpcBalance(balanceResult.addressBalance, 'Address balance');
   const availableAddressBalance =
     addressBalance > prefixTrace.senderWithdrawalDebit
       ? addressBalance - prefixTrace.senderWithdrawalDebit

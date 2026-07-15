@@ -27,8 +27,11 @@ import {
   RedisPrepareInflight,
   RedisPrepareRequestNonceStore,
   type HostContext,
+  type HostChainState,
   type PreparedTxEntry,
 } from '@stelis/core-api';
+import type { SingleHopSettlementSwapPath, SuiRpcFleetStatus } from '@stelis/contracts';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import { createSponsorOperationsRefillWorker } from './sponsor-operations/refillWorker.js';
 import { createRedisSponsorOperationsState } from './sponsor-operations/redisState.js';
 import { createSponsorRefillAccountSpendState } from './sponsor-operations/accountSpendState.js';
@@ -58,13 +61,8 @@ import type {
   PromotionExecutionLedger,
 } from '@stelis/core-api/studio';
 import { RedisPromotionUsageStore, RedisPromotionExecutionLedger } from '@stelis/core-api/studio';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { createRedisClient, type RedisClient } from './redisClient.js';
-import {
-  resolveSettlementSwapPathRegistry,
-  type ParsedSettlementSwapPathRegistryEntry,
-} from './settlementSwapPathRegistry.js';
 
 const APP_API_RATE_LIMIT_WINDOW_MS = 60_000;
 const APP_API_RATE_LIMIT_MAX_REQUESTS = 20;
@@ -96,8 +94,8 @@ export interface AppApiContext {
   developerJwtTrustConfig: DeveloperJwtTrustConfig | null;
   /** Optional developer-side JWT validity callback URL. null if not configured. */
   developerJwtVerifyUrl: string | null;
-  /** Failover transport — always present for admin RPC fleet snapshots. */
-  failoverTransport: import('./sui/failoverTransport.js').SuiRpcFailoverTransport;
+  /** Immutable public view of the boot-qualified RPC fleet. */
+  rpcFleet: Readonly<SuiRpcFleetStatus>;
   /** Redis client (for admin, rate-limit, etc.) */
   redis: RedisClient;
   /** Sponsor operations runtime — shared-state reader + sponsor refill account probe + refill queue. */
@@ -152,11 +150,10 @@ export interface ContextRuntimeInput {
     readonly vaultRegistryId: string;
   };
   readonly deepbookPackageId: string;
-  readonly suiClient: SuiGrpcClient;
-  /** Primary-pinned client used only by the serialized Sponsor Refill Account spend flow. */
-  readonly primarySuiClient: SuiGrpcClient;
-  readonly failoverTransport: import('./sui/failoverTransport.js').SuiRpcFailoverTransport;
-  readonly settlementSwapPathRegistryEntries: readonly ParsedSettlementSwapPathRegistryEntry[];
+  readonly sui: SuiEndpointSnapshot;
+  readonly rpcFleet: Readonly<SuiRpcFleetStatus>;
+  readonly initialHostChainState: HostChainState;
+  readonly settlementSwapPaths: readonly SingleHopSettlementSwapPath[];
   readonly sponsorKeys: readonly Ed25519Keypair[];
   readonly sponsorLeaseHmacSecret: string;
   readonly settlementPayoutRecipientAddress: string;
@@ -267,16 +264,11 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     const abuseBlocker = new RedisAbuseBlocker(redis);
     const prepareRequestNonceStore = new RedisPrepareRequestNonceStore(redis);
 
-    // ── 5. Settlement swap path registry (on-chain derivation) ──────
-    const suiClient = input.suiClient;
-    const settlementSwapPaths = await resolveSettlementSwapPathRegistry(
-      suiClient,
-      input.deepbookPackageId,
-      input.settlementSwapPathRegistryEntries,
-    );
+    // ── 5. Consume the exact boot-qualified settlement swap paths ───
+    const settlementSwapPaths = [...input.settlementSwapPaths];
     // eslint-disable-next-line no-console
     console.log(
-      `[app-api] Settlement swap path registry loaded: ${settlementSwapPaths.length} path(s) — ` +
+      `[app-api] Settlement swap path registry ready: ${settlementSwapPaths.length} path(s) — ` +
         settlementSwapPaths.map((p) => p.settlementTokenSymbol).join(', '),
     );
 
@@ -297,8 +289,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // ── 8. Create base HostContext ───────────────────────────────
     host = createHostContext({
       network,
-      suiRpcUrl: '', // Not used when suiClient is provided
-      suiClient,
+      sui: input.sui,
       packageId: contractIds.packageId,
       configId: contractIds.configId,
       vaultRegistryId: contractIds.vaultRegistryId,
@@ -313,12 +304,10 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       abuseBlocker,
       prepareInflightLimiter,
       allowedSettlementSwapPaths: prepareConfig.allowedSettlementSwapPaths,
+      initialChainState: input.initialHostChainState,
     });
 
-    // ── 9. Warm up (fail-closed) ────────────────────────────────────
-    await host.warmUp();
-
-    // The admin session cutoff is raised in boot.ts only (not here).
+    // The admin session cutoff is raised in app.ts only (not here).
     // createApp eagerly awaits context initialization. Raising it here would
     // still create a second authority for session invalidation.
 
@@ -363,7 +352,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       operationsState: sponsorOperationsState,
       dispatchLock: sponsorRefillAccountDispatchLock,
       boundary: createSuiSponsorRefillAccountSpendBoundary({
-        sui: input.primarySuiClient,
+        sui: input.sui,
         signer: sponsorRefillAccountKey,
         sourceAddress: sponsorRefillAccountAddress,
       }),
@@ -559,7 +548,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       studioGlobalAllowedTargets,
       developerJwtTrustConfig,
       developerJwtVerifyUrl,
-      failoverTransport: input.failoverTransport,
+      rpcFleet: input.rpcFleet,
       redis,
       sponsorOperations: sponsorOperationsRef,
       sponsoredLogsStore,

@@ -5,9 +5,13 @@
 // No side-effectful runtime helpers, and no Node-only or browser-only deps.
 
 import type { DeepBookSwapDirection, SettlementSwapDirection, SuiNetwork } from './types.js';
+import { DEEPBOOK_MIN_OUT_ABORT } from './settlementContract.js';
 
 /** Largest exact integer that every current JSON/Redis Promotion consumer can represent. */
 export const MAX_PROMOTION_LEDGER_VALUE_MIST = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** Original/runtime DeepBook ModuleId generated from the locked Pool bytecode. */
+export const DEEPBOOK_RUNTIME_PACKAGE_ID = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId;
 
 // ─────────────────────────────────────────────
 // Settlement swap direction data tables and lookups

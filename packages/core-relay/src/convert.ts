@@ -1,7 +1,7 @@
 /**
  * Convert Sui SDK transaction commands to core-relay PtbCommand format.
  *
- * Pure TS — no @mysten/sui dependency. Accepts unknown[] from
+ * Accepts the exact current SDK command union from
  * Transaction.getData().commands and normalizes to PtbCommand[].
  *
  * Used by:
@@ -9,31 +9,30 @@
  *   - SDK integrity.ts (client-side S-16 verification)
  */
 import type { PtbCommand } from '@stelis/contracts';
+import { parseSuiCommands } from './sui/suiTransactionShape.js';
 
 export function convertSdkCommands(commands: unknown[]): PtbCommand[] {
-  return commands.map((cmd) => {
-    const c = cmd as Record<string, unknown>;
-    const kind = (c.$kind as string) ?? 'Unknown';
+  return parseSuiCommands(commands).map((command) => {
+    const current = command as unknown as Record<string, unknown>;
+    const kind = command.$kind;
 
-    if (kind === 'MoveCall' && c.MoveCall) {
-      const mc = c.MoveCall as Record<string, unknown>;
+    if (kind === 'MoveCall') {
+      const moveCall = command.MoveCall;
       return {
         kind: 'MoveCall' as const,
-        packageId: mc.package as string,
-        module: mc.module as string,
-        function: mc.function as string,
-        typeArguments: Array.isArray(mc.typeArguments) ? mc.typeArguments : [],
-        arguments: Array.isArray(mc.arguments) ? mc.arguments : [],
+        packageId: moveCall.package,
+        module: moveCall.module,
+        function: moveCall.function,
+        typeArguments: [...moveCall.typeArguments],
+        arguments: [...moveCall.arguments],
       };
     }
 
-    // non-MoveCall (TransferObjects, SplitCoins, etc.):
-    // Wrap the payload in an array so containsGasCoinReference() can
-    // recursively scan for GasCoin references (S-15 defense).
-    const payload = c[kind];
+    // Preserve the exact current non-MoveCall payload so the sponsor GasCoin
+    // guard can recursively inspect every argument reference.
     return {
       kind,
-      arguments: payload !== undefined ? [payload] : [],
+      arguments: [current[kind]],
     };
   });
 }

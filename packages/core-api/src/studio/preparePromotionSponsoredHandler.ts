@@ -2,13 +2,12 @@
  * preparePromotionSponsoredHandler — public Studio prepare adapter over the
  * SponsoredExecution prepare runner.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type {
   PromotionPrepareErrorCode,
   PromotionPrepareRequest,
   PromotionPrepareResponse,
 } from '@stelis/contracts';
-import type { OnchainConfig } from '@stelis/core-relay';
+import type { OnchainConfig, SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import type { SponsorPoolAdapter } from '../context.js';
@@ -36,8 +35,8 @@ import {
 
 /** Dependencies injected by the host (app-api context). */
 export interface PromotionPrepareContext {
-  /** Sui gRPC client for dry-run / simulation. */
-  sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for dry-run / simulation. */
+  sui: SuiEndpointSnapshot;
   /** Promotion store — loads promotion record. */
   promotionStore: PromotionStoreAdapter;
   /** Execution ledger — entitlement read + atomic reserve/release. */

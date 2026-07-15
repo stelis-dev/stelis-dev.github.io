@@ -37,11 +37,11 @@ import {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
-  SponsorTerminalProcessingError,
   SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from '@stelis/core-api';
 import { PromotionPrepareError, PromotionSponsorError } from '@stelis/core-api/studio';
+import { SuiOperationError } from '@stelis/core-relay';
 import {
   HOST_ERROR_HTTP_STATUS,
   HOST_ERROR_META_POLICY,
@@ -61,6 +61,7 @@ import {
 // ─────────────────────────────────────────────
 
 type MappedErrorBody = HostErrorResponse;
+type HostInternalFailureCode = Extract<HostErrorCode, 'INTERNAL_ERROR' | 'SPONSOR_FAILED'>;
 
 interface MappedErrorResponse {
   status: number;
@@ -146,9 +147,6 @@ function extractHints(err: Error): ExtractedHints | null {
   if (err instanceof SponsorCongestionError) {
     return { code: 'SPONSOR_CONGESTION', digest: err.digest };
   }
-  if (err instanceof SponsorTerminalProcessingError) {
-    return { code: err.code, digest: err.digest };
-  }
   // The transaction was signed and may have reached Sui, but the Host could
   // not prove a current terminal result. Preserve the derived transaction
   // identity so clients can reconcile instead of retrying as if submission
@@ -198,9 +196,11 @@ function extractHints(err: Error): ExtractedHints | null {
 export function mapError(
   err: unknown,
   allowedCodes: readonly HostErrorCode[],
+  internalFailureCode: HostInternalFailureCode,
 ): MappedErrorResponse | null {
   if (!(err instanceof Error)) return null;
-  const hints = extractHints(err);
+  const hints: ExtractedHints | null =
+    err instanceof SuiOperationError ? { code: internalFailureCode } : extractHints(err);
   if (!hints) return null;
   if (!allowedCodes.includes(hints.code)) return null;
 

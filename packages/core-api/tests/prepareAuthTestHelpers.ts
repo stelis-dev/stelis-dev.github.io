@@ -7,6 +7,7 @@ import type { PrepareParams } from '../src/handlers/prepare.js';
 
 export const TEST_PREPARE_AUTH_KEYPAIR = Ed25519Keypair.generate();
 export const TEST_PREPARE_AUTH_SENDER = TEST_PREPARE_AUTH_KEYPAIR.getPublicKey().toSuiAddress();
+export const TEST_PREPARE_AUTH_PACKAGE_ID = `0x${'11'.repeat(32)}`;
 
 let nonceCounter = 0;
 
@@ -38,7 +39,7 @@ export async function withPrepareAuthorization(
 
   const message = encodePrepareAuthorizationMessage({
     network: overrides.network ?? 'testnet',
-    packageId: overrides.packageId ?? '0xPACKAGE',
+    packageId: overrides.packageId ?? TEST_PREPARE_AUTH_PACKAGE_ID,
     senderAddress: input.senderAddress,
     txKindBytesHash,
     settlementTokenType: input.settlementTokenType,

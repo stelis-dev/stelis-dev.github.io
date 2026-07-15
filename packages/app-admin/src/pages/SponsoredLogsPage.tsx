@@ -198,7 +198,7 @@ function SponsoredLogsTable({
 function SponsoredLogsRow({ entry }: { readonly entry: AdminSponsoredExecutionLogEntry }) {
   const isUnknown = entry.economicsStatus === 'unknown';
   const negativeNet = !isUnknown && entry.hostNetMist?.startsWith('-');
-  // Post-submit accounting failures (e.g. SPONSOR_EXEC_GAS_USED_MISSING,
+  // Post-submit accounting failures (for example,
   // PROMOTION_LEDGER_CONSUME_FAILED) keep `outcome === 'success'` because
   // the TX actually submitted on-chain, but they carry a non-null
   // `failureReason` describing the recorder-visible deviation. Surface

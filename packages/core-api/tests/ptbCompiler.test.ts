@@ -14,7 +14,7 @@ import {
 } from '@stelis/contracts';
 import {
   convertSdkCommands,
-  extractObjectIdFromInput,
+  projectSuiInputIdentity,
   validateGenericSettlementTransaction,
   validateGenericUserTransactionKind,
   type HostValidationEnv,
@@ -124,9 +124,9 @@ function requireInputIndex(argument: unknown): number {
 
 function objectIdForArgument(argument: unknown, inputs: unknown[]): string {
   const inputIndex = requireInputIndex(argument);
-  const objectId = extractObjectIdFromInput(inputs[inputIndex] as Record<string, unknown>);
-  if (!objectId) throw new Error(`Input ${inputIndex} has no object ID`);
-  return objectId;
+  const identity = projectSuiInputIdentity(inputs[inputIndex]);
+  if (!identity.startsWith('Object:')) throw new Error(`Input ${inputIndex} has no object ID`);
+  return identity.slice('Object:'.length);
 }
 
 function requireMergePayload(command: NormalizedCommand): {

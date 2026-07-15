@@ -2,37 +2,43 @@
  * Runtime input snapshot wiring tests.
  *
  * `createContext` receives an already parsed, secret-bearing runtime input.
- * These tests verify that it forwards those exact values to the on-chain
- * registry resolver and Host context without consulting process env or a
- * registry file again.
+ * These tests verify that it forwards the exact boot-qualified chain/RPC
+ * snapshots to the Host context without consulting process env, re-reading
+ * chain readiness state, or resolving the registry again.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { HostChainState } from '@stelis/core-api';
+import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { ContextRuntimeInput } from '../src/context.js';
+import { suiEndpointSnapshotFixture } from './suiEndpointSnapshotFixture.js';
 
-let capturedRegistryClient: unknown = null;
-let capturedRegistryEntries: unknown = null;
 let capturedHostConfig: Record<string, unknown> | null = null;
+let capturedPrepareConfigInput: Record<string, unknown> | null = null;
+let capturedSpendBoundaryInput: Record<string, unknown> | null = null;
 let capturedSpendCoordinatorDeps: Record<string, unknown> | null = null;
 let capturedSpendStateOptions: Record<string, unknown> | null = null;
 let nextRecoveryResult: unknown = null;
 let runtimeEvents: string[] = [];
 
-vi.mock('../src/settlementSwapPathRegistry.js', () => ({
-  getSettlementSwapPathRegistryPath: vi.fn(() => {
-    throw new Error('context must not resolve the registry file path');
-  }),
-  resolveSettlementSwapPathRegistry: vi.fn(function (
-    client: unknown,
-    _packageId: unknown,
-    entries: unknown,
-  ) {
-    capturedRegistryClient = client;
-    capturedRegistryEntries = entries;
-    return Promise.resolve([]);
-  }),
+const mocks = vi.hoisted(() => ({
+  getSettlementSwapPathRegistryPath: vi.fn(),
+  resolveSettlementSwapPathRegistry: vi.fn(),
+  getSuiBalance: vi.fn(),
 }));
+
+vi.mock('../src/settlementSwapPathRegistry.js', () => ({
+  getSettlementSwapPathRegistryPath: mocks.getSettlementSwapPathRegistryPath,
+  resolveSettlementSwapPathRegistry: mocks.resolveSettlementSwapPathRegistry,
+}));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return {
+    ...actual,
+    getSuiBalance: mocks.getSuiBalance,
+  };
+});
 
 vi.mock('@stelis/core-api', async () => {
   const actual = await vi.importActual('@stelis/core-api');
@@ -40,21 +46,22 @@ vi.mock('@stelis/core-api', async () => {
     ...actual,
     createHostContext: vi.fn().mockImplementation((config: Record<string, unknown>) => {
       capturedHostConfig = config;
+      const initialChainState = config.initialChainState as HostChainState;
       return {
         network: config.network,
-        sui: config.suiClient,
+        sui: config.sui,
         sponsorPool: config.sponsorPool,
         packageId: config.packageId,
         configId: config.configId,
         vaultRegistryId: config.vaultRegistryId,
+        deepbookPackageId: config.deepbookPackageId,
         rateLimiter: config.rateLimiter,
         abuseBlocker: config.abuseBlocker,
         prepareStore: config.prepareStore,
         settlementPayoutRecipientAddress: config.settlementPayoutRecipientAddress,
         allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
-        vaultsTableId: null,
-        getConfig: vi.fn(),
-        warmUp: vi.fn().mockResolvedValue(undefined),
+        vaultsTableId: initialChainState.vaultsTableId,
+        getConfig: vi.fn().mockResolvedValue(initialChainState.config),
         invalidateConfigCache: vi.fn(),
         dispose: vi.fn(),
       };
@@ -91,7 +98,10 @@ vi.mock('../src/sponsor-operations/accountSpendState.js', () => ({
 }));
 
 vi.mock('../src/sponsor-operations/accountSpend.js', () => ({
-  createSuiSponsorRefillAccountSpendBoundary: vi.fn(() => ({})),
+  createSuiSponsorRefillAccountSpendBoundary: vi.fn((input: Record<string, unknown>) => {
+    capturedSpendBoundaryInput = input;
+    return {};
+  }),
   createSponsorRefillAccountSpendCoordinator: vi.fn((deps: Record<string, unknown>) => {
     capturedSpendCoordinatorDeps = deps;
     return {
@@ -110,12 +120,15 @@ vi.mock('../src/sponsor-operations/accountSpend.js', () => ({
 }));
 
 vi.mock('@stelis/core-api/prepareConfig', () => ({
-  resolvePrepareConfig: vi.fn().mockReturnValue({
-    supportedSettlementSwapPaths: [],
-    deepbookPackageId: '0xDEEPBOOK',
-    deepType: '0xDEEP',
-    allowedSettlementSwapPaths: [],
-    quotedHostFeeMist: 0n,
+  resolvePrepareConfig: vi.fn().mockImplementation((input: Record<string, unknown>) => {
+    capturedPrepareConfigInput = input;
+    return {
+      supportedSettlementSwapPaths: [],
+      deepbookPackageId: '0xDEEPBOOK',
+      deepType: '0xDEEP',
+      allowedSettlementSwapPaths: [],
+      quotedHostFeeMist: 0n,
+    };
   }),
 }));
 
@@ -124,6 +137,27 @@ import { createContext } from '../src/context.js';
 const SPONSOR_ADDRESS = `0x${'aa'.repeat(32)}`;
 const SPONSOR_REFILL_ACCOUNT_ADDRESS = `0x${'bb'.repeat(32)}`;
 const PAYOUT_ADDRESS = `0x${'ff'.repeat(32)}`;
+const PACKAGE_ID = `0x${'01'.repeat(32)}`;
+const CONFIG_ID = `0x${'02'.repeat(32)}`;
+const VAULT_REGISTRY_ID = `0x${'03'.repeat(32)}`;
+const SETTLEMENT_SWAP_PATH: SingleHopSettlementSwapPath = {
+  hops: [
+    {
+      poolId: `0x${'05'.repeat(32)}`,
+      baseType: `0x${'06'.repeat(32)}::coin::COIN`,
+      quoteType: '0x2::sui::SUI',
+      swapDirection: 'baseForQuote',
+      feeBps: 0,
+    },
+  ],
+  settlementTokenType: `0x${'06'.repeat(32)}::coin::COIN`,
+  settlementTokenSymbol: 'COIN',
+  settlementTokenDecimals: 9,
+  lotSize: 1n,
+  minSize: 1n,
+  effectiveFeeRateBps: 0,
+  settlementSwapDirection: 'baseForQuote',
+};
 
 function keypair(address: string): Ed25519Keypair {
   return {
@@ -133,30 +167,39 @@ function keypair(address: string): Ed25519Keypair {
 }
 
 function runtimeInput(options: { prepareInflightCapacity?: number } = {}): ContextRuntimeInput {
-  const suiClient = {
-    __testId: 'runtime-input-sui-client',
-    getBalance: vi.fn(async () => {
-      runtimeEvents.push('balance');
-      return { balance: { balance: '10000000000' } };
+  const sui = suiEndpointSnapshotFixture();
+  const initialHostChainState: HostChainState = Object.freeze({
+    config: Object.freeze({
+      packageId: PACKAGE_ID,
+      configId: CONFIG_ID,
+      maxClaimMist: 1n,
+      minSettleMist: 2n,
+      maxHostFeeMist: 3n,
+      protocolFlatFeeMist: 4n,
+      configVersion: 5n,
+      maxSpreadBps: 6n,
     }),
-  } as unknown as SuiGrpcClient;
-  const registryEntries = Object.freeze([{ poolId: '0xboot-snapshot-pool' }]);
+    vaultRegistryId: VAULT_REGISTRY_ID,
+    vaultsTableId: `0x${'07'.repeat(32)}`,
+  });
 
   return {
     redisUrl: 'redis://boot-snapshot',
     network: 'testnet',
     contractIds: {
-      packageId: `0x${'01'.repeat(32)}`,
-      configId: `0x${'02'.repeat(32)}`,
-      vaultRegistryId: `0x${'03'.repeat(32)}`,
+      packageId: PACKAGE_ID,
+      configId: CONFIG_ID,
+      vaultRegistryId: VAULT_REGISTRY_ID,
     },
     deepbookPackageId: `0x${'04'.repeat(32)}`,
-    suiClient,
-    primarySuiClient: suiClient,
-    failoverTransport: {
-      getAdminSnapshot: () => ({ endpoints: [], totalEndpoints: 0, healthyEndpoints: 0 }),
-    } as unknown as ContextRuntimeInput['failoverTransport'],
-    settlementSwapPathRegistryEntries: registryEntries,
+    sui,
+    rpcFleet: Object.freeze({
+      endpoints: Object.freeze([
+        Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
+      ]),
+    }),
+    initialHostChainState,
+    settlementSwapPaths: Object.freeze([SETTLEMENT_SWAP_PATH]),
     sponsorKeys: [keypair(SPONSOR_ADDRESS)],
     sponsorLeaseHmacSecret: 'runtime-input-test-hmac-secret-00000000',
     settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
@@ -180,14 +223,24 @@ function runtimeInput(options: { prepareInflightCapacity?: number } = {}): Conte
 }
 
 beforeEach(() => {
-  capturedRegistryClient = null;
-  capturedRegistryEntries = null;
   capturedHostConfig = null;
+  capturedPrepareConfigInput = null;
+  capturedSpendBoundaryInput = null;
   capturedSpendCoordinatorDeps = null;
   capturedSpendStateOptions = null;
   nextRecoveryResult = null;
   runtimeEvents = [];
   vi.clearAllMocks();
+  mocks.getSettlementSwapPathRegistryPath.mockImplementation(() => {
+    throw new Error('context must not resolve the registry file path');
+  });
+  mocks.resolveSettlementSwapPathRegistry.mockImplementation(() => {
+    throw new Error('context must not resolve settlement swap paths');
+  });
+  mocks.getSuiBalance.mockImplementation(async () => {
+    runtimeEvents.push('balance');
+    return { balance: '10000000000' };
+  });
 });
 
 afterEach(() => {
@@ -195,7 +248,7 @@ afterEach(() => {
 });
 
 describe('createContext boot-snapshot wiring', () => {
-  it('uses the same injected client and already-parsed registry entries for runtime assembly', async () => {
+  it('uses the exact boot-qualified snapshots without repeating readiness work', async () => {
     const input = runtimeInput();
 
     vi.stubEnv('NETWORK', 'mainnet');
@@ -204,10 +257,16 @@ describe('createContext boot-snapshot wiring', () => {
 
     const context = await createContext(input);
     try {
-      expect(capturedRegistryClient).toBe(input.suiClient);
-      expect(capturedHostConfig?.suiClient).toBe(input.suiClient);
-      expect(capturedRegistryClient).toBe(capturedHostConfig?.suiClient);
-      expect(capturedRegistryEntries).toBe(input.settlementSwapPathRegistryEntries);
+      expect(capturedHostConfig?.sui).toBe(input.sui);
+      expect(capturedHostConfig?.initialChainState).toBe(input.initialHostChainState);
+      expect(capturedPrepareConfigInput?.settlementSwapPaths).toEqual(input.settlementSwapPaths);
+      expect(capturedSpendBoundaryInput?.sui).toBe(input.sui);
+      expect(context.rpcFleet).toBe(input.rpcFleet);
+      expect(mocks.getSettlementSwapPathRegistryPath).not.toHaveBeenCalled();
+      expect(mocks.resolveSettlementSwapPathRegistry).not.toHaveBeenCalled();
+      for (const [snapshot] of mocks.getSuiBalance.mock.calls) {
+        expect(snapshot).toBe(input.sui);
+      }
       expect(capturedHostConfig).toMatchObject({
         network: 'testnet',
         settlementPayoutRecipientAddress: PAYOUT_ADDRESS,

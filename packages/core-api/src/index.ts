@@ -2,14 +2,13 @@
 
 // Client IP resolution
 export { ClientIpResolutionError, resolveClientIp, parseTrustedProxyHops } from './clientIp.js';
-export {
-  BlockCheckUnavailableError,
-  checkBlockedRequest,
-} from './abuseBlocking.js';
+export { BlockCheckUnavailableError, checkBlockedRequest } from './abuseBlocking.js';
 
 // Context
 export { createHostContext } from './context.js';
 export type { HostContext } from './context.js';
+export { readHostChainState } from './hostChainState.js';
+export type { HostChainState } from './hostChainState.js';
 
 // Address constraints
 export { canonicalizeAddress, validateAddressConstraints } from './addressConstraints.js';
@@ -24,7 +23,6 @@ export {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
-  SponsorTerminalProcessingError,
   SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from './handlers/sponsor.js';
@@ -77,12 +75,6 @@ export { RedisAbuseBlocker } from './store/redisAbuseBlocker.js';
 // relative `../src/context.js` path.
 export { parseSponsorKey, parseSponsorKeys } from './context.js';
 export { RedisSponsorPool } from './store/redisSponsorPool.js';
-
-// Current Sui execution-result parser shared by Host execution boundaries.
-export {
-  parseCurrentSuiTerminalForBytes,
-  parseCurrentSuiTerminalForDigest,
-} from './session/sessionPrimitives.js';
 
 // Shared constants and types live in `@stelis/contracts`.
 // `@stelis/core-api` re-exports only its own domain/runtime APIs.

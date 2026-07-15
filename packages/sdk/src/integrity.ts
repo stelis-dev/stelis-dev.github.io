@@ -11,13 +11,13 @@
  *   - @stelis/contracts: SETTLE_MODULE, SETTLE_FUNCTIONS, SUI_TYPE
  */
 import { Transaction } from '@mysten/sui/transactions';
-import { fromBase64 } from '@mysten/sui/utils';
-import { normalizeSuiAddress } from '@mysten/sui/utils';
+import { fromBase64, normalizeSuiAddress } from '@mysten/sui/utils';
 import {
   convertSdkCommands,
   containsGasCoinReference,
   isMoveCall,
   integrityCompare,
+  projectSuiInputIdentity,
 } from '@stelis/core-relay/browser';
 import { SETTLE_MODULE, SETTLE_FUNCTIONS, SUI_TYPE } from '@stelis/contracts';
 import type { PtbCommand } from '@stelis/contracts';
@@ -51,7 +51,19 @@ export function verifyPtbIntegrity(
   returnedTxBase64: string,
   packageId: string,
 ): void {
-  // Parse both sides into PtbCommand[] via shared core conversion
+  try {
+    verifyPtbIntegrityCurrent(originalKindBytes, returnedTxBase64, packageId);
+  } catch (error) {
+    if (error instanceof StelisIntegrityError) throw error;
+    throw new StelisIntegrityError(error instanceof Error ? error.message : 'invalid PTB shape');
+  }
+}
+
+function verifyPtbIntegrityCurrent(
+  originalKindBytes: Uint8Array,
+  returnedTxBase64: string,
+  packageId: string,
+): void {
   const originalTx = Transaction.fromKind(originalKindBytes);
   const returnedTx = Transaction.from(fromBase64(returnedTxBase64));
 
@@ -76,50 +88,17 @@ export function verifyPtbIntegrity(
 // ─────────────────────────────────────────────
 
 /**
- * Extract objectId from any Object input variant.
- * Delegates to the shared @stelis/core-relay input helper.
- */
-import { extractObjectIdFromInput } from '@stelis/core-relay/browser';
-
-/**
  * Normalize an input to a comparable string.
  * - Pure: compared by bytes (base64)
  * - Object (all 3 variants): compared by normalized objectId (cross-type equivalence)
  * - Unknown kind: fail-closed (throw)
  */
 export function normalizeInput(input: Record<string, unknown>): string {
-  const kind = input.$kind as string;
-
-  // Pure: bytes (base64) comparison
-  if (kind === 'Pure') {
-    return `Pure:${(input.Pure as { bytes: string }).bytes}`;
+  try {
+    return projectSuiInputIdentity(input);
+  } catch (error) {
+    throw new StelisIntegrityError(error instanceof Error ? error.message : 'invalid input shape');
   }
-
-  // Object family: objectId-based cross-type equivalence
-  // UnresolvedObject (pre-build) ↔ Object.SharedObject/ImmOrOwnedObject (resolved)
-  // are equivalent if objectId matches. Additional resolved fields
-  // (initialSharedVersion, version, digest, mutable) are added during resolve
-  // and validated on-chain, not here.
-  const objectId = extractObjectIdFromInput(input);
-  if (objectId !== null) {
-    return `Object:${normalizeSuiAddress(objectId)}`;
-  }
-
-  // FundsWithdrawal: Host-appended input for address balance redemption.
-  // These appear as suffix inputs (index > original.length) so they never
-  // conflict with prefix verification. Normalize by kind + type + amount +
-  // withdrawFrom for full semantic equivalence.
-  if (kind === 'FundsWithdrawal') {
-    const fw = input.FundsWithdrawal as Record<string, unknown> | undefined;
-    const typeArg = (fw?.typeArg as Record<string, unknown>)?.Balance ?? 'unknown';
-    const amount = (fw?.reservation as Record<string, unknown>)?.MaxAmountU64 ?? 'unknown';
-    const wf = fw?.withdrawFrom as Record<string, unknown> | undefined;
-    const withdrawFrom = wf?.$kind ?? 'unknown';
-    return `FundsWithdrawal:${typeArg}:${amount}:${withdrawFrom}`;
-  }
-
-  // Unknown kind → fail-closed (S-16 defense-in-depth)
-  throw new StelisIntegrityError(`unsupported input kind: ${kind}`);
 }
 
 /**

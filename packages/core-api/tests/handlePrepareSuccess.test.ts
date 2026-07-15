@@ -22,9 +22,30 @@ import { computePolicyHash } from '../src/policyHash.js';
 
 // ─── Module mocks (vi.hoisted ensures availability inside vi.mock factory) ──
 
-const { mockQueryUserCredit, mockPrepareBuildPipeline } = vi.hoisted(() => ({
+const {
+  mockQueryUserCredit,
+  mockPrepareBuildPipeline,
+  PACKAGE_ID,
+  CONFIG_ID,
+  REGISTRY_ID,
+  PAYOUT_ADDRESS,
+  SPONSOR_ADDRESS,
+  DEEPBOOK_PACKAGE_ID,
+  SETTLEMENT_TOKEN_TYPE,
+  POOL_ID,
+  VAULT_ID,
+} = vi.hoisted(() => ({
   mockQueryUserCredit: vi.fn(),
   mockPrepareBuildPipeline: vi.fn(),
+  PACKAGE_ID: `0x${'11'.repeat(32)}`,
+  CONFIG_ID: `0x${'22'.repeat(32)}`,
+  REGISTRY_ID: `0x${'33'.repeat(32)}`,
+  PAYOUT_ADDRESS: `0x${'44'.repeat(32)}`,
+  SPONSOR_ADDRESS: `0x${'55'.repeat(32)}`,
+  DEEPBOOK_PACKAGE_ID: `0x${'66'.repeat(32)}`,
+  SETTLEMENT_TOKEN_TYPE: `0x${'77'.repeat(32)}::deep::DEEP`,
+  POOL_ID: `0x${'88'.repeat(32)}`,
+  VAULT_ID: `0x${'99'.repeat(32)}`,
 }));
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
@@ -61,10 +82,10 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
             {
               $kind: 'MoveCall',
               MoveCall: {
-                package: '0xPACKAGE',
+                package: PACKAGE_ID,
                 module: SETTLE_MODULE,
                 function: SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser,
-                typeArguments: ['0xDEEP::deep::DEEP'],
+                typeArguments: [SETTLEMENT_TOKEN_TYPE],
                 arguments: [],
               },
             },
@@ -137,8 +158,8 @@ const MOCK_CREDIT_RESULT = {
 };
 
 const ONCHAIN_CONFIG = {
-  packageId: '0xPACKAGE',
-  configId: '0xCONFIG',
+  packageId: PACKAGE_ID,
+  configId: CONFIG_ID,
   maxClaimMist: 50_000_000n,
   minSettleMist: 0n,
   maxHostFeeMist: 500_000n,
@@ -150,9 +171,9 @@ function makeExtractedSettleArgs(
   overrides: Partial<ExtractedSettleArgs> = {},
 ): ExtractedSettleArgs {
   return {
-    configObjectId: '0xCONFIG',
-    registryObjectId: '0xREGISTRY',
-    settlementPayoutRecipient: '0xPAYOUT',
+    configObjectId: CONFIG_ID,
+    registryObjectId: REGISTRY_ID,
+    settlementPayoutRecipient: PAYOUT_ADDRESS,
     executionCostClaim: 1_800_000n,
     policyHash: new Uint8Array(32),
     orderIdHash: new Uint8Array(0),
@@ -175,15 +196,15 @@ function makeMockContext() {
     sui: {},
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        sponsorAddress: '0xSPONSOR42',
+        sponsorAddress: SPONSOR_ADDRESS,
       }),
       commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
-    vaultRegistryId: '0xREGISTRY',
+    packageId: PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
     abuseBlocker: {
       checkIp: vi.fn().mockResolvedValue({ blocked: false }),
@@ -204,7 +225,7 @@ function makeMockContext() {
       reserveNonce: vi.fn().mockResolvedValue(1n),
       releaseReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
     prepareInflightLimiter: {
       tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -219,14 +240,14 @@ function makeExtraCfg(): PrepareHandlerConfig {
     {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xDEEP::deep::DEEP',
+          poolId: POOL_ID,
+          baseType: SETTLEMENT_TOKEN_TYPE,
           quoteType: '0x2::sui::SUI',
           swapDirection: 'baseForQuote' as const,
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -236,15 +257,15 @@ function makeExtraCfg(): PrepareHandlerConfig {
     },
   ];
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     supportedSettlementSwapPaths,
     settlementSwapPathDescriptors: createStaticSettlementSwapPathDescriptorMap(
       supportedSettlementSwapPaths,
     ),
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -264,13 +285,16 @@ async function makeParams(
   txKindBytes: string,
   overrides: Partial<Omit<PrepareParams, 'txKindBytes'>> = {},
 ): Promise<PrepareParams> {
-  return withPrepareAuthorization({
-    txKindBytes,
-    senderAddress: TEST_PREPARE_AUTH_SENDER,
-    settlementTokenType: '0xDEEP::deep::DEEP',
-    clientIp: '127.0.0.1',
-    ...overrides,
-  });
+  return withPrepareAuthorization(
+    {
+      txKindBytes,
+      senderAddress: TEST_PREPARE_AUTH_SENDER,
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+      clientIp: '127.0.0.1',
+      ...overrides,
+    },
+    { packageId: PACKAGE_ID },
+  );
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -296,9 +320,9 @@ describe('handlePrepare — success path', () => {
 
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
       makeExtractedSettleArgs({
-        configObjectId: '0xCONFIG',
-        registryObjectId: '0xREGISTRY',
-        settlementPayoutRecipient: '0xPAYOUT',
+        configObjectId: CONFIG_ID,
+        registryObjectId: REGISTRY_ID,
+        settlementPayoutRecipient: PAYOUT_ADDRESS,
         executionCostClaim: 1_800_000n,
         policyHash: policyHashBytes,
         orderIdHash: new Uint8Array(0),
@@ -308,8 +332,8 @@ describe('handlePrepare — success path', () => {
         paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
         slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
         extractedSettlementSwapPath: {
-          tokenType: '0xDEEP::deep::DEEP',
-          hops: ['0xPOOL'],
+          tokenType: SETTLEMENT_TOKEN_TYPE,
+          hops: [POOL_ID],
           settlementSwapDirection: 'baseForQuote',
         },
       }),
@@ -352,7 +376,7 @@ describe('handlePrepare — success path', () => {
     expect(storedDraft.receiptId).toBe(result.receiptId);
     expect(storedDraft.senderAddress).toBe(TEST_PREPARE_AUTH_SENDER);
     expect(storedDraft.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
-    expect(storedDraft.sponsorAddress).toBe('0xSPONSOR42');
+    expect(storedDraft.sponsorAddress).toBe(SPONSOR_ADDRESS);
     expect(storedDraft.clientIp).toBe('192.168.1.1');
     expect(storedDraft.mode).toBe('generic');
     expect(storedDraft).not.toHaveProperty('issuedAt');
@@ -424,7 +448,7 @@ describe('handlePrepare — success path', () => {
 
   it('passes correct profile to runGenericPrepareBuildPipeline for credit_general', async () => {
     mockQueryUserCredit.mockResolvedValue({
-      vaultObjectId: '0xVAULT_123',
+      vaultObjectId: VAULT_ID,
       credit: '5000000',
       needsCreate: false,
       lastNonce: '0',
@@ -443,7 +467,7 @@ describe('handlePrepare — success path', () => {
     // runGenericPrepareBuildPipeline should receive settleProfile='credit_general'
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
     expect(buildInput.profile).toBe('credit_general');
-    expect(buildInput.vaultObjectId).toBe('0xVAULT_123');
+    expect(buildInput.vaultObjectId).toBe(VAULT_ID);
     expect(buildInput.credit).toBe('5000000');
 
     expect(result.profile).toBe('credit_general');
@@ -465,9 +489,9 @@ describe('handlePrepare — success path', () => {
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('test-order-123'));
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
       makeExtractedSettleArgs({
-        configObjectId: '0xCONFIG',
-        registryObjectId: '0xREGISTRY',
-        settlementPayoutRecipient: '0xPAYOUT',
+        configObjectId: CONFIG_ID,
+        registryObjectId: REGISTRY_ID,
+        settlementPayoutRecipient: PAYOUT_ADDRESS,
         executionCostClaim: 1_800_000n,
         policyHash: policyHashBytes,
         orderIdHash,
@@ -477,8 +501,8 @@ describe('handlePrepare — success path', () => {
         paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
         slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
         extractedSettlementSwapPath: {
-          tokenType: '0xDEEP::deep::DEEP',
-          hops: ['0xPOOL'],
+          tokenType: SETTLEMENT_TOKEN_TYPE,
+          hops: [POOL_ID],
           settlementSwapDirection: 'baseForQuote',
         },
       }),
@@ -515,9 +539,9 @@ describe('handlePrepare — success path', () => {
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('store-test-order'));
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
       makeExtractedSettleArgs({
-        configObjectId: '0xCONFIG',
-        registryObjectId: '0xREGISTRY',
-        settlementPayoutRecipient: '0xPAYOUT',
+        configObjectId: CONFIG_ID,
+        registryObjectId: REGISTRY_ID,
+        settlementPayoutRecipient: PAYOUT_ADDRESS,
         executionCostClaim: 1_800_000n,
         policyHash: policyHashBytes,
         orderIdHash,
@@ -527,8 +551,8 @@ describe('handlePrepare — success path', () => {
         paymentInputTrace: MOCK_PAYMENT_INPUT_TRACE,
         slippageBufferMist: MOCK_BUILD_RESULT.slippageBufferMist,
         extractedSettlementSwapPath: {
-          tokenType: '0xDEEP::deep::DEEP',
-          hops: ['0xPOOL'],
+          tokenType: SETTLEMENT_TOKEN_TYPE,
+          hops: [POOL_ID],
           settlementSwapDirection: 'baseForQuote',
         },
       }),
@@ -558,9 +582,9 @@ describe('handlePrepare — success path', () => {
   it('rejects before store when payment-input trace mismatches the selected source', async () => {
     vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
       makeExtractedSettleArgs({
-        configObjectId: '0xCONFIG',
-        registryObjectId: '0xREGISTRY',
-        settlementPayoutRecipient: '0xPAYOUT',
+        configObjectId: CONFIG_ID,
+        registryObjectId: REGISTRY_ID,
+        settlementPayoutRecipient: PAYOUT_ADDRESS,
         executionCostClaim: 1_800_000n,
         policyHash: new Uint8Array(32).fill(0x11),
         orderIdHash: new Uint8Array(0),
@@ -646,7 +670,7 @@ describe('handlePrepare — success path', () => {
       TEST_PREPARE_AUTH_SENDER,
     );
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledWith(
-      '0xSPONSOR42',
+      SPONSOR_ADDRESS,
       expect.stringMatching(/^0x[0-9a-f]{64}$/),
       null, // commit failed → lease still in reserved stage
     );

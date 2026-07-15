@@ -11,62 +11,34 @@
  * orchestration logic can be tested without on-chain calls.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { formatMoveAbortMessage } from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+import {
+  SuiOperationError,
+  type SuiExecutionError,
+  type SuiTransactionResult,
+} from '@stelis/core-relay';
 import {
   DEEPBOOK_IDS,
   DEEPBOOK_MIN_OUT_ABORT,
   SETTLEMENT_SWAP_DIRECTION_FUNCTIONS,
-  SETTLE_FUNCTIONS,
+  SETTLE_ABORT,
   SETTLE_MODULE,
   SETTLE_WITH_CREDIT_FUNCTION,
+  VAULT_ABORT,
   type PtbCommand,
 } from '@stelis/contracts';
 import type { BuildContext, GenericPrepareBuildRequest } from '../src/prepare/build.js';
 import { bps } from '../src/internal/brand.js';
 
-// ── Mock Transaction ────────────────────────────────────────────────────────
+// ── Installed Transaction / mocked Sui operation ─────────────────────────
 
+// Keep the installed SDK's Transaction implementation authoritative. Only the
+// exact Sui operation boundary is controlled by this orchestration test.
 const mockBuild = vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]));
-const mockSetSender = vi.fn();
-const mockSetGasOwner = vi.fn();
-const mockSetGasBudget = vi.fn();
-
-vi.mock('@mysten/sui/transactions', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@mysten/sui/transactions')>();
-  class MockTransaction {
-    private readonly commands: unknown[] = [];
-    build = mockBuild;
-    setSender = mockSetSender;
-    setGasOwner = mockSetGasOwner;
-    setGasBudget = mockSetGasBudget;
-    object = vi.fn().mockImplementation((id: string) => ({ $kind: 'Input', objectId: id }));
-    moveCall = vi.fn().mockImplementation(({ target }: { target: string }) => {
-      const [packageId, module, fn] = target.split('::');
-      this.commands.push({
-        kind: 'MoveCall',
-        packageId,
-        module,
-        function: fn,
-        typeArguments: [],
-        arguments: [],
-      });
-      return [{ $kind: 'Result', Result: this.commands.length - 1 }];
-    });
-    withdrawal = vi.fn().mockReturnValue({ $kind: 'Result', Result: 0 });
-    mergeCoins = vi.fn();
-    splitCoins = vi.fn().mockReturnValue([{ $kind: 'Result', Result: 1 }]);
-
-    // Unit 9 prefix tracing and compiler command-boundary accounting read TX data.
-    getData() {
-      return { inputs: [], commands: this.commands };
-    }
-
-    static fromKind(_kindBytes: Uint8Array) {
-      return new MockTransaction();
-    }
-  }
-  return { ...original, Transaction: MockTransaction };
-});
+const mockRejectedBuildErrors = new WeakMap<SuiOperationError, SuiExecutionError>();
+const mockSetSender = vi.spyOn(Transaction.prototype, 'setSender');
+const mockSetGasOwner = vi.spyOn(Transaction.prototype, 'setGasOwner');
+const mockSetGasBudget = vi.spyOn(Transaction.prototype, 'setGasBudget');
 
 // ── Mock core-relay ────────────────────────────────────────────────────────
 
@@ -75,6 +47,10 @@ const mockBuildSettleWithCreditPtb = vi.fn();
 const mockComputeExecutionCostClaim = vi.fn();
 const mockBatchGetHopMidPrices = vi.fn().mockResolvedValue([27_000_000_000n]);
 const MOCK_FUNDING_COIN = `0x${'c0'.repeat(32)}`;
+const TEST_SENDER = `0x${'11'.repeat(32)}`;
+const TEST_SPONSOR = `0x${'22'.repeat(32)}`;
+const TEST_BOUND_SPONSOR = `0x${'23'.repeat(32)}`;
+const TEST_FINAL_SPONSOR = `0x${'24'.repeat(32)}`;
 const mockResolvePaymentSource = vi.fn().mockResolvedValue({
   source: 'coin_object',
   baseCoinId: MOCK_FUNDING_COIN,
@@ -96,9 +72,9 @@ const mockTraceUserPrefixValue = vi.fn().mockReturnValue({
   directCoins: new Map(),
   valueConstraints: [],
   senderWithdrawalDebit: 0n,
-  unaccountableSenderWithdrawal: false,
 });
 const mockValidatePaymentInputIntegrity = vi.fn().mockReturnValue({ ok: true });
+const mockSimulateSuiTransaction = vi.fn();
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
   const original = await importOriginal<typeof import('@stelis/core-relay')>();
@@ -144,11 +120,13 @@ vi.mock('@stelis/core-relay', async (importOriginal) => {
     PrefixValueTraceError: class PrefixValueTraceError extends Error {},
     traceUserPrefixValue: (...args: unknown[]) => mockTraceUserPrefixValue(...args),
     extractObjectIdFromInput: () => null,
-    convertSdkCommands: (commands: unknown[]) => commands,
+    buildSuiTransaction: (...args: unknown[]) => mockBuild(...args),
+    simulateSuiTransaction: (...args: unknown[]) => mockSimulateSuiTransaction(...args),
   };
 });
 
-vi.mock('@stelis/core-relay/server', () => {
+vi.mock('@stelis/core-relay/server', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@stelis/core-relay/server')>();
   class MarketQuoteUnavailableError extends Error {
     override readonly name = 'MarketQuoteUnavailableError';
   }
@@ -186,21 +164,12 @@ vi.mock('@stelis/core-relay/server', () => {
   }
 
   return {
+    ...original,
+    getSuiRejectedExecutionError: (error: unknown) =>
+      error instanceof SuiOperationError ? mockRejectedBuildErrors.get(error) : undefined,
     extractSettlePaymentInputContract: () => ({ paymentInputTrace: {} }),
     validatePaymentInputIntegrity: (...args: unknown[]) =>
       mockValidatePaymentInputIntegrity(...args),
-    findUniqueSettleCommandIndex: (commands: Array<Record<string, unknown>>, packageId: string) => {
-      const indices = commands.flatMap((command, index) =>
-        command['kind'] === 'MoveCall' &&
-        command['packageId'] === packageId &&
-        command['module'] === SETTLE_MODULE &&
-        typeof command['function'] === 'string' &&
-        SETTLE_FUNCTIONS.has(command['function'])
-          ? [index]
-          : [],
-      );
-      return indices.length === 1 ? indices[0] : undefined;
-    },
     createDeepbookQuotePort: vi.fn().mockReturnValue({}),
     wrapQuotePortWithStats: (port: unknown) => {
       mockNoCacheWrapperCalls.count += 1;
@@ -269,35 +238,46 @@ import {
 } from '../src/prepare/build.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  grpcSimulationFailure,
-  grpcSimulationSuccess,
-  unknownExecutionError,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  bindSuiResultToTransactionBytes,
+  moveAbortSuiExecutionError,
+  suiSimulationFailure,
+  suiSimulationSuccess,
+  TEST_SUI_TRANSACTION_DIGEST,
+  unclassifiedSuiExecutionError,
+} from './helpers/suiGatewayResultFixtures.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+const STELIS_PACKAGE_ID = `0x${'11'.repeat(32)}`;
+const CONFIG_ID = `0x${'22'.repeat(32)}`;
+const REGISTRY_ID = `0x${'33'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'44'.repeat(32)}`;
+const PAYOUT_ADDRESS = `0x${'55'.repeat(32)}`;
+const POOL_ID = `0x${'66'.repeat(32)}`;
+const BASE_TYPE = `0x${'77'.repeat(32)}::base::BASE`;
+const QUOTE_TYPE = `0x${'88'.repeat(32)}::quote::QUOTE`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'99'.repeat(32)}::deep::DEEP`;
+const VAULT_ID = `0x${'aa'.repeat(32)}`;
+const USDC_TYPE = `0x${'bb'.repeat(32)}::usdc::USDC`;
+const FOREIGN_PACKAGE_ID = `0x${'cc'.repeat(32)}`;
+
 function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
+  const sui = testSuiSnapshot(
+    suiSimulationSuccess(TEST_SUI_TRANSACTION_DIGEST, {
+      computationCost: '2000000',
+      storageCost: '500000',
+      storageRebate: '400000',
+    }),
+  );
   return {
-    sui: {
-      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-        bindGrpcResultToTransactionBytes(
-          grpcSimulationSuccess('fixture-digest', {
-            computationCost: '2000000',
-            storageCost: '500000',
-            storageRebate: '400000',
-          }),
-          transaction,
-        ),
-      ),
-    } as unknown as BuildContext['sui'],
+    sui,
     // Stelis abort fixtures use this active package ID. DeepBook abort tests
     // use the generated runtime identity, not deepbookPackageId below.
-    packageId: '0xabc',
-    configId: '0xCFG',
-    vaultRegistryId: '0xREG',
-    deepbookPackageId: '0xabc', // published quote/PTB target fixture
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    packageId: STELIS_PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     maxClaimMist: 50_000_000n,
     minSettleMist: 100_000n,
     quotedHostFeeMist: 0n,
@@ -307,33 +287,46 @@ function makeCtx(overrides: Partial<BuildContext> = {}): BuildContext {
   };
 }
 
-function simulationFailure(message: string): BuildContext['sui'] {
-  return {
-    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationFailure('fixture-digest', unknownExecutionError(message)),
-        transaction,
-      ),
-    ),
-  } as unknown as BuildContext['sui'];
+const simulationResultBySnapshot = new WeakMap<object, SuiTransactionResult>();
+
+function testSuiSnapshot(result: SuiTransactionResult): BuildContext['sui'] {
+  const snapshot = Object.freeze({}) as BuildContext['sui'];
+  simulationResultBySnapshot.set(snapshot, result);
+  return snapshot;
 }
 
-function simulationSuccessWithoutGas(): BuildContext['sui'] {
-  return {
-    simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
-      const success = grpcSimulationSuccess('fixture-digest');
-      return bindGrpcResultToTransactionBytes(
-        {
-          ...success,
-          Transaction: {
-            ...success.Transaction,
-            effects: { ...success.Transaction.effects, gasUsed: undefined },
-          },
-        },
-        transaction,
-      );
-    }),
-  } as unknown as BuildContext['sui'];
+function simulationFailure(error: SuiExecutionError): BuildContext['sui'] {
+  return testSuiSnapshot(suiSimulationFailure(TEST_SUI_TRANSACTION_DIGEST, error));
+}
+
+interface TestMoveAbort {
+  readonly packageId: string;
+  readonly module: string;
+  readonly functionName?: string;
+  readonly constantName?: string;
+  readonly abortCode: number;
+  readonly command?: number;
+}
+
+function internalMoveAbort(input: TestMoveAbort): SuiExecutionError {
+  return moveAbortSuiExecutionError({
+    packageId: input.packageId,
+    module: input.module,
+    abortCode: String(input.abortCode),
+    ...(input.functionName === undefined ? {} : { functionName: input.functionName }),
+    ...(input.constantName === undefined ? {} : { constantName: input.constantName }),
+    ...(input.command === undefined ? {} : { command: input.command }),
+  });
+}
+
+function buildMoveAbort(input: TestMoveAbort): SuiOperationError {
+  const error = new SuiOperationError('rpc_rejected', {
+    operation: 'resolve_transaction',
+    attempt: 1,
+    maxAttempts: 1,
+  });
+  mockRejectedBuildErrors.set(error, internalMoveAbort(input));
+  return error;
 }
 
 function makeInput(
@@ -341,18 +334,18 @@ function makeInput(
 ): GenericPrepareBuildRequest {
   return {
     userTxKindBytes: 'AAAA', // base64 placeholder
-    senderAddress: '0xSENDER',
+    senderAddress: TEST_SENDER,
     settlementSwapPath: {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xBASE',
-          quoteType: '0xQUOTE',
+          poolId: POOL_ID,
+          baseType: BASE_TYPE,
+          quoteType: QUOTE_TYPE,
           swapDirection: 'baseForQuote',
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -361,16 +354,16 @@ function makeInput(
       settlementSwapDirection: 'baseForQuote',
     } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
     descriptor: {
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       effectiveFeeRateBps: 0,
       settlementSwapDirection: 'baseForQuote',
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xBASE',
-          quoteType: '0xQUOTE',
+          poolId: POOL_ID,
+          baseType: BASE_TYPE,
+          quoteType: QUOTE_TYPE,
           swapDirection: 'baseForQuote',
           feeBps: 0,
         },
@@ -378,11 +371,11 @@ function makeInput(
       lotSize: 1n,
       minSize: 1n,
     } as unknown as GenericPrepareBuildRequest['descriptor'],
-    sponsorAddress: '0xSPONSOR',
+    sponsorAddress: TEST_SPONSOR,
     slippageBps: bps(100),
     gasMarginBps: bps(1000),
     profile: 'credit_general',
-    vaultObjectId: '0xVAULT',
+    vaultObjectId: VAULT_ID,
     credit: '10000000', // 10M MIST
     receiptId: new Uint8Array(32),
     nonce: 1n,
@@ -421,6 +414,14 @@ function makeExecutableQuote(
 
 function resetBuildMocks(): void {
   vi.clearAllMocks();
+  mockSimulateSuiTransaction.mockReset();
+  mockSimulateSuiTransaction.mockImplementation(
+    async (snapshot: BuildContext['sui'], options: { transaction: Uint8Array }) => {
+      const result = simulationResultBySnapshot.get(snapshot);
+      if (!result) throw new Error('test Sui snapshot has no gateway result');
+      return bindSuiResultToTransactionBytes(result, options.transaction);
+    },
+  );
   mockBuild.mockReset();
   mockBuild.mockResolvedValue(new Uint8Array([1, 2, 3]));
   mockComputeExecutionCostClaim.mockReset();
@@ -440,7 +441,6 @@ function resetBuildMocks(): void {
     directCoins: new Map(),
     valueConstraints: [],
     senderWithdrawalDebit: 0n,
-    unaccountableSenderWithdrawal: false,
   });
   mockValidatePaymentInputIntegrity.mockReset();
   mockValidatePaymentInputIntegrity.mockReturnValue({ ok: true });
@@ -478,7 +478,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     {
       label: 'with-vault quote-for-base',
       profile: 'with_vault' as const,
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '500000',
       slippageBps: 100,
       verifiedOutput: 'double' as const,
@@ -498,9 +498,9 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     }) => {
       const ctx = makeCtx();
       const hop = {
-        poolId: '0xPOOL',
-        baseType: swapDirection === 'baseForQuote' ? '0xBASE' : '0x2::sui::SUI',
-        quoteType: swapDirection === 'baseForQuote' ? '0x2::sui::SUI' : '0xQUOTE',
+        poolId: POOL_ID,
+        baseType: swapDirection === 'baseForQuote' ? BASE_TYPE : '0x2::sui::SUI',
+        quoteType: swapDirection === 'baseForQuote' ? '0x2::sui::SUI' : QUOTE_TYPE,
         swapDirection,
         feeBps: 0,
       };
@@ -511,7 +511,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
         slippageBps: bps(slippageBps),
         settlementSwapPath: {
           hops: [hop],
-          settlementTokenType: swapDirection === 'baseForQuote' ? '0xBASE' : '0xQUOTE',
+          settlementTokenType: swapDirection === 'baseForQuote' ? BASE_TYPE : QUOTE_TYPE,
           settlementTokenSymbol: swapDirection === 'baseForQuote' ? 'BASE' : 'QUOTE',
           settlementTokenDecimals: 6,
           lotSize: 1n,
@@ -520,7 +520,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
           settlementSwapDirection: swapDirection,
         } as GenericPrepareBuildRequest['settlementSwapPath'],
         descriptor: {
-          settlementTokenType: swapDirection === 'baseForQuote' ? '0xBASE' : '0xQUOTE',
+          settlementTokenType: swapDirection === 'baseForQuote' ? BASE_TYPE : QUOTE_TYPE,
           settlementTokenSymbol: swapDirection === 'baseForQuote' ? 'BASE' : 'QUOTE',
           settlementTokenDecimals: 6,
           effectiveFeeRateBps: 0,
@@ -625,24 +625,6 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.slippageBufferMist).toBe(0n);
     expect(result.swapAmountSmallest).toBe(0n);
-  });
-
-  it('rejects unaccountable withdrawals before selecting a measured credit-only path', async () => {
-    const ctx = makeCtx();
-    const input = makeInput({ credit: '5000000' });
-
-    mockTraceUserPrefixValue.mockReturnValueOnce({
-      directCoins: new Map(),
-      valueConstraints: [],
-      senderWithdrawalDebit: 0n,
-      unaccountableSenderWithdrawal: true,
-    });
-
-    await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
-      code: 'UNACCOUNTABLE_WITHDRAWAL',
-    });
-    expect(mockBuildSettleWithCreditPtb).not.toHaveBeenCalled();
-    expect(mockResolvePaymentSource).not.toHaveBeenCalled();
   });
 
   it('preserves swap fallback in pass2 when the swap-buffered final claim is credit-coverable', async () => {
@@ -754,7 +736,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
     expect(mockSolveExecutableSwap).not.toHaveBeenCalled();
-    expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(mockSimulateSuiTransaction).toHaveBeenCalledTimes(1);
     expect(mockComputeExecutionCostClaim).toHaveBeenCalledTimes(1);
     expect(mockBuildSwapAndSettlePtb).not.toHaveBeenCalled();
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(2);
@@ -863,7 +845,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
-    expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(2);
+    expect(mockSimulateSuiTransaction).toHaveBeenCalledTimes(2);
     expect(mockComputeExecutionCostClaim).toHaveBeenCalledTimes(3);
     expect(mockSolveExecutableSwap).toHaveBeenCalledTimes(3);
     expect(mockBuildSettleWithCreditPtb).toHaveBeenCalledTimes(1);
@@ -1129,14 +1111,14 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     expect(mockSetGasOwner).not.toHaveBeenCalled();
     expect(mockSetGasBudget).not.toHaveBeenCalled();
     expect(mockBuild).not.toHaveBeenCalled();
-    expect(ctx.sui.simulateTransaction).not.toHaveBeenCalled();
+    expect(mockSimulateSuiTransaction).not.toHaveBeenCalled();
     expect(mockBuildSwapAndSettlePtb).not.toHaveBeenCalled();
     expect(mockBuildSettleWithCreditPtb).not.toHaveBeenCalled();
   });
 
   it('runMaxClaimGasProbe is gas-bound: applies lowered sponsor identity, gas budget, and dry-run', async () => {
     const ctx = makeCtx();
-    const input = makeInput({ sponsorAddress: '0xBOUND_SPONSOR' });
+    const input = makeInput({ sponsorAddress: TEST_BOUND_SPONSOR });
     const runContext =
       __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext(input);
 
@@ -1147,17 +1129,17 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     );
 
     expect(mockSetSender).toHaveBeenCalledWith(input.senderAddress);
-    expect(mockSetGasOwner).toHaveBeenCalledWith('0xBOUND_SPONSOR');
+    expect(mockSetGasOwner).toHaveBeenCalledWith(TEST_BOUND_SPONSOR);
     expect(mockSetGasBudget).toHaveBeenCalledWith(ctx.maxClaimMist);
     expect(mockBuild).toHaveBeenCalledTimes(1);
-    expect(ctx.sui.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(mockSimulateSuiTransaction).toHaveBeenCalledTimes(1);
     expect(result.baseCosts.executionCostClaim).toBe(3_000_000n);
     expect(result.pass1MidPrices).toEqual([27_000_000_000n]);
   });
 
   it('buildFinalGenericPrepareResult is gas-bound: final assembly sets sponsor gas owner and safe-builds txBytes', async () => {
     const ctx = makeCtx();
-    const input = makeInput({ sponsorAddress: '0xFINAL_SPONSOR' });
+    const input = makeInput({ sponsorAddress: TEST_FINAL_SPONSOR });
     const runContext =
       __testingGenericPrepareBuildStages.createGenericPrepareBuildRunContext(input);
     const finalCosts = {
@@ -1179,10 +1161,10 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     );
 
     expect(mockSetSender).toHaveBeenCalledWith(input.senderAddress);
-    expect(mockSetGasOwner).toHaveBeenCalledWith('0xFINAL_SPONSOR');
+    expect(mockSetGasOwner).toHaveBeenCalledWith(TEST_FINAL_SPONSOR);
     expect(mockSetGasBudget).toHaveBeenCalledWith(2_750_000n);
     expect(mockBuild).toHaveBeenCalledTimes(1);
-    expect(ctx.sui.simulateTransaction).not.toHaveBeenCalled();
+    expect(mockSimulateSuiTransaction).not.toHaveBeenCalled();
     expect(result.txBytes).toEqual(new Uint8Array([1, 2, 3]));
     expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.simGas).toBe(2_000_000n);
@@ -1196,22 +1178,6 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
 describe('runGenericPrepareBuildPipeline — error classification', () => {
   beforeEach(() => {
     resetBuildMocks();
-  });
-
-  // ── UNACCOUNTABLE_WITHDRAWAL: prefix value trace reports an unknown debit ──
-  it('throws UNACCOUNTABLE_WITHDRAWAL when the prefix debit is unaccountable', async () => {
-    mockTraceUserPrefixValue.mockReturnValueOnce({
-      directCoins: new Map(),
-      valueConstraints: [],
-      senderWithdrawalDebit: 0n,
-      unaccountableSenderWithdrawal: true,
-    });
-    const ctx = makeCtx();
-    const input = makeInput({ credit: '0' });
-
-    await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toMatchObject({
-      code: 'UNACCOUNTABLE_WITHDRAWAL',
-    });
   });
 
   it('rejects when the final PTB does not match the compiler funding expectation', async () => {
@@ -1237,39 +1203,13 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     );
   });
 
-  // ── safeBuild: InsufficientCoinBalance → INSUFFICIENT_BALANCE ─────────
-  it('classifies InsufficientCoinBalance from tx.build() as INSUFFICIENT_BALANCE', async () => {
-    mockBuild.mockRejectedValueOnce(
-      new Error('Transaction resolution failed: InsufficientCoinBalance in command 1'),
-    );
-    const ctx = makeCtx();
-    const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
-
-    await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toThrow(
-      PrepareValidationError,
-    );
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    } catch (_err) {
-      // Reset mock before second call in case of test structure
-    }
-    // Verify the first call threw INSUFFICIENT_BALANCE
-    mockBuild.mockRejectedValueOnce(
-      new Error('Transaction resolution failed: InsufficientCoinBalance in command 1'),
-    );
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('INSUFFICIENT_BALANCE');
-    }
-  });
-
   // ── classifyDryRunFailure: InsufficientCoinBalance in dry-run ─────────
   it('classifies InsufficientCoinBalance in dry-run as INSUFFICIENT_BALANCE', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('InsufficientCoinBalance in command 0'),
+      sui: simulationFailure({
+        kind: 'InsufficientCoinBalance',
+        command: 0,
+      }),
     });
 
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1286,7 +1226,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── classifyDryRunFailure: non-balance error stays DRY_RUN_FAILED ─────
   it('classifies non-balance dry-run error as DRY_RUN_FAILED', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('MoveAbort in module foo'),
+      sui: simulationFailure(unclassifiedSuiExecutionError()),
     });
 
     const input = makeInput();
@@ -1300,33 +1240,8 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     }
   });
 
-  // ── safeBuild: address balance overflow → INSUFFICIENT_BALANCE ────────
-  // This captures the underlying runtime failure when user prefix and
-  // Host suffix both request address-balance withdrawal and the combined amount exceeds the
-  // available balance, Sui runtime rejects with "Available amount in
-  // account for object id ... is less than requested: X < Y".
-  // safeBuild must catch this and classify as INSUFFICIENT_BALANCE.
-  it('classifies address-balance overflow from tx.build() as INSUFFICIENT_BALANCE', async () => {
-    mockBuild.mockRejectedValueOnce(
-      new Error(
-        'Available amount in account for object id 0xabc is less than requested: 3000 < 8000',
-      ),
-    );
-    const ctx = makeCtx();
-    const input = makeInput();
-
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('INSUFFICIENT_BALANCE');
-      expect((err as PrepareValidationError).message).toContain('Insufficient address balance');
-    }
-  });
-
   // ── safeBuild: non-balance error re-thrown as-is ──────────────────────
-  it('re-throws non-balance tx.build() error as-is', async () => {
+  it('re-throws an untyped build-gateway error as-is', async () => {
     mockBuild.mockRejectedValueOnce(new TypeError('Cannot read property of undefined'));
     const ctx = makeCtx();
     const input = makeInput();
@@ -1335,8 +1250,17 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   });
 
   // ── safeBuild: DeepBook minOut abort 12 → SLIPPAGE_EXCEEDED ──────────
-  it('classifies DeepBook abort 12 in tx.build() as SLIPPAGE_EXCEEDED', async () => {
-    mockBuild.mockRejectedValueOnce(new Error(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code)));
+  it('classifies a typed DeepBook build-gateway abort as SLIPPAGE_EXCEEDED', async () => {
+    mockBuild.mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+        module: 'pool',
+        functionName: 'swap_exact_quantity',
+        constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
+        abortCode: DEEPBOOK_MIN_OUT_ABORT.code,
+        command: 1,
+      }),
+    );
     const ctx = makeCtx();
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
 
@@ -1346,48 +1270,13 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
       expect((err as PrepareValidationError).code).toBe('SLIPPAGE_EXCEEDED');
-    }
-  });
-
-  // ── safeBuild: Transaction resolution failed classified as DRY_RUN_FAILED ─
-  it('classifies "Transaction resolution failed" in tx.build() as DRY_RUN_FAILED', async () => {
-    mockBuild.mockRejectedValueOnce(
-      new Error('Transaction resolution failed: some other abort reason'),
-    );
-    const ctx = makeCtx();
-    const input = makeInput();
-
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('DRY_RUN_FAILED');
-    }
-  });
-
-  // ── simulateTransaction returns no Transaction or FailedTransaction ────
-  it('DRY_RUN_FAILED when simulateTransaction returns unexpected empty result', async () => {
-    const ctx = makeCtx({
-      sui: {
-        simulateTransaction: vi.fn().mockResolvedValue({}), // no Transaction / FailedTransaction
-      } as unknown as BuildContext['sui'],
-    });
-    const input = makeInput();
-
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('DRY_RUN_FAILED');
     }
   });
 
   // ── Transaction result with status.success === false ──────────────────
-  it('DRY_RUN_FAILED when Transaction status.success is false (MoveAbort)', async () => {
+  it('uses DRY_RUN_FAILED for an unclassified failed simulation', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('MoveAbort in settle'),
+      sui: simulationFailure(unclassifiedSuiExecutionError()),
     });
     const input = makeInput();
 
@@ -1400,9 +1289,18 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     }
   });
 
-  it('SLIPPAGE_EXCEEDED when Transaction status.success is false (DeepBook abort 12)', async () => {
+  it('classifies a typed DeepBook abort in a failed simulation', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code)),
+      sui: simulationFailure(
+        internalMoveAbort({
+          packageId: DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+          module: 'pool',
+          functionName: 'swap_exact_quantity',
+          constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
+          abortCode: DEEPBOOK_MIN_OUT_ABORT.code,
+          command: 1,
+        }),
+      ),
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
 
@@ -1412,43 +1310,6 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
       expect((err as PrepareValidationError).code).toBe('SLIPPAGE_EXCEEDED');
-    }
-  });
-
-  // ── DRY_RUN_NO_GAS: gasUsed absent ───────────────────────────────────
-  it('DRY_RUN_NO_GAS when gasUsed is missing from successful dry-run', async () => {
-    const ctx = makeCtx({
-      sui: simulationSuccessWithoutGas(),
-    });
-    const input = makeInput();
-
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('DRY_RUN_NO_GAS');
-    }
-  });
-
-  // ── pass2 safeBuild: InsufficientCoinBalance ──────────────────────────
-  it('INSUFFICIENT_BALANCE from pass2 safeBuild (pass1 succeeds, pass2 fails)', async () => {
-    // pass1 build succeeds, then pass2 build fails with InsufficientCoinBalance
-    mockBuild
-      .mockResolvedValueOnce(new Uint8Array([1, 2, 3])) // pass1 ok
-      .mockRejectedValueOnce(
-        new Error('Transaction resolution failed: InsufficientCoinBalance in command 2'),
-      ); // pass2 fails
-
-    const ctx = makeCtx();
-    const input = makeInput();
-
-    try {
-      await runGenericPrepareBuildPipeline(ctx, input);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(PrepareValidationError);
-      expect((err as PrepareValidationError).code).toBe('INSUFFICIENT_BALANCE');
     }
   });
 
@@ -1526,7 +1387,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     const ctx = makeCtx({ minSettleMist: 20_000_000n });
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '5000000', // 5M MIST — above executionCostClaim(3M), below minSettle(20M)
     });
 
@@ -1558,7 +1419,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     });
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '4000000', // 4M MIST
     });
 
@@ -1583,7 +1444,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     });
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '5000000', // 5M MIST
     });
 
@@ -1601,7 +1462,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── safeBuild: MoveAbort 102 from settle → INSUFFICIENT_SETTLE_INPUT ──
 
   it('CLAIM_WOULD_EXCEED_MAX from pass1 safeBuild (MoveAbort settle 101)', async () => {
-    mockBuild.mockRejectedValueOnce(new Error('MoveAbort(0xabc::settle, 101) in command 0'));
+    mockBuild.mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: STELIS_PACKAGE_ID,
+        module: 'settle',
+        constantName: 'EClaimTooHigh',
+        abortCode: 101,
+        command: 1,
+      }),
+    );
 
     const ctx = makeCtx({ maxClaimMist: 50_000_000n });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1618,7 +1487,16 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('CLAIM_WOULD_EXCEED_MAX from pass1 dry-run (settle 101 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('MoveAbort(0xabc::settle::settle_core, 101) in command 0'),
+      sui: simulationFailure(
+        internalMoveAbort({
+          packageId: STELIS_PACKAGE_ID,
+          module: 'settle',
+          functionName: 'settle_core',
+          constantName: 'EClaimTooHigh',
+          abortCode: 101,
+          command: 1,
+        }),
+      ),
       maxClaimMist: 50_000_000n,
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1634,7 +1512,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   });
 
   it('INSUFFICIENT_SETTLE_INPUT from pass1 safeBuild (MoveAbort settle 102)', async () => {
-    mockBuild.mockRejectedValueOnce(new Error('MoveAbort(0xabc::settle, 102) in command 0'));
+    mockBuild.mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: STELIS_PACKAGE_ID,
+        module: 'settle',
+        constantName: 'ETotalInTooLow',
+        abortCode: 102,
+        command: 1,
+      }),
+    );
 
     const ctx = makeCtx({
       minSettleMist: 100_000n,
@@ -1659,7 +1545,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     // pass1 build succeeds, then pass2 build fails with settle 102
     mockBuild
       .mockResolvedValueOnce(new Uint8Array([1, 2, 3])) // pass1 ok
-      .mockRejectedValueOnce(new Error('MoveAbort(0xabc::settle, 102) in command 0')); // pass2 fails
+      .mockRejectedValueOnce(
+        buildMoveAbort({
+          packageId: STELIS_PACKAGE_ID,
+          module: 'settle',
+          constantName: 'ETotalInTooLow',
+          abortCode: 102,
+          command: 1,
+        }),
+      );
 
     const ctx = makeCtx({
       minSettleMist: 100_000n,
@@ -1681,7 +1575,16 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('INSUFFICIENT_SETTLE_INPUT from pass1 dry-run (settle 102 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('MoveAbort(0xabc::settle::execute_settle, 102) in command 0'),
+      sui: simulationFailure(
+        internalMoveAbort({
+          packageId: STELIS_PACKAGE_ID,
+          module: 'settle',
+          functionName: SWAP_NEW_USER_FUNCTION,
+          constantName: 'ETotalInTooLow',
+          abortCode: 102,
+          command: 1,
+        }),
+      ),
       minSettleMist: 100_000n,
       protocolFlatFeeMist: 10_000n,
     });
@@ -1702,7 +1605,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   // ── safeBuild: MoveAbort 110 from settle → SPREAD_EXCEEDED ────────────
 
   it('SPREAD_EXCEEDED from pass1 safeBuild (MoveAbort settle 110)', async () => {
-    mockBuild.mockRejectedValueOnce(new Error('MoveAbort(0xabc::settle, 110) in command 0'));
+    mockBuild.mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: STELIS_PACKAGE_ID,
+        module: 'settle',
+        constantName: 'ESpreadTooWide',
+        abortCode: 110,
+        command: 1,
+      }),
+    );
 
     const ctx = makeCtx();
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1720,7 +1631,15 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   it('SPREAD_EXCEEDED from pass2 safeBuild (MoveAbort settle 110)', async () => {
     mockBuild
       .mockResolvedValueOnce(new Uint8Array([1, 2, 3])) // pass1 ok
-      .mockRejectedValueOnce(new Error('MoveAbort(0xabc::settle, 110) in command 0')); // pass2 fails
+      .mockRejectedValueOnce(
+        buildMoveAbort({
+          packageId: STELIS_PACKAGE_ID,
+          module: 'settle',
+          constantName: 'ESpreadTooWide',
+          abortCode: 110,
+          command: 1,
+        }),
+      );
 
     const ctx = makeCtx();
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
@@ -1737,7 +1656,16 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
 
   it('SPREAD_EXCEEDED from pass1 dry-run (settle 110 in simulation)', async () => {
     const ctx = makeCtx({
-      sui: simulationFailure('MoveAbort(0xabc::settle::assert_spread_ok, 110) in command 0'),
+      sui: simulationFailure(
+        internalMoveAbort({
+          packageId: STELIS_PACKAGE_ID,
+          module: 'settle',
+          functionName: SWAP_NEW_USER_FUNCTION,
+          constantName: 'ESpreadTooWide',
+          abortCode: 110,
+          command: 1,
+        }),
+      ),
     });
     const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
 
@@ -1755,7 +1683,7 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
     const ctx = makeCtx({ maxClaimMist: 50_000_000n });
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '1000000000',
     });
 
@@ -1776,396 +1704,20 @@ describe('runGenericPrepareBuildPipeline — error classification', () => {
   });
 });
 
-// ── Move abort occurrence parser tests ─────────────────────────────────────
+// ── Structured Move-abort classification tests ────────────────────────────
 
 import {
-  isTotalInTooLow as isTotalInTooLowAtCommand,
-  isClaimTooHigh as isClaimTooHighAtCommand,
+  classifySponsorFailureSubcode,
+  isClaimTooHigh,
+  isDeepbookMinOutNotMet,
+  isPaused,
+  isReplayNonce,
+  isSpreadTooWide,
+  isTotalInTooLow,
+  isVaultAlreadyRegistered,
 } from '../src/prepare/prepareErrors.js';
 
-// Stelis identity is supplied by the active Host. DeepBook identity is the
-// generated original/runtime ModuleId, not its published storage/call target.
-const TRUSTED_STELIS_PKG = '0xabc';
-const TRUSTED_STELIS_PKG_LONG = '0xabc123';
-
-function commandIndexFromAbort(reason: string): number | undefined {
-  const formatter = /MoveAbort\s+in\s+(\d+)(?:st|nd|rd|th)\s+command/i.exec(reason);
-  if (formatter) return Number(formatter[1]) - 1;
-  const tuple = /MoveAbort[^;\r\n]*\bin\s+command\s+(\d+)/i.exec(reason);
-  return tuple ? Number(tuple[1]) : undefined;
-}
-
-function identityAtReportedCommand(
-  classifier: (reason: string, packageId: string, commandIndex: number) => boolean,
-  reason: string,
-  packageId: string,
-): boolean {
-  return classifier(reason, packageId, commandIndexFromAbort(reason) ?? -1);
-}
-
-const isClaimTooHigh = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isClaimTooHighAtCommand, reason, packageId);
-const isTotalInTooLow = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isTotalInTooLowAtCommand, reason, packageId);
-
-function formatDeepbookAbort(
-  code: number,
-  packageId: string = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
-  commandIndex = 0,
-) {
-  const [module, functionName] = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::');
-  return formatMoveAbortMessage({
-    command: commandIndex,
-    location: { package: packageId, module, functionName, instruction: 165 },
-    abortCode: String(code),
-  });
-}
-
-describe('isClaimTooHigh — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::settle, 101)', () => {
-    expect(
-      isClaimTooHigh('MoveAbort(0xabc123::settle, 101) in command 5', TRUSTED_STELIS_PKG_LONG),
-    ).toBe(true);
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(isClaimTooHigh('abort code 101 in module 0xabc::settle::fn', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match settle with non-101 abort code', () => {
-    expect(isClaimTooHigh('MoveAbort(0xabc::settle, 102) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match 101 without settle', () => {
-    expect(isClaimTooHigh('MoveAbort(0xabc::vault, 101) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  // Negative: external package with the same module + abort code does
-  // not classify — package ID is not the trusted Stelis ID.
-  it('does NOT match non-Stelis package', () => {
-    expect(isClaimTooHigh('MoveAbort(0xdef::settle, 101) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-});
-
-describe('isTotalInTooLow — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::settle, 102)', () => {
-    expect(
-      isTotalInTooLow('MoveAbort(0xabc123::settle, 102) in command 5', TRUSTED_STELIS_PKG_LONG),
-    ).toBe(true);
-  });
-
-  it('matches MoveAbort with ::settle:: (function path)', () => {
-    expect(
-      isTotalInTooLow(
-        'MoveAbort(0xabc::settle::execute_settle, 102) in command 4',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe(true);
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(isTotalInTooLow('abort code 102 in module 0xabc::settle::fn', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match MoveAbort in non-settle module', () => {
-    expect(isTotalInTooLow('MoveAbort(0xabc::swap, 102) in command 3', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match settle with non-102 abort code', () => {
-    expect(isTotalInTooLow('MoveAbort(0xabc::settle, 103) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match 102 without settle', () => {
-    expect(isTotalInTooLow('MoveAbort(0xabc::vault, 102) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match settle without 102 or MoveAbort', () => {
-    expect(isTotalInTooLow('Some error in ::settle:: module', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-
-  // Negative: external package settle 102 does not classify.
-  it('does NOT match non-Stelis package', () => {
-    expect(isTotalInTooLow('MoveAbort(0xdef::settle, 102) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-});
-
-// ── isSpreadTooWide occurrence tests ───────────────────────────────────────
-
-import { isSpreadTooWide as isSpreadTooWideAtCommand } from '../src/prepare/prepareErrors.js';
-
-const isSpreadTooWide = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isSpreadTooWideAtCommand, reason, packageId);
-
-describe('isSpreadTooWide — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::settle, 110)', () => {
-    expect(
-      isSpreadTooWide('MoveAbort(0xabc123::settle, 110) in command 5', TRUSTED_STELIS_PKG_LONG),
-    ).toBe(true);
-  });
-
-  it('matches MoveAbort with ::settle:: (function path)', () => {
-    expect(
-      isSpreadTooWide(
-        'MoveAbort(0xabc::settle::assert_spread_ok, 110) in command 4',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe(true);
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(isSpreadTooWide('abort code 110 in module 0xabc::settle::fn', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match MoveAbort in non-settle module', () => {
-    expect(isSpreadTooWide('MoveAbort(0xabc::swap, 110) in command 3', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match settle with non-110 abort code', () => {
-    expect(isSpreadTooWide('MoveAbort(0xabc::settle, 102) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match 110 without settle', () => {
-    expect(isSpreadTooWide('MoveAbort(0xabc::vault, 110) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match settle without 110 or MoveAbort', () => {
-    expect(isSpreadTooWide('Some error in ::settle:: module', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-
-  // Negative: external package settle 110 does not classify.
-  it('does NOT match non-Stelis package', () => {
-    expect(isSpreadTooWide('MoveAbort(0xdef::settle, 110) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-});
-
-// ── isDeepbookMinOutNotMet occurrence tests ────────────────────────────────
-
-import { isDeepbookMinOutNotMet as isDeepbookMinOutNotMetAtCommand } from '../src/prepare/prepareErrors.js';
-
-const isDeepbookMinOutNotMet = (reason: string) =>
-  isDeepbookMinOutNotMetAtCommand(reason, commandIndexFromAbort(reason) ?? -1);
-
-describe('isDeepbookMinOutNotMet — occurrence coverage', () => {
-  it('matches swap_exact_quantity abort code 12', () => {
-    expect(isDeepbookMinOutNotMet(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code))).toBe(true);
-  });
-
-  it('matches the installed Sui clever-error format', () => {
-    const [module, functionName] = DEEPBOOK_MIN_OUT_ABORT.modulePath.split('::');
-    const reason = formatMoveAbortMessage({
-      command: 4,
-      location: {
-        package: DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
-        module,
-        functionName,
-        instruction: 165,
-      },
-      abortCode: String(DEEPBOOK_MIN_OUT_ABORT.code),
-      cleverError: {
-        constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
-        value: String(DEEPBOOK_MIN_OUT_ABORT.code),
-        lineNumber: 412,
-      },
-    });
-    expect(isDeepbookMinOutNotMet(reason)).toBe(true);
-  });
-
-  it('does NOT match swap_exact_quantity with non-12 code', () => {
-    expect(isDeepbookMinOutNotMet(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code - 1))).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match abort 12 from non-swap_exact_quantity path', () => {
-    expect(
-      isDeepbookMinOutNotMet(
-        `MoveAbort(${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::pool::some_other_fn, ${DEEPBOOK_MIN_OUT_ABORT.code}) in command 3`,
-      ),
-    ).toBe(false);
-    expect(
-      isDeepbookMinOutNotMet(
-        `MoveAbort(${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::${DEEPBOOK_MIN_OUT_ABORT.modulePath}::extra, ${DEEPBOOK_MIN_OUT_ABORT.code})`,
-      ),
-    ).toBe(false);
-  });
-
-  // Negative: external package's `pool::swap_exact_quantity` abort 12
-  // does not classify into `SLIPPAGE_EXCEEDED`.
-  it('does NOT match non-DeepBook package', () => {
-    expect(isDeepbookMinOutNotMet(formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, '0xdef'))).toBe(
-      false,
-    );
-  });
-});
-
-// ── isPaused occurrence tests ──────────────────────────────────────────────
-
-import { isPaused as isPausedAtCommand } from '../src/prepare/prepareErrors.js';
-
-const isPaused = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isPausedAtCommand, reason, packageId);
-
-describe('isPaused — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::settle, 100)', () => {
-    expect(isPaused('MoveAbort(0xabc123::settle, 100) in command 5', TRUSTED_STELIS_PKG_LONG)).toBe(
-      true,
-    );
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(isPaused('abort code 100 in module 0xabc::settle::fn', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-
-  it('does NOT match settle with non-100 abort code', () => {
-    expect(isPaused('MoveAbort(0xabc::settle, 101) in command 5', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-
-  it('does NOT match 100 without settle', () => {
-    expect(isPaused('MoveAbort(0xabc::vault, 100) in command 5', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-
-  // Negative: external package settle 100 does not classify.
-  it('does NOT match non-Stelis package', () => {
-    expect(isPaused('MoveAbort(0xdef::settle, 100) in command 5', TRUSTED_STELIS_PKG)).toBe(false);
-  });
-});
-
-// ── isVaultAlreadyRegistered occurrence tests ─────────────────────────────
-
-import { isVaultAlreadyRegistered as isVaultAlreadyRegisteredAtCommand } from '../src/prepare/prepareErrors.js';
-
-const isVaultAlreadyRegistered = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isVaultAlreadyRegisteredAtCommand, reason, packageId);
-
-describe('isVaultAlreadyRegistered — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::vault, 2)', () => {
-    expect(
-      isVaultAlreadyRegistered(
-        'MoveAbort(0xabc123::vault, 2) in command 5',
-        TRUSTED_STELIS_PKG_LONG,
-      ),
-    ).toBe(true);
-  });
-
-  it('matches MoveAbort with ::vault:: (function path)', () => {
-    expect(
-      isVaultAlreadyRegistered(
-        'MoveAbort(0xabc::vault::register, 2) in command 4',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe(true);
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(
-      isVaultAlreadyRegistered('abort code 2 in module 0xabc::vault::fn', TRUSTED_STELIS_PKG),
-    ).toBe(false);
-  });
-
-  it('does NOT match vault with non-2 abort code', () => {
-    expect(
-      isVaultAlreadyRegistered('MoveAbort(0xabc::vault, 3) in command 5', TRUSTED_STELIS_PKG),
-    ).toBe(false);
-  });
-
-  it('does NOT match 2 without vault', () => {
-    expect(
-      isVaultAlreadyRegistered('MoveAbort(0xabc::settle, 2) in command 5', TRUSTED_STELIS_PKG),
-    ).toBe(false);
-  });
-
-  // Negative: external package vault 2 does not classify.
-  it('does NOT match non-Stelis package', () => {
-    expect(
-      isVaultAlreadyRegistered('MoveAbort(0xdef::vault, 2) in command 5', TRUSTED_STELIS_PKG),
-    ).toBe(false);
-  });
-});
-
-// ── isReplayNonce occurrence tests ─────────────────────────────────────────
-
-import { isReplayNonce as isReplayNonceAtCommand } from '../src/prepare/prepareErrors.js';
-
-const isReplayNonce = (reason: string, packageId: string) =>
-  identityAtReportedCommand(isReplayNonceAtCommand, reason, packageId);
-
-describe('isReplayNonce — occurrence coverage', () => {
-  it('matches MoveAbort(0x…::vault, 1)', () => {
-    expect(
-      isReplayNonce('MoveAbort(0xabc123::vault, 1) in command 5', TRUSTED_STELIS_PKG_LONG),
-    ).toBe(true);
-  });
-
-  it('matches MoveAbort with ::vault:: (function path)', () => {
-    expect(
-      isReplayNonce(
-        'MoveAbort(0xabc::vault::check_and_advance_nonce, 1) in command 4',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe(true);
-  });
-
-  it('does not grant classification to an abort-code phrase without command provenance', () => {
-    expect(isReplayNonce('abort code 1 in module 0xabc::vault::fn', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match vault with non-1 abort code', () => {
-    expect(isReplayNonce('MoveAbort(0xabc::vault, 2) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  it('does NOT match 1 without vault', () => {
-    expect(isReplayNonce('MoveAbort(0xabc::settle, 1) in command 5', TRUSTED_STELIS_PKG)).toBe(
-      false,
-    );
-  });
-
-  // Negative: external package vault 1 does not classify.
-  it('does NOT match non-Stelis package', () => {
-    expect(
-      isReplayNonce(
-        'MoveAbort(0xdef::vault::check_and_advance_nonce, 1) in command 5',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe(false);
-  });
-});
-
-// ── classifySponsorFailureSubcode — subcode routing ──────────────────────
-
-import { classifySponsorFailureSubcode as classifySponsorFailureSubcodeFromGraph } from '../src/prepare/prepareErrors.js';
-
+const TRUSTED_STELIS_PKG = STELIS_PACKAGE_ID;
 const SWAP_NEW_USER_FUNCTION = SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser;
 
 function settlementCommandsAt(
@@ -2175,7 +1727,7 @@ function settlementCommandsAt(
 ): PtbCommand[] {
   const commands = Array.from({ length: commandIndex }, () => ({
     kind: 'MoveCall',
-    packageId: '0xdef',
+    packageId: FOREIGN_PACKAGE_ID,
     module: 'wrapper',
     function: 'call',
     typeArguments: [],
@@ -2192,120 +1744,88 @@ function settlementCommandsAt(
   return commands;
 }
 
-function classifySponsorFailureSubcode(
-  reason: string,
-  packageId: string,
-  functionName = SETTLE_WITH_CREDIT_FUNCTION,
-) {
-  const commandIndex = commandIndexFromAbort(reason);
-  return classifySponsorFailureSubcodeFromGraph(reason, packageId, {
-    kind: 'settlement',
-    commands: settlementCommandsAt(commandIndex ?? 0, packageId, functionName),
-  });
-}
+describe('structured Stelis Move-abort identity', () => {
+  const cases = [
+    {
+      classifier: isPaused,
+      module: 'settle',
+      constantName: 'EPaused',
+      abortCode: SETTLE_ABORT.EPaused,
+    },
+    {
+      classifier: isClaimTooHigh,
+      module: 'settle',
+      constantName: 'EClaimTooHigh',
+      abortCode: SETTLE_ABORT.EClaimTooHigh,
+    },
+    {
+      classifier: isTotalInTooLow,
+      module: 'settle',
+      constantName: 'ETotalInTooLow',
+      abortCode: SETTLE_ABORT.ETotalInTooLow,
+    },
+    {
+      classifier: isSpreadTooWide,
+      module: 'settle',
+      constantName: 'ESpreadTooWide',
+      abortCode: SETTLE_ABORT.ESpreadTooWide,
+    },
+    {
+      classifier: isVaultAlreadyRegistered,
+      module: 'vault',
+      constantName: 'EVaultAlreadyRegistered',
+      abortCode: VAULT_ABORT.EVaultAlreadyRegistered,
+    },
+    {
+      classifier: isReplayNonce,
+      module: 'vault',
+      constantName: 'EReplayNonce',
+      abortCode: VAULT_ABORT.EReplayNonce,
+    },
+  ] as const;
 
-describe('classifySponsorFailureSubcode — subcode routing', () => {
-  it('classifies settle EPaused into PAUSED', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::settle, 100) in command 2',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe('PAUSED');
-  });
+  for (const testCase of cases) {
+    it(`binds ${testCase.constantName} to package, module, constant, code, and command`, () => {
+      const error = internalMoveAbort({
+        packageId: TRUSTED_STELIS_PKG,
+        module: testCase.module,
+        constantName: testCase.constantName,
+        abortCode: testCase.abortCode,
+        command: 2,
+      });
+      expect(testCase.classifier(error, TRUSTED_STELIS_PKG, 2)).toBe(true);
+      expect(testCase.classifier(error, TRUSTED_STELIS_PKG, 1)).toBe(false);
+      expect(testCase.classifier(error, FOREIGN_PACKAGE_ID, 2)).toBe(false);
+      expect(
+        testCase.classifier(
+          internalMoveAbort({
+            packageId: TRUSTED_STELIS_PKG,
+            module: testCase.module,
+            constantName: 'EAnotherAbort',
+            abortCode: testCase.abortCode,
+            command: 2,
+          }),
+          TRUSTED_STELIS_PKG,
+          2,
+        ),
+      ).toBe(false);
+    });
+  }
 
-  it('classifies vault EVaultAlreadyRegistered into VAULT_ALREADY_REGISTERED', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::vault, 2) in command 3',
-        TRUSTED_STELIS_PKG,
-        SWAP_NEW_USER_FUNCTION,
-      ),
-    ).toBe('VAULT_ALREADY_REGISTERED');
-  });
-
-  // S-14 monotonic-nonce out-of-order execution (EReplayNonce) classification.
-  // Required for the address-revert carve-out so a sender that races two
-  // concurrent prepares does not self-block when the loser's prepared nonce
-  // settles after the winner's.
-  it('classifies vault EReplayNonce into REPLAY_NONCE', () => {
-    expect(
-      classifySponsorFailureSubcode('MoveAbort(0xabc::vault, 1) in command 3', TRUSTED_STELIS_PKG),
-    ).toBe('REPLAY_NONCE');
-  });
-
-  // Locks the server-side link of the server-to-SDK exhaustion normalization
-  // chain:
-  //   MoveAbort settle 103 (EInsufficientFunds, S-4 non-loss assert)
-  //   → classifySponsorFailureSubcode === 'INSUFFICIENT_FUNDS'
-  //   → SponsorPreflightError/SponsorOnchainError carries this subcode
-  //   → SDK normalizeApiError maps to code 'INSUFFICIENT_FUNDS' (locked in the
-  //     SDK preflight + onchain subcode tests in executeSponsored.test.ts).
-  // Without this lock, an occurrence-parser/rename break in isInsufficientFunds would route
-  // EInsufficientFunds back into the generic SPONSOR_*_FAILED → EXECUTION_FAILED
-  // path silently.
-  it('classifies settle EInsufficientFunds into INSUFFICIENT_FUNDS', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::settle, 103) in command 4',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe('INSUFFICIENT_FUNDS');
-  });
-
-  // Package binding for Stelis classifications.
-  it('does NOT classify non-Stelis vault aborts into Stelis subcodes', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xdef::vault::check_and_advance_nonce, 1) in command 0',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xdef::settle, 100) in command 2',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-  });
-
-  // Package binding for DeepBook classification — external package
-  // matching `pool::swap_exact_quantity` does not become `SLIPPAGE_EXCEEDED`.
-  it('does NOT classify non-DeepBook pool aborts into SLIPPAGE_EXCEEDED', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, '0xdef'),
-        TRUSTED_STELIS_PKG,
-        SWAP_NEW_USER_FUNCTION,
-      ),
-    ).toBeUndefined();
-  });
-
-  // Trusted DeepBook abort still classifies.
-  it('classifies trusted DeepBook pool::swap_exact_quantity 12 into SLIPPAGE_EXCEEDED', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code),
-        TRUSTED_STELIS_PKG,
-        SWAP_NEW_USER_FUNCTION,
-      ),
-    ).toBe('SLIPPAGE_EXCEEDED');
-  });
-
-  it('does not treat the published DeepBook storage ID as the abort runtime identity', () => {
-    const storageId = DEEPBOOK_IDS.testnet!.packageId;
-    expect(storageId).not.toBe(DEEPBOOK_MIN_OUT_ABORT.runtimePackageId);
-    expect(
-      classifySponsorFailureSubcode(
-        formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, storageId),
-        TRUSTED_STELIS_PKG,
-        SWAP_NEW_USER_FUNCTION,
-      ),
-    ).toBeUndefined();
+  it('uses only structured execution identity for classification', () => {
+    const error = internalMoveAbort({
+      packageId: TRUSTED_STELIS_PKG,
+      module: 'settle',
+      constantName: 'EClaimTooHigh',
+      abortCode: SETTLE_ABORT.EClaimTooHigh,
+      command: 0,
+    });
+    expect(isClaimTooHigh(error, TRUSTED_STELIS_PKG, 0)).toBe(true);
+    expect(isReplayNonce(error, TRUSTED_STELIS_PKG, 99)).toBe(false);
   });
 });
 
-describe('classifySponsorFailureSubcode — transaction command provenance', () => {
+describe('structured Move-abort command provenance', () => {
   const deepbookStoragePackageId = DEEPBOOK_IDS.testnet!.packageId;
   const directDeepbookCommand = {
     kind: 'MoveCall',
@@ -2315,311 +1835,112 @@ describe('classifySponsorFailureSubcode — transaction command provenance', () 
     typeArguments: [],
     arguments: [],
   } as PtbCommand;
-  const settlementCommand = settlementCommandsAt(0, TRUSTED_STELIS_PKG, SWAP_NEW_USER_FUNCTION)[0]!;
 
-  it('does not classify a real DeepBook abort from a user prefix as Host settlement slippage', () => {
-    const commands = [directDeepbookCommand, settlementCommand];
-    const prefixAbort = formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, undefined, 0);
-    const settlementAbort = formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, undefined, 1);
+  function deepbookAbort(
+    command: number,
+    packageId: string = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
+  ) {
+    return internalMoveAbort({
+      packageId,
+      module: 'pool',
+      functionName: 'swap_exact_quantity',
+      constantName: DEEPBOOK_MIN_OUT_ABORT.constantName,
+      abortCode: DEEPBOOK_MIN_OUT_ABORT.code,
+      command,
+    });
+  }
+
+  it('classifies only the unique active settlement command', () => {
+    const commands = settlementCommandsAt(1, TRUSTED_STELIS_PKG, SWAP_NEW_USER_FUNCTION);
+    const exact = internalMoveAbort({
+      packageId: TRUSTED_STELIS_PKG,
+      module: 'settle',
+      constantName: 'EClaimTooHigh',
+      abortCode: SETTLE_ABORT.EClaimTooHigh,
+      command: 1,
+    });
+    const wrapper = { ...exact, command: 0 } as SuiExecutionError;
 
     expect(
-      classifySponsorFailureSubcodeFromGraph(prefixAbort, TRUSTED_STELIS_PKG, {
+      classifySponsorFailureSubcode(exact, TRUSTED_STELIS_PKG, {
+        kind: 'settlement',
+        commands,
+      }),
+    ).toBe('CLAIM_WOULD_EXCEED_MAX');
+    expect(
+      classifySponsorFailureSubcode(wrapper, TRUSTED_STELIS_PKG, {
+        kind: 'settlement',
+        commands,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('limits swap-only aborts to settlement entries that actually consume a pool', () => {
+    const error = internalMoveAbort({
+      packageId: TRUSTED_STELIS_PKG,
+      module: 'settle',
+      constantName: 'ESpreadTooWide',
+      abortCode: SETTLE_ABORT.ESpreadTooWide,
+      command: 0,
+    });
+    expect(
+      classifySponsorFailureSubcode(error, TRUSTED_STELIS_PKG, {
+        kind: 'settlement',
+        commands: settlementCommandsAt(0, TRUSTED_STELIS_PKG, SWAP_NEW_USER_FUNCTION),
+      }),
+    ).toBe('SPREAD_EXCEEDED');
+    expect(
+      classifySponsorFailureSubcode(error, TRUSTED_STELIS_PKG, {
+        kind: 'settlement',
+        commands: settlementCommandsAt(0, TRUSTED_STELIS_PKG, SETTLE_WITH_CREDIT_FUNCTION),
+      }),
+    ).toBeUndefined();
+  });
+
+  it('does not borrow a user-prefix DeepBook abort for Host settlement', () => {
+    const commands = [
+      directDeepbookCommand,
+      settlementCommandsAt(0, TRUSTED_STELIS_PKG, SWAP_NEW_USER_FUNCTION)[0]!,
+    ];
+    expect(
+      classifySponsorFailureSubcode(deepbookAbort(0), TRUSTED_STELIS_PKG, {
         kind: 'settlement',
         commands,
       }),
     ).toBeUndefined();
     expect(
-      classifySponsorFailureSubcodeFromGraph(settlementAbort, TRUSTED_STELIS_PKG, {
+      classifySponsorFailureSubcode(deepbookAbort(1), TRUSTED_STELIS_PKG, {
         kind: 'settlement',
         commands,
       }),
     ).toBe('SLIPPAGE_EXCEEDED');
   });
 
-  it('does not classify a nested Stelis abort reported at an external wrapper command', () => {
-    const commands = settlementCommandsAt(1, TRUSTED_STELIS_PKG);
-    const wrapperAbort = 'MoveAbort(0xabc::settle, 101) in command 0';
-
-    expect(
-      classifySponsorFailureSubcodeFromGraph(wrapperAbort, TRUSTED_STELIS_PKG, {
-        kind: 'settlement',
-        commands,
-      }),
-    ).toBeUndefined();
-  });
-
-  it('classifies a direct DeepBook command only when storage target and runtime abort both match', () => {
-    const reason = formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code, undefined, 0);
-
-    expect(
-      classifySponsorFailureSubcodeFromGraph(reason, TRUSTED_STELIS_PKG, {
-        kind: 'direct',
-        commands: [directDeepbookCommand],
-        deepbookPackageId: deepbookStoragePackageId,
-      }),
-    ).toBe('SLIPPAGE_EXCEEDED');
-    expect(
-      classifySponsorFailureSubcodeFromGraph(reason, TRUSTED_STELIS_PKG, {
-        kind: 'direct',
-        commands: [
-          {
-            ...directDeepbookCommand,
-            packageId: '0xdef',
-            module: 'wrapper',
-            function: 'call',
-          } as PtbCommand,
-        ],
-        deepbookPackageId: deepbookStoragePackageId,
-      }),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcodeFromGraph(reason, TRUSTED_STELIS_PKG, {
-        kind: 'direct',
-        commands: [{ ...directDeepbookCommand, packageId: 'invalid' } as PtbCommand],
-        deepbookPackageId: 'invalid',
-      }),
-    ).toBeUndefined();
-  });
-
-  it('does not classify swap-only or new-user-only aborts for settle_with_credit', () => {
+  it('separates the DeepBook storage target from its runtime abort identity', () => {
     const scope = {
-      kind: 'settlement',
-      commands: settlementCommandsAt(0, TRUSTED_STELIS_PKG),
-    } as const;
-
-    for (const reason of [
-      formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code),
-      'MoveAbort(0xabc::settle, 110) in command 0',
-      'MoveAbort(0xabc::settle, 102) in command 0',
-      'MoveAbort(0xabc::vault, 2) in command 0',
-    ]) {
-      expect(
-        classifySponsorFailureSubcodeFromGraph(reason, TRUSTED_STELIS_PKG, scope),
-      ).toBeUndefined();
-    }
+      kind: 'direct' as const,
+      commands: [directDeepbookCommand],
+      deepbookPackageId: deepbookStoragePackageId,
+    };
+    expect(isDeepbookMinOutNotMet(deepbookAbort(0), 0)).toBe(true);
+    expect(classifySponsorFailureSubcode(deepbookAbort(0), TRUSTED_STELIS_PKG, scope)).toBe(
+      'SLIPPAGE_EXCEEDED',
+    );
     expect(
-      classifySponsorFailureSubcodeFromGraph(
-        'MoveAbort(0xabc::settle, 101) in command 0',
+      classifySponsorFailureSubcode(
+        deepbookAbort(0, deepbookStoragePackageId),
         TRUSTED_STELIS_PKG,
         scope,
       ),
-    ).toBe('CLAIM_WOULD_EXCEED_MAX');
-  });
-});
-
-// ── Abort-code position binding ──────────────────────────────────────────
-//
-// The classifier reads the numeric code from its actual abort-code
-// position. Free-floating numeric tokens like `command N`, `Nth command`,
-// or `(instruction N)` cannot satisfy a low-numbered abort code, even
-// when the trusted package + module substring are present.
-
-describe('classifySponsorFailureSubcode — abort-code position binding', () => {
-  it('does not combine a trusted package with a code from another abort occurrence', () => {
-    const reason =
-      "MoveAbort in 1st command, abort code: 101, in '0xdef::settle::settle_core'; " +
-      "MoveAbort in 2nd command, abort code: 102, in '0xabc::settle::settle_core'";
-
+    ).toBeUndefined();
     expect(
-      classifySponsorFailureSubcodeFromGraph(reason, TRUSTED_STELIS_PKG, {
-        kind: 'settlement',
-        commands: settlementCommandsAt(1, TRUSTED_STELIS_PKG, SWAP_NEW_USER_FUNCTION),
+      classifySponsorFailureSubcode(deepbookAbort(1), TRUSTED_STELIS_PKG, scope),
+    ).toBeUndefined();
+    expect(
+      classifySponsorFailureSubcode(deepbookAbort(0), TRUSTED_STELIS_PKG, {
+        ...scope,
+        commands: [{ ...directDeepbookCommand, function: 'wrapper' } as PtbCommand],
       }),
-    ).toBe('INSUFFICIENT_SETTLE_INPUT');
-  });
-
-  it('does not combine a trusted DeepBook path with a code from another occurrence', () => {
-    const reason =
-      "MoveAbort in 1st command, abort code: 12, in '0xdef::pool::swap_exact_quantity'; " +
-      `MoveAbort in 2nd command, abort code: 11, in '${DEEPBOOK_MIN_OUT_ABORT.runtimePackageId}::pool::swap_exact_quantity'`;
-
-    expect(classifySponsorFailureSubcode(reason, TRUSTED_STELIS_PKG)).toBeUndefined();
-  });
-
-  it('does not grant classification to path clauses without command provenance', () => {
-    const reason =
-      'abort code: 101 with no module path, ' +
-      'abort code: 102 in module 0xabc::settle::settle_core';
-
-    expect(classifySponsorFailureSubcode(reason, TRUSTED_STELIS_PKG)).toBeUndefined();
-  });
-
-  it('does not borrow a diagnostic path later in the same clause', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'abort code: 101 with no location, diagnostic continued in module 0xabc::settle::settle_core',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode(
-        "MoveAbort in 1st command, 'EClaimTooHigh': 101, diagnostic continued in module 0xabc::settle::settle_core",
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-  });
-
-  it('accepts canonical-equivalent package padding and case', () => {
-    expect(
-      classifySponsorFailureSubcode('MoveAbort(0x000AbC::settle, 101) in command 0', '0xabc'),
-    ).toBe('CLAIM_WOULD_EXCEED_MAX');
-  });
-
-  it('rejects oversized package IDs and non-integral abort tokens', () => {
-    const oversized = `0x${'0'.repeat(65)}abc`;
-    expect(
-      classifySponsorFailureSubcode(`MoveAbort(${oversized}::settle, 101)`, '0xabc'),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode(
-        'abort code: 101.5 in module 0xabc::settle::settle_core',
-        '0xabc',
-      ),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode("abort code: 101 in '0xabc::settle", '0xabc'),
-    ).toBeUndefined();
-  });
-
-  it('rejects non-canonical command indices and ordinal suffixes', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::settle, 101) in command 0junk',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode(
-        "MoveAbort in 1th command, abort code: 101, in '0xabc::settle::settle_core'",
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-  });
-
-  it('rejects Move locations deeper than package::module::function', () => {
-    for (const reason of [
-      'MoveAbort(0xabc::settle::anything::extra, 110)',
-      'abort code: 110 in module 0xabc::settle::anything::extra',
-      "MoveAbort in 1st command, abort code: 110, in '0xabc::settle::anything::extra'",
-      "MoveAbort in 1st command, 'ESpreadTooWide': 110, in '0xabc::settle::anything::extra'",
-    ]) {
-      expect(classifySponsorFailureSubcode(reason, TRUSTED_STELIS_PKG)).toBeUndefined();
-    }
-  });
-
-  it('classifies the installed Sui clever-error format only when name and code agree', () => {
-    const location = {
-      package: TRUSTED_STELIS_PKG,
-      module: 'settle',
-      functionName: 'settle_core',
-      instruction: 101,
-    };
-    const supported = formatMoveAbortMessage({
-      command: 0,
-      location,
-      abortCode: '101',
-      cleverError: { constantName: 'EClaimTooHigh', value: '101', lineNumber: 12 },
-    });
-    const wrongName = formatMoveAbortMessage({
-      command: 0,
-      location,
-      abortCode: '101',
-      cleverError: { constantName: 'EOther', value: '101', lineNumber: 12 },
-    });
-    expect(classifySponsorFailureSubcode(supported, TRUSTED_STELIS_PKG)).toBe(
-      'CLAIM_WOULD_EXCEED_MAX',
-    );
-    expect(classifySponsorFailureSubcode(wrongName, TRUSTED_STELIS_PKG)).toBeUndefined();
-  });
-
-  it('does not skip a malformed leading clever-error clause to classify a later fragment', () => {
-    for (const reason of [
-      "MoveAbort in 1st command, 'EOther', diagnostic, 'ESpreadTooWide': 110, in '0xabc::settle::settle_core'",
-      "MoveAbort in 1st command, 'Bad-Name': 999, 'ESpreadTooWide': 110, in '0xabc::settle::settle_core'",
-      "MoveAbort in 1st command, 'EOther': 999.5, 'ESpreadTooWide': 110, in '0xabc::settle::settle_core'",
-    ]) {
-      expect(classifySponsorFailureSubcode(reason, TRUSTED_STELIS_PKG)).toBeUndefined();
-    }
-  });
-
-  it('does not reinterpret diagnostics inside a name-only MoveAbort as another occurrence', () => {
-    const location = {
-      package: TRUSTED_STELIS_PKG,
-      module: 'settle',
-      functionName: 'settle_core',
-      instruction: 110,
-    };
-    const nameOnly = formatMoveAbortMessage({
-      command: 0,
-      location,
-      abortCode: '110',
-      cleverError: { constantName: 'EOther' },
-    });
-
-    expect(nameOnly).toContain("'EOther', in '0xabc::settle::settle_core'");
-    expect(classifySponsorFailureSubcode(nameOnly, TRUSTED_STELIS_PKG)).toBeUndefined();
-    expect(
-      classifySponsorFailureSubcode(
-        `${nameOnly}, diagnostic says abort code: 110 in module 0xabc::settle::settle_core`,
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-  });
-
-  // EVaultAlreadyRegistered (code 2) abort with `command 1` elsewhere in
-  // the string must classify by the abort-tuple code (2), not the command
-  // index (1).
-  it('classifies vault 2 as VAULT_ALREADY_REGISTERED even when string contains "command 1"', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::vault, 2) in command 1',
-        TRUSTED_STELIS_PKG,
-        SWAP_NEW_USER_FUNCTION,
-      ),
-    ).toBe('VAULT_ALREADY_REGISTERED');
-  });
-
-  // EReplayNonce (code 1) abort with `command 2` elsewhere in the string
-  // must classify by the abort-tuple code (1), not the command index (2).
-  it('classifies vault 1 as REPLAY_NONCE even when string contains "command 2"', () => {
-    expect(
-      classifySponsorFailureSubcode('MoveAbort(0xabc::vault, 1) in command 2', TRUSTED_STELIS_PKG),
-    ).toBe('REPLAY_NONCE');
-  });
-
-  // settle EClaimTooHigh (code 101) abort with `command 100` elsewhere in
-  // the string must classify by the abort-tuple code (101), not the
-  // command index (100).
-  it('classifies settle 101 as CLAIM_WOULD_EXCEED_MAX even when string contains "command 100"', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'MoveAbort(0xabc::settle, 101) in command 100',
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBe('CLAIM_WOULD_EXCEED_MAX');
-  });
-
-  // DeepBook real abort code 11 with `(instruction 12)` elsewhere in the
-  // string must not classify as SLIPPAGE_EXCEEDED (which expects code 12
-  // at the abort-code position).
-  it('does NOT classify trusted DeepBook code 11 as SLIPPAGE_EXCEEDED via "(instruction 12)"', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        formatDeepbookAbort(DEEPBOOK_MIN_OUT_ABORT.code - 1),
-        TRUSTED_STELIS_PKG,
-      ),
-    ).toBeUndefined();
-  });
-
-  // Trusted package + vault module substring with the only `1`
-  // appearing as `command 1` index — no abort-tuple form and no
-  // `abort code` keyword. Must not classify.
-  it('does NOT classify "command 1" + vault substring as REPLAY_NONCE without abort-code position', () => {
-    expect(
-      classifySponsorFailureSubcode(
-        'Transaction resolution failed in command 1 referencing 0xabc::vault::check_and_advance_nonce — internal error',
-        TRUSTED_STELIS_PKG,
-      ),
     ).toBeUndefined();
   });
 });
@@ -2653,19 +1974,32 @@ describe('runGenericPrepareBuildPipeline — slippage error paths', () => {
     );
   });
 
-  it('throws MARKET_QUOTE_UNAVAILABLE with RPC message when batchGetHopMidPrices throws SlippageQueryError', async () => {
+  it('maps a completed-view ABI failure to MARKET_QUOTE_UNAVAILABLE', async () => {
     const ctx = makeCtx();
     const input = swapInput();
 
     const { SlippageQueryError: SQE } = await import('@stelis/core-relay');
-    mockBatchGetHopMidPrices.mockRejectedValue(new SQE('simulateTransaction failed: RPC timeout'));
+    mockBatchGetHopMidPrices.mockRejectedValue(new SQE('mid_price: unexpected return tuple'));
 
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
     expect(err).toEqual(expect.objectContaining({ code: 'MARKET_QUOTE_UNAVAILABLE' }));
     expect((err as PrepareValidationError).meta?.stage).toBe('mid_price_collection');
-    // Message must include query-failure context (not "empty orderbook")
+    // Message must retain the completed-view context (not "empty orderbook").
     expect((err as Error).message).toContain('Mid-price query failed');
-    expect((err as Error).message).toContain('RPC timeout');
+    expect((err as Error).message).toContain('unexpected return tuple');
+  });
+
+  it('preserves typed Sui operation failures instead of manufacturing a market 422', async () => {
+    const ctx = makeCtx();
+    const input = swapInput();
+    const operationError = new SuiOperationError('deadline_exceeded', {
+      operation: 'simulate_move_view',
+      attempt: 1,
+      maxAttempts: 1,
+    });
+    mockBatchGetHopMidPrices.mockRejectedValue(operationError);
+
+    await expect(runGenericPrepareBuildPipeline(ctx, input)).rejects.toBe(operationError);
   });
 
   it('throws MARKET_QUOTE_UNAVAILABLE when solveExecutableSwap throws MarketQuoteUnavailableError', async () => {
@@ -3174,7 +2508,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     // returns before any solver invocation.
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '100000000',
     });
     mockComputeExecutionCostClaim.mockReturnValue({
@@ -3243,7 +2577,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_quantity_in_logical_calls).toBe(2);
     expect(failed!.payload.quote_quantity_out_verify_logical_calls).toBe(3);
     expect(failed!.payload.quote_cache_hits).toBe(0);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // The planner's economic target is captured even though the solver
     // threw before any quote object existed. Without this field, an
@@ -3300,7 +2634,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.quote_rpc_total_ms).toBe(70);
     expect(failed!.payload.quote_rpc_max_ms).toBe(60);
     expect(failed!.payload.quote_rpc_stats_complete).toBe(false);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // pass1 emit succeeded before the failure; aggregate did not.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeDefined();
@@ -3362,7 +2696,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_in_logical_calls).toBe(1);
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(2);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
-    expect(aborted!.payload.pool_id).toBe('0xPOOL');
+    expect(aborted!.payload.pool_id).toBe(POOL_ID);
     expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Caller never absorbed pass1 stats → no per-pass emit, no aggregate.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeUndefined();
@@ -3417,7 +2751,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_quantity_in_logical_calls).toBe(2);
     expect(aborted!.payload.quote_quantity_out_verify_logical_calls).toBe(1);
     expect(aborted!.payload.quote_cache_hits).toBe(0);
-    expect(aborted!.payload.pool_id).toBe('0xPOOL');
+    expect(aborted!.payload.pool_id).toBe(POOL_ID);
     expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
     // Funding emit happened (resolvePaymentSource succeeded), but pass1 emit
     // never did because compile threw before caller absorption.
@@ -3618,14 +2952,14 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
       settlementSwapPath: {
         hops: [
           {
-            poolId: '0xPOOL',
-            baseType: '0xBASE',
-            quoteType: '0xQUOTE',
+            poolId: POOL_ID,
+            baseType: BASE_TYPE,
+            quoteType: QUOTE_TYPE,
             swapDirection: 'quoteForBase',
             feeBps: 0,
           },
         ],
-        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenType: USDC_TYPE,
         settlementTokenSymbol: 'USDC',
         settlementTokenDecimals: 6,
         lotSize: 1_000n,
@@ -3634,16 +2968,16 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
         settlementSwapDirection: 'quoteForBase',
       } as unknown as GenericPrepareBuildRequest['settlementSwapPath'],
       descriptor: {
-        settlementTokenType: '0xUSDC::usdc::USDC',
+        settlementTokenType: USDC_TYPE,
         settlementTokenSymbol: 'USDC',
         settlementTokenDecimals: 6,
         effectiveFeeRateBps: 0,
         settlementSwapDirection: 'quoteForBase',
         hops: [
           {
-            poolId: '0xPOOL',
-            baseType: '0xBASE',
-            quoteType: '0xQUOTE',
+            poolId: POOL_ID,
+            baseType: BASE_TYPE,
+            quoteType: QUOTE_TYPE,
             swapDirection: 'quoteForBase',
             feeBps: 0,
           },
@@ -3696,7 +3030,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(completion!.payload.effective_target_output_mist).toBe('1000000000');
   });
 
-  it('emits mid_price_rpc_failed when batchGetHopMidPrices throws SlippageQueryError', async () => {
+  it('emits mid_price_rpc_failed when a completed mid-price view violates its ABI', async () => {
     const ctx = makeCtx();
     const input = makeInput({
       profile: 'new_user',
@@ -3705,7 +3039,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     });
 
     const { SlippageQueryError: SQE } = await import('@stelis/core-relay');
-    mockBatchGetHopMidPrices.mockRejectedValue(new SQE('simulateTransaction failed: RPC timeout'));
+    mockBatchGetHopMidPrices.mockRejectedValue(new SQE('mid_price: unexpected return tuple'));
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
@@ -3718,7 +3052,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(failed!.payload.error_code).toBe('MARKET_QUOTE_UNAVAILABLE');
     expect(typeof failed!.payload.mid_price_total_ms).toBe('number');
     expect(failed!.payload.mid_price_stats_complete).toBe(false);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Mid-price failure is upstream of any solve work — neither solve-time
     // nor post-solve emits should fire.
@@ -3762,24 +3096,32 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     const ctx = makeCtx();
     const input = makeInput({
       profile: 'credit_general',
-      vaultObjectId: '0xVAULT',
+      vaultObjectId: VAULT_ID,
       credit: '5000000',
     });
 
-    // First tx.build is the credit_preswap probe. Reject with InsufficientCoinBalance
-    // so safeBuild classifies it as INSUFFICIENT_BALANCE before simulateTransaction
-    // is reached.
-    mockBuild.mockRejectedValueOnce(new Error('InsufficientCoinBalance: cannot fund swap'));
+    // First tx.build is the credit_preswap probe. A structured resolver abort
+    // must bind to the credit settlement at command 0 and be classified before
+    // the Sui simulation gateway is reached.
+    mockBuild.mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: STELIS_PACKAGE_ID,
+        module: 'settle',
+        constantName: 'EClaimTooHigh',
+        abortCode: 101,
+        command: 0,
+      }),
+    );
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
-    expect(err).toEqual(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
+    expect(err).toEqual(expect.objectContaining({ code: 'CLAIM_WOULD_EXCEED_MAX' }));
 
     const failed = events.find((e) => e.stage === 'dryrun_safebuild_failed');
     expect(failed).toBeDefined();
     expect(failed!.payload.pass).toBe('credit_preswap');
-    expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.error_code).toBe('CLAIM_WOULD_EXCEED_MAX');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     expect(failed!.payload.phase_complete).toBe(false);
     // Quote-stats schema: credit_preswap path is upstream of any quote solve,
@@ -3818,9 +3160,8 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
       maxDurationMs: 25,
     });
 
-    // pass1 tx.build succeeds (default mock). simulateTransaction rejects on the
-    // first call (the pass1 dry-run).
-    (ctx.sui.simulateTransaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    // The pass1 build gateway succeeds; simulation rejects on its first call.
+    mockSimulateSuiTransaction.mockRejectedValueOnce(
       new Error('RPC unavailable: simulate timed out'),
     );
 
@@ -3834,7 +3175,7 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed!.payload.pass).toBe('pass1');
     expect(failed!.payload.error_code).toBe('UNKNOWN');
     expect(failed!.payload.phase_complete).toBe(false);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema: pass1 dry-run runs AFTER pass1 quote-solve has
     // already accumulated, so the failure emit MUST carry forward the injected
@@ -3879,11 +3220,9 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     // simulateTransaction returns successfully but with status.success=false.
     // The completed-stage emits (because simulate returned), then
     // extractSuccessfulDryRunGas throws DRY_RUN_FAILED.
-    (ctx.sui.simulateTransaction as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      Transaction: {
-        status: { success: false, error: { message: 'execution_failure: gas exhausted' } },
-      },
-    });
+    mockSimulateSuiTransaction.mockResolvedValueOnce(
+      suiSimulationFailure(TEST_SUI_TRANSACTION_DIGEST, unclassifiedSuiExecutionError()),
+    );
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
@@ -3895,10 +3234,9 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     expect(failed).toBeDefined();
     expect(failed!.payload.pass).toBe('pass1');
     expect(failed!.payload.error_code).toBe('DRY_RUN_FAILED');
-    expect(failed!.payload.has_transaction).toBe(true);
     expect(failed!.payload.completed_stage_emitted).toBe(true);
     expect(failed!.payload.phase_complete).toBe(false);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Quote-stats schema with non-zero forward-carry — same lock as
     // `dryrun_simulate_failed`. Pass1 stats already accumulated by the time
@@ -3924,22 +3262,28 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
       credit: '0',
     });
 
-    // pass1 dry-run succeeds (default). pass2 final tx.build is the second
-    // mockBuild call — reject it with a classifiable error.
-    mockBuild
-      .mockResolvedValueOnce(new Uint8Array([1, 2, 3]))
-      .mockRejectedValueOnce(new Error('InsufficientCoinBalance: pass2 swap'));
+    // pass1 dry-run succeeds (default). The pass2 final build is the second
+    // gateway call. The swap settlement follows SplitCoins at command 1.
+    mockBuild.mockResolvedValueOnce(new Uint8Array([1, 2, 3])).mockRejectedValueOnce(
+      buildMoveAbort({
+        packageId: STELIS_PACKAGE_ID,
+        module: 'settle',
+        constantName: 'EClaimTooHigh',
+        abortCode: 101,
+        command: 1,
+      }),
+    );
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
-    expect(err).toEqual(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
+    expect(err).toEqual(expect.objectContaining({ code: 'CLAIM_WOULD_EXCEED_MAX' }));
 
     const failed = events.find((e) => e.stage === 'pass2_safebuild_failed');
     expect(failed).toBeDefined();
     expect(failed!.payload.pass).toBe('pass2');
-    expect(failed!.payload.error_code).toBe('INSUFFICIENT_BALANCE');
+    expect(failed!.payload.error_code).toBe('CLAIM_WOULD_EXCEED_MAX');
     expect(failed!.payload.phase_complete).toBe(false);
-    expect(failed!.payload.pool_id).toBe('0xPOOL');
+    expect(failed!.payload.pool_id).toBe(POOL_ID);
     expect(failed!.payload.settlement_token_symbol).toBe('DEEP');
     // Final safeBuild fails after all quote work has completed, so this
     // lifecycle failure still carries a complete request-level quote-stats

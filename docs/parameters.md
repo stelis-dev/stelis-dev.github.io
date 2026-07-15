@@ -78,7 +78,7 @@ Prepare authorization request nonces are temporary replay guards for signed prep
 | Admin operation rate limit window | `900000` | `packages/core-api/src/admin/adminOperationsRateLimit.ts` | Fixed-window duration for mutating admin operation attempts. |
 | `ADMIN_OPERATIONS_RATE_LIMIT_MAX` | `5` | `packages/core-api/src/admin/adminOperationsRateLimit.ts` | Maximum mutating admin operation attempts per IP in each fixed window. |
 | `DEVELOPER_VERIFY_TIMEOUT_MS` | `5000` | `packages/app-api/src/developerJwtVerifyCallback.ts` | Timeout for optional developer JWT verification callback. |
-| `DEFAULT_COOLDOWN_MS` | `30000` | `packages/app-api/src/sui/failoverTransport.ts` | Passive cooldown for a failed RPC endpoint. |
+| `SUI_OPERATION_ATTEMPT_TIMEOUT_MS` | `30000` | `packages/core-relay/src/sui/suiOperation.ts` | Maximum duration `U` for one Sui RPC attempt. A validated read tries each endpoint in the immutable qualified snapshot at most once, with a total deadline of `endpointCount * U`; signed execution submits to the primary endpoint once. |
 
 ## Studio Ledger Limits
 

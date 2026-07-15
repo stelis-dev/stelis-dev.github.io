@@ -38,7 +38,7 @@ function makeUnknownEntry(receiptId: string): SponsoredExecutionLogEntry {
   return {
     createdAt: '2026-04-26T16:00:00.000Z',
     mode: 'generic',
-    outcome: 'success',
+    outcome: 'internal_error',
     receiptId,
     digest: null,
     senderAddress: '0xsender',
@@ -55,7 +55,7 @@ function makeUnknownEntry(receiptId: string): SponsoredExecutionLogEntry {
     grossGasMist: null,
     storageRebateMist: null,
     economicsStatus: 'unknown',
-    failureReason: 'SPONSOR_EXEC_GAS_USED_MISSING',
+    failureReason: 'post_signature_uncertainty: Sui RPC transport was unavailable',
   };
 }
 

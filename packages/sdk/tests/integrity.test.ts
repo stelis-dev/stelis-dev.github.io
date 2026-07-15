@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
-import { toBase64 } from '@mysten/sui/utils';
+import { normalizeStructTag, toBase64 } from '@mysten/sui/utils';
 import { convertSdkCommands } from '@stelis/core-relay/browser';
 import {
   SETTLE_MODULE,
@@ -381,7 +381,7 @@ describe('S-16: fromKind/from command serialization', () => {
       {
         $kind: 'SplitCoins',
         SplitCoins: {
-          coin: { $kind: 'GasCoin' },
+          coin: { $kind: 'GasCoin', GasCoin: true },
           amounts: [{ $kind: 'Input', Input: 0 }],
         },
       },
@@ -392,7 +392,7 @@ describe('S-16: fromKind/from command serialization', () => {
     // arguments should be [payload] — the entire SplitCoins object wrapped
     expect(converted[0].arguments).toEqual([
       {
-        coin: { $kind: 'GasCoin' },
+        coin: { $kind: 'GasCoin', GasCoin: true },
         amounts: [{ $kind: 'Input', Input: 0 }],
       },
     ]);
@@ -424,7 +424,7 @@ describe('S-16: fromKind/from command serialization', () => {
       {
         $kind: 'MergeCoins',
         MergeCoins: {
-          destination: { $kind: 'GasCoin' },
+          destination: { $kind: 'GasCoin', GasCoin: true },
           sources: [{ $kind: 'Result', Result: 0 }],
         },
       },
@@ -435,7 +435,7 @@ describe('S-16: fromKind/from command serialization', () => {
     // GasCoin should be preserved for S-15 scanning
     expect(converted[0].arguments).toEqual([
       {
-        destination: { $kind: 'GasCoin' },
+        destination: { $kind: 'GasCoin', GasCoin: true },
         sources: [{ $kind: 'Result', Result: 0 }],
       },
     ]);
@@ -476,7 +476,11 @@ describe('normalizeInput', () => {
       $kind: 'Object',
       Object: {
         $kind: 'ImmOrOwnedObject',
-        ImmOrOwnedObject: { objectId: OBJ_A, version: '5', digest: 'abc123' },
+        ImmOrOwnedObject: {
+          objectId: OBJ_A,
+          version: '5',
+          digest: '11111111111111111111111111111111',
+        },
       },
     };
     expect(normalizeInput(input)).toMatch(/^Object:0x0*a+$/);
@@ -500,22 +504,29 @@ describe('normalizeInput', () => {
       $kind: 'Object',
       Object: {
         $kind: 'ImmOrOwnedObject',
-        ImmOrOwnedObject: { objectId: OBJ_A, version: '3', digest: 'xyz789' },
+        ImmOrOwnedObject: {
+          objectId: OBJ_A,
+          version: '3',
+          digest: '11111111111111111111111111111111',
+        },
       },
     };
     expect(normalizeInput(unresolved)).toBe(normalizeInput(immOrOwned));
   });
 
   it('FundsWithdrawal → FundsWithdrawal:<type>:<amount>:<withdrawFrom>', () => {
+    const balanceType = '0xdee0::deep::DEEP';
     const input = {
       $kind: 'FundsWithdrawal',
       FundsWithdrawal: {
         reservation: { $kind: 'MaxAmountU64', MaxAmountU64: '10000000' },
-        typeArg: { $kind: 'Balance', Balance: '0xdeep::deep::DEEP' },
+        typeArg: { $kind: 'Balance', Balance: balanceType },
         withdrawFrom: { $kind: 'Sender', Sender: true },
       },
     };
-    expect(normalizeInput(input)).toBe('FundsWithdrawal:0xdeep::deep::DEEP:10000000:Sender');
+    expect(normalizeInput(input)).toBe(
+      `FundsWithdrawal:${normalizeStructTag(balanceType)}:10000000:Sender`,
+    );
   });
 
   it('FundsWithdrawal: different withdrawFrom → different normalized string', () => {
@@ -557,7 +568,7 @@ describe('normalizeInput', () => {
   it('unknown input kind → fail-closed (StelisIntegrityError)', () => {
     const input = { $kind: 'SomeFutureKind', SomeFutureKind: { data: 'x' } };
     expect(() => normalizeInput(input)).toThrow(StelisIntegrityError);
-    expect(() => normalizeInput(input)).toThrow('unsupported input kind');
+    expect(() => normalizeInput(input)).toThrow('unsupported current kind');
   });
 });
 
@@ -585,7 +596,11 @@ describe('verifyInputs', () => {
       $kind: 'Object',
       Object: {
         $kind: 'ImmOrOwnedObject',
-        ImmOrOwnedObject: { objectId: id, version: '1', digest: 'abc' },
+        ImmOrOwnedObject: {
+          objectId: id,
+          version: '1',
+          digest: '11111111111111111111111111111111',
+        },
       },
     });
     expect(() => verifyInputs([mkImm(OBJ_A)], [mkImm(OBJ_B)])).toThrow(StelisIntegrityError);
@@ -617,7 +632,11 @@ describe('verifyInputs', () => {
         $kind: 'Object',
         Object: {
           $kind: 'ImmOrOwnedObject',
-          ImmOrOwnedObject: { objectId: OBJ_A, version: '2', digest: 'def' },
+          ImmOrOwnedObject: {
+            objectId: OBJ_A,
+            version: '2',
+            digest: '11111111111111111111111111111111',
+          },
         },
       },
     ];

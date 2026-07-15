@@ -19,6 +19,8 @@ import { createAuthRoutes } from './routes/auth.js';
 import { createAdminRoutes } from './routes/admin.js';
 import { createStudioRoutes } from './routes/studio.js';
 import { createClientIpResolver, type ClientIpSourceProvider } from './clientIp.js';
+import { createAdminRedisAdapter } from './adminRedis.js';
+import { raiseAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
 
 export type AppBootResult = BootSummary;
 
@@ -89,13 +91,20 @@ export async function createApp(
     );
   }
 
-  // 5. Eager context init (fail-fast: on-chain settlement swap path derivation)
+  // 5. Eager context assembly from the already boot-qualified snapshots.
   // This must complete before the server starts accepting requests.
-  // If settlement-swap-paths.json contains invalid pool IDs, or RPC derivation fails,
-  // the process crashes here — not on first request.
   // eslint-disable-next-line no-console
-  console.log('[app-api] Initializing context (settlement-swap-paths.json on-chain derivation)...');
-  await contextPromise;
+  console.log('[app-api] Initializing context from boot-qualified Sui state...');
+  const context = await contextPromise;
+  try {
+    // Invalidate sessions only after every runtime resource and boot-qualified
+    // Sui read is ready. A failed boot must not mutate the shared session
+    // boundary for an instance that never becomes capable of serving traffic.
+    await raiseAppApiAdminSessionNotBefore(createAdminRedisAdapter(context.redis), Date.now());
+  } catch (error) {
+    await context.dispose();
+    throw error;
+  }
 
   // 6. Health check (always available — context already initialized)
   app.get('/health', (c) => c.json({ status: 'ok', mode: bootResult.mode }));

@@ -65,7 +65,7 @@ const endpoints: EndpointOverview[] = [
     highlights: [
       'Required body: txKindBytes, senderAddress, settlementTokenType, txKindBytesHash, and the three prepare-authorization fields',
       'Optional body: slippageBps, gasMarginBps, orderId',
-      'Dry-run rejections return 422 domain codes such as DRY_RUN_FAILED and DRY_RUN_NO_GAS',
+      'Dry-run transaction rejections return the 422 domain code DRY_RUN_FAILED',
     ],
     docHref: docAnchor(API_DOC_URL, 'post-relay-prepare'),
   },

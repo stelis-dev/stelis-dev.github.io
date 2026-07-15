@@ -25,7 +25,7 @@ stale claimant from renaming a newer live lease. Stale takeover and normal
 release both retain the prior lease-ID directory as an identity tombstone, so
 a delayed observer cannot act on an ABA replacement. The journal keeps
 monotonic active-attempt state and retains Sui-proven terminal digests. A Host-reported
-on-chain failure is verified through the same current Sui terminal parser used
+on-chain failure is verified through the same exact Sui transaction gateway used
 for success and restart recovery. Host congestion remains uncertain rather
 than becoming a non-submitted terminal without Sui proof. After an uncertain
 submit, a later invocation performs Host-independent Sui terminal reconciliation
