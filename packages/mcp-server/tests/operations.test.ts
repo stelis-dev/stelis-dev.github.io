@@ -11,6 +11,8 @@ import {
 } from '../src/operations.js';
 import { hostErrorPublicMessage, RELAY_CONFIG_ERROR_CODES } from '@stelis/contracts';
 
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+
 function createConfig(fetchFn: FetchLike): StelisMcpServerConfig {
   return {
     defaultRelayApiUrl: 'https://host.example/relay',
@@ -157,7 +159,7 @@ describe('current Host error boundary', () => {
     ).rejects.toThrow('Stelis Host returned a non-current error response (HTTP 400)');
   });
 
-  it('keeps Studio read and claim error ownership distinct', async () => {
+  it('keeps each Studio operation on its contracts-owned error vocabulary', async () => {
     const claimFetch = vi
       .fn<FetchLike>()
       .mockResolvedValue(
@@ -175,9 +177,22 @@ describe('current Host error boundary', () => {
       .mockResolvedValue(
         jsonResponse({ error: hostErrorPublicMessage('BAD_REQUEST'), code: 'BAD_REQUEST' }, 400),
       );
-    await expect(listPromotions(createConfig(readFetch), { developerJwt: 'jwt' })).rejects.toThrow(
-      'Stelis Host returned a non-current error response (HTTP 400)',
+    await expect(
+      listPromotions(createConfig(readFetch), { developerJwt: 'jwt' }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST', status: 400 });
+
+    const unrelatedReadFetch = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: hostErrorPublicMessage('PROMOTION_NOT_FOUND'),
+          code: 'PROMOTION_NOT_FOUND',
+        },
+        404,
+      ),
     );
+    await expect(
+      listPromotions(createConfig(unrelatedReadFetch), { developerJwt: 'jwt' }),
+    ).rejects.toThrow('Stelis Host returned a non-current error response (HTTP 404)');
   });
 });
 
@@ -251,7 +266,9 @@ describe('Stelis MCP operations', () => {
   });
 
   it('sends developer JWT only as an Authorization header for promotion reads', async () => {
-    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse({ promotions: [] }));
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ promotions: [], nextCursor: null }));
 
     await listPromotions(createConfig(fetchFn), {
       developerJwt: 'jwt-secret',
@@ -261,6 +278,31 @@ describe('Stelis MCP operations', () => {
     expect(url).toBe('https://host.example/studio/promotions');
     expect(init?.headers).toEqual({ Authorization: 'Bearer jwt-secret' });
     expect(init?.body).toBeUndefined();
+  });
+
+  it('serializes only supplied Promotion page fields and validates them before I/O', async () => {
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ promotions: [], nextCursor: null }));
+
+    await listPromotions(createConfig(fetchFn), {
+      developerJwt: 'jwt-secret',
+      cursor: PROMOTION_ID,
+      limit: 100,
+    });
+
+    expect(fetchFn.mock.calls[0][0]).toBe(
+      `https://host.example/studio/promotions?cursor=${PROMOTION_ID}&limit=100`,
+    );
+
+    const invalidFetch = vi.fn<FetchLike>();
+    await expect(
+      listPromotions(createConfig(invalidFetch), {
+        developerJwt: 'jwt-secret',
+        cursor: 'promotion-1',
+      }),
+    ).rejects.toThrow(/canonical lowercase UUID-v4/);
+    expect(invalidFetch).not.toHaveBeenCalled();
   });
 
   it('posts promotion sponsor to the studio base URL', async () => {

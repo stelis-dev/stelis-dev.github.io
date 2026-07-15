@@ -47,6 +47,7 @@ export type {
   UserPromotionDetail,
   PromotionDetailResponse,
   PromotionUnavailableReason,
+  PromotionPageQuery,
 } from './types.js';
 
 // ─────────────────────────────────────────────
@@ -81,7 +82,11 @@ export { STELIS_CONTRACT_IDS, DEEPBOOK_IDS } from '@stelis/contracts';
 // ─────────────────────────────────────────────
 
 import { StelisClient } from './client.js';
-import type { PromotionListResponse, PromotionDetailResponse } from './types.js';
+import type {
+  PromotionListResponse,
+  PromotionDetailResponse,
+  PromotionPageQuery,
+} from './types.js';
 
 /**
  * List available promotions for a user (server-to-server).
@@ -92,13 +97,15 @@ import type { PromotionListResponse, PromotionDetailResponse } from './types.js'
  * @param baseUrl      - App API base URL (e.g. 'http://localhost:3200').
  *                       If a /relay suffix is present, it is stripped automatically.
  * @param developerJwt - Developer-signed JWT (Authorization: Bearer header).
+ * @param query        - Optional exclusive cursor and page limit.
  */
 export async function listAvailablePromotions(
   baseUrl: string,
   developerJwt: string,
+  query: PromotionPageQuery = {},
 ): Promise<PromotionListResponse> {
   const client = new StelisClient({ endpoint: baseUrl });
-  return client.listPromotions(developerJwt);
+  return client.listPromotions(developerJwt, query);
 }
 
 /**

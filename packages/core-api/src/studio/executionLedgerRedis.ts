@@ -33,8 +33,9 @@
  * @module studio/executionLedgerRedis
  */
 
-import type { PromotionExecutionLedger } from './executionLedger.js';
+import type { PromotionExecutionLedger, PromotionListLedgerStatus } from './executionLedger.js';
 import {
+  assertPromotionListLedgerBatchBound,
   PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
   PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS,
 } from './executionLedger.js';
@@ -82,6 +83,11 @@ function parseNonNegativeSafeInteger(value: unknown, label: string): number {
   }
 
   throw new Error(`${label} must be a non-negative safe integer`);
+}
+
+function parseNullableRedisString(value: unknown, label: string): string | null {
+  if (value === null || typeof value === 'string') return value;
+  throw new Error(`${label} must be a string or null`);
 }
 
 // Money-input parse + assertion helpers live in
@@ -414,6 +420,42 @@ redis.call('SET', KEYS[2], 'released', 'PX', ARGV[1])
 return cjson.encode({status = 'ok', promotionId = pid, userId = uid})
 `;
 
+/**
+ * Read every ledger field needed by one bounded Studio Promotion list page.
+ *
+ * ARGV: [keyPrefix, userId, promotionId...]
+ * Returns one JSON array whose row order exactly matches the input IDs.
+ */
+const LUA_PROMOTION_LIST_LEDGER_STATUS = `
+local prefix = ARGV[1]
+local userId = ARGV[2]
+local rows = {}
+
+local function nullable(value)
+  if not value then return cjson.null end
+  return value
+end
+
+for i = 3, #ARGV do
+  local promotionId = ARGV[i]
+  local entitlementPrefix = prefix .. 'ent:' .. promotionId .. ':' .. userId
+  local metaRaw = redis.call('GET', entitlementPrefix .. ':meta')
+
+  rows[#rows + 1] = {
+    promotionId = promotionId,
+    entitlementMetaRaw = nullable(metaRaw),
+    entitlementRemainingRaw = nullable(redis.call('GET', entitlementPrefix .. ':rem')),
+    entitlementConsumedRaw = nullable(redis.call('GET', entitlementPrefix .. ':con')),
+    entitlementReservationRaw = nullable(redis.call('GET', entitlementPrefix .. ':res')),
+    claimedAtRaw = nullable(redis.call('GET', prefix .. 'claim:' .. promotionId .. ':' .. userId)),
+    claimedCount = redis.call('SCARD', prefix .. 'claim:idx:' .. promotionId),
+    availableBudgetMist = redis.call('GET', prefix .. 'budget:' .. promotionId .. ':avail') or '0'
+  }
+end
+
+return cjson.encode(rows)
+`;
+
 // ─────────────────────────────────────────────
 // Internal meta type (stored in Redis as JSON)
 // ─────────────────────────────────────────────
@@ -422,6 +464,46 @@ interface EntitlementMeta {
   useUntilAt: string | null;
   lastUsedAt: string | null;
   status: EntitlementStatus;
+}
+
+interface StoredEntitlementFields {
+  metaRaw: string | null;
+  remainingRaw: string | null;
+  consumedRaw: string | null;
+  reservationRaw: string | null;
+  claimedAtRaw: string | null;
+}
+
+function entitlementFromStoredFields(
+  promotionId: string,
+  userId: string,
+  fields: StoredEntitlementFields,
+): Entitlement | null {
+  if (fields.metaRaw === null) return null;
+
+  const meta: EntitlementMeta = JSON.parse(fields.metaRaw);
+  let activeReservationReceiptId: string | null = null;
+  let activeReservationAmountMist: string | null = null;
+  if (fields.reservationRaw !== null) {
+    const separator = fields.reservationRaw.indexOf(':');
+    if (separator > 0) {
+      activeReservationReceiptId = fields.reservationRaw.substring(0, separator);
+      activeReservationAmountMist = fields.reservationRaw.substring(separator + 1);
+    }
+  }
+
+  return {
+    promotionId,
+    userId,
+    claimedAt: fields.claimedAtRaw ?? '',
+    useUntilAt: meta.useUntilAt,
+    remainingGasAllowanceMist: fields.remainingRaw ?? '0',
+    consumedGasAllowanceMist: fields.consumedRaw ?? '0',
+    status: meta.status,
+    activeReservationReceiptId,
+    activeReservationAmountMist,
+    lastUsedAt: meta.lastUsedAt,
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -675,6 +757,75 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     return parseNonNegativeSafeInteger(result ?? 0, 'Redis claimed count');
   }
 
+  async getPromotionListLedgerStatuses(
+    promotionIds: readonly string[],
+    userId: string,
+  ): Promise<PromotionListLedgerStatus[]> {
+    assertPromotionListLedgerBatchBound(promotionIds);
+    if (promotionIds.length === 0) return [];
+
+    const result = await this.redis.eval(
+      LUA_PROMOTION_LIST_LEDGER_STATUS,
+      [],
+      [PFX, userId, ...promotionIds],
+    );
+    if (typeof result !== 'string') {
+      throw new Error('Redis Promotion list ledger status must be JSON');
+    }
+
+    const rows: unknown = JSON.parse(result);
+    if (!Array.isArray(rows) || rows.length !== promotionIds.length) {
+      throw new Error('Redis Promotion list ledger status length mismatch');
+    }
+
+    return rows.map((rowValue, index) => {
+      if (typeof rowValue !== 'object' || rowValue === null || Array.isArray(rowValue)) {
+        throw new Error('Redis Promotion list ledger status row must be an object');
+      }
+      const row = rowValue as Record<string, unknown>;
+      const promotionId = promotionIds[index];
+      if (row.promotionId !== promotionId) {
+        throw new Error('Redis Promotion list ledger status ID mismatch');
+      }
+      if (typeof row.availableBudgetMist !== 'string') {
+        throw new Error('Redis Promotion list available budget must be a decimal string');
+      }
+      return {
+        promotionId,
+        entitlement: entitlementFromStoredFields(promotionId, userId, {
+          metaRaw: parseNullableRedisString(
+            row.entitlementMetaRaw,
+            'Redis Promotion list entitlement meta',
+          ),
+          remainingRaw: parseNullableRedisString(
+            row.entitlementRemainingRaw,
+            'Redis Promotion list entitlement remaining allowance',
+          ),
+          consumedRaw: parseNullableRedisString(
+            row.entitlementConsumedRaw,
+            'Redis Promotion list entitlement consumed allowance',
+          ),
+          reservationRaw: parseNullableRedisString(
+            row.entitlementReservationRaw,
+            'Redis Promotion list entitlement reservation',
+          ),
+          claimedAtRaw: parseNullableRedisString(
+            row.claimedAtRaw,
+            'Redis Promotion list claim time',
+          ),
+        }),
+        claimedCount: parseNonNegativeSafeInteger(
+          row.claimedCount,
+          'Redis Promotion list claimed count',
+        ),
+        availableBudgetMist: parseNonNegativeDecimalBigInt(
+          row.availableBudgetMist,
+          'Redis Promotion list available budget MIST',
+        ),
+      };
+    });
+  }
+
   async listClaimedUsers(promotionId: string): Promise<ClaimedUserProjection[]> {
     // Get all userIds from claim index
     const userIds = (await this.redis.eval(
@@ -756,32 +907,13 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
       this.redis.get(claimKey(promotionId, userId)),
     ]);
 
-    if (!metaRaw) return null;
-
-    const meta: EntitlementMeta = JSON.parse(metaRaw);
-
-    let activeReservationReceiptId: string | null = null;
-    let activeReservationAmountMist: string | null = null;
-    if (resRaw) {
-      const sep = resRaw.indexOf(':');
-      if (sep > 0) {
-        activeReservationReceiptId = resRaw.substring(0, sep);
-        activeReservationAmountMist = resRaw.substring(sep + 1);
-      }
-    }
-
-    return {
-      promotionId,
-      userId,
-      claimedAt: claimedAt ?? '',
-      useUntilAt: meta.useUntilAt,
-      remainingGasAllowanceMist: rem ?? '0',
-      consumedGasAllowanceMist: con ?? '0',
-      status: meta.status,
-      activeReservationReceiptId,
-      activeReservationAmountMist,
-      lastUsedAt: meta.lastUsedAt,
-    };
+    return entitlementFromStoredFields(promotionId, userId, {
+      metaRaw,
+      remainingRaw: rem,
+      consumedRaw: con,
+      reservationRaw: resRaw,
+      claimedAtRaw: claimedAt,
+    });
   }
 
   private async getRedisTimeMs(): Promise<number> {

@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { isPromotionId, PROMOTION_PAGE_MAX_LIMIT } from '@stelis/contracts';
 import { z } from 'zod';
 import type { StelisMcpServerConfig } from './config.js';
 import { StelisMcpHttpError } from './http.js';
@@ -32,6 +33,18 @@ const DEVELOPER_JWT = z
   .string()
   .min(1)
   .describe('Developer JWT for Studio promotion endpoints. Kept request-local.');
+const PROMOTION_PAGE_CURSOR = z
+  .string()
+  .refine(isPromotionId, 'cursor must be a canonical lowercase UUID-v4')
+  .optional()
+  .describe('Exclusive cursor returned as nextCursor by the preceding Promotion page.');
+const PROMOTION_PAGE_LIMIT = z
+  .number()
+  .int()
+  .min(1)
+  .max(PROMOTION_PAGE_MAX_LIMIT)
+  .optional()
+  .describe(`Maximum Promotions to return, from 1 through ${PROMOTION_PAGE_MAX_LIMIT}.`);
 const PROMOTION_ID = z.string().min(1).describe('Promotion ID.');
 const SUI_ADDRESS = z
   .string()
@@ -130,6 +143,8 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       inputSchema: {
         ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
+        cursor: PROMOTION_PAGE_CURSOR,
+        limit: PROMOTION_PAGE_LIMIT,
       },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },

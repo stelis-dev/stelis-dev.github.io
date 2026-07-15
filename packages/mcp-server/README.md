@@ -61,6 +61,14 @@ Agents read `supportedSettlementSwapPaths` from `stelis_get_relay_api_config` an
 
 The server never stores developer JWTs, user signatures, transaction bytes, or private keys.
 
+## Studio Promotion Pages
+
+`stelis_list_promotions` returns one deterministic page of active Promotions. It accepts an
+optional `limit` from 1 through 100 and an optional canonical lowercase UUID-v4 `cursor`, such as
+`00000000-0000-4000-8000-000000000001`. A non-null response `nextCursor` is the exclusive cursor
+for the next call; `nextCursor: null` means the final page has been reached. The developer JWT
+remains request-local and is sent only in the Host authorization header.
+
 ## Generic Tool Flow
 
 1. Call `stelis_get_relay_api_config` and choose a `settlementTokenType` from `supportedSettlementSwapPaths`.

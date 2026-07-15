@@ -897,7 +897,7 @@ export class StelisSDK {
    * const sdk = await StelisSDK.connect(endpoint, { studioEndpoint: true });
    * const result = await sdk.executePromotionSponsored(tx, {
    *   client: suiClient,
-   *   promotionId: 'promo_abc123',
+   *   promotionId: '00000000-0000-4000-8000-000000000001',
    *   signer: wallet.signTransaction,
    *   addr: userAddress,
    *   developerJwt: token,

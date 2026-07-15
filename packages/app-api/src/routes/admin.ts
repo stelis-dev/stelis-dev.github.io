@@ -23,7 +23,6 @@ import {
   ADMIN_WITHDRAWAL_ERROR_CODES,
   buildSponsorRefillAccountWithdrawMessage,
   HostWireParseError,
-  isPromotionStatus,
   parseAdminAuditLogsResponse,
   parseAdminBlocklistDeleteRequest,
   parseAdminBlocklistDeleteResponse,
@@ -31,6 +30,7 @@ import {
   parseAdminPromotionCreateRequest,
   parseAdminPromotionDeleteResponse,
   parseAdminPromotionDetailResponse,
+  parseAdminPromotionListQuery,
   parseAdminPromotionListResponse,
   parseAdminPromotionResponse,
   parseAdminPromotionStatusRequest,
@@ -673,15 +673,21 @@ export function createAdminRoutes(
           codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_LIST_ERROR_CODES),
         );
       }
-      const statusFilter = c.req.query('status');
-      if (statusFilter !== undefined && !isPromotionStatus(statusFilter)) {
-        return respondMapped(c, codedHostError('BAD_REQUEST', ADMIN_PROMOTION_LIST_ERROR_CODES));
-      }
-      const promotions = await ctx.promotionStore.list(
-        statusFilter ? { status: statusFilter } : undefined,
+      const { status, ...pageParams } = parseAdminRequest(
+        c.req.query(),
+        parseAdminPromotionListQuery,
       );
-      const enriched = promotions.map(withDerivedBudget);
-      return c.json(parseAdminPromotionListResponse({ promotions: enriched }));
+      const page = await ctx.promotionStore.listPage(
+        pageParams,
+        status === undefined ? undefined : { status },
+      );
+      const enriched = page.promotions.map(withDerivedBudget);
+      return c.json(
+        parseAdminPromotionListResponse({
+          promotions: enriched,
+          nextCursor: page.nextCursor,
+        }),
+      );
     } catch (err) {
       return respondAdminFailure(c, err, ADMIN_PROMOTION_LIST_ERROR_CODES);
     }

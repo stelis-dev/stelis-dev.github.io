@@ -40,5 +40,20 @@ describe('MCP stdio server', () => {
         'stelis_submit_signed_promotion_sponsored_transaction',
       ]),
     );
+
+    const listPromotions = result.tools.find((tool) => tool.name === 'stelis_list_promotions');
+    expect(listPromotions?.inputSchema).toMatchObject({
+      properties: {
+        cursor: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+    });
+
+    const invalidCursor = await client.callTool({
+      name: 'stelis_list_promotions',
+      arguments: { developerJwt: 'jwt', cursor: 'promotion-1' },
+    });
+    expect(invalidCursor.isError).toBe(true);
+    expect(JSON.stringify(invalidCursor.content)).toContain('canonical lowercase UUID-v4');
   });
 });

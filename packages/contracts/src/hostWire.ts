@@ -29,7 +29,11 @@ import {
 
 const DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
 const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
+const PROMOTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const U64_MAX = (1n << 64n) - 1n;
+
+const PROMOTION_PAGE_DEFAULT_LIMIT = 50;
+export const PROMOTION_PAGE_MAX_LIMIT = 100;
 
 export class HostWireParseError extends Error {
   constructor(message: string) {
@@ -134,6 +138,44 @@ const PROMOTION_ENTITLEMENT_STATUSES = ['active', 'exhausted', 'expired'] as con
 export type PromotionType = (typeof PROMOTION_TYPES)[number];
 export type PromotionStatus = (typeof PROMOTION_STATUSES)[number];
 
+/** Optional public query shared by every current Promotion-list boundary. */
+export interface PromotionPageQuery {
+  cursor?: string;
+  limit?: number;
+}
+
+/** Validated parameters consumed by Promotion page handlers and stores. */
+export interface PromotionPageParams {
+  cursor: string | null;
+  limit: number;
+}
+
+export interface AdminPromotionListQuery extends PromotionPageQuery {
+  status?: PromotionStatus;
+}
+
+export interface AdminPromotionListParams extends PromotionPageParams {
+  status?: PromotionStatus;
+}
+
+export function isPromotionId(value: unknown): value is string {
+  return typeof value === 'string' && PROMOTION_ID_RE.test(value);
+}
+
+export function parsePromotionId(value: unknown, label = 'promotionId'): string {
+  if (!isPromotionId(value)) {
+    throw new HostWireParseError(`${label} must be a canonical lowercase UUID-v4`);
+  }
+  return value;
+}
+
+/** Ascending ASCII order for canonical Promotion IDs. */
+export function comparePromotionIds(left: string, right: string): number {
+  const currentLeft = parsePromotionId(left, 'left promotionId');
+  const currentRight = parsePromotionId(right, 'right promotionId');
+  return currentLeft < currentRight ? -1 : currentLeft > currentRight ? 1 : 0;
+}
+
 export function isPromotionStatus(value: unknown): value is PromotionStatus {
   return typeof value === 'string' && (PROMOTION_STATUSES as readonly string[]).includes(value);
 }
@@ -154,6 +196,7 @@ export interface PromotionListItem {
 
 export interface PromotionListResponse {
   promotions: PromotionListItem[];
+  nextCursor: string | null;
 }
 
 export interface UserPromotionDetail {
@@ -300,6 +343,7 @@ export interface AdminPromotionRecord {
 
 export interface AdminPromotionListResponse {
   promotions: AdminPromotionRecord[];
+  nextCursor: string | null;
 }
 
 export interface AdminPromotionSummary {
@@ -528,6 +572,10 @@ function nonEmptyStringField(value: Record<string, unknown>, key: string, label:
   return field;
 }
 
+function promotionIdField(value: Record<string, unknown>, key: string, label: string): string {
+  return parsePromotionId(value[key], `${label}.${key}`);
+}
+
 function optionalStringField(
   value: Record<string, unknown>,
   key: string,
@@ -722,6 +770,54 @@ function positiveSafeIntegerField(
     throw new HostWireParseError(`${label}.${key} must be positive`);
   }
   return field;
+}
+
+function parsePromotionPageLimit(value: unknown, label: string): number {
+  if (value === undefined) return PROMOTION_PAGE_DEFAULT_LIMIT;
+
+  const limit =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^[1-9]\d*$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROMOTION_PAGE_MAX_LIMIT) {
+    throw new HostWireParseError(
+      `${label}.limit must be an integer from 1 through ${PROMOTION_PAGE_MAX_LIMIT}`,
+    );
+  }
+  return limit;
+}
+
+function parsePromotionPageFields(
+  raw: Record<string, unknown>,
+  label: string,
+): PromotionPageParams {
+  return {
+    cursor: raw.cursor === undefined ? null : parsePromotionId(raw.cursor, `${label}.cursor`),
+    limit: parsePromotionPageLimit(raw.limit, label),
+  };
+}
+
+/** Parse and normalize the exact current Promotion-page query. */
+export function parsePromotionPageQuery(value: unknown): PromotionPageParams {
+  const label = 'PromotionPageQuery';
+  const raw = record(value, label);
+  onlyKeys(raw, ['cursor', 'limit'], label);
+  return parsePromotionPageFields(raw, label);
+}
+
+/** Parse the Admin Promotion-list query without changing shared page semantics. */
+export function parseAdminPromotionListQuery(value: unknown): AdminPromotionListParams {
+  const label = 'AdminPromotionListQuery';
+  const raw = record(value, label);
+  onlyKeys(raw, ['cursor', 'limit', 'status'], label);
+  const page = parsePromotionPageFields(raw, label);
+  if (raw.status === undefined) return page;
+  if (!isPromotionStatus(raw.status)) {
+    throw new HostWireParseError(`${label}.status is not current`);
+  }
+  return { ...page, status: raw.status };
 }
 
 function bpsField(value: Record<string, unknown>, key: string, label: string): number {
@@ -1094,6 +1190,36 @@ function promotionUnavailableReasonField(
   return closedStringField(value, key, label, PROMOTION_UNAVAILABLE_REASONS);
 }
 
+function validatePromotionPage<Item>(
+  items: readonly Item[],
+  promotionIdOf: (item: Item) => string,
+  nextCursorValue: unknown,
+  label: string,
+): string | null {
+  if (items.length > PROMOTION_PAGE_MAX_LIMIT) {
+    throw new HostWireParseError(
+      `${label}.promotions must contain at most ${PROMOTION_PAGE_MAX_LIMIT} items`,
+    );
+  }
+  for (let index = 1; index < items.length; index += 1) {
+    if (comparePromotionIds(promotionIdOf(items[index - 1]!), promotionIdOf(items[index]!)) >= 0) {
+      throw new HostWireParseError(
+        `${label}.promotions must be in strictly ascending promotionId order`,
+      );
+    }
+  }
+
+  const nextCursor =
+    nextCursorValue === null ? null : parsePromotionId(nextCursorValue, `${label}.nextCursor`);
+  if (
+    nextCursor !== null &&
+    (items.length === 0 || nextCursor !== promotionIdOf(items[items.length - 1]!))
+  ) {
+    throw new HostWireParseError(`${label}.nextCursor must equal the final returned promotionId`);
+  }
+  return nextCursor;
+}
+
 function parsePromotionListItem(value: unknown, index: number): PromotionListItem {
   const label = `PromotionListResponse.promotions[${index}]`;
   const raw = record(value, label);
@@ -1118,7 +1244,7 @@ function parsePromotionListItem(value: unknown, index: number): PromotionListIte
     throw new HostWireParseError(`${label}.remainingParticipantSlots must be non-negative`);
   }
   return {
-    promotionId: stringField(raw, 'promotionId', label),
+    promotionId: promotionIdField(raw, 'promotionId', label),
     displayName: stringField(raw, 'displayName', label),
     type: closedStringField(raw, 'type', label, PROMOTION_TYPES),
     status: closedStringField(raw, 'status', label, PROMOTION_STATUSES),
@@ -1138,12 +1264,19 @@ function parsePromotionListItem(value: unknown, index: number): PromotionListIte
 export function parsePromotionListResponse(value: unknown): PromotionListResponse {
   const label = 'PromotionListResponse';
   const raw = record(value, label);
-  onlyKeys(raw, ['promotions'], label);
+  onlyKeys(raw, ['promotions', 'nextCursor'], label);
   if (!Array.isArray(raw.promotions)) {
     throw new HostWireParseError(`${label}.promotions must be an array`);
   }
+  const promotions = raw.promotions.map((item, index) => parsePromotionListItem(item, index));
   return {
-    promotions: raw.promotions.map((item, index) => parsePromotionListItem(item, index)),
+    promotions,
+    nextCursor: validatePromotionPage(
+      promotions,
+      (promotion) => promotion.promotionId,
+      raw.nextCursor,
+      label,
+    ),
   };
 }
 
@@ -1477,7 +1610,7 @@ function parseAdminPromotionRecord(value: unknown, label: string): AdminPromotio
     );
   }
   return {
-    promotionId: nonEmptyStringField(raw, 'promotionId', label),
+    promotionId: promotionIdField(raw, 'promotionId', label),
     type: closedStringField(raw, 'type', label, PROMOTION_TYPES),
     displayName: nonEmptyStringField(raw, 'displayName', label),
     description: stringField(raw, 'description', label),
@@ -1498,13 +1631,20 @@ function parseAdminPromotionRecord(value: unknown, label: string): AdminPromotio
 export function parseAdminPromotionListResponse(value: unknown): AdminPromotionListResponse {
   const label = 'AdminPromotionListResponse';
   const raw = record(value, label);
-  onlyKeys(raw, ['promotions'], label);
+  onlyKeys(raw, ['promotions', 'nextCursor'], label);
   if (!Array.isArray(raw.promotions)) {
     throw new HostWireParseError(`${label}.promotions must be an array`);
   }
+  const promotions = raw.promotions.map((promotion, index) =>
+    parseAdminPromotionRecord(promotion, `${label}.promotions[${index}]`),
+  );
   return {
-    promotions: raw.promotions.map((promotion, index) =>
-      parseAdminPromotionRecord(promotion, `${label}.promotions[${index}]`),
+    promotions,
+    nextCursor: validatePromotionPage(
+      promotions,
+      (promotion) => promotion.promotionId,
+      raw.nextCursor,
+      label,
     ),
   };
 }

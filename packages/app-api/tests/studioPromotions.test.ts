@@ -123,6 +123,7 @@ describe('studio promotion routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.promotions).toEqual([]);
+      expect(body.nextCursor).toBeNull();
     });
 
     it('returns active promotions with user state', async () => {
@@ -142,6 +143,65 @@ describe('studio promotion routes', () => {
       expect(body.promotions[0].promotionRemainingBudgetMist).toBeTruthy();
 
       expect(parsePromotionListResponse(body)).toEqual(body);
+    });
+
+    it('reads page ledger state through one aligned bounded batch', async () => {
+      const record = await ctx.promotionStore!.create(BASE_PROMO);
+      await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      const batch = vi.spyOn(ctx.executionLedger!, 'getPromotionListLedgerStatuses');
+      const entitlement = vi.spyOn(ctx.executionLedger!, 'getEntitlement');
+      const claimedCount = vi.spyOn(ctx.executionLedger!, 'getClaimedCount');
+      const budgetSummary = vi.spyOn(ctx.executionLedger!, 'getBudgetSummary');
+
+      const res = await app.request('/studio/promotions', {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(batch).toHaveBeenCalledTimes(1);
+      expect(batch).toHaveBeenCalledWith([record.promotionId], 'user-1');
+      expect(entitlement).not.toHaveBeenCalled();
+      expect(claimedCount).not.toHaveBeenCalled();
+      expect(budgetSummary).not.toHaveBeenCalled();
+    });
+
+    it('returns a deterministic cursor for the next active page', async () => {
+      for (const displayName of ['First', 'Second']) {
+        const record = await ctx.promotionStore!.create({ ...BASE_PROMO, displayName });
+        await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      }
+
+      const firstRes = await app.request('/studio/promotions?limit=1', {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+      expect(firstRes.status).toBe(200);
+      const first = await firstRes.json();
+      expect(first.promotions).toHaveLength(1);
+      expect(first.nextCursor).toBe(first.promotions[0].promotionId);
+
+      const secondRes = await app.request(`/studio/promotions?limit=1&cursor=${first.nextCursor}`, {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+      expect(secondRes.status).toBe(200);
+      const second = await secondRes.json();
+      expect(second.promotions).toHaveLength(1);
+      expect(second.promotions[0].promotionId).not.toBe(first.promotions[0].promotionId);
+      expect(second.nextCursor).toBeNull();
+    });
+
+    it.each([
+      '/studio/promotions?cursor=not-a-promotion-id',
+      '/studio/promotions?limit=0',
+      '/studio/promotions?limit=101',
+      '/studio/promotions?limit=1.5',
+      '/studio/promotions?offset=1',
+    ])('returns BAD_REQUEST for an invalid page query: %s', async (url) => {
+      const res = await app.request(url, {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'BAD_REQUEST' });
     });
 
     it('checks block state and rate-limit keys on successful list', async () => {

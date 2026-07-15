@@ -17,12 +17,14 @@ import type {
   PromotionPrepareResponse,
   PromotionSponsorRequest,
   PromotionSponsorResponse,
+  PromotionPageQuery,
   PromotionListResponse,
   PromotionDetailResponse,
 } from './types.js';
 import {
   parsePromotionPrepareResponse,
   parsePromotionSponsorResponse,
+  parsePromotionPageQuery,
   parsePromotionListResponse,
   parsePromotionDetailResponse,
   parseRelayConfigResponse,
@@ -186,10 +188,19 @@ export class StelisClient {
   // Promotion discovery (GET /studio/promotions, developer JWT)
   // ─────────────────────────────────────────
 
-  async listPromotions(developerJwt: string): Promise<PromotionListResponse> {
+  async listPromotions(
+    developerJwt: string,
+    query: PromotionPageQuery = {},
+  ): Promise<PromotionListResponse> {
+    const page = parsePromotionPageQuery(query);
+    const search = new URLSearchParams();
+    if (page.cursor !== null) search.set('cursor', page.cursor);
+    if (query.limit !== undefined) search.set('limit', String(page.limit));
+    const serializedQuery = search.toString();
+    const suffix = serializedQuery === '' ? '' : `?${serializedQuery}`;
     return parsePromotionListResponse(
       await this.studioGet(
-        '/studio/promotions',
+        `/studio/promotions${suffix}`,
         {
           Authorization: `Bearer ${developerJwt}`,
         },

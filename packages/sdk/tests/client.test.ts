@@ -7,6 +7,7 @@ import { makeRelayPrepareRequest } from './helpers/currentFixtures.js';
 // Mock global fetch
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
 
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -101,7 +102,7 @@ describe('StelisClient', () => {
         .mockResolvedValueOnce(
           jsonResponse({ digest: '0x1', effects: {}, executionCostClaim: '1' }),
         ) // sponsor
-        .mockResolvedValueOnce(jsonResponse({ promotions: [] })) // listPromotions
+        .mockResolvedValueOnce(jsonResponse({ promotions: [], nextCursor: null })) // listPromotions
         .mockResolvedValueOnce(
           jsonResponse({ txBytes: 'b64', receiptId: 'r1', estimatedGasMist: '1000' }),
         ); // promotionPrepare
@@ -811,7 +812,7 @@ describe('StelisClient', () => {
       const listData = {
         promotions: [
           {
-            promotionId: 'p1',
+            promotionId: PROMOTION_ID,
             displayName: 'Test Promo',
             type: 'gas_sponsorship',
             status: 'active',
@@ -823,13 +824,14 @@ describe('StelisClient', () => {
             unavailableReason: 'not_claimed',
           },
         ],
+        nextCursor: null,
       };
       mockFetch.mockResolvedValueOnce(jsonResponse(listData));
 
       const result = await client.listPromotions('dev-jwt-token');
 
       expect(result.promotions).toHaveLength(1);
-      expect(result.promotions[0].promotionId).toBe('p1');
+      expect(result.promotions[0].promotionId).toBe(PROMOTION_ID);
 
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toBe('http://localhost:3000/studio/promotions');
@@ -837,12 +839,29 @@ describe('StelisClient', () => {
       expect(init.headers['Authorization']).toBe('Bearer dev-jwt-token');
     });
 
+    it('serializes only explicitly supplied page fields', async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ promotions: [], nextCursor: null }));
+
+      await client.listPromotions('dev-jwt-token', {
+        limit: 1,
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toBe('http://localhost:3000/studio/promotions?limit=1');
+    });
+
+    it('rejects an invalid page query before making a request', async () => {
+      await expect(client.listPromotions('dev-jwt-token', { limit: 101 })).rejects.toThrow(
+        /integer from 1 through 100/,
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('rejects a non-current promotion list success body', async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({
           promotions: [
             {
-              promotionId: 'p1',
+              promotionId: PROMOTION_ID,
               displayName: 'Test Promo',
               type: 'legacy_kind',
               status: 'active',
@@ -854,6 +873,7 @@ describe('StelisClient', () => {
               unavailableReason: 'not_claimed',
             },
           ],
+          nextCursor: null,
         }),
       );
 
@@ -934,20 +954,23 @@ describe('Standalone promotion helpers', () => {
 
   it('listAvailablePromotions creates client and calls listPromotions', async () => {
     const { listAvailablePromotions } = await import('../src/index.js');
-    mockFetch.mockResolvedValueOnce(jsonResponse({ promotions: [] }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ promotions: [], nextCursor: null }));
 
-    const result = await listAvailablePromotions('http://localhost:3200', 'dev-jwt');
+    const result = await listAvailablePromotions('http://localhost:3200', 'dev-jwt', {
+      cursor: PROMOTION_ID,
+      limit: 1,
+    });
 
     expect(result.promotions).toEqual([]);
 
     const [url, init] = mockFetch.mock.calls[0];
-    expect(url).toBe('http://localhost:3200/studio/promotions');
+    expect(url).toBe(`http://localhost:3200/studio/promotions?cursor=${PROMOTION_ID}&limit=1`);
     expect(init.headers['Authorization']).toBe('Bearer dev-jwt');
   });
 
   it('listAvailablePromotions strips /relay suffix from baseUrl', async () => {
     const { listAvailablePromotions } = await import('../src/index.js');
-    mockFetch.mockResolvedValueOnce(jsonResponse({ promotions: [] }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ promotions: [], nextCursor: null }));
 
     await listAvailablePromotions('http://localhost:3200/relay', 'u');
 

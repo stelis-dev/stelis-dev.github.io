@@ -4,16 +4,62 @@ import {
   HOST_ERROR_META_POLICY,
   hostErrorPublicMessage,
   PAYMENT_INPUT_INTEGRITY_SUBCODES,
+  PROMOTION_PAGE_MAX_LIMIT,
   RELAY_PREPARE_ERROR_CODES,
   RELAY_SPONSOR_ERROR_CODES,
   SPONSOR_FAILURE_SUBCODES,
+  parseAdminPromotionListQuery,
+  parseAdminPromotionListResponse,
   parseAdminSponsoredLogsQuery,
   parseAdminSponsoredLogsResponse,
   parseHostErrorResponse,
+  parsePromotionListResponse,
+  parsePromotionPageQuery,
   type HostErrorCode,
 } from '@stelis/contracts';
 
 const ALL_HOST_ERROR_CODES = Object.keys(HOST_ERROR_HTTP_STATUS) as HostErrorCode[];
+const PROMOTION_ID_1 = '00000000-0000-4000-8000-000000000001';
+const PROMOTION_ID_2 = '00000000-0000-4000-8000-000000000002';
+
+function promotionId(index: number): string {
+  return `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+}
+
+function promotionListItem(currentPromotionId: string) {
+  return {
+    promotionId: currentPromotionId,
+    displayName: `Promotion ${currentPromotionId}`,
+    type: 'gas_sponsorship',
+    status: 'active',
+    canClaim: true,
+    canUseSponsoredAction: false,
+    promotionRemainingBudgetMist: '1',
+    remainingParticipantSlots: 1,
+    userRemainingGasAllowanceMist: null,
+    unavailableReason: null,
+  };
+}
+
+function adminPromotionRecord(currentPromotionId: string) {
+  return {
+    promotionId: currentPromotionId,
+    type: 'gas_sponsorship',
+    displayName: `Promotion ${currentPromotionId}`,
+    description: '',
+    status: 'active',
+    maxParticipants: 1,
+    perUserGasAllowanceMist: '1',
+    totalRequiredBudgetMist: '1',
+    claimDeadlineAt: null,
+    postClaimUseWindowMs: 0,
+    startAt: null,
+    pauseReason: null,
+    archiveReason: null,
+    createdAt: '2026-07-15T00:00:00.000Z',
+    updatedAt: '2026-07-15T00:00:00.000Z',
+  };
+}
 
 function currentSponsoredLogsResponse() {
   return {
@@ -52,6 +98,89 @@ function currentSponsoredLogsResponse() {
 }
 
 describe('contracts-owned Host wire authority', () => {
+  test('owns one normalized Promotion-page query and its exact boundaries', () => {
+    expect(parsePromotionPageQuery({})).toEqual({
+      cursor: null,
+      limit: 50,
+    });
+    expect(parsePromotionPageQuery({ cursor: PROMOTION_ID_1, limit: 1 })).toEqual({
+      cursor: PROMOTION_ID_1,
+      limit: 1,
+    });
+    expect(parsePromotionPageQuery({ limit: String(PROMOTION_PAGE_MAX_LIMIT) })).toEqual({
+      cursor: null,
+      limit: PROMOTION_PAGE_MAX_LIMIT,
+    });
+    expect(parseAdminPromotionListQuery({ status: 'active', cursor: PROMOTION_ID_1 })).toEqual({
+      cursor: PROMOTION_ID_1,
+      limit: 50,
+      status: 'active',
+    });
+
+    for (const limit of [0, 101, 1.5, '01', '1e2']) {
+      expect(() => parsePromotionPageQuery({ limit })).toThrow(/integer from 1 through 100/);
+    }
+    for (const cursor of [
+      '00000000-0000-3000-8000-000000000001',
+      '00000000-0000-4000-7000-000000000001',
+      '00000000-0000-4000-8000-00000000000A',
+      '',
+    ]) {
+      expect(() => parsePromotionPageQuery({ cursor })).toThrow(/canonical lowercase UUID-v4/);
+    }
+    expect(() => parseAdminPromotionListQuery({ status: '' })).toThrow(/status is not current/);
+  });
+
+  test('binds Studio pages to canonical ascending IDs and the final-item cursor', () => {
+    const first = promotionListItem(PROMOTION_ID_1);
+    const second = promotionListItem(PROMOTION_ID_2);
+    expect(
+      parsePromotionListResponse({ promotions: [first, second], nextCursor: PROMOTION_ID_2 }),
+    ).toEqual({ promotions: [first, second], nextCursor: PROMOTION_ID_2 });
+    expect(parsePromotionListResponse({ promotions: [first], nextCursor: null })).toEqual({
+      promotions: [first],
+      nextCursor: null,
+    });
+
+    expect(() =>
+      parsePromotionListResponse({ promotions: [second, first], nextCursor: null }),
+    ).toThrow(/strictly ascending/);
+    expect(() =>
+      parsePromotionListResponse({ promotions: [first, first], nextCursor: null }),
+    ).toThrow(/strictly ascending/);
+    expect(() =>
+      parsePromotionListResponse({ promotions: [first, second], nextCursor: PROMOTION_ID_1 }),
+    ).toThrow(/final returned promotionId/);
+    expect(() =>
+      parsePromotionListResponse({
+        promotions: [promotionListItem('00000000-0000-4000-8000-00000000000A')],
+        nextCursor: null,
+      }),
+    ).toThrow(/canonical lowercase UUID-v4/);
+    expect(() =>
+      parsePromotionListResponse({
+        promotions: Array.from({ length: PROMOTION_PAGE_MAX_LIMIT + 1 }, (_, index) =>
+          promotionListItem(promotionId(index)),
+        ),
+        nextCursor: null,
+      }),
+    ).toThrow(/at most 100 items/);
+  });
+
+  test('keeps Admin page items distinct while enforcing the same cursor contract', () => {
+    const first = adminPromotionRecord(PROMOTION_ID_1);
+    const second = adminPromotionRecord(PROMOTION_ID_2);
+    expect(
+      parseAdminPromotionListResponse({
+        promotions: [first, second],
+        nextCursor: PROMOTION_ID_2,
+      }),
+    ).toEqual({ promotions: [first, second], nextCursor: PROMOTION_ID_2 });
+    expect(() =>
+      parseAdminPromotionListResponse({ promotions: [first], nextCursor: PROMOTION_ID_2 }),
+    ).toThrow(/final returned promotionId/);
+  });
+
   test('owns the sponsored-log query defaults and bounds', () => {
     expect(parseAdminSponsoredLogsQuery({})).toEqual({ mode: 'all', limit: 50 });
     expect(parseAdminSponsoredLogsQuery({ mode: 'promotion', limit: '200' })).toEqual({

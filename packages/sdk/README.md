@@ -342,7 +342,7 @@ const result = await sdk.executePromotionSponsored(tx, {
   client: suiClient,
   signer: wallet.signTransaction,
   addr: userAddress,
-  promotionId: 'promo_abc',
+  promotionId: '00000000-0000-4000-8000-000000000001',
   developerJwt: 'eyJ...',  // issued by your developer backend
 });
 console.log(result.digest);
@@ -356,7 +356,7 @@ For advanced 2-step control:
 //   verifies the server did not modify your user commands)
 const prepared = await sdk.preparePromotionSponsored(tx, {
   client: suiClient,
-  promotionId: 'promo_abc',
+  promotionId: '00000000-0000-4000-8000-000000000001',
   addr: userAddress,
   developerJwt: 'eyJ...',
 });
@@ -368,7 +368,7 @@ const signature = await wallet.signTransaction(prepared.txBytes);
 
 // Step 3: Sponsor
 const result = await sdk.sponsorPromotionSponsored({
-  promotionId: 'promo_abc',
+  promotionId: '00000000-0000-4000-8000-000000000001',
   receiptId: prepared.receiptId,
   txBytes: prepared.txBytes,
   userSignature: signature,
@@ -390,22 +390,32 @@ For server-side integration (not browser), use the standalone discovery helpers:
 ```typescript
 import { listAvailablePromotions, getPromotionUserState } from '@stelis/sdk';
 
-// List all promotions visible to a user
-const { promotions } = await listAvailablePromotions(
+// Read one bounded page of promotions visible to a user
+const firstPage = await listAvailablePromotions(
   'https://studio.myapp.dev',
   'developer-jwt-for-user-123',
+  { limit: 50 },
 );
+
+const secondPage = firstPage.nextCursor
+  ? await listAvailablePromotions('https://studio.myapp.dev', 'developer-jwt-for-user-123', {
+      cursor: firstPage.nextCursor,
+      limit: 50,
+    })
+  : null;
 
 // Get detailed promotion state for a specific user
 const detail = await getPromotionUserState(
   'https://studio.myapp.dev',
-  'promo_abc',
+  '00000000-0000-4000-8000-000000000001',
   'developer-jwt-for-user-123',
 );
 ```
 
 > These helpers use developer JWT authentication and do not require
-> a `StelisSDK` instance. They are designed for server-to-server flows.
+> a `StelisSDK` instance. Promotion pages contain at most 100 items, are ordered
+> by Promotion ID, and return `nextCursor: null` after the final page. A non-null
+> `nextCursor` is the exclusive cursor for the next request.
 
 ### Server Settlement Verification
 

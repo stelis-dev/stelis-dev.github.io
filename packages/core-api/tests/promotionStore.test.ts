@@ -5,20 +5,44 @@
  * Redis adapter follows the same interface and is tested separately with integration tests.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import type {
-  AdminPromotionCreateRequest,
-  AdminPromotionUpdateRequest,
-} from '@stelis/contracts';
+import type { AdminPromotionCreateRequest, AdminPromotionUpdateRequest } from '@stelis/contracts';
 import {
   MemoryPromotionStore,
   InvalidStatusTransitionError,
   PromotionCurrentConflictError,
   PromotionFieldImmutableError,
   isValidTransition,
+  type PromotionStoreAdapter,
+  type PromotionStoreFilter,
 } from '../src/studio/promotionStore.js';
 import { PromotionLedgerValueError } from '../src/studio/executionLedgerValueGuards.js';
 import { computeTotalRequiredBudgetMist } from '../src/studio/domain.js';
 import type { PromotionStatus } from '../src/studio/domain.js';
+
+const PAGE_ALL = { cursor: null, limit: 100 } as const;
+const ID_A = '00000000-0000-4000-8000-000000000001';
+const ID_B = '00000000-0000-4000-8000-000000000002';
+const ID_C = '00000000-0000-4000-8000-000000000003';
+const ID_D = '00000000-0000-4000-8000-000000000004';
+
+async function listRecords(store: PromotionStoreAdapter, filter?: PromotionStoreFilter) {
+  return (await store.listPage(PAGE_ALL, filter)).promotions;
+}
+
+class SequenceMemoryPromotionStore extends MemoryPromotionStore {
+  private _nextId = 0;
+
+  constructor(private readonly _ids: readonly string[]) {
+    super();
+  }
+
+  protected override generateId(): string {
+    const promotionId = this._ids[this._nextId++];
+    if (promotionId === undefined)
+      throw new Error('SequenceMemoryPromotionStore ID list exhausted');
+    return promotionId;
+  }
+}
 
 // ── Fixtures ────────────────────────────────────────────────────────────
 
@@ -53,7 +77,7 @@ describe('MemoryPromotionStore', () => {
     it('creates a promotion with auto-generated id and draft status', async () => {
       const record = await store.create(makeInput());
 
-      expect(record.promotionId).toMatch(/^promo-test-/);
+      expect(record.promotionId).toBe(ID_A);
       expect(record.status).toBe('draft');
       expect(record.type).toBe('gas_sponsorship');
       expect(record.displayName).toBe('Test Promo');
@@ -80,19 +104,19 @@ describe('MemoryPromotionStore', () => {
           }),
         ),
       ).rejects.toThrow(PromotionLedgerValueError);
-      await expect(store.list()).resolves.toEqual([]);
+      await expect(listRecords(store)).resolves.toEqual([]);
     });
 
     it('rejects zero allowance before creating a draft', async () => {
-      await expect(
-        store.create(makeInput({ perUserGasAllowanceMist: '0' })),
-      ).rejects.toThrow(/canonical positive u64 decimal string/);
+      await expect(store.create(makeInput({ perUserGasAllowanceMist: '0' }))).rejects.toThrow(
+        /canonical positive u64 decimal string/,
+      );
     });
 
     it('rejects a generated-ID collision without overwriting the current record', async () => {
       class FixedIdMemoryPromotionStore extends MemoryPromotionStore {
         protected override generateId(): string {
-          return 'promo-fixed-id';
+          return ID_A;
         }
       }
 
@@ -152,16 +176,16 @@ describe('MemoryPromotionStore', () => {
 
   // ── list ───────────────────────────────────────────────────────
 
-  describe('list', () => {
+  describe('listPage', () => {
     it('returns empty array when empty', async () => {
-      const result = await store.list();
-      expect(result).toEqual([]);
+      const result = await store.listPage(PAGE_ALL);
+      expect(result).toEqual({ promotions: [], nextCursor: null });
     });
 
-    it('returns all promotions', async () => {
+    it('returns one bounded page of promotions', async () => {
       await store.create(makeInput({ displayName: 'A' }));
       await store.create(makeInput({ displayName: 'B' }));
-      const result = await store.list();
+      const result = await listRecords(store);
       expect(result).toHaveLength(2);
     });
 
@@ -170,18 +194,18 @@ describe('MemoryPromotionStore', () => {
       await store.create(makeInput({ displayName: 'Also Draft' }));
       await store.transitionStatus(draft.promotionId, 'active');
 
-      const drafts = await store.list({ status: 'draft' });
+      const drafts = await listRecords(store, { status: 'draft' });
       expect(drafts).toHaveLength(1);
       expect(drafts[0].displayName).toBe('Also Draft');
 
-      const actives = await store.list({ status: 'active' });
+      const actives = await listRecords(store, { status: 'active' });
       expect(actives).toHaveLength(1);
       expect(actives[0].displayName).toBe('Draft');
     });
 
     it('does not expose stored records through list', async () => {
       const created = await store.create(makeInput());
-      const listed = await store.list();
+      const listed = await listRecords(store);
       expect(listed).toHaveLength(1);
 
       Reflect.set(listed[0], 'status', 'active');
@@ -191,7 +215,53 @@ describe('MemoryPromotionStore', () => {
         status: 'draft',
         displayName: 'Test Promo',
       });
-      await expect(store.list({ status: 'active' })).resolves.toEqual([]);
+      await expect(listRecords(store, { status: 'active' })).resolves.toEqual([]);
+    });
+
+    it('orders non-insertion IDs by ascending ASCII and uses one-record lookahead', async () => {
+      const orderedStore = new SequenceMemoryPromotionStore([ID_C, ID_A, ID_D, ID_B]);
+      for (const displayName of ['C', 'A', 'D', 'B']) {
+        await orderedStore.create(makeInput({ displayName }));
+      }
+
+      const first = await orderedStore.listPage({ cursor: null, limit: 2 });
+      expect(first.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_A, ID_B]);
+      expect(first.nextCursor).toBe(ID_B);
+
+      const second = await orderedStore.listPage({ cursor: first.nextCursor, limit: 2 });
+      expect(second.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_C, ID_D]);
+      expect(second.nextCursor).toBeNull();
+    });
+
+    it('continues strictly after a cursor that was deleted', async () => {
+      const orderedStore = new SequenceMemoryPromotionStore([ID_A, ID_B, ID_C]);
+      await orderedStore.create(makeInput({ displayName: 'A' }));
+      await orderedStore.create(makeInput({ displayName: 'B' }));
+      await orderedStore.create(makeInput({ displayName: 'C' }));
+
+      const first = await orderedStore.listPage({ cursor: null, limit: 1 });
+      expect(first.nextCursor).toBe(ID_A);
+      await expect(orderedStore.delete(ID_A)).resolves.toEqual({ status: 'deleted' });
+
+      const second = await orderedStore.listPage({ cursor: ID_A, limit: 1 });
+      expect(second.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_B]);
+      expect(second.nextCursor).toBe(ID_B);
+    });
+
+    it('continues after an active cursor moves to another status index', async () => {
+      const orderedStore = new SequenceMemoryPromotionStore([ID_A, ID_B, ID_C]);
+      for (const displayName of ['A', 'B', 'C']) {
+        const record = await orderedStore.create(makeInput({ displayName }));
+        await orderedStore.transitionStatus(record.promotionId, 'active');
+      }
+
+      const first = await orderedStore.listPage({ cursor: null, limit: 1 }, { status: 'active' });
+      expect(first.nextCursor).toBe(ID_A);
+      await orderedStore.transitionStatus(ID_A, 'paused');
+
+      const second = await orderedStore.listPage({ cursor: ID_A, limit: 1 }, { status: 'active' });
+      expect(second.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_B]);
+      expect(second.nextCursor).toBe(ID_B);
     });
   });
 
@@ -421,7 +491,6 @@ describe('MemoryPromotionStore', () => {
         InvalidStatusTransitionError,
       );
     });
-
   });
 
   // ── delete ────────────────────────────────────────────────────

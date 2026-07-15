@@ -195,13 +195,20 @@ Authorization: Bearer <developerJwt>
 
 Mounted routes:
 
-- `GET /studio/promotions`
+- `GET /studio/promotions?cursor=<promotionId>&limit=<1..100>`
 - `GET /studio/promotions/:id`
 - `POST /studio/promotions/:id/claim`
 - `POST /studio/promotions/:id/prepare`
 - `POST /studio/promotions/:id/sponsor`
 
 Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before consume.
+
+Promotion IDs and list cursors are canonical lowercase UUID-v4 strings. List
+queries default to 50 records and return at most 100. Results are ordered by
+ascending Promotion ID and the response is `{ promotions, nextCursor }`.
+`nextCursor` is the final returned ID only when another page exists; pass it as
+the next request's exclusive cursor. The cursor remains valid as a position
+even if that Promotion is later deleted or changes status.
 
 ## Auth Routes
 
@@ -236,7 +243,7 @@ Mounted admin routes:
 - `POST /api/sponsor-refill-account/withdraw`
 - `GET /api/settlement-swap-paths`
 - `GET /api/studio`
-- `GET /api/promotions`
+- `GET /api/promotions?status=<status>&cursor=<promotionId>&limit=<1..100>`
 - `POST /api/promotions`
 - `GET /api/promotions/:id`
 - `PUT /api/promotions/:id`
@@ -244,6 +251,9 @@ Mounted admin routes:
 - `DELETE /api/promotions/:id`
 - `GET /api/promotions/:id/users`
 - `GET /api/promotions/:id/summary`
+
+The Admin Promotion list uses the same bounded cursor contract as the Studio
+list. `status` is optional and accepts the current Promotion status values.
 
 ## MCP Boundary
 

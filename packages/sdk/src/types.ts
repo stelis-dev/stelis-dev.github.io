@@ -12,6 +12,7 @@ export type {
   RelaySponsorRequest,
   RelaySponsorResponse,
   PromotionUnavailableReason,
+  PromotionPageQuery,
   PromotionListItem,
   PromotionListResponse,
   UserPromotionDetail,

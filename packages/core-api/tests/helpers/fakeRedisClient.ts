@@ -662,26 +662,32 @@ export class FakeRedisClient implements RedisClientLike {
     // ── PromotionStore CREATE_LUA emulation ──
     if (
       script.includes("redis.call('EXISTS', KEYS[1])") &&
-      script.includes("redis.call('SADD', KEYS[2], ARGV[2])") &&
-      script.includes("redis.call('SADD', KEYS[3], ARGV[2])")
+      script.includes("redis.call('ZADD', KEYS[2], 0, ARGV[2])") &&
+      script.includes("redis.call('ZADD', KEYS[3], 0, ARGV[2])")
     ) {
       if ((await this.get(keys[0])) !== null) return 'CURRENT_CONFLICT';
+      if (keys.slice(1).some((key) => this._zscore(key, args[1]) !== null)) {
+        return 'INDEX_CONFLICT';
+      }
       await this.set(keys[0], args[0]);
-      this._sadd(keys[1], args[1]);
-      this._sadd(keys[2], args[1]);
+      this._zadd(keys[1], 0, args[1]);
+      this._zadd(keys[2], 0, args[1]);
       return 'OK';
     }
 
-    // ── PromotionStore LIST_LUA emulation ──
+    // ── PromotionStore PAGE_LUA emulation ──
     if (
-      script.includes("redis.call('SMEMBERS', KEYS[1])") &&
+      script.includes("redis.call('ZRANGEBYLEX', KEYS[1]") &&
       script.includes("redis.call('MGET', unpack(keys))")
     ) {
-      const ids = this._smembers(keys[0]);
-      if (ids.length === 0) return [];
-      const results: (string | null)[] = [];
+      const cursor = args[1] === '' ? null : args[1];
+      const count = Number(args[2]);
+      const ids = this._zrangeByLex(keys[0], cursor, count);
+      const results: string[] = ['OK'];
       for (const id of ids) {
-        results.push(await this.get(args[0] + id));
+        const raw = await this.get(args[0] + id);
+        if (raw === null) return ['INDEX_RECORD_MISSING', id];
+        results.push(id, raw);
       }
       return results;
     }
@@ -690,7 +696,7 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      !script.includes("redis.call('SREM', KEYS[2], ARGV[3])")
+      !script.includes("redis.call('ZREM', KEYS[2], ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
@@ -702,14 +708,21 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      script.includes("redis.call('SREM', KEYS[2], ARGV[3])") &&
-      script.includes("redis.call('SADD', KEYS[3], ARGV[3])")
+      script.includes("redis.call('ZREM', KEYS[2], ARGV[3])") &&
+      script.includes("redis.call('ZADD', KEYS[3], 0, ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
+      if (
+        this._zscore(keys[1], args[2]) !== 0 ||
+        this._zscore(keys[2], args[2]) !== null ||
+        this._zscore(keys[3], args[2]) !== 0
+      ) {
+        return 'INDEX_CONFLICT';
+      }
       await this.set(keys[0], args[1]);
-      this._srem(keys[1], args[2]);
-      this._sadd(keys[2], args[2]);
+      this._zrem(keys[1], args[2]);
+      this._zadd(keys[2], 0, args[2]);
       return 'OK';
     }
 
@@ -717,17 +730,29 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes("current.status ~= 'draft'") &&
       script.includes("redis.call('DEL', KEYS[1])") &&
-      script.includes("redis.call('SREM', KEYS[2], ARGV[2])") &&
-      script.includes("redis.call('SREM', KEYS[3], ARGV[2])")
+      script.includes("redis.call('ZREM', KEYS[2], ARGV[2])") &&
+      script.includes("redis.call('ZREM', KEYS[3], ARGV[2])")
     ) {
       const raw = await this.get(keys[0]);
-      if (raw === null) return args[0] === '' ? 'NOT_FOUND' : 'CURRENT_CONFLICT';
+      if (raw === null) {
+        if (args[0] !== '') return 'CURRENT_CONFLICT';
+        if (this._zscore(keys[1], args[1]) !== null || this._zscore(keys[2], args[1]) !== null) {
+          return 'INDEX_CONFLICT';
+        }
+        return 'NOT_FOUND';
+      }
       if (args[0] === '' || raw !== args[0]) return 'CURRENT_CONFLICT';
       const current = JSON.parse(raw) as { status?: string };
-      if (current.status !== 'draft') return 'NOT_DELETABLE';
+      const allScore = this._zscore(keys[1], args[1]);
+      const draftScore = this._zscore(keys[2], args[1]);
+      if (current.status !== 'draft') {
+        if (allScore !== 0 || draftScore !== null) return 'INDEX_CONFLICT';
+        return 'NOT_DELETABLE';
+      }
+      if (allScore !== 0 || draftScore !== 0) return 'INDEX_CONFLICT';
       await this.del(keys[0]);
-      this._srem(keys[1], args[1]);
-      this._srem(keys[2], args[1]);
+      this._zrem(keys[1], args[1]);
+      this._zrem(keys[2], args[1]);
       return 'OK';
     }
 
@@ -750,6 +775,7 @@ export class FakeRedisClient implements RedisClientLike {
 
   async quit(): Promise<void> {
     this._store.clear();
+    this._zsets.clear();
   }
 
   async scan(pattern: string, _count?: number): Promise<string[]> {
@@ -783,32 +809,42 @@ export class FakeRedisClient implements RedisClientLike {
     }
   }
 
-  // ── Redis SET data structure emulation ──────────────────────────────
+  // ── Redis sorted-set data structure emulation ─────────────────────
 
-  private readonly _sets = new Map<string, Set<string>>();
+  private readonly _zsets = new Map<string, Map<string, number>>();
 
-  /** SADD equivalent — add member to a set. */
-  private _sadd(key: string, member: string): void {
-    let s = this._sets.get(key);
-    if (!s) {
-      s = new Set<string>();
-      this._sets.set(key, s);
+  /** ZADD equivalent used by PromotionStore's same-score lex indexes. */
+  private _zadd(key: string, score: number, member: string): void {
+    let zset = this._zsets.get(key);
+    if (!zset) {
+      zset = new Map<string, number>();
+      this._zsets.set(key, zset);
     }
-    s.add(member);
+    zset.set(member, score);
   }
 
-  /** SMEMBERS equivalent — return all members of a set. */
-  private _smembers(key: string): string[] {
-    const s = this._sets.get(key);
-    return s ? Array.from(s) : [];
+  private _zscore(key: string, member: string): number | null {
+    return this._zsets.get(key)?.get(member) ?? null;
   }
 
-  /** SREM equivalent — remove member from a set. */
-  private _srem(key: string, member: string): void {
-    const s = this._sets.get(key);
-    if (s) {
-      s.delete(member);
-      if (s.size === 0) this._sets.delete(key);
+  /** Bounded exclusive ZRANGEBYLEX for equal-score members. */
+  private _zrangeByLex(key: string, cursor: string | null, count: number): string[] {
+    const zset = this._zsets.get(key);
+    if (!zset) return [];
+    return Array.from(zset.entries())
+      .filter(([, score]) => score === 0)
+      .map(([member]) => member)
+      .sort()
+      .filter((member) => cursor === null || member > cursor)
+      .slice(0, count);
+  }
+
+  /** ZREM equivalent. */
+  private _zrem(key: string, member: string): void {
+    const zset = this._zsets.get(key);
+    if (zset) {
+      zset.delete(member);
+      if (zset.size === 0) this._zsets.delete(key);
     }
   }
 

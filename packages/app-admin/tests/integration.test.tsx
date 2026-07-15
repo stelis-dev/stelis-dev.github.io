@@ -1096,8 +1096,10 @@ describe('SecurityPage integration', () => {
 });
 
 describe('PromotionsPage integration', () => {
+  const CURRENT_PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+  const CONFLICT_PROMOTION_ID = '00000000-0000-4000-8000-000000000002';
   const promotionRecord = {
-    promotionId: 'promo-current',
+    promotionId: CURRENT_PROMOTION_ID,
     type: 'gas_sponsorship',
     displayName: 'Current Promotion',
     description: 'Current description',
@@ -1123,7 +1125,7 @@ describe('PromotionsPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/promotions': { promotions: [] },
+        '/api/promotions': { promotions: [], nextCursor: null },
       }),
     );
 
@@ -1143,10 +1145,63 @@ describe('PromotionsPage integration', () => {
     expect(maxParticipantsInput.min).toBe('1');
   });
 
+  it('uses the returned exclusive cursor for next and previous pages', async () => {
+    const secondPromotionId = '00000000-0000-4000-8000-000000000003';
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
+        if (url === '/api/promotions') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({ promotions: [promotionRecord], nextCursor: CURRENT_PROMOTION_ID }),
+          });
+        }
+        if (url === `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                promotions: [
+                  {
+                    ...promotionRecord,
+                    promotionId: secondPromotionId,
+                    displayName: 'Second Promotion',
+                  },
+                ],
+                nextCursor: null,
+              }),
+          });
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    const { PromotionsPage } = await import('../src/pages/PromotionsPage');
+    render(<DirectOutletProvider element={<PromotionsPage />} />);
+    await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByText('Second Promotion')).toBeDefined());
+    expect(screen.getByText('Page 2')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
+    expect(requestedUrls).toEqual([
+      '/api/promotions',
+      `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`,
+      '/api/promotions',
+    ]);
+  });
+
   it('reloads the current promotion and closes stale edits after current conflicts', async () => {
     const original = {
       ...promotionRecord,
-      promotionId: 'promo-conflict',
+      promotionId: CONFLICT_PROMOTION_ID,
       displayName: 'Original Promotion',
       description: 'Before concurrent update',
     };
@@ -1182,10 +1237,11 @@ describe('PromotionsPage integration', () => {
                         updatedAt: '2026-01-01T00:00:01.000Z',
                       },
                 ],
+                nextCursor: null,
               }),
           });
         }
-        if (url === '/api/promotions/promo-conflict' && method === 'PUT') {
+        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}` && method === 'PUT') {
           updateWrites += 1;
           return updateConflictGate.then(() => ({
             ok: false,
@@ -1197,7 +1253,7 @@ describe('PromotionsPage integration', () => {
               }),
           }));
         }
-        if (url === '/api/promotions/promo-conflict/status' && method === 'POST') {
+        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}/status` && method === 'POST') {
           statusWrites += 1;
           return statusConflictGate.then(() => ({
             ok: false,
@@ -1254,13 +1310,13 @@ describe('PromotionsPage integration', () => {
       label: 'activation',
       action: 'Activate',
       method: 'POST',
-      path: '/api/promotions/promo-current/status',
+      path: `/api/promotions/${CURRENT_PROMOTION_ID}/status`,
     },
     {
       label: 'deletion',
       action: 'Delete',
       method: 'DELETE',
-      path: '/api/promotions/promo-current',
+      path: `/api/promotions/${CURRENT_PROMOTION_ID}`,
     },
   ])('closes the same-record editor after successful $label', async (testCase) => {
     let listReads = 0;
@@ -1285,7 +1341,7 @@ describe('PromotionsPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ promotions }),
+            json: () => Promise.resolve({ promotions, nextCursor: null }),
           });
         }
         if (url === testCase.path && method === testCase.method) {

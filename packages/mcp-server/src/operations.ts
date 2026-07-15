@@ -4,6 +4,7 @@ import {
   parsePromotionClaimResponse,
   parsePromotionDetailResponse,
   parsePromotionListResponse,
+  parsePromotionPageQuery,
   parsePromotionPrepareResponse,
   parsePromotionSponsorResponse,
   parseRelayConfigResponse,
@@ -18,6 +19,7 @@ import {
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
   type PromotionPrepareRequest,
+  type PromotionPageQuery,
   type PromotionSponsorRequest,
   type RelayPrepareRequest,
   type RelaySponsorRequest,
@@ -76,14 +78,23 @@ export async function submitSponsoredTransaction(
 
 export async function listPromotions(
   config: StelisMcpServerConfig,
-  input: RelayApiScopedInput & { developerJwt: string },
+  input: RelayApiScopedInput & { developerJwt: string } & PromotionPageQuery,
 ): Promise<ReturnType<typeof parsePromotionListResponse>> {
+  const query: PromotionPageQuery = {
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+  };
+  const page = parsePromotionPageQuery(query);
+  const search = new URLSearchParams();
+  if (page.cursor !== null) search.set('cursor', page.cursor);
+  if (query.limit !== undefined) search.set('limit', String(page.limit));
+  const serializedQuery = search.toString();
   return parsePromotionListResponse(
     await requestJson(config, {
       relayApiUrl: input.relayApiUrl,
       timeoutMs: input.timeoutMs,
       base: 'studio',
-      path: '/studio/promotions',
+      path: `/studio/promotions${serializedQuery === '' ? '' : `?${serializedQuery}`}`,
       allowedErrorCodes: STUDIO_LIST_ERROR_CODES,
       headers: bearerHeader(input.developerJwt),
     }),

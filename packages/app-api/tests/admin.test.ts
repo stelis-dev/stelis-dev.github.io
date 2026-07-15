@@ -1007,29 +1007,86 @@ describe('admin routes', () => {
       it('GET /api/promotions returns empty list', async () => {
         const res = await app.request('/api/promotions');
         expect(res.status).toBe(200);
-        const body = (await res.json()) as { promotions: unknown[] };
+        const body = (await res.json()) as { promotions: unknown[]; nextCursor: string | null };
         expect(body.promotions).toEqual([]);
+        expect(body.nextCursor).toBeNull();
+      });
+
+      it('GET /api/promotions forwards the shared page params and optional status', async () => {
+        const cursor = '00000000-0000-4000-8000-000000000001';
+        const listPage = vi.spyOn(mockCtx.promotionStore!, 'listPage');
+
+        const res = await app.request(`/api/promotions?cursor=${cursor}&limit=7&status=active`);
+
+        expect(res.status).toBe(200);
+        expect(listPage).toHaveBeenCalledWith({ cursor, limit: 7 }, { status: 'active' });
+      });
+
+      it.each([
+        '/api/promotions?cursor=not-a-promotion-id',
+        '/api/promotions?limit=0',
+        '/api/promotions?limit=101',
+        '/api/promotions?limit=1.5',
+        '/api/promotions?status=unknown',
+        '/api/promotions?offset=1',
+      ])('GET /api/promotions returns BAD_REQUEST for invalid query: %s', async (url) => {
+        const res = await app.request(url);
+
+        await expectHostError(res, 'BAD_REQUEST');
+      });
+
+      it('GET /api/promotions returns a cursor for the next bounded page', async () => {
+        for (const displayName of ['First', 'Second']) {
+          await mockCtx.promotionStore!.create({
+            type: 'gas_sponsorship',
+            displayName,
+            maxParticipants: 10,
+            perUserGasAllowanceMist: '1000000',
+          });
+        }
+
+        const firstRes = await app.request('/api/promotions?limit=1');
+        expect(firstRes.status).toBe(200);
+        const first = (await firstRes.json()) as {
+          promotions: Array<{ promotionId: string }>;
+          nextCursor: string | null;
+        };
+        expect(first.promotions).toHaveLength(1);
+        expect(first.nextCursor).toBe(first.promotions[0].promotionId);
+
+        const secondRes = await app.request(`/api/promotions?limit=1&cursor=${first.nextCursor}`);
+        expect(secondRes.status).toBe(200);
+        const second = (await secondRes.json()) as {
+          promotions: Array<{ promotionId: string }>;
+          nextCursor: string | null;
+        };
+        expect(second.promotions).toHaveLength(1);
+        expect(second.promotions[0].promotionId).not.toBe(first.promotions[0].promotionId);
+        expect(second.nextCursor).toBeNull();
       });
 
       it('GET /api/promotions maps a corrupt stored budget to INTERNAL_ERROR', async () => {
-        vi.spyOn(mockCtx.promotionStore!, 'list').mockResolvedValueOnce([
-          {
-            promotionId: 'corrupt-promotion',
-            type: 'gas_sponsorship',
-            displayName: 'Corrupt promotion',
-            description: '',
-            status: 'draft',
-            maxParticipants: 2,
-            perUserGasAllowanceMist: Number.MAX_SAFE_INTEGER.toString(),
-            claimDeadlineAt: null,
-            postClaimUseWindowMs: 0,
-            startAt: null,
-            pauseReason: null,
-            archiveReason: null,
-            createdAt: '2026-07-15T00:00:00.000Z',
-            updatedAt: '2026-07-15T00:00:00.000Z',
-          },
-        ]);
+        vi.spyOn(mockCtx.promotionStore!, 'listPage').mockResolvedValueOnce({
+          promotions: [
+            {
+              promotionId: '00000000-0000-4000-8000-000000000001',
+              type: 'gas_sponsorship',
+              displayName: 'Corrupt promotion',
+              description: '',
+              status: 'draft',
+              maxParticipants: 2,
+              perUserGasAllowanceMist: Number.MAX_SAFE_INTEGER.toString(),
+              claimDeadlineAt: null,
+              postClaimUseWindowMs: 0,
+              startAt: null,
+              pauseReason: null,
+              archiveReason: null,
+              createdAt: '2026-07-15T00:00:00.000Z',
+              updatedAt: '2026-07-15T00:00:00.000Z',
+            },
+          ],
+          nextCursor: null,
+        });
 
         const res = await app.request('/api/promotions');
         await expectHostError(res, 'INTERNAL_ERROR');

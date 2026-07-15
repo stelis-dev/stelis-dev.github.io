@@ -36,7 +36,7 @@ A `SettleEvent` is settlement evidence. Application payment completion is decide
 
 Promotion-sponsored flow uses:
 
-- `GET /studio/promotions`
+- `GET /studio/promotions?cursor=<promotionId>&limit=<1..100>`
 - `GET /studio/promotions/:id`
 - `POST /studio/promotions/:id/claim`
 - `POST /studio/promotions/:id/prepare`

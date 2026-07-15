@@ -10,6 +10,7 @@
  * @module studio/executionLedger
  */
 
+import { PROMOTION_PAGE_MAX_LIMIT } from '@stelis/contracts';
 import type {
   Entitlement,
   BudgetSummary,
@@ -21,6 +22,21 @@ import type {
   ConsumeResult,
   ReleaseResult,
 } from './domain.js';
+
+/** Ledger fields required to project one Studio Promotion page item. */
+export interface PromotionListLedgerStatus {
+  promotionId: string;
+  entitlement: Entitlement | null;
+  claimedCount: number;
+  availableBudgetMist: bigint;
+}
+
+/** Keep the page projection operation within the contracts-owned page bound. */
+export function assertPromotionListLedgerBatchBound(promotionIds: readonly string[]): void {
+  if (promotionIds.length > PROMOTION_PAGE_MAX_LIMIT) {
+    throw new Error(`Promotion page ledger batch cannot exceed ${PROMOTION_PAGE_MAX_LIMIT} IDs`);
+  }
+}
 
 // ─────────────────────────────────────────────
 // Operational parameters
@@ -182,6 +198,18 @@ export interface PromotionExecutionLedger {
    * Get the number of users who have claimed a promotion.
    */
   getClaimedCount(promotionId: string): Promise<number>;
+
+  /**
+   * Read the Studio list projection for one bounded Promotion page.
+   *
+   * Results preserve the exact input ID order. Implementations read their
+   * underlying state directly as one bounded adapter operation rather than
+   * calling the three single-Promotion read methods for every ID.
+   */
+  getPromotionListLedgerStatuses(
+    promotionIds: readonly string[],
+    userId: string,
+  ): Promise<PromotionListLedgerStatus[]>;
 
   /**
    * Get enriched claimed-user projection for admin views.

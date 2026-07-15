@@ -28,6 +28,9 @@ const USER_B = 'user-b';
 const USER_C = 'user-c';
 const PER_USER_ALLOWANCE = '5000000'; // 5M MIST
 const RESERVE_AMOUNT = 1_000_000n; // 1M MIST
+const PAGE_PROMO_A = '00000000-0000-4000-8000-000000000001';
+const PAGE_PROMO_B = '00000000-0000-4000-8000-000000000002';
+const PAGE_PROMO_MISSING = '00000000-0000-4000-8000-000000000003';
 
 function defaultClaimOpts(overrides?: Partial<ClaimOpts>): ClaimOpts {
   return {
@@ -552,6 +555,60 @@ export function runLedgerConformanceTests(
       expect(summary.availableMist).toBe(expectedTotal);
       expect(summary.reservedMist).toBe(0n);
       expect(summary.consumedMist).toBe(0n);
+    });
+
+    it('returns one aligned bounded Promotion list ledger status', async () => {
+      await ledger.claim(PAGE_PROMO_A, USER_A, defaultClaimOpts());
+      await ledger.claim(PAGE_PROMO_A, USER_B, defaultClaimOpts());
+      await ledger.claim(PAGE_PROMO_B, USER_B, defaultClaimOpts());
+      await ledger.reserve(defaultReserveParams({ promotionId: PAGE_PROMO_A, userId: USER_A }));
+
+      const statuses = await ledger.getPromotionListLedgerStatuses(
+        [PAGE_PROMO_B, PAGE_PROMO_A, PAGE_PROMO_MISSING],
+        USER_A,
+      );
+
+      expect(statuses.map((status) => status.promotionId)).toEqual([
+        PAGE_PROMO_B,
+        PAGE_PROMO_A,
+        PAGE_PROMO_MISSING,
+      ]);
+      expect(statuses[0]).toEqual({
+        promotionId: PAGE_PROMO_B,
+        entitlement: null,
+        claimedCount: 1,
+        availableBudgetMist: 50_000_000n,
+      });
+      expect(statuses[1]).toMatchObject({
+        promotionId: PAGE_PROMO_A,
+        claimedCount: 2,
+        availableBudgetMist: 49_000_000n,
+        entitlement: {
+          promotionId: PAGE_PROMO_A,
+          userId: USER_A,
+          activeReservationReceiptId: 'receipt-1',
+        },
+      });
+      expect(statuses[2]).toEqual({
+        promotionId: PAGE_PROMO_MISSING,
+        entitlement: null,
+        claimedCount: 0,
+        availableBudgetMist: 0n,
+      });
+    });
+
+    it('rejects a Promotion list ledger batch above the contracts page bound', async () => {
+      const ids = Array.from(
+        { length: 101 },
+        (_, index) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+      );
+      await expect(ledger.getPromotionListLedgerStatuses(ids, USER_A)).rejects.toThrow(
+        /cannot exceed 100 IDs/,
+      );
+    });
+
+    it('returns an empty aligned status for an empty Promotion page', async () => {
+      await expect(ledger.getPromotionListLedgerStatuses([], USER_A)).resolves.toEqual([]);
     });
 
     // Budget summaries before claim are pure reads. They must not create

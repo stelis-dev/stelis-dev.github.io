@@ -320,7 +320,7 @@ async function setup(opts?: {
     create: async () => {
       throw new Error('not needed');
     },
-    list: async () => [],
+    listPage: async () => ({ promotions: [], nextCursor: null }),
     update: async () => null,
     delete: async () => ({ status: 'deleted' as const }),
     transitionStatus: async () => null,
@@ -1369,7 +1369,7 @@ describe('handlePromotionSponsor', () => {
       create: async () => {
         throw new Error('not needed');
       },
-      list: async () => [],
+      listPage: async () => ({ promotions: [], nextCursor: null }),
       update: async () => null,
       delete: async () => ({ status: 'deleted' as const }),
       transitionStatus: async () => null,
@@ -1468,7 +1468,7 @@ describe('handlePromotionSponsor', () => {
       create: async () => {
         throw new Error('not needed');
       },
-      list: async () => [],
+      listPage: async () => ({ promotions: [], nextCursor: null }),
       update: async () => null,
       delete: async () => ({ status: 'deleted' as const }),
       transitionStatus: async () => null,

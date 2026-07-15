@@ -15,8 +15,11 @@
  * @module studio/executionLedgerMemory
  */
 
-import type { PromotionExecutionLedger } from './executionLedger.js';
-import { PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS } from './executionLedger.js';
+import type { PromotionExecutionLedger, PromotionListLedgerStatus } from './executionLedger.js';
+import {
+  assertPromotionListLedgerBatchBound,
+  PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
+} from './executionLedger.js';
 import {
   parsePromotionLedgerBudget,
   assertPositiveMist,
@@ -350,6 +353,25 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
 
   async getClaimedCount(promotionId: string): Promise<number> {
     return this.claimIndex.get(promotionId)?.size ?? 0;
+  }
+
+  async getPromotionListLedgerStatuses(
+    promotionIds: readonly string[],
+    userId: string,
+  ): Promise<PromotionListLedgerStatus[]> {
+    assertPromotionListLedgerBatchBound(promotionIds);
+
+    return promotionIds.map((promotionId) => {
+      const entitlement = this.entitlements.get(entKey(promotionId, userId));
+      const budget = this.budgets.get(promotionId);
+      return {
+        promotionId,
+        entitlement: entitlement ? toEntitlement(entitlement) : null,
+        claimedCount: this.claimIndex.get(promotionId)?.size ?? 0,
+        availableBudgetMist:
+          budget?.availableMist ?? this.promotionBudgetTotals.get(promotionId) ?? 0n,
+      };
+    });
   }
 
   async listClaimedUsers(promotionId: string): Promise<ClaimedUserProjection[]> {

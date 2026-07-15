@@ -34,6 +34,7 @@ import {
   parseAdminBlocklistResponse,
   parseAdminPromotionCreateRequest,
   parseAdminPromotionDeleteResponse,
+  parseAdminPromotionListQuery,
   parseAdminPromotionListResponse,
   parseAdminPromotionResponse,
   parseAdminPromotionStatusRequest,
@@ -49,6 +50,7 @@ import {
   parseAdminSponsorOperationsResponse,
   parseHostErrorResponse,
   type AdminPromotionCreateRequest,
+  type AdminPromotionListQuery,
   type AdminPromotionStatusRequest,
   type AdminPromotionUpdateRequest,
   type AdminSponsoredLogsMode,
@@ -228,10 +230,15 @@ export function getStudio() {
 
 // ── Promotions ────────────────────────────────────────────────────────────
 
-export function getPromotions(status?: AdminPromotionStatusRequest['status']) {
-  const qs = status ? `?status=${status}` : '';
+export function getPromotions(query: AdminPromotionListQuery = {}) {
+  const current = parseAdminPromotionListQuery(query);
+  const search = new URLSearchParams();
+  if (current.status !== undefined) search.set('status', current.status);
+  if (current.cursor !== null) search.set('cursor', current.cursor);
+  if (query.limit !== undefined) search.set('limit', String(current.limit));
+  const encoded = search.toString();
   return apiFetch(
-    `/api/promotions${qs}`,
+    `/api/promotions${encoded.length === 0 ? '' : `?${encoded}`}`,
     undefined,
     parseAdminPromotionListResponse,
     ADMIN_PROMOTION_LIST_ERROR_CODES,

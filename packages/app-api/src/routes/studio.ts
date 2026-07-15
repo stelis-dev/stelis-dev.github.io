@@ -41,11 +41,12 @@ import {
   STUDIO_CLAIM_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
+  parsePromotionListResponse,
+  parsePromotionPageQuery,
   parsePromotionPrepareRequest,
   parsePromotionSponsorRequest,
   type PromotionClaimResponse,
   type PromotionDetailResponse,
-  type PromotionListResponse,
   type PromotionPrepareResponse,
   type PromotionSponsorResponse,
 } from '@stelis/contracts';
@@ -88,26 +89,40 @@ export function createStudioRoutes(
       const { identity } = auth;
       const userId = identity.userId;
 
-      const promotions = await ctx.promotionStore.list({ status: 'active' });
+      let pageParams;
+      try {
+        pageParams = parsePromotionPageQuery(c.req.query());
+      } catch (err) {
+        if (err instanceof HostWireParseError) {
+          return respondMapped(c, codedHostError('BAD_REQUEST', STUDIO_LIST_ERROR_CODES));
+        }
+        throw err;
+      }
 
-      const items = await Promise.all(
-        promotions.map(async (promo) => {
-          const [entitlement, claimedCount, budgetSummary] = await Promise.all([
-            ctx.executionLedger!.getEntitlement(promo.promotionId, userId),
-            ctx.executionLedger!.getClaimedCount(promo.promotionId),
-            ctx.executionLedger!.getBudgetSummary(promo.promotionId),
-          ]);
-          return computePromotionListItem(
-            promo,
-            entitlement,
-            claimedCount,
-            budgetSummary.availableMist,
-          );
-        }),
+      const page = await ctx.promotionStore.listPage(pageParams, { status: 'active' });
+      const promotionIds = page.promotions.map((promotion) => promotion.promotionId);
+      const ledgerStatuses = await ctx.executionLedger.getPromotionListLedgerStatuses(
+        promotionIds,
+        userId,
       );
+      if (ledgerStatuses.length !== page.promotions.length) {
+        throw new Error('Promotion list ledger status length mismatch');
+      }
 
-      const response = { promotions: items } satisfies PromotionListResponse;
-      return c.json(response);
+      const items = page.promotions.map((promotion, index) => {
+        const ledgerStatus = ledgerStatuses[index];
+        if (ledgerStatus === undefined || ledgerStatus.promotionId !== promotion.promotionId) {
+          throw new Error('Promotion list ledger status ID mismatch');
+        }
+        return computePromotionListItem(
+          promotion,
+          ledgerStatus.entitlement,
+          ledgerStatus.claimedCount,
+          ledgerStatus.availableBudgetMist,
+        );
+      });
+
+      return c.json(parsePromotionListResponse({ promotions: items, nextCursor: page.nextCursor }));
     } catch (err) {
       const mapped = mapError(err, STUDIO_LIST_ERROR_CODES);
       if (mapped) return respondMapped(c, mapped);
