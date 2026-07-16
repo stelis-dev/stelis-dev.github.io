@@ -25,6 +25,7 @@ import {
 } from '../src/studio/sponsorPromotionSponsoredHandler.js';
 import { SponsorLeaseExpiredError } from '../src/handlers/sponsor.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
+import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { SponsorPool } from '../src/context.js';
@@ -69,7 +70,7 @@ vi.mock('@stelis/core-relay', async (importOriginal) => ({
 // Constants
 // ─────────────────────────────────────────────
 
-const TEST_PROMO_ID = 'sponsor-promo-1';
+const TEST_PROMO_ID = '00000000-0000-4000-8000-000000000301';
 const TEST_USER_ID = 'sponsor-user-1';
 const PER_USER_ALLOWANCE = '100000000'; // 0.1 SUI
 const ALLOWED_TARGET =
@@ -140,10 +141,7 @@ interface MockSuiOptions {
   zeroNetRevert?: boolean;
 }
 
-interface SetupOptions extends MockSuiOptions {
-  /** Capture every usage row for failure-path economics assertions. */
-  withUsageCapture?: boolean;
-}
+type SetupOptions = MockSuiOptions;
 
 const mockSuiOptions = new WeakMap<object, MockSuiOptions>();
 
@@ -191,7 +189,20 @@ function createMockSui(opts: MockSuiOptions = {}): SuiEndpointSnapshot {
 // ─────────────────────────────────────────────
 
 async function setup(opts: SetupOptions = {}) {
-  const executionLedger = new MemoryPromotionExecutionLedger();
+  class FixedPromotionStore extends MemoryPromotionStore {
+    protected override generateId(): string {
+      return TEST_PROMO_ID;
+    }
+  }
+  const promotionStore = new FixedPromotionStore();
+  const promotion = await promotionStore.create({
+    type: 'gas_sponsorship',
+    displayName: 'Test Promo',
+    maxParticipants: 100,
+    perUserGasAllowanceMist: PER_USER_ALLOWANCE,
+  });
+  await promotionStore.transitionStatus(promotion.promotionId, 'active');
+  const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
@@ -200,8 +211,6 @@ async function setup(opts: SetupOptions = {}) {
 
   // Claim promotion (creates entitlement via ExecutionLedger)
   await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
-    maxParticipants: 100,
-    perUserGasAllowanceMist: PER_USER_ALLOWANCE,
     useUntilAt: null,
   });
 
@@ -246,49 +255,6 @@ async function setup(opts: SetupOptions = {}) {
   };
   await prepareStore.store(entry);
 
-  // Mock promotion store
-  const promotionStore = {
-    get: async (id: string) =>
-      id === TEST_PROMO_ID
-        ? {
-            promotionId: TEST_PROMO_ID,
-            type: 'gas_sponsorship' as const,
-            displayName: 'Test Promo',
-            description: '',
-            status: 'active' as const,
-            maxParticipants: 100,
-            perUserGasAllowanceMist: PER_USER_ALLOWANCE,
-            claimDeadlineAt: null,
-            postClaimUseWindowMs: 0,
-            startAt: null,
-            pauseReason: null,
-            archiveReason: null,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          }
-        : null,
-    create: async () => {
-      throw new Error('not needed');
-    },
-    listPage: async () => ({ promotions: [], nextCursor: null }),
-    update: async () => null,
-    delete: async () => ({ status: 'deleted' as const }),
-    transitionStatus: async () => null,
-  } satisfies import('../src/studio/promotionStore.js').PromotionStoreAdapter;
-
-  const usageRows: import('../src/studio/domain.js').CreateUsageEventInput[] = [];
-  const usageStore = opts?.withUsageCapture
-    ? ({
-        append: async (row: import('../src/studio/domain.js').CreateUsageEventInput) => {
-          usageRows.push(row);
-          return { ...row, createdAt: new Date().toISOString() };
-        },
-        getByReceipt: async () => [],
-        getByUser: async () => [],
-        getByPromotion: async () => [],
-      } satisfies import('../src/studio/promotionUsageStore.js').PromotionUsageStoreAdapter)
-    : undefined;
-
   const ctx: PromotionSponsorContext = {
     sui: createMockSui(opts),
     // Trusted Stelis package ID for sponsor-time abort classification. The
@@ -302,7 +268,6 @@ async function setup(opts: SetupOptions = {}) {
     prepareStore,
     abuseBlocker,
     globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
-    usageStore,
   };
 
   return {
@@ -313,7 +278,6 @@ async function setup(opts: SetupOptions = {}) {
     sponsorPool,
     prepareStore,
     promotionStore,
-    usageRows,
   };
 }
 
@@ -1056,54 +1020,6 @@ describe('handlePromotionSponsor', () => {
     expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
   });
 
-  test('usage recorder append rejection preserves success response and emits PROMOTION_USAGE_RECORDER_FAILED warn', async () => {
-    const { ctx, signed, receiptId } = await setup();
-    ctx.usageStore = {
-      append: async () => {
-        throw new Error('usage-store-unreachable');
-      },
-      getByReceipt: async () => [],
-      getByUser: async () => [],
-      getByPromotion: async () => [],
-    };
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    try {
-      const result = await handlePromotionSponsor(ctx, {
-        promotionId: TEST_PROMO_ID,
-        receiptId,
-        txBytes: signed.txBytesBase64,
-        userSignature: signed.userSignature,
-        verifiedIdentity: buildIdentity(),
-        clientIp: '127.0.0.1',
-      });
-
-      expect(result.digest).toBe(suiDigest(signed.txBytes));
-      expect(BigInt(result.actualGasMist)).toBeGreaterThan(0n);
-
-      const recorderFailed = warnSpy.mock.calls
-        .map((call) => {
-          try {
-            return JSON.parse(String(call[0])) as Record<string, unknown>;
-          } catch {
-            return null;
-          }
-        })
-        .find(
-          (entry): entry is Record<string, unknown> =>
-            entry?.['event'] === 'PROMOTION_USAGE_RECORDER_FAILED',
-        );
-      expect(recorderFailed).toBeDefined();
-      expect(recorderFailed!['promotionId']).toBe(TEST_PROMO_ID);
-      expect(recorderFailed!['receiptId']).toBe(receiptId);
-      expect(recorderFailed!['userId']).toBe(TEST_USER_ID);
-      expect(recorderFailed!['digest']).toBe(suiDigest(signed.txBytes));
-      expect(recorderFailed!['error']).toBe('usage-store-unreachable');
-    } finally {
-      warnSpy.mockRestore();
-    }
-  });
-
   test('gas overrun: consumes actual gas, deducts overrun from budget + allowance', async () => {
     const { ctx, signed, receiptId } = await setup({ highGas: true });
 
@@ -1232,7 +1148,22 @@ describe('handlePromotionSponsor', () => {
   });
 
   test('rejects with PROMOTION_NOT_STARTED when startAt is in the future', async () => {
-    const executionLedger = new MemoryPromotionExecutionLedger();
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    class FuturePromotionStore extends MemoryPromotionStore {
+      protected override generateId(): string {
+        return TEST_PROMO_ID;
+      }
+    }
+    const promotionStore = new FuturePromotionStore();
+    const promotion = await promotionStore.create({
+      type: 'gas_sponsorship',
+      displayName: 'Future promotion',
+      maxParticipants: 1,
+      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
+      startAt: future,
+    });
+    await promotionStore.transitionStatus(promotion.promotionId, 'active');
+    const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
     const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
       sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
@@ -1241,8 +1172,6 @@ describe('handlePromotionSponsor', () => {
 
     // Claim with an open use-window so the startAt gate is the only failing check.
     await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
-      maxParticipants: 1,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
 
@@ -1275,33 +1204,6 @@ describe('handlePromotionSponsor', () => {
       userId: TEST_USER_ID,
     } satisfies PromotionPreparedTxDraft);
 
-    const future = new Date(Date.now() + 86_400_000).toISOString();
-    const promotionStore = {
-      get: async () => ({
-        promotionId: TEST_PROMO_ID,
-        type: 'gas_sponsorship' as const,
-        displayName: 'Test',
-        description: '',
-        status: 'active' as const,
-        maxParticipants: 100,
-        perUserGasAllowanceMist: PER_USER_ALLOWANCE,
-        claimDeadlineAt: null,
-        postClaimUseWindowMs: 86400_000,
-        startAt: future,
-        pauseReason: null,
-        archiveReason: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }),
-      create: async () => {
-        throw new Error('not needed');
-      },
-      listPage: async () => ({ promotions: [], nextCursor: null }),
-      update: async () => null,
-      delete: async () => ({ status: 'deleted' as const }),
-      transitionStatus: async () => null,
-    } satisfies import('../src/studio/promotionStore.js').PromotionStoreAdapter;
-
     const ctx: PromotionSponsorContext = {
       sui: createMockSui(),
       packageId: '0xabc',
@@ -1332,7 +1234,20 @@ describe('handlePromotionSponsor', () => {
   });
 
   test('rejects when use window has expired (USE_WINDOW_EXPIRED)', async () => {
-    const executionLedger = new MemoryPromotionExecutionLedger();
+    class ExpiredPromotionStore extends MemoryPromotionStore {
+      protected override generateId(): string {
+        return TEST_PROMO_ID;
+      }
+    }
+    const promotionStore = new ExpiredPromotionStore();
+    const promotion = await promotionStore.create({
+      type: 'gas_sponsorship',
+      displayName: 'Expired entitlement promotion',
+      maxParticipants: 1,
+      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
+    });
+    await promotionStore.transitionStatus(promotion.promotionId, 'active');
+    const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
     const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
     const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
       sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
@@ -1341,8 +1256,6 @@ describe('handlePromotionSponsor', () => {
 
     // Claim with expired use window
     await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
-      maxParticipants: 1,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: new Date(Date.now() - 86400_000).toISOString(),
     });
 
@@ -1374,32 +1287,6 @@ describe('handlePromotionSponsor', () => {
       promotionId: TEST_PROMO_ID,
       userId: TEST_USER_ID,
     } satisfies PromotionPreparedTxDraft);
-
-    const promotionStore = {
-      get: async () => ({
-        promotionId: TEST_PROMO_ID,
-        type: 'gas_sponsorship' as const,
-        displayName: 'Test',
-        description: '',
-        status: 'active' as const,
-        maxParticipants: 100,
-        perUserGasAllowanceMist: PER_USER_ALLOWANCE,
-        claimDeadlineAt: null,
-        postClaimUseWindowMs: 86400_000,
-        startAt: null,
-        pauseReason: null,
-        archiveReason: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }),
-      create: async () => {
-        throw new Error('not needed');
-      },
-      listPage: async () => ({ promotions: [], nextCursor: null }),
-      update: async () => null,
-      delete: async () => ({ status: 'deleted' as const }),
-      transitionStatus: async () => null,
-    } satisfies import('../src/studio/promotionStore.js').PromotionStoreAdapter;
 
     const ctx: PromotionSponsorContext = {
       sui: createMockSui(),
@@ -2147,19 +2034,16 @@ describe('handlePromotionSponsor', () => {
 // ─────────────────────────────────────────────
 //
 // Acceptance:
-//   - post-signature uncertainty → consume(reservedGasMist), UsageEvent
-//     `post_signature_uncertainty`, reconciliation event,
-//     no `release()`.
-//   - on-chain revert → consume(actualGasMist), UsageEvent
-//     `onchain_revert`, no `release()`.
+//   - post-signature uncertainty → consume(reservedGasMist),
+//     reconciliation event, no `release()`.
+//   - on-chain revert → consume(actualGasMist), no `release()`.
 //   - Pre-submit + congestion remain `release()`.
 
 describe('post-signature/post-submit ledger consume policy', () => {
-  test('post-signature uncertainty consumes reserved, appends usage row, emits reconciliation event, and does not release', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
+  test('post-signature uncertainty consumes reserved, emits reconciliation event, and does not release', async () => {
+    const { ctx, signed, receiptId, executionLedger } = await setup({
       submitThrows: true,
       submitThrowMessage: 'rpc transport error',
-      withUsageCapture: true,
     });
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -2183,14 +2067,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     expect(entitlement!.consumedGasAllowanceMist).toBe('2000000');
     expect(entitlement!.activeReservationReceiptId).toBeNull();
 
-    // UsageEvent append.
-    const failedRow = usageRows.find((r) => r.failureReason === 'post_signature_uncertainty');
-    expect(failedRow).toBeDefined();
-    expect(failedRow!.result).toBe('failed');
-    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
-    expect(failedRow!.consumedGasMist).toBe('2000000');
-    expect(failedRow!.releasedGasMist).toBe('0');
-
     // Reconciliation event emitted with operator-side context.
     const reconLog = consoleErrorSpy.mock.calls
       .map((args: unknown[]) => {
@@ -2212,10 +2088,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('on-chain revert with gasUsed consumes actualGasMist (not reservedGasMist), appends onchain_revert usage row', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
+  test('on-chain revert with gasUsed consumes actualGasMist (not reservedGasMist)', async () => {
+    const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
-      withUsageCapture: true,
     });
     const sponsorResults: SponsorResultMetadata[] = [];
     ctx.onSponsorResult = (metadata) => {
@@ -2241,13 +2116,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
     expect(entitlement!.consumedGasAllowanceMist).toBe('1300000');
 
-    const failedRow = usageRows.find((r) => r.failureReason === 'onchain_revert');
-    expect(failedRow).toBeDefined();
-    expect(failedRow!.result).toBe('failed');
-    expect(failedRow!.consumedGasMist).toBe('1300000');
-    expect(failedRow!.releasedGasMist).toBe('700000');
-    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
-
     expect(sponsorResults).toHaveLength(1);
     expect(sponsorResults[0]).toMatchObject({
       outcome: 'onchain_revert',
@@ -2268,10 +2136,9 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // computation + storage. The exact gateway always supplies gasUsed,
     // and the canonical clamp makes simGas === 0. Acceptance: consumed=0;
     // released=full reserved (delta-release surplus).
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
+    const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
       zeroNetRevert: true,
-      withUsageCapture: true,
     });
 
     const err = await handlePromotionSponsor(ctx, {
@@ -2290,13 +2157,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // simGas clamps to 0n → consumed bucket gains 0; remaining is fully restored.
     expect(entitlement!.consumedGasAllowanceMist).toBe('0');
     expect(BigInt(entitlement!.remainingGasAllowanceMist)).toBe(BigInt(PER_USER_ALLOWANCE));
-
-    // Audit row keeps the one current on-chain-revert classification.
-    const failedRow = usageRows.find((r) => r.failureReason === 'onchain_revert');
-    expect(failedRow).toBeDefined();
-    expect(failedRow!.consumedGasMist).toBe('0');
-    expect(failedRow!.releasedGasMist).toBe('2000000');
-    expect(failedRow!.txDigest).toBe(suiDigest(signed.txBytes));
   });
 
   test('post-signature uncertainty and post-submit loss paths never invoke ledger.release()', async () => {
@@ -2313,14 +2173,13 @@ describe('post-signature/post-submit ledger consume policy', () => {
     }> = [
       {
         label: 'post-signature uncertainty',
-        opts: { submitThrows: true, withUsageCapture: true },
+        opts: { submitThrows: true },
         expectedCode: 'SPONSOR_SUBMISSION_UNCERTAIN',
       },
       {
         label: 'on-chain revert',
         opts: {
           executionError: unclassifiedSuiExecutionError(),
-          withUsageCapture: true,
         },
         expectedCode: 'ONCHAIN_REVERT',
       },
@@ -2349,7 +2208,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // branch context for operator reconciliation.
     const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
-      withUsageCapture: true,
     });
     vi.spyOn(executionLedger, 'consume').mockRejectedValue(new Error('redis transport down'));
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -2397,7 +2255,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // and the post-submit consume, NOT an adapter throw.
     const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
-      withUsageCapture: true,
     });
     const releaseSpy = vi.spyOn(executionLedger, 'release');
     vi.spyOn(executionLedger, 'consume').mockResolvedValue({
@@ -2451,7 +2308,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const { ctx, signed, receiptId, executionLedger } = await setup({
       submitThrows: true,
       submitThrowMessage: 'rpc transport error',
-      withUsageCapture: true,
     });
     const calls: SponsorResultMetadata[] = [];
     ctx.onSponsorResult = (metadata) => {
@@ -2503,7 +2359,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // `sponsorResultOutcome='onchain_revert'` so the gate skips it.
     const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
-      withUsageCapture: true,
     });
     const calls: SponsorResultMetadata[] = [];
     ctx.onSponsorResult = (metadata) => {
@@ -2563,7 +2418,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // the adapter-throw branch of the failure-path consume helper.
     const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: unclassifiedSuiExecutionError(),
-      withUsageCapture: true,
     });
     const calls: SponsorResultMetadata[] = [];
     ctx.onSponsorResult = (metadata) => {
@@ -2612,14 +2466,12 @@ describe('post-signature/post-submit ledger consume policy', () => {
     // Boundary regression: `pool.sign()` runs BEFORE
     // `executeTransaction()` inside `signAndSubmit`. A pre-sign lease
     // failure means the sponsor signature was NEVER issued, so the
-    // promotion post-signature cleanup (consume + UsageEvent +
-    // reconciliation event) MUST NOT fire. The active reservation
+    // promotion post-signature cleanup (consume + reconciliation event)
+    // MUST NOT fire. The active reservation
     // must be released via the pre-submit cleanup path so the user's
     // allowance is not held until the ExecutionLedger reservation reaper
     // sweeps.
-    const { ctx, signed, receiptId, executionLedger, sponsorPool, usageRows } = await setup({
-      withUsageCapture: true,
-    });
+    const { ctx, signed, receiptId, executionLedger, sponsorPool } = await setup();
     vi.spyOn(sponsorPool, 'sign').mockRejectedValue(new SponsorLeaseExpiredError(signed.txHash));
     const calls: SponsorResultMetadata[] = [];
     ctx.onSponsorResult = (metadata) => {
@@ -2645,11 +2497,6 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const ent = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
     expect(ent!.activeReservationReceiptId).toBeNull();
     expect(ent!.consumedGasAllowanceMist).toBe('0');
-
-    // No post-signature uncertainty UsageEvent. That failed usage row is reserved
-    // for post-signature executeTransaction throws; pre-sign lease failures must
-    // not reuse that row shape.
-    expect(usageRows.find((r) => r.failureReason === 'post_signature_uncertainty')).toBeUndefined();
 
     // No post-signature uncertainty reconciliation
     // event. That event signals operator-side reconciliation for an
@@ -2681,9 +2528,8 @@ describe('post-signature/post-submit ledger consume policy', () => {
   });
 
   test('congestion still releases (entitlement consumed=0)', async () => {
-    const { ctx, signed, receiptId, executionLedger, usageRows } = await setup({
+    const { ctx, signed, receiptId, executionLedger } = await setup({
       executionError: congestedSuiExecutionError(),
-      withUsageCapture: true,
     });
 
     const err = await handlePromotionSponsor(ctx, {
@@ -2703,7 +2549,5 @@ describe('post-signature/post-submit ledger consume policy', () => {
     const entitlement = await executionLedger.getEntitlement(TEST_PROMO_ID, TEST_USER_ID);
     // Release path → consumed stays at 0 (allowance restored).
     expect(entitlement!.consumedGasAllowanceMist).toBe('0');
-    // No failed usage row written for congestion (release path).
-    expect(usageRows.find((r) => r.result === 'failed')).toBeUndefined();
   });
 });

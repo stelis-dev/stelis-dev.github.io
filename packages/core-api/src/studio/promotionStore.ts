@@ -28,10 +28,19 @@ import {
   parseAdminPromotionUpdateRequest,
   parsePromotionId,
   parsePromotionPageQuery,
+  PROMOTION_STATUSES,
 } from '@stelis/contracts';
 import type { RedisClientLike } from '../store/redisClient.js';
 import type { Promotion, PromotionStatus } from './domain.js';
 import { parsePromotionLedgerBudget } from './executionLedgerValueGuards.js';
+import {
+  decodePromotionAccountingRecord,
+  decodePromotionRecord,
+  promotionAccountingKey,
+  PromotionRecordCorruptionError,
+  serializePromotionRecord,
+  type CurrentPromotionRecord,
+} from './promotionRecords.js';
 
 // ─────────────────────────────────────────────
 // Store contract
@@ -39,7 +48,9 @@ import { parsePromotionLedgerBudget } from './executionLedgerValueGuards.js';
 
 /** Atomic outcome of deleting the current Promotion record. */
 export type PromotionDeleteResult =
-  { status: 'deleted' } | { status: 'not_found' } | { status: 'not_deletable' };
+  | { status: 'deleted' }
+  | { status: 'not_found' }
+  | { status: 'not_deletable' };
 
 /** Optional lifecycle filter applied to the ordered Promotion index. */
 export interface PromotionStoreFilter {
@@ -62,6 +73,9 @@ export interface PromotionStoreAdapter {
 
   /** Get a promotion by ID. Returns null if not found. */
   get(promotionId: string): Promise<Promotion | null>;
+
+  /** Read the strict current Promotion and its exact stored representation. */
+  readCurrent(promotionId: string): Promise<CurrentPromotionRecord | null>;
 
   /** Read one deterministic, bounded page. */
   listPage(params: PromotionPageParams, filter?: PromotionStoreFilter): Promise<PromotionStorePage>;
@@ -87,6 +101,14 @@ export interface PromotionStoreAdapter {
 // ─────────────────────────────────────────────
 // Status transition rules
 // ─────────────────────────────────────────────
+
+const PROMOTION_STATUS_INDEX_FIRST_KEY = 3;
+const PROMOTION_STATUS_INDEX_LAST_KEY =
+  PROMOTION_STATUS_INDEX_FIRST_KEY + PROMOTION_STATUSES.length - 1;
+const PROMOTION_PAGE_STATUS_MEMBERSHIP_OFFSET = 3;
+const PROMOTION_PAGE_ROW_WIDTH =
+  PROMOTION_PAGE_STATUS_MEMBERSHIP_OFFSET + PROMOTION_STATUSES.length;
+const PROMOTION_ACCOUNTING_DELETE_KEY = PROMOTION_STATUS_INDEX_LAST_KEY + 1;
 
 /**
  * Valid status transitions.
@@ -262,6 +284,52 @@ function currentPromotionPageParams(params: PromotionPageParams): PromotionPageP
   });
 }
 
+interface PromotionIndexProjection {
+  readonly all: boolean;
+  readonly statuses: Readonly<Record<PromotionStatus, boolean>>;
+}
+
+function assertPromotionIndexProjection(
+  record: Promotion,
+  projection: PromotionIndexProjection,
+): void {
+  const currentStatusPresent = projection.statuses[record.status];
+  const statusMembershipCount = PROMOTION_STATUSES.filter(
+    (status) => projection.statuses[status],
+  ).length;
+  if (!projection.all || !currentStatusPresent || statusMembershipCount !== 1) {
+    throw new PromotionRecordCorruptionError(
+      `Promotion index projection is inconsistent with ${record.promotionId} status ${record.status}`,
+    );
+  }
+}
+
+function hasPromotionIndexMembership(projection: PromotionIndexProjection): boolean {
+  return projection.all || PROMOTION_STATUSES.some((status) => projection.statuses[status]);
+}
+
+function statusIndexKeyPosition(status: PromotionStatus): number {
+  return PROMOTION_STATUSES.indexOf(status) + PROMOTION_STATUS_INDEX_FIRST_KEY;
+}
+
+function parseIndexMembership(value: unknown, label: string): boolean {
+  if (value === '1') return true;
+  if (value === '0') return false;
+  throw new PromotionRecordCorruptionError(`${label} is not a current index membership`);
+}
+
+function parseStatusIndexMembership(
+  row: readonly unknown[],
+  rowStart: number,
+  status: PromotionStatus,
+): boolean {
+  const statusOffset = PROMOTION_STATUSES.indexOf(status);
+  return parseIndexMembership(
+    row[rowStart + PROMOTION_PAGE_STATUS_MEMBERSHIP_OFFSET + statusOffset],
+    `Promotion ${status}-index membership`,
+  );
+}
+
 /** Find the first insertion point whose current ID is not less than `promotionId`. */
 function lowerBoundPromotionId(ids: readonly string[], promotionId: string): number {
   let low = 0;
@@ -317,6 +385,12 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     archived: [],
   };
   private _counter = 0;
+  private _accountingExists: (promotionId: string) => boolean = () => false;
+
+  /** Bind the matching Memory ledger's accounting-existence authority. */
+  bindAccountingExists(probe: (promotionId: string) => boolean): void {
+    this._accountingExists = probe;
+  }
 
   /** Generate a deterministic test ID. Override for custom IDs. */
   protected generateId(): string {
@@ -328,6 +402,18 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     return `00000000-0000-4000-8000-${suffix}`;
   }
 
+  private indexProjection(promotionId: string): PromotionIndexProjection {
+    return {
+      all: hasSortedPromotionId(this._allIds, promotionId),
+      statuses: {
+        draft: hasSortedPromotionId(this._statusIds.draft, promotionId),
+        active: hasSortedPromotionId(this._statusIds.active, promotionId),
+        paused: hasSortedPromotionId(this._statusIds.paused, promotionId),
+        archived: hasSortedPromotionId(this._statusIds.archived, promotionId),
+      },
+    };
+  }
+
   async create(input: AdminPromotionCreateRequest): Promise<Promotion> {
     const promotionId = parsePromotionId(
       this.generateId(),
@@ -337,8 +423,7 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     const record = createPromotionRecord(input, promotionId, now);
     if (
       this._records.has(promotionId) ||
-      hasSortedPromotionId(this._allIds, promotionId) ||
-      Object.values(this._statusIds).some((ids) => hasSortedPromotionId(ids, promotionId))
+      hasPromotionIndexMembership(this.indexProjection(promotionId))
     ) {
       throw new PromotionCurrentConflictError(promotionId, 'create');
     }
@@ -353,12 +438,36 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     return record === undefined ? null : clonePromotion(record);
   }
 
+  /**
+   * Read the exact current record without yielding the JavaScript event loop.
+   *
+   * The adjacent memory ledger uses this method so its Promotion check and
+   * ledger Map mutation execute in one synchronous turn, matching the Redis
+   * adapter's atomic script boundary.
+   */
+  readCurrentSync(promotionId: string): CurrentPromotionRecord | null {
+    const record = this._records.get(promotionId);
+    if (record === undefined) return null;
+    const promotion = decodePromotionRecord(serializePromotionRecord(record));
+    if (promotion.promotionId !== promotionId) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion record identity does not match its store key',
+      );
+    }
+    return { promotion, serialized: serializePromotionRecord(promotion) };
+  }
+
+  async readCurrent(promotionId: string): Promise<CurrentPromotionRecord | null> {
+    return this.readCurrentSync(promotionId);
+  }
+
   async listPage(
     params: PromotionPageParams,
     filter?: PromotionStoreFilter,
   ): Promise<PromotionStorePage> {
     const currentParams = currentPromotionPageParams(params);
-    const ids = filter?.status ? this._statusIds[filter.status] : this._allIds;
+    const status = filter?.status;
+    const ids = status ? this._statusIds[status] : this._allIds;
     const start =
       currentParams.cursor === null ? 0 : firstPromotionIdAfter(ids, currentParams.cursor);
     const pageIds = ids.slice(start, start + currentParams.limit + 1);
@@ -367,6 +476,7 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
       if (record === undefined) {
         throw new Error(`Promotion index references missing record ${promotionId}`);
       }
+      assertPromotionIndexProjection(record, this.indexProjection(promotionId));
       return record;
     });
     const hasMore = records.length > currentParams.limit;
@@ -383,6 +493,7 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     const existing = this._records.get(promotionId);
     if (!existing) return null;
     const updated = updatePromotionRecord(existing, patch, now);
+    assertPromotionIndexProjection(existing, this.indexProjection(promotionId));
     this._records.set(promotionId, clonePromotion(updated));
     return clonePromotion(updated);
   }
@@ -396,15 +507,9 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
     const existing = this._records.get(promotionId);
     if (!existing) return null;
     const updated = transitionPromotionRecord(existing, newStatus, reason, now);
+    assertPromotionIndexProjection(existing, this.indexProjection(promotionId));
     const oldStatusIds = this._statusIds[existing.status];
     const newStatusIds = this._statusIds[newStatus];
-    if (
-      !hasSortedPromotionId(this._allIds, promotionId) ||
-      !hasSortedPromotionId(oldStatusIds, promotionId) ||
-      hasSortedPromotionId(newStatusIds, promotionId)
-    ) {
-      throw new Error(`Promotion status index is inconsistent for ${promotionId}`);
-    }
     removeSortedPromotionId(oldStatusIds, promotionId);
     insertSortedPromotionId(newStatusIds, promotionId);
     this._records.set(promotionId, clonePromotion(updated));
@@ -412,15 +517,25 @@ export class MemoryPromotionStore implements PromotionStoreAdapter {
   }
 
   async delete(promotionId: string): Promise<PromotionDeleteResult> {
-    const decision = decidePromotionDelete(this._records.get(promotionId) ?? null);
-    if (decision === 'not_found') return { status: 'not_found' };
-    if (decision === 'not_deletable') return { status: 'not_deletable' };
-    if (
-      !hasSortedPromotionId(this._allIds, promotionId) ||
-      !hasSortedPromotionId(this._statusIds.draft, promotionId)
-    ) {
-      throw new Error(`Promotion index is inconsistent for ${promotionId}`);
+    const record = this._records.get(promotionId) ?? null;
+    const decision = decidePromotionDelete(record);
+    const projection = this.indexProjection(promotionId);
+    const accountingExists = this._accountingExists(promotionId);
+    if (accountingExists && (record === null || record.status === 'draft')) {
+      throw new PromotionRecordCorruptionError(
+        'A missing or draft Promotion must not have accounting state',
+      );
     }
+    if (record === null) {
+      if (hasPromotionIndexMembership(projection)) {
+        throw new PromotionRecordCorruptionError(
+          `Promotion indexes exist without record ${promotionId}`,
+        );
+      }
+      return { status: 'not_found' };
+    }
+    assertPromotionIndexProjection(record, projection);
+    if (decision === 'not_deletable') return { status: 'not_deletable' };
     this._records.delete(promotionId);
     removeSortedPromotionId(this._allIds, promotionId);
     removeSortedPromotionId(this._statusIds.draft, promotionId);
@@ -473,11 +588,22 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     return `${this._prefix}index:status:${status}`;
   }
 
+  private get _statusIndexKeys(): readonly string[] {
+    return PROMOTION_STATUSES.map((status) => this._statusIndexKey(status));
+  }
+
   private async _readSerialized(
     promotionId: string,
   ): Promise<{ readonly raw: string; readonly record: Promotion } | null> {
     const raw = await this._client.get(this._recordKey(promotionId));
-    return raw === null ? null : { raw, record: JSON.parse(raw) as Promotion };
+    if (raw === null) return null;
+    const record = decodePromotionRecord(raw);
+    if (record.promotionId !== promotionId) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion record identity does not match its Redis key',
+      );
+    }
+    return { raw, record };
   }
 
   async create(input: AdminPromotionCreateRequest): Promise<Promotion> {
@@ -485,7 +611,7 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     const now = new Date().toISOString();
     const record = createPromotionRecord(input, promotionId, now);
 
-    const json = JSON.stringify(record);
+    const json = serializePromotionRecord(record);
     const result = await this._client.eval(
       CREATE_LUA,
       [
@@ -512,15 +638,21 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     return (await this._readSerialized(promotionId))?.record ?? null;
   }
 
+  async readCurrent(promotionId: string): Promise<CurrentPromotionRecord | null> {
+    const current = await this._readSerialized(promotionId);
+    return current === null ? null : { promotion: current.record, serialized: current.raw };
+  }
+
   async listPage(
     params: PromotionPageParams,
     filter?: PromotionStoreFilter,
   ): Promise<PromotionStorePage> {
     const currentParams = currentPromotionPageParams(params);
-    const indexKey = filter?.status ? this._statusIndexKey(filter.status) : this._allIndexKey;
+    const status = filter?.status;
+    const indexKey = status ? this._statusIndexKey(status) : this._allIndexKey;
     const result = await this._client.eval(
       PAGE_LUA,
-      [indexKey],
+      [indexKey, this._allIndexKey, ...this._statusIndexKeys],
       [this._prefix, currentParams.cursor ?? '', String(currentParams.limit + 1)],
     );
 
@@ -530,23 +662,37 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     if (result[0] === 'INDEX_RECORD_MISSING') {
       throw new Error(`Promotion index references missing record ${String(result[1])}`);
     }
+    if (result[0] === 'INDEX_SCORE_INVALID') {
+      throw new PromotionRecordCorruptionError(
+        `Promotion index has a nonzero score for ${String(result[1])}`,
+      );
+    }
     if (result[0] !== 'OK') {
       throw new Error(`Unexpected PAGE_LUA result: ${String(result[0])}`);
     }
-    if ((result.length - 1) % 2 !== 0) {
-      throw new Error('PAGE_LUA returned an incomplete ID/record pair');
+    if ((result.length - 1) % PROMOTION_PAGE_ROW_WIDTH !== 0) {
+      throw new Error('PAGE_LUA returned an incomplete Promotion index row');
     }
     const rows: Array<{ readonly promotionId: string; readonly record: Promotion }> = [];
-    for (let index = 1; index < result.length; index += 2) {
+    for (let index = 1; index < result.length; index += PROMOTION_PAGE_ROW_WIDTH) {
       const promotionId = result[index];
       const raw = result[index + 1];
       if (typeof promotionId !== 'string' || typeof raw !== 'string') {
         throw new Error('PAGE_LUA returned a non-string ID/record pair');
       }
-      const record = JSON.parse(raw) as Promotion;
+      const record = decodePromotionRecord(raw);
       if (record.promotionId !== promotionId) {
         throw new Error(`Promotion index identity mismatch for ${promotionId}`);
       }
+      assertPromotionIndexProjection(record, {
+        all: parseIndexMembership(result[index + 2], 'Promotion all-index membership'),
+        statuses: {
+          draft: parseStatusIndexMembership(result, index, 'draft'),
+          active: parseStatusIndexMembership(result, index, 'active'),
+          paused: parseStatusIndexMembership(result, index, 'paused'),
+          archived: parseStatusIndexMembership(result, index, 'archived'),
+        },
+      });
       rows.push({ promotionId, record });
     }
     const hasMore = rows.length > currentParams.limit;
@@ -566,11 +712,19 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     const updated = updatePromotionRecord(current.record, patch, now);
     const result = await this._client.eval(
       UPDATE_LUA,
-      [this._recordKey(promotionId)],
-      [current.raw, JSON.stringify(updated)],
+      [this._recordKey(promotionId), this._allIndexKey, ...this._statusIndexKeys],
+      [
+        current.raw,
+        serializePromotionRecord(updated),
+        promotionId,
+        String(statusIndexKeyPosition(current.record.status)),
+      ],
     );
     if (result === 'CURRENT_CONFLICT') {
       throw new PromotionCurrentConflictError(promotionId, 'update');
+    }
+    if (result === 'INDEX_CONFLICT') {
+      throw new Error(`Promotion index conflict while updating ${promotionId}`);
     }
     if (result !== 'OK') throw new Error(`Unexpected UPDATE_LUA result: ${String(result)}`);
     return updated;
@@ -587,13 +741,14 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
     const updated = transitionPromotionRecord(current.record, newStatus, reason, now);
     const result = await this._client.eval(
       STATUS_LUA,
+      [this._recordKey(promotionId), this._allIndexKey, ...this._statusIndexKeys],
       [
-        this._recordKey(promotionId),
-        this._statusIndexKey(current.record.status),
-        this._statusIndexKey(newStatus),
-        this._allIndexKey,
+        current.raw,
+        serializePromotionRecord(updated),
+        promotionId,
+        String(statusIndexKeyPosition(current.record.status)),
+        String(statusIndexKeyPosition(newStatus)),
       ],
-      [current.raw, JSON.stringify(updated), promotionId],
     );
     if (result === 'OK') return updated;
     if (result === 'CURRENT_CONFLICT') {
@@ -606,14 +761,39 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
   }
 
   async delete(promotionId: string): Promise<PromotionDeleteResult> {
-    const expectedRaw = await this._client.get(this._recordKey(promotionId));
-    const decision = decidePromotionDelete(
-      expectedRaw === null ? null : (JSON.parse(expectedRaw) as Promotion),
-    );
+    const [current, accountingFields] = await Promise.all([
+      this._readSerialized(promotionId),
+      this._client.hgetall(promotionAccountingKey(promotionId)),
+    ]);
+    const expectedRaw = current?.raw ?? null;
+    const decision = decidePromotionDelete(current?.record ?? null);
+    if (Object.keys(accountingFields).length > 0) {
+      const accounting = decodePromotionAccountingRecord(accountingFields);
+      if (accounting.promotionId !== promotionId) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion accounting identity does not match its Redis key',
+        );
+      }
+      if (decision === 'not_found' || decision === 'delete') {
+        throw new PromotionRecordCorruptionError(
+          'A missing or draft Promotion must not have accounting state',
+        );
+      }
+    }
     const result = await this._client.eval(
       DELETE_LUA,
-      [this._recordKey(promotionId), this._allIndexKey, this._statusIndexKey('draft')],
-      [expectedRaw ?? '', promotionId],
+      [
+        this._recordKey(promotionId),
+        this._allIndexKey,
+        ...this._statusIndexKeys,
+        promotionAccountingKey(promotionId),
+      ],
+      [
+        expectedRaw ?? '',
+        promotionId,
+        decision,
+        current === null ? '' : String(statusIndexKeyPosition(current.record.status)),
+      ],
     );
     if (result === 'OK') {
       if (decision !== 'delete') throw new Error('DELETE_LUA contradicted the current record');
@@ -630,6 +810,11 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
         throw new Error('DELETE_LUA contradicted the current record');
       }
       return { status: 'not_deletable' };
+    }
+    if (result === 'ACCOUNTING_PRESENT') {
+      throw new PromotionRecordCorruptionError(
+        'A missing or draft Promotion acquired accounting state during deletion',
+      );
     }
     if (result === 'CURRENT_CONFLICT') {
       throw new PromotionCurrentConflictError(promotionId, 'delete');
@@ -650,8 +835,7 @@ export class RedisPromotionStore implements PromotionStoreAdapter {
  *
  * KEYS[1] = record key
  * KEYS[2] = all index key
- * KEYS[3] = status index key (draft)
- * KEYS[4..6] = remaining status index keys
+ * Remaining KEYS = status indexes in `PROMOTION_STATUSES` order
  * ARGV[1] = JSON record
  * ARGV[2] = promotionId
  */
@@ -662,7 +846,7 @@ for i = 2, #KEYS do
 end
 redis.call('SET', KEYS[1], ARGV[1])
 redis.call('ZADD', KEYS[2], 0, ARGV[2])
-redis.call('ZADD', KEYS[3], 0, ARGV[2])
+redis.call('ZADD', KEYS[${statusIndexKeyPosition('draft')}], 0, ARGV[2])
 return 'OK'
 `;
 
@@ -673,11 +857,19 @@ return 'OK'
  * Missing indexed records fail closed instead of shortening or shifting a page.
  *
  * KEYS[1] = sorted index key (all or status-specific)
+ * KEYS[2] = all-promotions index
+ * Remaining KEYS = status indexes in `PROMOTION_STATUSES` order
  * ARGV[1] = record key prefix
  * ARGV[2] = exclusive cursor, or empty string for the first page
  * ARGV[3] = bounded ID read count (`limit + 1`)
  */
 const PAGE_LUA = `
+local function membership(key, id)
+  local score = redis.call('ZSCORE', key, id)
+  if not score then return '0' end
+  if tonumber(score) ~= 0 then return nil end
+  return '1'
+end
 local min = '-'
 if ARGV[2] ~= '' then min = '(' .. ARGV[2] end
 local ids = redis.call('ZRANGEBYLEX', KEYS[1], min, '+', 'LIMIT', 0, tonumber(ARGV[3]))
@@ -691,22 +883,58 @@ local result = {'OK'}
 for i = 1, #ids do
   local raw = records[i]
   if not raw then return {'INDEX_RECORD_MISSING', ids[i]} end
+  local allMember = membership(KEYS[2], ids[i])
+  local statusMembers = {}
+  for statusIndex = ${PROMOTION_STATUS_INDEX_FIRST_KEY}, ${PROMOTION_STATUS_INDEX_LAST_KEY} do
+    local statusMember = membership(KEYS[statusIndex], ids[i])
+    if not statusMember then return {'INDEX_SCORE_INVALID', ids[i]} end
+    statusMembers[#statusMembers + 1] = statusMember
+  end
+  if not allMember then
+    return {'INDEX_SCORE_INVALID', ids[i]}
+  end
   result[#result + 1] = ids[i]
   result[#result + 1] = raw
+  result[#result + 1] = allMember
+  for _, statusMember in ipairs(statusMembers) do
+    result[#result + 1] = statusMember
+  end
 end
 return result
 `;
 
 /**
- * UPDATE — exact-current-record CAS followed by record replacement.
+ * UPDATE — exact-current-record and index-projection CAS followed by record
+ * replacement.
  *
  * KEYS[1] = record key
+ * KEYS[2] = all-promotions index
+ * Remaining KEYS = status indexes in `PROMOTION_STATUSES` order
  * ARGV[1] = exact serialized record observed by the caller
  * ARGV[2] = serialized target record
+ * ARGV[3] = promotionId
+ * ARGV[4] = current status-index key position
  */
 const UPDATE_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 if not currentRaw or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
+local currentIndex = tonumber(ARGV[4])
+if not currentIndex or
+   currentIndex < ${PROMOTION_STATUS_INDEX_FIRST_KEY} or
+   currentIndex > ${PROMOTION_STATUS_INDEX_LAST_KEY} then
+  return 'INDEX_CONFLICT'
+end
+if tonumber(redis.call('ZSCORE', KEYS[2], ARGV[3]) or '-1') ~= 0 then
+  return 'INDEX_CONFLICT'
+end
+for i = ${PROMOTION_STATUS_INDEX_FIRST_KEY}, ${PROMOTION_STATUS_INDEX_LAST_KEY} do
+  local score = redis.call('ZSCORE', KEYS[i], ARGV[3])
+  if i == currentIndex then
+    if tonumber(score or '-1') ~= 0 then return 'INDEX_CONFLICT' end
+  elseif score then
+    return 'INDEX_CONFLICT'
+  end
+end
 redis.call('SET', KEYS[1], ARGV[2])
 return 'OK'
 `;
@@ -715,24 +943,42 @@ return 'OK'
  * STATUS — exact-current-record CAS, record update, and status-index move.
  *
  * KEYS[1] = record key
- * KEYS[2] = old status index key
- * KEYS[3] = new status index key
- * KEYS[4] = all-promotions index key
+ * KEYS[2] = all-promotions index
+ * Remaining KEYS = status indexes in `PROMOTION_STATUSES` order
  * ARGV[1] = exact serialized record observed by the caller
  * ARGV[2] = serialized target record
  * ARGV[3] = promotionId
+ * ARGV[4] = current status-index key position
+ * ARGV[5] = target status-index key position
  */
 const STATUS_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 if not currentRaw or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
-if tonumber(redis.call('ZSCORE', KEYS[2], ARGV[3]) or '-1') ~= 0 or
-   redis.call('ZSCORE', KEYS[3], ARGV[3]) or
-   tonumber(redis.call('ZSCORE', KEYS[4], ARGV[3]) or '-1') ~= 0 then
+local currentIndex = tonumber(ARGV[4])
+local targetIndex = tonumber(ARGV[5])
+if not currentIndex or
+   currentIndex < ${PROMOTION_STATUS_INDEX_FIRST_KEY} or
+   currentIndex > ${PROMOTION_STATUS_INDEX_LAST_KEY} or
+   not targetIndex or
+   targetIndex < ${PROMOTION_STATUS_INDEX_FIRST_KEY} or
+   targetIndex > ${PROMOTION_STATUS_INDEX_LAST_KEY} or
+   currentIndex == targetIndex then
   return 'INDEX_CONFLICT'
 end
+if tonumber(redis.call('ZSCORE', KEYS[2], ARGV[3]) or '-1') ~= 0 then
+  return 'INDEX_CONFLICT'
+end
+for i = ${PROMOTION_STATUS_INDEX_FIRST_KEY}, ${PROMOTION_STATUS_INDEX_LAST_KEY} do
+  local score = redis.call('ZSCORE', KEYS[i], ARGV[3])
+  if i == currentIndex then
+    if tonumber(score or '-1') ~= 0 then return 'INDEX_CONFLICT' end
+  elseif score then
+    return 'INDEX_CONFLICT'
+  end
+end
 redis.call('SET', KEYS[1], ARGV[2])
-redis.call('ZREM', KEYS[2], ARGV[3])
-redis.call('ZADD', KEYS[3], 0, ARGV[3])
+redis.call('ZREM', KEYS[currentIndex], ARGV[3])
+redis.call('ZADD', KEYS[targetIndex], 0, ARGV[3])
 return 'OK'
 `;
 
@@ -741,32 +987,52 @@ return 'OK'
  *
  * KEYS[1] = record key
  * KEYS[2] = all index key
- * KEYS[3] = status index key (draft)
+ * Status-index KEYS follow in `PROMOTION_STATUSES` order
+ * Final KEY = Promotion accounting record
  * ARGV[1] = exact serialized record observed by the caller, or empty if absent
  * ARGV[2] = promotionId
+ * ARGV[3] = TypeScript-decoded delete decision
+ * ARGV[4] = current status-index key position, or empty when absent
  */
 const DELETE_LUA = `
 local currentRaw = redis.call('GET', KEYS[1])
 if not currentRaw then
   if ARGV[1] == '' then
-    if redis.call('ZSCORE', KEYS[2], ARGV[2]) or redis.call('ZSCORE', KEYS[3], ARGV[2]) then
-      return 'INDEX_CONFLICT'
+    for i = 2, ${PROMOTION_STATUS_INDEX_LAST_KEY} do
+      if redis.call('ZSCORE', KEYS[i], ARGV[2]) then return 'INDEX_CONFLICT' end
+    end
+    if redis.call('EXISTS', KEYS[${PROMOTION_ACCOUNTING_DELETE_KEY}]) == 1 then
+      return 'ACCOUNTING_PRESENT'
     end
     return 'NOT_FOUND'
   end
   return 'CURRENT_CONFLICT'
 end
 if ARGV[1] == '' or currentRaw ~= ARGV[1] then return 'CURRENT_CONFLICT' end
-local current = cjson.decode(currentRaw)
-local allScore = tonumber(redis.call('ZSCORE', KEYS[2], ARGV[2]) or '-1')
-local draftScore = redis.call('ZSCORE', KEYS[3], ARGV[2])
-if current.status ~= 'draft' then
-  if allScore ~= 0 or draftScore then return 'INDEX_CONFLICT' end
-  return 'NOT_DELETABLE'
+local currentIndex = tonumber(ARGV[4])
+if not currentIndex or
+   currentIndex < ${PROMOTION_STATUS_INDEX_FIRST_KEY} or
+   currentIndex > ${PROMOTION_STATUS_INDEX_LAST_KEY} then
+  return 'INDEX_CONFLICT'
 end
-if allScore ~= 0 or tonumber(draftScore or '-1') ~= 0 then return 'INDEX_CONFLICT' end
+if tonumber(redis.call('ZSCORE', KEYS[2], ARGV[2]) or '-1') ~= 0 then
+  return 'INDEX_CONFLICT'
+end
+for i = ${PROMOTION_STATUS_INDEX_FIRST_KEY}, ${PROMOTION_STATUS_INDEX_LAST_KEY} do
+  local score = redis.call('ZSCORE', KEYS[i], ARGV[2])
+  if i == currentIndex then
+    if tonumber(score or '-1') ~= 0 then return 'INDEX_CONFLICT' end
+  elseif score then
+    return 'INDEX_CONFLICT'
+  end
+end
+if ARGV[3] ~= 'delete' then return 'NOT_DELETABLE' end
+if currentIndex ~= ${statusIndexKeyPosition('draft')} then return 'INDEX_CONFLICT' end
+if redis.call('EXISTS', KEYS[${PROMOTION_ACCOUNTING_DELETE_KEY}]) == 1 then
+  return 'ACCOUNTING_PRESENT'
+end
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], ARGV[2])
-redis.call('ZREM', KEYS[3], ARGV[2])
+redis.call('ZREM', KEYS[currentIndex], ARGV[2])
 return 'OK'
 `;

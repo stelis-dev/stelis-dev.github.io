@@ -9,8 +9,6 @@ function createMockRedis(): RedisClient {
     del: vi.fn(),
     eval: vi.fn(),
     hgetall: vi.fn(),
-    scan: vi.fn(),
-    ttl: vi.fn(),
     lrange: vi.fn(),
     lpush: vi.fn(),
     ltrim: vi.fn(),
@@ -33,12 +31,10 @@ describe('createAdminRedisAdapter', () => {
     const adminRedis = createAdminRedisAdapter(redis);
 
     await adminRedis.del('a');
-    await adminRedis.scan('stelis:*');
     await adminRedis.lpush('logs', 'entry');
     await adminRedis.eval('return 1', ['k'], ['v']);
 
     expect(redis.del).toHaveBeenCalledWith('a');
-    expect(redis.scan).toHaveBeenCalledWith('stelis:*');
     expect(redis.lpush).toHaveBeenCalledWith('logs', 'entry');
     expect(redis.eval).toHaveBeenCalledWith('return 1', ['k'], ['v']);
   });

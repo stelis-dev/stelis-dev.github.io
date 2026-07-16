@@ -18,10 +18,29 @@ export class ClientIpResolutionError extends Error {
   }
 }
 
-function normalizeIp(value?: string | null): string | null {
+/**
+ * Canonicalize one IP address without applying any trusted-proxy policy.
+ *
+ * IPv6 zone identifiers are socket-local routing metadata, not part of the
+ * external client identity. The complete input must still be a valid IP
+ * address, but only the canonical address portion is returned.
+ */
+export function canonicalizeIpAddress(value?: string | null): string | null {
   const trimmed = value?.trim();
   if (!trimmed || trimmed.toLowerCase() === 'unknown') return null;
-  return isIP(trimmed) === 0 ? null : trimmed;
+  const version = isIP(trimmed);
+  if (version === 0) return null;
+  if (version === 4) return trimmed;
+
+  const zoneIndex = trimmed.indexOf('%');
+  const address = zoneIndex === -1 ? trimmed : trimmed.slice(0, zoneIndex);
+  try {
+    const hostname = new URL(`http://[${address}]/`).hostname;
+    if (!hostname.startsWith('[') || !hostname.endsWith(']')) return null;
+    return hostname.slice(1, -1);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -41,7 +60,7 @@ export function resolveClientIp(
   const trustedProxyHops = options.trustedProxyHops ?? 0;
 
   if (trustedProxyHops === 0) {
-    const directIp = normalizeIp(options.directIp);
+    const directIp = canonicalizeIpAddress(options.directIp);
     if (!directIp) {
       throw new ClientIpResolutionError('Client IP could not be resolved from socket address');
     }
@@ -56,7 +75,7 @@ export function resolveClientIp(
   }
 
   const chain = xff.split(',').map((part) => part.trim());
-  if (chain.some((part) => normalizeIp(part) === null)) {
+  if (chain.some((part) => canonicalizeIpAddress(part) === null)) {
     throw new ClientIpResolutionError(
       'Client IP could not be resolved from the trusted proxy chain',
     );
@@ -69,7 +88,7 @@ export function resolveClientIp(
     );
   }
 
-  const clientIp = normalizeIp(chain[clientIndex]);
+  const clientIp = canonicalizeIpAddress(chain[clientIndex]);
   if (!clientIp) {
     throw new ClientIpResolutionError(
       'Client IP could not be resolved from the trusted proxy chain',

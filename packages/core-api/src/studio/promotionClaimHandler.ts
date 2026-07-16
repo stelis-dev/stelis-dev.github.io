@@ -13,10 +13,8 @@
  *   2. Check claim deadline has not passed
  *   3. Delegate atomic claim to ExecutionLedger
  *
- * Budget initialization: handled lazily by ExecutionLedger inside
- * mutation paths (`reserve()` / `consume()` / `release()`); the read-only
- * `getBudgetSummary()` path never installs accounting state. claim() is
- * still owns the real total budget.
+ * Accounting initialization is owned by ExecutionLedger.claim(). The
+ * read-only Promotion ledger status path never installs accounting state.
  *
  * Ownership model: promotionId + userId. No wallet address persisted.
  *
@@ -42,7 +40,8 @@ export type ClaimFailureReason =
   | 'promotion_not_started'
   | 'claim_deadline_passed'
   | 'max_participants_reached'
-  | 'already_claimed';
+  | 'already_claimed'
+  | 'current_conflict';
 
 export type ClaimResult =
   | { ok: true; entitlement: Entitlement }
@@ -107,26 +106,24 @@ export async function handlePromotionClaim(
   // 4. Atomic claim: dedupe + capacity + entitlement creation
   const useUntilAt = computeUseUntilAt(promotion, now);
   const claimResult = await deps.ledger.claim(input.promotionId, input.userId, {
-    maxParticipants: promotion.maxParticipants,
-    perUserGasAllowanceMist: promotion.perUserGasAllowanceMist,
     useUntilAt,
   });
 
   if (!claimResult.ok) {
-    if (claimResult.reason === 'duplicate') {
-      return { ok: false, reason: 'already_claimed' };
+    switch (claimResult.reason) {
+      case 'duplicate':
+        return { ok: false, reason: 'already_claimed' };
+      case 'capacity_exceeded':
+        return { ok: false, reason: 'max_participants_reached' };
+      case 'promotion_not_active':
+        // The exact Promotion changed or stopped being active between the
+        // route read and the atomic claim mutation.
+        return { ok: false, reason: 'promotion_not_active' };
+      case 'record_changed':
+        return { ok: false, reason: 'current_conflict' };
     }
-    if (claimResult.reason === 'capacity_exceeded') {
-      return { ok: false, reason: 'max_participants_reached' };
-    }
-    if (claimResult.reason === 'promotion_not_active') {
-      // Redis-only race closure: admin paused/archived the promotion
-      // between `catalog.get()` above and the atomic Lua claim CAS.
-      // Map the internal ledger reason to the existing public claim
-      // reason so the public claim contract stays unchanged.
-      return { ok: false, reason: 'promotion_not_active' };
-    }
-    return { ok: false, reason: 'already_claimed' };
+    const unsupported: never = claimResult.reason;
+    throw new Error(`Unsupported Promotion claim failure: ${String(unsupported)}`);
   }
 
   return { ok: true, entitlement: claimResult.entitlement };

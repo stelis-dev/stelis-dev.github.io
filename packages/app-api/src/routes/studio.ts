@@ -70,6 +70,7 @@ export function createStudioRoutes(
     claim_deadline_passed: 'CLAIM_DEADLINE_PASSED',
     max_participants_reached: 'PROMOTION_CAPACITY_REACHED',
     already_claimed: 'ALREADY_CLAIMED',
+    current_conflict: 'PROMOTION_CURRENT_CONFLICT',
   } as const satisfies Record<ClaimFailureReason, (typeof STUDIO_CLAIM_ERROR_CODES)[number]>;
 
   // ── GET /studio/promotions — developer-JWT principal promotion list ──
@@ -153,19 +154,19 @@ export function createStudioRoutes(
         return respondMapped(c, codedHostError('PROMOTION_NOT_FOUND', STUDIO_DETAIL_ERROR_CODES));
       }
 
-      const [entitlement, claimedCount, budgetSummary] = await Promise.all([
-        ctx.executionLedger.getEntitlement(promotionId, userId),
-        ctx.executionLedger.getClaimedCount(promotionId),
-        ctx.executionLedger.getBudgetSummary(promotionId),
-      ]);
+      const ledgerStatus = await ctx.executionLedger.getPromotionLedgerStatus(promotionId, userId);
 
-      const detail = computeUserPromotionDetail(promotion, entitlement, claimedCount);
+      const detail = computeUserPromotionDetail(
+        promotion,
+        ledgerStatus.entitlement,
+        ledgerStatus.claimedCount,
+      );
 
       const response = {
         promotionId: promotion.promotionId,
         displayName: promotion.displayName,
         type: promotion.type,
-        promotionRemainingBudgetMist: budgetSummary.availableMist.toString(),
+        promotionRemainingBudgetMist: ledgerStatus.budget.availableMist.toString(),
         detail,
       } satisfies PromotionDetailResponse;
       return c.json(response);
@@ -387,7 +388,6 @@ export function createStudioRoutes(
         sponsorPool: ctx.host.sponsorPool,
         prepareStore: ctx.host.prepareStore,
         abuseBlocker: ctx.host.abuseBlocker,
-        usageStore: ctx.usageStore ?? null,
         globalAllowedTargets: ctx.studioGlobalAllowedTargets,
         onSponsorResult: ctx.host.onSponsorResult,
       };

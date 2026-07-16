@@ -28,12 +28,6 @@ export function createAdminRedisAdapter(redis: RedisClient): AdminRedisClient {
     del(key) {
       return redis.del(key);
     },
-    scan(pattern) {
-      return redis.scan(pattern);
-    },
-    ttl(key) {
-      return redis.ttl(key);
-    },
     lrange(key, start, stop) {
       return redis.lrange(key, start, stop);
     },

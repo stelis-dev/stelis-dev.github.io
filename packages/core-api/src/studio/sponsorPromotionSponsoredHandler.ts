@@ -12,7 +12,6 @@ import {
 } from '../session/sessionPrimitives.js';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
-import type { PromotionUsageStoreAdapter } from './promotionUsageStore.js';
 import type { SponsorPoolAdapter } from '../context.js';
 import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
@@ -59,8 +58,6 @@ export interface PromotionSponsorContext {
   prepareStore: PrepareStoreAdapter;
   /** Abuse blocker — for recording sponsor failures. */
   abuseBlocker: AbuseBlockerAdapter;
-  /** Usage store — record completed sponsor events. */
-  usageStore?: PromotionUsageStoreAdapter | null;
   /** Canonical STUDIO_ALLOWED_TARGETS entries for Host-level MoveCall enforcement. */
   globalAllowedTargets: ReadonlySet<string>;
   /** Optional host-provided sponsor result callback. */

@@ -1,358 +1,392 @@
-/**
- * MemoryPromotionExecutionLedger — in-memory implementation for testing.
- *
- * Single-threaded, no Lua needed. All operations are synchronous-safe
- * (wrapped in Promise for interface conformance).
- *
- * Budget is lazily installed in mutation paths (`reserve` / `consume` /
- * `release` / `sweepExpiredReservations`) via `ensureBudget()`. Read paths
- * (`getBudgetSummary`) are non-mutating: they return existing snapshots
- * directly, derive an ephemeral snapshot from `promotionBudgetTotals` if a claim has
- * already recorded one, or return `{0n,0n,0n}` for unclaimed promotions.
- * Total budget = `maxParticipants * perUserGasAllowanceMist` (computed
- * by the shared semantic guard at claim time and stored per-promotion).
- *
- * @module studio/executionLedgerMemory
- */
-
-import type { PromotionExecutionLedger, PromotionListLedgerStatus } from './executionLedger.js';
+import type {
+  PromotionExecutionLedger,
+  PromotionLedgerStatus,
+  PromotionListLedgerStatus,
+} from './executionLedger.js';
 import {
   assertPromotionListLedgerBatchBound,
   PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
+  PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE,
 } from './executionLedger.js';
-import {
-  parsePromotionLedgerBudget,
-  assertPositiveMist,
-  assertNonNegativeMist,
-  assertWithinLedgerBound,
-} from './executionLedgerValueGuards.js';
 import type {
-  Entitlement,
-  EntitlementStatus,
-  BudgetSummary,
-  ClaimedUserProjection,
   ClaimOpts,
   ClaimResult,
+  ConsumeResult,
+  Entitlement,
+  ReleaseResult,
   ReserveParams,
   ReserveResult,
-  ConsumeResult,
-  ReleaseResult,
 } from './domain.js';
+import {
+  assertNonNegativeMist,
+  assertPositiveMist,
+  assertWithinLedgerBound,
+} from './executionLedgerValueGuards.js';
+import { MemoryPromotionStore } from './promotionStore.js';
+import {
+  assertPromotionLedgerReadState,
+  assertPromotionOperationResultIdentity,
+  assertPromotionReservationAccountingState,
+  assertPromotionReservationIdentity,
+  createPromotionClaimTransition,
+  createPromotionFinalizeTransition,
+  createPromotionReserveTransition,
+  decodePromotionAccountingRecord,
+  decodePromotionEntitlementRecord,
+  decodePromotionOperationResultRecord,
+  decodePromotionReservationRecord,
+  promotionEntitlementFromRecord,
+  promotionEntitlementKey,
+  serializePromotionAccountingRecord,
+  serializePromotionEntitlementRecord,
+  serializePromotionOperationResultRecord,
+  serializePromotionReservationRecord,
+  type CurrentPromotionRecord,
+  type PromotionAccountingRecord,
+  type PromotionEntitlementRecord,
+  type PromotionOperationResultRecord,
+  type PromotionReservationRecord,
+  PromotionRecordCorruptionError,
+  PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE,
+} from './promotionRecords.js';
 import { type Clock, systemClock } from '../clock.js';
 
-// ─────────────────────────────────────────────
-// Internal state types
-// ─────────────────────────────────────────────
-
-interface ClaimEntry {
-  userId: string;
-  claimedAt: string;
+function cloneAccounting(record: PromotionAccountingRecord): PromotionAccountingRecord {
+  return decodePromotionAccountingRecord(serializePromotionAccountingRecord(record));
 }
 
-interface EntitlementState {
-  promotionId: string;
-  userId: string;
-  claimedAt: string;
-  useUntilAt: string | null;
-  remainingMist: bigint;
-  consumedMist: bigint;
-  status: EntitlementStatus;
-  activeReservationReceiptId: string | null;
-  activeReservationAmountMist: bigint | null;
-  lastUsedAt: string | null;
+function cloneEntitlement(record: PromotionEntitlementRecord): PromotionEntitlementRecord {
+  return decodePromotionEntitlementRecord(serializePromotionEntitlementRecord(record));
 }
 
-interface ReservationRecord {
-  promotionId: string;
-  userId: string;
-  amountMist: bigint;
-  createdAt: number;
-  expiresAt: number;
+function cloneReservation(record: PromotionReservationRecord): PromotionReservationRecord {
+  return decodePromotionReservationRecord(serializePromotionReservationRecord(record));
 }
 
-interface BudgetState {
-  totalMist: bigint;
-  availableMist: bigint;
-  reservedMist: bigint;
-  consumedMist: bigint;
+function cloneResult(record: PromotionOperationResultRecord): PromotionOperationResultRecord {
+  return decodePromotionOperationResultRecord(serializePromotionOperationResultRecord(record));
 }
-
-// ─────────────────────────────────────────────
-// Implementation
-// ─────────────────────────────────────────────
 
 export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger {
-  private readonly reservationTtlMs: number;
-  private readonly _clock: Clock;
+  private readonly accounting = new Map<string, PromotionAccountingRecord>();
+  private readonly entitlements = new Map<string, PromotionEntitlementRecord>();
+  private readonly reservations = new Map<string, PromotionReservationRecord>();
+  private readonly operationResults = new Map<string, PromotionOperationResultRecord>();
+  private runningSweepBatch: Promise<number> | null = null;
 
-  /**
-   * @param reservationTtlMs - TTL for reservations. Default: PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS.
-   *   Tests can pass a short value to verify sweep behavior.
-   * @param clock             - Optional `Clock` for reservation TTL reads.
-   *                            Defaults to `systemClock`. ISO timestamp
-   *                            fields (`claimedAt`, `lastUsedAt`) intentionally
-   *                            still use `new Date().toISOString()` — they
-   *                            live on a separate observability axis.
-   */
   constructor(
-    reservationTtlMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
-    clock: Clock = systemClock,
+    private readonly promotionStore: MemoryPromotionStore,
+    private readonly reservationTtlMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
+    private readonly clock: Clock = systemClock,
   ) {
     if (!Number.isSafeInteger(reservationTtlMs) || reservationTtlMs < 0) {
       throw new Error(
         'MemoryPromotionExecutionLedger: reservationTtlMs must be a non-negative safe integer',
       );
     }
-    this.reservationTtlMs = reservationTtlMs;
-    this._clock = clock;
+    promotionStore.bindAccountingExists((promotionId) => this.accounting.has(promotionId));
   }
 
-  /**
-   * claim index: promotionId → Set<userId>
-   * Used for dedupe, capacity guard, and listClaimedUsers.
-   */
-  private readonly claimIndex = new Map<string, Map<string, ClaimEntry>>();
-
-  /** entitlement state: `${promotionId}:${userId}` → EntitlementState */
-  private readonly entitlements = new Map<string, EntitlementState>();
-
-  /** reservation records: receiptId → ReservationRecord */
-  private readonly reservations = new Map<string, ReservationRecord>();
-
-  /** budget state: promotionId → BudgetState */
-  private readonly budgets = new Map<string, BudgetState>();
-
-  /** Guard-validated total budget captured from the first claim per Promotion. */
-  private readonly promotionBudgetTotals = new Map<string, bigint>();
-
-  /** final receipts (consumed or released): receiptId → true */
-  private readonly terminalReceipts = new Set<string>();
-
-  // ── Claim ──────────────────────────────────
+  private requireActivePromotion(promotionId: string) {
+    const current = this.promotionStore.readCurrentSync(promotionId);
+    if (current === null || current.promotion.status !== 'active') return 'not_active';
+    return current;
+  }
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
-    const { perUserGasAllowanceMist, totalBudgetMist } = parsePromotionLedgerBudget(
-      opts.maxParticipants,
-      opts.perUserGasAllowanceMist,
-    );
-
-    // Get or create claim index for this promotion
-    let promoClaims = this.claimIndex.get(promotionId);
-    if (!promoClaims) {
-      promoClaims = new Map();
-      this.claimIndex.set(promotionId, promoClaims);
+    const current = this.requireActivePromotion(promotionId);
+    if (current === 'not_active') {
+      return { ok: false, reason: 'promotion_not_active' };
     }
-
-    // Dedupe check
-    if (promoClaims.has(userId)) {
-      return { ok: false, reason: 'duplicate' };
-    }
-
-    // Capacity check
-    if (promoClaims.size >= opts.maxParticipants) {
-      return { ok: false, reason: 'capacity_exceeded' };
-    }
-
-    // Preserve the guard's exact output for lazy budget materialization.
-    if (!this.promotionBudgetTotals.has(promotionId)) {
-      this.promotionBudgetTotals.set(promotionId, totalBudgetMist);
-    }
-
-    const now = new Date().toISOString();
-    const key = entKey(promotionId, userId);
-
-    // Create claim entry
-    promoClaims.set(userId, { userId, claimedAt: now });
-
-    // Create entitlement
-    const state: EntitlementState = {
-      promotionId,
+    const key = promotionEntitlementKey(promotionId, userId);
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(promotionId, userId, current);
+    const transition = createPromotionClaimTransition({
+      promotion: current.promotion,
+      accounting,
+      entitlement,
       userId,
-      claimedAt: now,
+      claimedAt: new Date(this.clock.nowMs()).toISOString(),
       useUntilAt: opts.useUntilAt,
-      remainingMist: perUserGasAllowanceMist,
-      consumedMist: 0n,
-      status: 'active',
-      activeReservationReceiptId: null,
-      activeReservationAmountMist: null,
-      lastUsedAt: null,
-    };
-    this.entitlements.set(key, state);
-
-    return { ok: true, entitlement: toEntitlement(state) };
+    });
+    if ('status' in transition) {
+      return {
+        ok: false,
+        reason: transition.status === 'duplicate' ? 'duplicate' : 'capacity_exceeded',
+      };
+    }
+    this.entitlements.set(key, transition.entitlement);
+    this.accounting.set(promotionId, transition.accounting);
+    return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
   }
-
-  // ── Reserve ────────────────────────────────
 
   async reserve(params: ReserveParams): Promise<ReserveResult> {
     const { promotionId, userId, receiptId, amountMist } = params;
     assertPositiveMist(amountMist, 'amountMist');
     assertWithinLedgerBound(amountMist, 'amountMist');
-    const key = entKey(promotionId, userId);
-    const state = this.entitlements.get(key);
+    const current = this.promotionStore.readCurrentSync(promotionId);
 
-    if (!state) {
-      return { ok: false, reason: 'entitlement_not_found' };
+    const existingResult = this.operationResults.get(receiptId);
+    const existingReservationRecord = this.reservations.get(receiptId);
+    if (existingResult && existingReservationRecord) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion receipt has both a reservation and a final operation result',
+      );
+    }
+    if (existingResult) {
+      await this.validateOperationResult(existingResult, receiptId);
+      return { ok: false, reason: 'record_changed' };
     }
 
-    if (state.status !== 'active') {
-      return { ok: false, reason: 'entitlement_not_active' };
+    const key = promotionEntitlementKey(promotionId, userId);
+    const existingReservation = existingReservationRecord
+      ? cloneReservation(existingReservationRecord)
+      : null;
+    if (existingReservation) {
+      assertPromotionReservationIdentity(existingReservation, receiptId);
+      if (!current) {
+        throw new PromotionRecordCorruptionError('Reservation exists without its Promotion record');
+      }
+      if (
+        existingReservation.promotionId !== promotionId ||
+        existingReservation.userId !== userId ||
+        existingReservation.amountMist !== amountMist.toString()
+      ) {
+        return { ok: false, reason: 'record_changed' };
+      }
+      const { accounting, entitlement } = this.readLedgerStateSnapshot(
+        promotionId,
+        userId,
+        current,
+      );
+      if (!entitlement || !accounting) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation exists without accounting or entitlement state',
+        );
+      }
+      assertPromotionReservationAccountingState(accounting, entitlement, existingReservation);
+      return { ok: true, entitlement: promotionEntitlementFromRecord(entitlement) };
     }
 
-    if (state.activeReservationReceiptId !== null) {
-      return { ok: false, reason: 'concurrent_reservation' };
+    if (current === null || current.promotion.status !== 'active') {
+      return { ok: false, reason: 'promotion_not_active' };
     }
-
-    if (state.remainingMist < amountMist) {
-      return { ok: false, reason: 'entitlement_insufficient' };
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(promotionId, userId, current);
+    if (!entitlement) return { ok: false, reason: 'entitlement_not_found' };
+    if (!accounting) {
+      throw new PromotionRecordCorruptionError(PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE);
     }
-
-    // Ensure budget is initialized
-    const budget = this.ensureBudget(promotionId);
-
-    if (budget.availableMist < amountMist) {
-      return { ok: false, reason: 'budget_insufficient' };
+    if (entitlement.activeReservationReceiptId !== null) {
+      const activeReceiptId = entitlement.activeReservationReceiptId;
+      const activeReservation = this.reservations.get(activeReceiptId);
+      const activeResult = this.operationResults.get(activeReceiptId);
+      if (!activeReservation || activeResult) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion entitlement points to a missing or finalized reservation',
+        );
+      }
+      const currentActiveReservation = cloneReservation(activeReservation);
+      assertPromotionReservationIdentity(currentActiveReservation, activeReceiptId);
+      assertPromotionReservationAccountingState(accounting, entitlement, currentActiveReservation);
     }
-
-    // Atomically update entitlement + budget + reservation
-    state.remainingMist -= amountMist;
-    state.activeReservationReceiptId = receiptId;
-    state.activeReservationAmountMist = amountMist;
-
-    budget.availableMist -= amountMist;
-    budget.reservedMist += amountMist;
-
-    const now = this._clock.nowMs();
-    this.reservations.set(receiptId, {
-      promotionId,
-      userId,
+    const transition = createPromotionReserveTransition({
+      promotion: current.promotion,
+      accounting,
+      entitlement,
+      receiptId,
       amountMist,
-      createdAt: now,
-      expiresAt: now + this.reservationTtlMs,
+      deadlineMs: this.clock.nowMs() + this.reservationTtlMs,
     });
-
-    return { ok: true, entitlement: toEntitlement(state) };
+    if ('status' in transition) return { ok: false, reason: transition.status };
+    this.reservations.set(receiptId, transition.reservation);
+    this.entitlements.set(key, transition.entitlement);
+    this.accounting.set(promotionId, transition.accounting);
+    return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
   }
-
-  // ── Consume ────────────────────────────────
 
   async consume(receiptId: string, actualGasMist: bigint): Promise<ConsumeResult> {
     assertNonNegativeMist(actualGasMist, 'actualGasMist');
     assertWithinLedgerBound(actualGasMist, 'actualGasMist');
+    const storedResult = this.operationResults.get(receiptId);
     const reservation = this.reservations.get(receiptId);
-    if (!reservation || this.terminalReceipts.has(receiptId)) {
-      return { ok: false, reason: 'reservation_not_found' };
+    if (storedResult && reservation) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion receipt has both a reservation and a final operation result',
+      );
     }
-
-    const { promotionId, userId, amountMist: reservedMist } = reservation;
-    const key = entKey(promotionId, userId);
-    const state = this.entitlements.get(key);
-    const budget = this.budgets.get(promotionId);
-
-    if (!state || !budget) {
-      return { ok: false, reason: 'reservation_not_found' };
+    if (storedResult) {
+      const currentResult = await this.validateOperationResult(storedResult, receiptId);
+      if (
+        currentResult.operation !== 'consume' ||
+        currentResult.amountMist !== actualGasMist.toString()
+      ) {
+        return { ok: false, reason: 'record_changed' };
+      }
+      return { ok: true, entitlement: promotionEntitlementFromRecord(currentResult.entitlement) };
     }
-
-    // Delta-release semantics
-    const delta = reservedMist > actualGasMist ? reservedMist - actualGasMist : 0n;
-    const overrun = actualGasMist > reservedMist ? actualGasMist - reservedMist : 0n;
-
-    // Update entitlement
-    // Restore delta to remaining (delta-release)
-    state.remainingMist += delta;
-    // Deduct overrun from remaining (clamped to 0)
-    if (overrun > 0n) {
-      state.remainingMist = state.remainingMist > overrun ? state.remainingMist - overrun : 0n;
-    }
-    state.consumedMist += actualGasMist;
-    state.activeReservationReceiptId = null;
-    state.activeReservationAmountMist = null;
-    state.lastUsedAt = new Date().toISOString();
-
-    // Update status if exhausted
-    if (state.remainingMist === 0n) {
-      state.status = 'exhausted';
-    }
-
-    // Update budget
-    budget.reservedMist -= reservedMist;
-    budget.consumedMist += actualGasMist;
-    // Return delta to available
-    budget.availableMist += delta;
-    // Deduct overrun from available (clamped to 0)
-    if (overrun > 0n) {
-      budget.availableMist = budget.availableMist > overrun ? budget.availableMist - overrun : 0n;
-    }
-
-    // Mark terminal
-    this.terminalReceipts.add(receiptId);
-    this.reservations.delete(receiptId);
-
-    return { ok: true, entitlement: toEntitlement(state) };
+    if (!reservation) return { ok: false, reason: 'reservation_not_found' };
+    const currentReservation = cloneReservation(reservation);
+    assertPromotionReservationIdentity(currentReservation, receiptId);
+    return this.applyConsume(currentReservation, actualGasMist);
   }
 
-  // ── Release ────────────────────────────────
+  private applyConsume(
+    reservation: PromotionReservationRecord,
+    actualGasMist: bigint,
+  ): ConsumeResult {
+    const key = promotionEntitlementKey(reservation.promotionId, reservation.userId);
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(
+      reservation.promotionId,
+      reservation.userId,
+    );
+    if (!entitlement || !accounting) {
+      throw new PromotionRecordCorruptionError(
+        'Reservation is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionReservationAccountingState(accounting, entitlement, reservation);
+
+    const transition = createPromotionFinalizeTransition({
+      accounting,
+      entitlement,
+      reservation,
+      operation: 'consume',
+      chargedMist: actualGasMist,
+      usedAt: new Date(this.clock.nowMs()).toISOString(),
+    });
+    this.entitlements.set(key, transition.entitlement);
+    this.accounting.set(reservation.promotionId, transition.accounting);
+    this.reservations.delete(reservation.receiptId);
+    this.operationResults.set(reservation.receiptId, transition.result);
+    return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
+  }
 
   async release(receiptId: string): Promise<ReleaseResult> {
+    const storedResult = this.operationResults.get(receiptId);
     const reservation = this.reservations.get(receiptId);
-    if (!reservation || this.terminalReceipts.has(receiptId)) {
-      return { ok: false, reason: 'reservation_not_found' };
+    if (storedResult && reservation) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion receipt has both a reservation and a final operation result',
+      );
     }
-
-    const { promotionId, userId, amountMist } = reservation;
-    const key = entKey(promotionId, userId);
-    const state = this.entitlements.get(key);
-    const budget = this.budgets.get(promotionId);
-
-    if (!state || !budget) {
-      return { ok: false, reason: 'reservation_not_found' };
+    if (storedResult) {
+      const currentResult = await this.validateOperationResult(storedResult, receiptId);
+      if (currentResult.operation !== 'release') {
+        return { ok: false, reason: 'record_changed' };
+      }
+      return { ok: true, entitlement: promotionEntitlementFromRecord(currentResult.entitlement) };
     }
-
-    // Full restoration
-    state.remainingMist += amountMist;
-    state.activeReservationReceiptId = null;
-    state.activeReservationAmountMist = null;
-
-    budget.reservedMist -= amountMist;
-    budget.availableMist += amountMist;
-
-    // Mark terminal
-    this.terminalReceipts.add(receiptId);
-    this.reservations.delete(receiptId);
-
-    return { ok: true, entitlement: toEntitlement(state) };
+    if (!reservation) return { ok: false, reason: 'reservation_not_found' };
+    const currentReservation = cloneReservation(reservation);
+    assertPromotionReservationIdentity(currentReservation, receiptId);
+    return this.applyRelease(currentReservation);
   }
 
-  // ── Read models ────────────────────────────
+  private applyRelease(reservation: PromotionReservationRecord): ReleaseResult {
+    const key = promotionEntitlementKey(reservation.promotionId, reservation.userId);
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(
+      reservation.promotionId,
+      reservation.userId,
+    );
+    if (!entitlement || !accounting) {
+      throw new PromotionRecordCorruptionError(
+        'Reservation is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionReservationAccountingState(accounting, entitlement, reservation);
+    const transition = createPromotionFinalizeTransition({
+      accounting,
+      entitlement,
+      reservation,
+      operation: 'release',
+      chargedMist: 0n,
+      usedAt: null,
+    });
+    this.entitlements.set(key, transition.entitlement);
+    this.accounting.set(reservation.promotionId, transition.accounting);
+    this.reservations.delete(reservation.receiptId);
+    this.operationResults.set(reservation.receiptId, transition.result);
+    return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
+  }
+
+  private async validateOperationResult(
+    stored: PromotionOperationResultRecord,
+    receiptId: string,
+  ): Promise<PromotionOperationResultRecord> {
+    const result = cloneResult(stored);
+    assertPromotionOperationResultIdentity(result, receiptId);
+    const accounting = this.accounting.get(result.promotionId);
+    const entitlement = this.entitlements.get(
+      promotionEntitlementKey(result.promotionId, result.userId),
+    );
+    const current = this.promotionStore.readCurrentSync(result.promotionId);
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion final result is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionLedgerReadState(
+      current,
+      result.promotionId,
+      result.userId,
+      cloneAccounting(accounting),
+      cloneEntitlement(entitlement),
+    );
+    return result;
+  }
+
+  private async readLedgerState(
+    promotionId: string,
+    userId: string | null,
+  ): Promise<{
+    accounting: PromotionAccountingRecord | null;
+    entitlement: PromotionEntitlementRecord | null;
+  }> {
+    return this.readLedgerStateSnapshot(promotionId, userId);
+  }
+
+  private readLedgerStateSnapshot(
+    promotionId: string,
+    userId: string | null,
+    observedPromotion?: CurrentPromotionRecord | null,
+  ): {
+    accounting: PromotionAccountingRecord | null;
+    entitlement: PromotionEntitlementRecord | null;
+  } {
+    const storedAccounting = this.accounting.get(promotionId);
+    const storedEntitlement =
+      userId === null ? null : this.entitlements.get(promotionEntitlementKey(promotionId, userId));
+    const accounting = storedAccounting ? cloneAccounting(storedAccounting) : null;
+    const entitlement = storedEntitlement ? cloneEntitlement(storedEntitlement) : null;
+    const current =
+      observedPromotion === undefined
+        ? accounting === null
+          ? null
+          : this.promotionStore.readCurrentSync(promotionId)
+        : observedPromotion;
+    assertPromotionLedgerReadState(current, promotionId, userId, accounting, entitlement);
+    return { accounting, entitlement };
+  }
 
   async getEntitlement(promotionId: string, userId: string): Promise<Entitlement | null> {
-    const state = this.entitlements.get(entKey(promotionId, userId));
-    return state ? toEntitlement(state) : null;
+    const { entitlement } = await this.readLedgerState(promotionId, userId);
+    return entitlement ? promotionEntitlementFromRecord(entitlement) : null;
   }
 
-  async getBudgetSummary(promotionId: string): Promise<BudgetSummary> {
-    // Read-only: summaries never materialize `BudgetState`. Mutation
-    // paths own `ensureBudget()` because they update budget accounting.
-    const existing = this.budgets.get(promotionId);
-    if (existing) {
-      return {
-        availableMist: existing.availableMist,
-        reservedMist: existing.reservedMist,
-        consumedMist: existing.consumedMist,
-      };
-    }
-    // No budget materialized yet. Derive an ephemeral snapshot from
-    // `promotionBudgetTotals` if claim() recorded one; otherwise return the
-    // unclaimed-promotion shape `{ 0, 0, 0 }`.
-    const total = this.promotionBudgetTotals.get(promotionId);
-    if (total === undefined) {
-      return { availableMist: 0n, reservedMist: 0n, consumedMist: 0n };
-    }
-    return { availableMist: total, reservedMist: 0n, consumedMist: 0n };
-  }
-
-  async getClaimedCount(promotionId: string): Promise<number> {
-    return this.claimIndex.get(promotionId)?.size ?? 0;
+  async getPromotionLedgerStatus(
+    promotionId: string,
+    userId: string | null,
+  ): Promise<PromotionLedgerStatus> {
+    const { accounting, entitlement } = await this.readLedgerState(promotionId, userId);
+    return {
+      promotionId,
+      entitlement: entitlement ? promotionEntitlementFromRecord(entitlement) : null,
+      claimedCount: accounting?.claimedCount ?? 0,
+      budget: {
+        availableMist: BigInt(accounting?.availableMist ?? '0'),
+        reservedMist: BigInt(accounting?.reservedMist ?? '0'),
+        consumedMist: BigInt(accounting?.consumedMist ?? '0'),
+      },
+    };
   }
 
   async getPromotionListLedgerStatuses(
@@ -360,115 +394,74 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     userId: string,
   ): Promise<PromotionListLedgerStatus[]> {
     assertPromotionListLedgerBatchBound(promotionIds);
-
-    return promotionIds.map((promotionId) => {
-      const entitlement = this.entitlements.get(entKey(promotionId, userId));
-      const budget = this.budgets.get(promotionId);
+    const snapshots = promotionIds.map((promotionId) => {
+      const storedAccounting = this.accounting.get(promotionId);
+      const storedEntitlement = this.entitlements.get(promotionEntitlementKey(promotionId, userId));
       return {
         promotionId,
-        entitlement: entitlement ? toEntitlement(entitlement) : null,
-        claimedCount: this.claimIndex.get(promotionId)?.size ?? 0,
-        availableBudgetMist:
-          budget?.availableMist ?? this.promotionBudgetTotals.get(promotionId) ?? 0n,
+        accounting: storedAccounting ? cloneAccounting(storedAccounting) : null,
+        entitlement: storedEntitlement ? cloneEntitlement(storedEntitlement) : null,
+      };
+    });
+    const currentPromotions = snapshots.map(({ promotionId, accounting }) =>
+      accounting === null ? null : this.promotionStore.readCurrentSync(promotionId),
+    );
+    return snapshots.map(({ promotionId, accounting, entitlement }, index) => {
+      assertPromotionLedgerReadState(
+        currentPromotions[index]!,
+        promotionId,
+        userId,
+        accounting,
+        entitlement,
+      );
+      return {
+        promotionId,
+        entitlement: entitlement ? promotionEntitlementFromRecord(entitlement) : null,
+        claimedCount: accounting?.claimedCount ?? 0,
+        availableBudgetMist: BigInt(accounting?.availableMist ?? '0'),
       };
     });
   }
 
-  async listClaimedUsers(promotionId: string): Promise<ClaimedUserProjection[]> {
-    const claims = this.claimIndex.get(promotionId);
-    if (!claims) return [];
-
-    const result: ClaimedUserProjection[] = [];
-    for (const [userId, claim] of claims) {
-      const state = this.entitlements.get(entKey(promotionId, userId));
-      result.push({
-        userId,
-        claimedAt: claim.claimedAt,
-        remainingGasAllowanceMist: state ? state.remainingMist.toString() : null,
-        consumedGasAllowanceMist: state ? state.consumedMist.toString() : null,
-        status: state ? state.status : null,
-        activeReservationReceiptId: state ? state.activeReservationReceiptId : null,
+  async sweepExpiredReservations(): Promise<number> {
+    if (this.runningSweepBatch) return this.runningSweepBatch;
+    this.runningSweepBatch = Promise.resolve()
+      .then(() => this.sweepExpiredReservationsBatch())
+      .finally(() => {
+        this.runningSweepBatch = null;
       });
-    }
-    return result;
+    return this.runningSweepBatch;
   }
 
-  // ── Background ─────────────────────────────
-
-  async sweepExpiredReservations(): Promise<number> {
-    const now = this._clock.nowMs();
+  private sweepExpiredReservationsBatch(): number {
+    const now = this.clock.nowMs();
+    const due = [...this.reservations.entries()]
+      .map(([receiptId, record]) => {
+        const current = cloneReservation(record);
+        assertPromotionReservationIdentity(current, receiptId);
+        return current;
+      })
+      .filter((record) => record.deadlineMs <= now)
+      .sort(
+        (left, right) =>
+          left.deadlineMs - right.deadlineMs ||
+          (left.receiptId < right.receiptId ? -1 : left.receiptId > right.receiptId ? 1 : 0),
+      )
+      .slice(0, PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE);
     let swept = 0;
-
-    for (const [receiptId, reservation] of this.reservations) {
-      if (reservation.expiresAt > now) continue;
-      if (this.terminalReceipts.has(receiptId)) continue;
-
-      // Expired reservation: full restoration (same semantics as release)
-      const { promotionId, userId, amountMist } = reservation;
-      const key = entKey(promotionId, userId);
-      const state = this.entitlements.get(key);
-      const budget = this.budgets.get(promotionId);
-
-      if (state) {
-        state.remainingMist += amountMist;
-        state.activeReservationReceiptId = null;
-        state.activeReservationAmountMist = null;
+    for (const reservation of due) {
+      if (this.operationResults.has(reservation.receiptId)) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion receipt has both a reservation and a final operation result',
+        );
       }
-
-      if (budget) {
-        budget.reservedMist -= amountMist;
-        budget.availableMist += amountMist;
-      }
-
-      this.terminalReceipts.add(receiptId);
-      this.reservations.delete(receiptId);
-      swept++;
+      const result = this.applyRelease(reservation);
+      if (result.ok) swept += 1;
     }
-
     return swept;
   }
 
-  dispose(): void {
-    // No background timers in memory implementation.
+  async dispose(): Promise<void> {
+    await this.runningSweepBatch;
   }
-
-  // ── Private helpers ────────────────────────
-
-  private ensureBudget(promotionId: string): BudgetState {
-    let budget = this.budgets.get(promotionId);
-    if (!budget) {
-      const total = this.promotionBudgetTotals.get(promotionId) ?? 0n;
-      budget = {
-        totalMist: total,
-        availableMist: total,
-        reservedMist: 0n,
-        consumedMist: 0n,
-      };
-      this.budgets.set(promotionId, budget);
-    }
-    return budget;
-  }
-}
-
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-
-function entKey(promotionId: string, userId: string): string {
-  return `${promotionId}:${userId}`;
-}
-
-function toEntitlement(state: EntitlementState): Entitlement {
-  return {
-    promotionId: state.promotionId,
-    userId: state.userId,
-    claimedAt: state.claimedAt,
-    useUntilAt: state.useUntilAt,
-    remainingGasAllowanceMist: state.remainingMist.toString(),
-    consumedGasAllowanceMist: state.consumedMist.toString(),
-    status: state.status,
-    activeReservationReceiptId: state.activeReservationReceiptId,
-    activeReservationAmountMist: state.activeReservationAmountMist?.toString() ?? null,
-    lastUsedAt: state.lastUsedAt,
-  };
 }

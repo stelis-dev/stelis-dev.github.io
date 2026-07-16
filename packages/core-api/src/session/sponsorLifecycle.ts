@@ -59,7 +59,7 @@
  *                      insufficiency against preflight `simGas`.
  *   result       — sponsor runner owned. Sign/submit, route-specific accounting
  *                  (generic economics log; promotion ledger consume +
- *                  usage append + overrun warning), `finally` slot
+ *                  structured execution log + overrun warning), `finally` slot
  *                  checkin. Runs only after every postconsume gate
  *                  passes.
  *

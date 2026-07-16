@@ -29,8 +29,6 @@ function appRedis(real: RealRedisHandle): RedisClient {
       return real.client.set(key, value, options);
     },
     del: (key) => real.client.del(key),
-    scan: (pattern) => real.client.scan(pattern),
-    ttl: async (key) => Number(await real.rawClient.sendCommand(['TTL', key])),
     lrange: async (key, start, stop) =>
       (await real.rawClient.sendCommand(['LRANGE', key, String(start), String(stop)])) as string[],
     lpush: async (key, value) => Number(await real.rawClient.sendCommand(['LPUSH', key, value])),

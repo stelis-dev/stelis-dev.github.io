@@ -9,6 +9,7 @@
  */
 import { Hono } from 'hono';
 import {
+  ADMIN_BLOCKLIST_READ_ERROR_CODES,
   ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
   ADMIN_PROMOTION_CREATE_ERROR_CODES,
   ADMIN_PROMOTION_DELETE_ERROR_CODES,
@@ -26,6 +27,7 @@ import {
   parseAdminAuditLogsResponse,
   parseAdminBlocklistDeleteRequest,
   parseAdminBlocklistDeleteResponse,
+  parseAdminBlocklistQuery,
   parseAdminBlocklistResponse,
   parseAdminPromotionCreateRequest,
   parseAdminPromotionDeleteResponse,
@@ -36,7 +38,6 @@ import {
   parseAdminPromotionStatusRequest,
   parseAdminPromotionSummaryResponse,
   parseAdminPromotionUpdateRequest,
-  parseAdminPromotionUsersResponse,
   parseAdminSettlementSwapPathsResponse,
   parseAdminSponsoredLogsQuery,
   parseAdminSponsoredLogsResponse,
@@ -58,7 +59,12 @@ import {
   type AdminJwtConfig,
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
-import { readJsonBodyWithLimit, MAX_SMALL_REQUEST_BODY_BYTES } from '@stelis/core-api';
+import {
+  AbuseBlockCurrentConflictError,
+  AbuseBlockInputError,
+  readJsonBodyWithLimit,
+  MAX_SMALL_REQUEST_BODY_BYTES,
+} from '@stelis/core-api';
 import {
   computeTotalRequiredBudgetMist,
   InvalidStatusTransitionError,
@@ -106,11 +112,8 @@ async function computeAdminSummary(
 ): Promise<import('@stelis/core-api/studio').PromotionAdminSummary | null> {
   if (!ctx.executionLedger) return null;
   const { computePromotionAdminSummary } = await import('@stelis/core-api/studio');
-  const [claimedCount, budgetSummary] = await Promise.all([
-    ctx.executionLedger.getClaimedCount(promotionId),
-    ctx.executionLedger.getBudgetSummary(promotionId),
-  ]);
-  return computePromotionAdminSummary(promotion, claimedCount, budgetSummary);
+  const ledgerStatus = await ctx.executionLedger.getPromotionLedgerStatus(promotionId, null);
+  return computePromotionAdminSummary(promotion, ledgerStatus.claimedCount, ledgerStatus.budget);
 }
 
 class AdminRequestContractError extends Error {
@@ -137,6 +140,12 @@ function respondAdminFailure(
   if (err instanceof AdminRequestContractError && allowedCodes.includes('BAD_REQUEST')) {
     return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
   }
+  if (err instanceof AbuseBlockInputError && allowedCodes.includes('BAD_REQUEST')) {
+    return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
+  }
+  if (err instanceof AbuseBlockCurrentConflictError && allowedCodes.includes('ADMIN_CONFLICT')) {
+    return respondMapped(c, codedHostError('ADMIN_CONFLICT', allowedCodes));
+  }
   if (
     err instanceof PromotionCurrentConflictError &&
     allowedCodes.includes('PROMOTION_CURRENT_CONFLICT')
@@ -157,8 +166,6 @@ function respondAdminFailure(
   return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
 }
 
-const IP_PREFIX = 'stelis:abuse:block:ip:';
-const ADDR_PREFIX = 'stelis:abuse:block:address:';
 const WITHDRAW_NONCE_PREFIX = 'stelis:admin:withdraw_nonce:';
 const WITHDRAW_NONCE_TTL_MS = 60_000;
 
@@ -199,22 +206,21 @@ export function createAdminRoutes(
   // ── GET /api/blocklist ────────────────────────────────────────────
   app.get('/blocklist', async (c) => {
     try {
-      const redis = await getAdminRedis(contextPromise);
-      const [ipKeys, addrKeys] = await Promise.all([
-        redis.scan(`${IP_PREFIX}*`),
-        redis.scan(`${ADDR_PREFIX}*`),
-      ]);
-
-      const entries = await Promise.all(
-        [...ipKeys, ...addrKeys].map(async (key) => {
-          const ttl = await redis.ttl(key);
-          return { key, ttl };
+      const params = parseAdminRequest(c.req.query(), parseAdminBlocklistQuery);
+      const page = await (await contextPromise).abuseStore.listBlocks(params);
+      return c.json(
+        parseAdminBlocklistResponse({
+          blocklist: page.blocks.map((block) => ({
+            scope: block.identity.scope,
+            subject: block.identity.subject,
+            reason: block.reason,
+            blockedUntilMs: block.blockedUntilMs,
+          })),
+          nextCursor: page.nextCursor,
         }),
       );
-
-      return c.json(parseAdminBlocklistResponse({ blocklist: entries }));
     } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
+      return respondAdminFailure(c, err, ADMIN_BLOCKLIST_READ_ERROR_CODES);
     }
   });
 
@@ -226,17 +232,13 @@ export function createAdminRoutes(
         parseAdminBlocklistDeleteRequest,
       );
 
-      const allowed = [IP_PREFIX, ADDR_PREFIX];
-      if (!allowed.some((prefix) => body.key.startsWith(prefix))) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_FORBIDDEN', ADMIN_BLOCKLIST_DELETE_ERROR_CODES),
-        );
-      }
-
-      const redis = await getAdminRedis(contextPromise);
-      await redis.del(body.key);
-      return c.json(parseAdminBlocklistDeleteResponse({ ok: true, deleted: body.key }));
+      const removed = await (
+        await contextPromise
+      ).abuseStore.removeBlock({
+        scope: body.scope,
+        subject: body.subject,
+      });
+      return c.json(parseAdminBlocklistDeleteResponse({ removed }));
     } catch (err) {
       return respondAdminFailure(c, err, ADMIN_BLOCKLIST_DELETE_ERROR_CODES);
     }
@@ -841,33 +843,6 @@ export function createAdminRoutes(
       return c.json(parseAdminPromotionDeleteResponse({ ok: true }));
     } catch (err) {
       return respondAdminFailure(c, err, ADMIN_PROMOTION_DELETE_ERROR_CODES);
-    }
-  });
-
-  // ── GET /api/promotions/:id/users ────────────────────────────────
-  app.get('/promotions/:id/users', async (c) => {
-    try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
-      const promotion = await ctx.promotionStore.get(id);
-      if (!promotion) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
-      }
-      const users = await ctx.executionLedger.listClaimedUsers(id);
-      return c.json(
-        parseAdminPromotionUsersResponse({ promotionId: id, users, total: users.length }),
-      );
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
     }
   });
 

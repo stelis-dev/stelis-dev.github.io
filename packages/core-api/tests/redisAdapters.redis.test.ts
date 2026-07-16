@@ -3,6 +3,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { RedisAbuseBlocker } from '../src/store/redisAbuseBlocker.js';
+import {
+  ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+  abuseBlockMember,
+  abuseBlockRecordKey,
+  serializeAbuseBlockRecord,
+} from '../src/store/abuseBlockStore.js';
 import { RedisPrepareInflight } from '../src/store/redisPrepareInflight.js';
 import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
 import { RedisRateLimiter } from '../src/store/redisRateLimiter.js';
@@ -102,9 +108,318 @@ describe('Redis-backed adapters — real Redis conformance', () => {
 
     await blocker.recordSponsorFailure(ip, undefined, 'PREFLIGHT_FAILED');
 
-    const pttl = Number(await redis!.rawClient.sendCommand(['PTTL', `stelis:abuse:ip_fail:${ip}`]));
+    const counterKeys = await redis!.rawClient.sendCommand(['KEYS', 'stelis:abuse:counter:ip:*']);
+    expect(counterKeys).toEqual([expect.any(String)]);
+    const pttl = Number(
+      await redis!.rawClient.sendCommand(['PTTL', (counterKeys as string[])[0]!]),
+    );
     expect(pttl).toBeGreaterThan(0);
     expect(pttl).toBeLessThanOrEqual(1_000);
+  });
+
+  it('RedisAbuseBlocker — preserves the longer live block and pages after a removed cursor', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+      ipFailureThreshold: 0,
+      ipBlockDurationMs: 1_000,
+    });
+    try {
+      await blocker.recordSponsorFailure('127.0.0.1', undefined, 'TAMPERING_DETECTED');
+      await blocker.recordSponsorFailure('127.0.0.1', undefined, 'PREFLIGHT_FAILED');
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'studio_user', userId: 'User-A' },
+        'TAMPERING_DETECTED',
+      );
+
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.blocks).toHaveLength(1);
+      expect(first.nextCursor).not.toBeNull();
+      expect(first.blocks[0]!.reason).toBe('manipulation');
+      await blocker.removeBlock(first.blocks[0]!.identity);
+
+      const second = await blocker.listBlocks({ cursor: first.nextCursor, limit: 2 });
+      expect(second.blocks.length).toBeGreaterThan(0);
+      expect(second.blocks.every((block) => block.reason === 'manipulation')).toBe(true);
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — pages from the cursor tuple when the same live identity moves later', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    const ip = '127.0.0.1';
+    const subject = { kind: 'address' as const, address: '0x2' };
+    try {
+      await blocker.recordSponsorFailure(ip, subject, 'TAMPERING_DETECTED');
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.blocks).toHaveLength(1);
+      expect(first.nextCursor).not.toBeNull();
+      const movedIdentity = first.blocks[0]!.identity;
+
+      await sleep(10);
+      if (movedIdentity.scope === 'ip') {
+        await blocker.recordSponsorFailure(movedIdentity.subject, undefined, 'TAMPERING_DETECTED');
+      } else {
+        await blocker.recordSponsorFailure(ip, subject, 'TAMPERING_DETECTED');
+      }
+
+      const next = await blocker.listBlocks({ cursor: first.nextCursor, limit: 50 });
+      expect(next.blocks.map((block) => block.identity)).toContainEqual(movedIdentity);
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — fails closed when a live cursor has no record', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    try {
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.nextCursor).not.toBeNull();
+      await redis!.rawClient.sendCommand(['DEL', abuseBlockRecordKey(first.blocks[0]!.identity)]);
+
+      await expect(blocker.listBlocks({ cursor: first.nextCursor, limit: 50 })).rejects.toThrow(
+        'storage is corrupt',
+      );
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — fails closed when a live cursor record loses its index', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    try {
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.nextCursor).not.toBeNull();
+      await redis!.rawClient.sendCommand([
+        'ZREM',
+        ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+        abuseBlockMember(first.blocks[0]!.identity),
+      ]);
+
+      await expect(blocker.listBlocks({ cursor: first.nextCursor, limit: 50 })).rejects.toThrow(
+        'storage is corrupt',
+      );
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — binds a live cursor member to the stored identity member', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    try {
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.nextCursor).not.toBeNull();
+      const key = abuseBlockRecordKey(first.blocks[0]!.identity);
+      const raw = await redis!.client.get(key);
+      expect(raw).not.toBeNull();
+      await redis!.client.set(
+        key,
+        JSON.stringify({
+          ...(JSON.parse(raw!) as Record<string, unknown>),
+          member: abuseBlockMember({ scope: 'studio_user', subject: 'Different-User' }),
+        }),
+      );
+
+      await expect(blocker.listBlocks({ cursor: first.nextCursor, limit: 50 })).rejects.toThrow(
+        'storage is corrupt',
+      );
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — accepts an expired stale cursor as an exclusive position', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 25,
+    });
+    try {
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+      const first = await blocker.listBlocks({ cursor: null, limit: 1 });
+      expect(first.nextCursor).not.toBeNull();
+      await sleep(40);
+
+      await expect(blocker.listBlocks({ cursor: first.nextCursor, limit: 50 })).resolves.toEqual({
+        blocks: [],
+        nextCursor: null,
+      });
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — keeps stale rows sparse and resumes after the last examined member', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    try {
+      await redis!.rawClient.sendCommand([
+        'ZADD',
+        ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+        '1',
+        abuseBlockMember({ scope: 'ip', subject: '192.0.2.1' }),
+        '2',
+        abuseBlockMember({ scope: 'ip', subject: '192.0.2.2' }),
+      ]);
+      await blocker.recordSponsorFailure(
+        '127.0.0.1',
+        { kind: 'address', address: '0x2' },
+        'TAMPERING_DETECTED',
+      );
+
+      const first = await blocker.listBlocks({ cursor: null, limit: 3 });
+      expect(first.blocks).toHaveLength(1);
+      expect(first.nextCursor).not.toBeNull();
+      const second = await blocker.listBlocks({ cursor: first.nextCursor, limit: 3 });
+      expect(second.blocks).toHaveLength(1);
+      expect(second.nextCursor).toBeNull();
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — fails closed on a malformed live block record', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    const identity = { scope: 'ip' as const, subject: '127.0.0.1' };
+    try {
+      await blocker.recordSponsorFailure(identity.subject, undefined, 'TAMPERING_DETECTED');
+      const deadline = Number(
+        await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+          abuseBlockMember(identity),
+        ]),
+      );
+      await redis!.rawClient.sendCommand([
+        'SET',
+        abuseBlockRecordKey(identity),
+        JSON.stringify({
+          member: abuseBlockMember(identity),
+          reason: 'not_current',
+          blockedUntilMs: String(deadline),
+        }),
+      ]);
+      await expect(blocker.checkIp(identity.subject)).rejects.toThrow('storage is corrupt');
+      await expect(blocker.listBlocks({ cursor: null, limit: 50 })).rejects.toThrow(
+        'storage is corrupt',
+      );
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — expiry sweep binds the index member to the stored record before deleting', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client);
+    const identity = { scope: 'ip' as const, subject: '127.0.0.1' };
+    const member = abuseBlockMember(identity);
+    const deadline = (await readRedisTimeMs(redis!)) - 1;
+    try {
+      await redis!.rawClient.sendCommand([
+        'SET',
+        abuseBlockRecordKey(identity),
+        serializeAbuseBlockRecord({
+          identity: { scope: 'studio_user', subject: 'Different-User' },
+          reason: 'manipulation',
+          blockedUntilMs: deadline,
+        }),
+      ]);
+      await redis!.rawClient.sendCommand([
+        'ZADD',
+        ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+        String(deadline),
+        member,
+      ]);
+
+      await expect(
+        (
+          blocker as unknown as {
+            runExpirySweep(): Promise<void>;
+          }
+        ).runExpirySweep(),
+      ).rejects.toThrow('storage is corrupt');
+      await expect(redis!.client.get(abuseBlockRecordKey(identity))).resolves.not.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand(['ZSCORE', ABUSE_BLOCK_DEADLINE_INDEX_KEY, member]),
+      ).resolves.not.toBeNull();
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — does not delete a live record when its index score is corrupt and stale', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 60_000,
+    });
+    const identity = { scope: 'ip' as const, subject: '127.0.0.1' };
+    try {
+      await blocker.recordSponsorFailure(identity.subject, undefined, 'TAMPERING_DETECTED');
+      await redis!.rawClient.sendCommand([
+        'ZADD',
+        ABUSE_BLOCK_DEADLINE_INDEX_KEY,
+        '1',
+        abuseBlockMember(identity),
+      ]);
+      await expect(blocker.listBlocks({ cursor: null, limit: 50 })).rejects.toThrow(
+        'storage is corrupt',
+      );
+      await expect(redis!.client.get(abuseBlockRecordKey(identity))).resolves.not.toBeNull();
+    } finally {
+      await blocker.stop();
+    }
+  });
+
+  it('RedisAbuseBlocker — prunes physically expired records from the ordered index in a bounded page', async () => {
+    const blocker = new RedisAbuseBlocker(redis!.client, {
+      manipulationBlockDurationMs: 25,
+    });
+    try {
+      await blocker.recordSponsorFailure('127.0.0.1', undefined, 'TAMPERING_DETECTED');
+      await sleep(40);
+      await expect(blocker.listBlocks({ cursor: null, limit: 50 })).resolves.toEqual({
+        blocks: [],
+        nextCursor: null,
+      });
+      const indexSize = Number(
+        await redis!.rawClient.sendCommand(['ZCARD', ABUSE_BLOCK_DEADLINE_INDEX_KEY]),
+      );
+      expect(indexSize).toBe(0);
+    } finally {
+      await blocker.stop();
+    }
   });
 
   it('RedisPrepareInflight — shares capacity across instances through one Redis ZSET', async () => {

@@ -29,6 +29,7 @@ import {
   type HostContext,
   type HostChainState,
   type PreparedTxEntry,
+  type AbuseBlockStore,
 } from '@stelis/core-api';
 import type { SingleHopSettlementSwapPath, SuiRpcFleetStatus } from '@stelis/contracts';
 import type { SuiEndpointSnapshot } from '@stelis/core-relay';
@@ -55,12 +56,8 @@ import {
 } from '@stelis/core-api/observability';
 import type { StudioHostContext, DeveloperJwtTrustConfig } from '@stelis/core-api/studio';
 import { RedisPromotionStore } from '@stelis/core-api/studio';
-import type {
-  PromotionStoreAdapter,
-  PromotionUsageStoreAdapter,
-  PromotionExecutionLedger,
-} from '@stelis/core-api/studio';
-import { RedisPromotionUsageStore, RedisPromotionExecutionLedger } from '@stelis/core-api/studio';
+import type { PromotionStoreAdapter, PromotionExecutionLedger } from '@stelis/core-api/studio';
+import { RedisPromotionExecutionLedger } from '@stelis/core-api/studio';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { createRedisClient, type RedisClient } from './redisClient.js';
 
@@ -80,8 +77,6 @@ export interface AppApiContext {
 
   /** Promotion registry store — null in generic-only */
   promotionStore: PromotionStoreAdapter | null;
-  /** Promotion usage/event store — null in generic-only */
-  usageStore: PromotionUsageStoreAdapter | null;
   /** Unified execution ledger — null in generic-only */
   executionLedger: PromotionExecutionLedger | null;
   /**
@@ -98,6 +93,8 @@ export interface AppApiContext {
   rpcFleet: Readonly<SuiRpcFleetStatus>;
   /** Redis client (for admin, rate-limit, etc.) */
   redis: RedisClient;
+  /** Single abuse block store shared by Host enforcement and Admin operations. */
+  abuseStore: AbuseBlockStore;
   /** Sponsor operations runtime — shared-state reader + sponsor refill account probe + refill queue. */
   sponsorOperations: AppSponsorOperations;
   /**
@@ -190,6 +187,8 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
 
   // Track disposable resources for cleanup on partial failure
   let host: HostContext | null = null;
+  let abuseStoreForCleanup: AbuseBlockStore | null = null;
+  let executionLedgerForCleanup: PromotionExecutionLedger | null = null;
   let sponsorOperationsForCleanup: AppSponsorOperations | null = null;
 
   try {
@@ -262,6 +261,7 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       maxRequests: APP_API_RATE_LIMIT_MAX_REQUESTS,
     });
     const abuseBlocker = new RedisAbuseBlocker(redis);
+    abuseStoreForCleanup = abuseBlocker;
     const prepareRequestNonceStore = new RedisPrepareRequestNonceStore(redis);
 
     // ── 5. Consume the exact boot-qualified settlement swap paths ───
@@ -513,24 +513,12 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
 
     // ── 9. Promotion stores ──────────────────────────────────────────
     let promotionStore: PromotionStoreAdapter | null = null;
-    let usageStore: PromotionUsageStoreAdapter | null = null;
     let executionLedger: PromotionExecutionLedger | null = null;
     if (studioEnabled) {
       const redisPromotionStore = new RedisPromotionStore(redis);
       promotionStore = redisPromotionStore;
-      usageStore = new RedisPromotionUsageStore(redis);
-      // Pass the canonical promotion record key shape from the store
-      // into the ledger so the claim Lua can re-read `status` atomically
-      // and close the admin-pause/archive race window between
-      // `promotionStore.get()` and the claim CAS. The key shape
-      // stays owned by `RedisPromotionStore.recordKey`.
-      executionLedger = new RedisPromotionExecutionLedger(
-        redis,
-        undefined,
-        undefined,
-        undefined,
-        (promotionId) => redisPromotionStore.recordKey(promotionId),
-      );
+      executionLedger = new RedisPromotionExecutionLedger(redis, redisPromotionStore);
+      executionLedgerForCleanup = executionLedger;
       // Late-bind executionLedger ref for the prepareStore eviction callback.
       _executionLedgerRef = executionLedger;
     }
@@ -543,17 +531,18 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
       prepareConfig,
       studio,
       promotionStore,
-      usageStore,
       executionLedger,
       studioGlobalAllowedTargets,
       developerJwtTrustConfig,
       developerJwtVerifyUrl,
       rpcFleet: input.rpcFleet,
       redis,
+      abuseStore: abuseBlocker,
       sponsorOperations: sponsorOperationsRef,
       sponsoredLogsStore,
       async dispose() {
-        executionLedger?.dispose();
+        await abuseBlocker.stop();
+        await executionLedger?.dispose();
         hostRef.dispose();
         sponsorOperationsRef.dispose();
         await redis.dispose();
@@ -563,6 +552,8 @@ export async function createContext(input: ContextRuntimeInput): Promise<AppApiC
     // Cleanup all acquired resources on partial initialization failure
     sponsorOperationsForCleanup?.dispose();
     host?.dispose();
+    await abuseStoreForCleanup?.stop();
+    await executionLedgerForCleanup?.dispose();
     await redis.dispose();
     throw err;
   }

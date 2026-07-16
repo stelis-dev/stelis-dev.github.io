@@ -245,7 +245,6 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
     studio: studioEnabled ? ({} as never) : null,
     // Stores must be non-null when studio is enabled
     promotionStore: studioEnabled ? ({} as never) : null,
-    usageStore: null,
     executionLedger: studioEnabled ? ({} as never) : null,
     studioGlobalAllowedTargets: studioEnabled ? new Set<string>() : null,
     developerJwtTrustConfig: studioEnabled ? TEST_TRUST_CONFIG : null,
@@ -254,6 +253,7 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
       endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' }],
     },
     redis: {} as never,
+    abuseStore: {} as never,
     sponsorOperations: {
       readState: vi.fn().mockResolvedValue({
         slots: [

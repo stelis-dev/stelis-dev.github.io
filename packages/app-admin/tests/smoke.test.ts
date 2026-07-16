@@ -7,7 +7,11 @@
  * 3. Component exports exist and are renderable
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { hostErrorPublicMessage, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
+import {
+  ADMIN_BLOCKLIST_MAX_LIMIT,
+  hostErrorPublicMessage,
+  SUI_CHAIN_IDENTIFIERS,
+} from '@stelis/contracts';
 
 const { assertSuiNetworkMock } = vi.hoisted(() => ({
   assertSuiNetworkMock: vi.fn().mockResolvedValue(undefined),
@@ -323,7 +327,17 @@ describe('API client', () => {
   });
 
   it('getBlocklist returns { blocklist: [...] } matching server contract', async () => {
-    const serverResponse = { blocklist: [{ key: '0x123', ttl: 300 }] };
+    const serverResponse = {
+      blocklist: [
+        {
+          scope: 'ip',
+          subject: '127.0.0.1',
+          reason: 'manipulation',
+          blockedUntilMs: 1_800_000_000_000,
+        },
+      ],
+      nextCursor: 'Y3Vyc29y',
+    };
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -336,8 +350,72 @@ describe('API client', () => {
     const result = await getBlocklist();
 
     expect(result.blocklist).toHaveLength(1);
-    expect(result.blocklist[0].key).toBe('0x123');
-    expect(result.blocklist[0].ttl).toBe(300);
+    expect(result.blocklist[0]).toEqual(serverResponse.blocklist[0]);
+    expect(result.nextCursor).toBe('Y3Vyc29y');
+  });
+
+  const currentBlocklistEntry = {
+    scope: 'ip',
+    subject: '127.0.0.1',
+    reason: 'manipulation',
+    blockedUntilMs: 1_800_000_000_000,
+  } as const;
+
+  it.each([
+    {
+      label: 'a non-current raw-key shape',
+      response: {
+        blocklist: [{ key: 'stelis:abuse:block:ip:127.0.0.1', ttl: 300 }],
+        nextCursor: null,
+      },
+      error: /non-current field/,
+    },
+    {
+      label: 'an unsupported scope',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, scope: 'user' }],
+        nextCursor: null,
+      },
+      error: /current block scope/,
+    },
+    {
+      label: 'an unsupported reason',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, reason: 'manual' }],
+        nextCursor: null,
+      },
+      error: /current block reason/,
+    },
+    {
+      label: 'a non-positive deadline',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, blockedUntilMs: 0 }],
+        nextCursor: null,
+      },
+      error: /must be positive/,
+    },
+    {
+      label: 'a page above the response bound',
+      response: {
+        blocklist: Array.from(
+          { length: ADMIN_BLOCKLIST_MAX_LIMIT + 1 },
+          () => currentBlocklistEntry,
+        ),
+        nextCursor: null,
+      },
+      error: new RegExp(`at most ${ADMIN_BLOCKLIST_MAX_LIMIT} entries`),
+    },
+  ])('getBlocklist rejects $label through the API client boundary', async ({ response, error }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(response),
+      }),
+    );
+
+    const { getBlocklist } = await import('../src/api/client');
+    await expect(getBlocklist()).rejects.toThrow(error);
   });
 
   it('getAuditLogs accepts only the current structured audit entries', async () => {
@@ -450,25 +528,48 @@ describe('API client', () => {
     );
   });
 
-  it('removeBlocklistEntry sends DELETE /api/blocklist with key', async () => {
+  it('removeBlocklistEntry sends DELETE /api/blocklist with a typed identity', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ ok: true, deleted: '0xbad' }),
+        json: () => Promise.resolve({ removed: true }),
       }),
     );
 
     const { removeBlocklistEntry } = await import('../src/api/client');
-    await removeBlocklistEntry('0xbad');
+    await removeBlocklistEntry({ scope: 'studio_user', subject: 'User-A' });
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/blocklist',
       expect.objectContaining({
         method: 'DELETE',
-        body: JSON.stringify({ key: '0xbad' }),
+        body: JSON.stringify({ scope: 'studio_user', subject: 'User-A' }),
       }),
     );
+  });
+
+  it('preserves ADMIN_CONFLICT from a concurrent block removal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () =>
+          Promise.resolve({
+            code: 'ADMIN_CONFLICT',
+            error: hostErrorPublicMessage('ADMIN_CONFLICT'),
+          }),
+      }),
+    );
+
+    const { removeBlocklistEntry } = await import('../src/api/client');
+    await expect(
+      removeBlocklistEntry({ scope: 'studio_user', subject: 'User-A' }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'ADMIN_CONFLICT',
+    });
   });
 });
 

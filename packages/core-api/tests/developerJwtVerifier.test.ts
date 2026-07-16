@@ -420,7 +420,7 @@ describe('verifyDeveloperJwt', () => {
     await expect(verifyDeveloperJwt(jwt, TRUST_CONFIG)).rejects.toThrow('missing or empty userId');
   });
 
-  // ── Bounded-opaque-ID validation (USER_ID_PATTERN) ──────────────────────
+  // ── Shared bounded Studio user ID validation ─────────────────────────────
   // The userId flows directly into Redis keys and structured-log fields.
   // The regex `^[A-Za-z0-9_:.-]{1,128}$` rejects shapes that could pollute
   // logs (whitespace, control chars), inflate Redis-key memory (overlong),

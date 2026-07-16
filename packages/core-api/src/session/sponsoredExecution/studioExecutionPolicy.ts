@@ -41,7 +41,6 @@ import {
   PROMOTION_GAS_OVERRUN_WARNING,
   PROMOTION_SPONSOR_EXECUTION,
   PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY,
-  PROMOTION_USAGE_RECORDER_FAILED,
   SPONSOR_RESULT_CALLBACK_FAILED,
 } from '../../observability/events.js';
 import { emitSponsorDriftObserved } from '../../failures.js';
@@ -59,7 +58,6 @@ import type {
 import type { SponsorPoolAdapter } from '../../context.js';
 import type { PromotionStoreAdapter } from '../../studio/promotionStore.js';
 import type { PromotionExecutionLedger } from '../../studio/executionLedger.js';
-import type { PromotionUsageStoreAdapter } from '../../studio/promotionUsageStore.js';
 import type { VerifiedDeveloperIdentity } from '../../studio/developerJwtVerifier.js';
 import {
   PromotionSponsorPolicyError,
@@ -124,7 +122,6 @@ export interface StudioPolicyContext {
     checkUserQuota(userId: string): Promise<'ok' | { exceeded: true; limit: number }>;
   };
   readonly abuseBlocker?: AbuseBlockerAdapter;
-  readonly usageStore?: PromotionUsageStoreAdapter | null;
   readonly globalAllowedTargets: ReadonlySet<string>;
   readonly getConfig?: () => Promise<OnchainConfig>;
   readonly onSponsorResult?: SponsorResultCallback;
@@ -958,21 +955,6 @@ async function classifyStudioSponsorResult(
         txDigest: result.digest,
       },
     );
-    const releasedMist =
-      consumeOutcome.ok && revert.actualMist <= prepared.reservedGasMist
-        ? prepared.reservedGasMist - revert.actualMist
-        : 0n;
-    await appendFailedUsageRow(options.context.usageStore, {
-      promotionId: sponsor.params.promotionId,
-      receiptId: sponsor.params.receiptId,
-      userId: identity.userId,
-      senderAddress: peekedPromotion.senderAddress,
-      txDigest: result.digest,
-      reservedGasMist: prepared.reservedGasMist,
-      consumedGasMist: consumeOutcome.ok ? revert.consumeAmount : 0n,
-      releasedGasMist: releasedMist,
-      failureReason: revert.triggerReason,
-    });
     await d.recordSponsorFailureForAbuse(
       sponsorContext.abuseBlocker,
       ctx.clientIp,
@@ -1068,36 +1050,6 @@ async function classifyStudioSponsorResult(
       'CONSUME_FAILED',
       { digest: result.digest },
     );
-  }
-
-  if (options.context.usageStore) {
-    try {
-      await options.context.usageStore.append({
-        promotionId: sponsor.params.promotionId,
-        receiptId: sponsor.params.receiptId,
-        result: 'consumed',
-        userId: identity.userId,
-        senderAddress: peekedPromotion.senderAddress,
-        txDigest: result.digest,
-        reservedGasMist: prepared.reservedGasMist.toString(),
-        consumedGasMist: actualGasMist.toString(),
-        releasedGasMist: deltaReleasedMist.toString(),
-        failureReason: null,
-        policyCheckResult: null,
-      });
-    } catch (err) {
-      logStructuredEvent(
-        PROMOTION_USAGE_RECORDER_FAILED,
-        {
-          promotionId: sponsor.params.promotionId,
-          receiptId: sponsor.params.receiptId,
-          userId: identity.userId,
-          digest: result.digest,
-          error: err instanceof Error ? err.message : String(err),
-        },
-        'warn',
-      );
-    }
   }
 
   logStructuredEvent(PROMOTION_SPONSOR_EXECUTION, {
@@ -1212,17 +1164,6 @@ async function handleStudioSignAndSubmitThrow(
       txDigest: err.expectedDigest,
     },
   );
-  await appendFailedUsageRow(options.context.usageStore, {
-    promotionId: sponsor.params.promotionId,
-    receiptId: sponsor.params.receiptId,
-    userId: identity.userId,
-    senderAddress: peekedPromotion.senderAddress,
-    txDigest: err.expectedDigest,
-    reservedGasMist: prepared.reservedGasMist,
-    consumedGasMist: consumeOutcome.ok ? prepared.reservedGasMist : 0n,
-    releasedGasMist: 0n,
-    failureReason: 'post_signature_uncertainty',
-  });
   logStructuredEvent(
     PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY,
     {
@@ -1254,51 +1195,6 @@ async function handleStudioSignAndSubmitThrow(
 // -------------------------------------------------------------
 // Shared helpers
 // -------------------------------------------------------------
-
-async function appendFailedUsageRow(
-  usageStore: PromotionUsageStoreAdapter | null | undefined,
-  row: {
-    readonly promotionId: string;
-    readonly receiptId: string;
-    readonly userId: string;
-    readonly senderAddress: string;
-    readonly txDigest: string | null;
-    readonly reservedGasMist: bigint;
-    readonly consumedGasMist: bigint;
-    readonly releasedGasMist: bigint;
-    readonly failureReason: string;
-  },
-): Promise<void> {
-  if (!usageStore) return;
-  try {
-    await usageStore.append({
-      promotionId: row.promotionId,
-      receiptId: row.receiptId,
-      result: 'failed',
-      userId: row.userId,
-      senderAddress: row.senderAddress,
-      txDigest: row.txDigest,
-      reservedGasMist: row.reservedGasMist.toString(),
-      consumedGasMist: row.consumedGasMist.toString(),
-      releasedGasMist: row.releasedGasMist.toString(),
-      failureReason: row.failureReason,
-      policyCheckResult: null,
-    });
-  } catch (err) {
-    logStructuredEvent(
-      PROMOTION_USAGE_RECORDER_FAILED,
-      {
-        promotionId: row.promotionId,
-        receiptId: row.receiptId,
-        userId: row.userId,
-        digest: row.txDigest,
-        failureReason: row.failureReason,
-        error: err instanceof Error ? err.message : String(err),
-      },
-      'warn',
-    );
-  }
-}
 
 async function handleStudioCorruptPreparedEntry(
   context: StudioPolicyContext,

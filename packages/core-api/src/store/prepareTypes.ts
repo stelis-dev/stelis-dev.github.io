@@ -35,8 +35,7 @@
  *   - Promotion: `reservedGasMist` lives on `PromotionPreparedTxEntry`.
  *     It is the ceiling passed to `ExecutionLedger.reserve()` and
  *     compared against actual execution gas in the Studio sponsor
- *     SponsoredExecutionPolicy sponsor result accounting (consume → usage append →
- *     structured log).
+ *     SponsoredExecutionPolicy sponsor result accounting (consume → structured log).
  */
 interface PreparedTxDraftBase {
   // ── Binding (from QuoteStore pattern) ─────────────────────────

@@ -34,6 +34,31 @@ const U64_MAX = (1n << 64n) - 1n;
 
 const PROMOTION_PAGE_DEFAULT_LIMIT = 50;
 export const PROMOTION_PAGE_MAX_LIMIT = 100;
+const ADMIN_BLOCKLIST_DEFAULT_LIMIT = 50;
+export const ADMIN_BLOCKLIST_MAX_LIMIT = 100;
+export const STUDIO_USER_ID_MAX_LENGTH = 128;
+const ADMIN_BLOCK_SUBJECT_MAX_LENGTH = STUDIO_USER_ID_MAX_LENGTH;
+export const ADMIN_BLOCKLIST_CURSOR_MAX_LENGTH = 512;
+const STUDIO_USER_ID_CHARACTERS = /^[A-Za-z0-9_:.-]+$/;
+export const ABUSE_BLOCK_SCOPES = ['ip', 'address', 'studio_user'] as const;
+export const ABUSE_BLOCK_REASONS = [
+  'sponsor_failure_threshold',
+  'dry_run_failure_threshold',
+  'onchain_revert_threshold',
+  'manipulation',
+] as const;
+
+export type AdminBlockScope = (typeof ABUSE_BLOCK_SCOPES)[number];
+export type AbuseBlockReason = (typeof ABUSE_BLOCK_REASONS)[number];
+
+export function isValidStudioUserId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= STUDIO_USER_ID_MAX_LENGTH &&
+    STUDIO_USER_ID_CHARACTERS.test(value)
+  );
+}
 
 export class HostWireParseError extends Error {
   constructor(message: string) {
@@ -122,7 +147,7 @@ export interface HostErrorResponse {
 export type HostErrorMeta = Omit<HostErrorResponse, 'error' | 'code'>;
 
 const PROMOTION_TYPES = ['gas_sponsorship'] as const;
-const PROMOTION_STATUSES = ['draft', 'active', 'paused', 'archived'] as const;
+export const PROMOTION_STATUSES = ['draft', 'active', 'paused', 'archived'] as const;
 const PROMOTION_UNAVAILABLE_REASONS = [
   'not_claimed',
   'promotion_unavailable',
@@ -294,22 +319,34 @@ export interface AdminAuditLogsResponse {
 }
 
 export interface AdminBlocklistEntry {
-  key: string;
-  /** Redis TTL in seconds; `-1` means no expiry and `-2` means no current key. */
-  ttl: number;
+  scope: AdminBlockScope;
+  subject: string;
+  reason: AbuseBlockReason;
+  blockedUntilMs: number;
+}
+
+export interface AdminBlocklistQuery {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface AdminBlocklistParams {
+  cursor: string | null;
+  limit: number;
 }
 
 export interface AdminBlocklistResponse {
   blocklist: AdminBlocklistEntry[];
+  nextCursor: string | null;
 }
 
 export interface AdminBlocklistDeleteRequest {
-  key: string;
+  scope: AdminBlockScope;
+  subject: string;
 }
 
 export interface AdminBlocklistDeleteResponse {
-  ok: true;
-  deleted: string;
+  removed: boolean;
 }
 
 export type AdminStudioResponse =
@@ -347,7 +384,7 @@ export interface AdminPromotionListResponse {
 }
 
 export interface AdminPromotionSummary {
-  claimedUsers: number;
+  claimedCount: number;
   remainingParticipantSlots: number;
   totalConsumedBudgetMist: string;
   totalReservedBudgetMist: string;
@@ -355,24 +392,9 @@ export interface AdminPromotionSummary {
   totalRequiredBudgetMist: string;
 }
 
-export interface AdminClaimedUser {
-  userId: string;
-  claimedAt: string;
-  remainingGasAllowanceMist: string | null;
-  consumedGasAllowanceMist: string | null;
-  status: PromotionEntitlementStatus | null;
-  activeReservationReceiptId: string | null;
-}
-
 export interface AdminPromotionDetailResponse {
   promotion: AdminPromotionRecord;
   summary: AdminPromotionSummary | null;
-}
-
-export interface AdminPromotionUsersResponse {
-  promotionId: string;
-  users: AdminClaimedUser[];
-  total: number;
 }
 
 export interface AdminPromotionSummaryResponse {
@@ -616,6 +638,39 @@ function nonEmptyStringField(value: Record<string, unknown>, key: string, label:
     throw new HostWireParseError(`${label}.${key} must be a non-empty string`);
   }
   return field;
+}
+
+function boundedNonEmptyString(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
+    throw new HostWireParseError(`${label} must contain 1-${maxLength} characters`);
+  }
+  return value;
+}
+
+function parseAdminBlockScope(value: unknown, label: string): AdminBlockScope {
+  if (typeof value !== 'string' || !(ABUSE_BLOCK_SCOPES as readonly string[]).includes(value)) {
+    throw new HostWireParseError(`${label} is not a current block scope`);
+  }
+  return value as AdminBlockScope;
+}
+
+function parseAbuseBlockReason(value: unknown, label: string): AbuseBlockReason {
+  if (typeof value !== 'string' || !(ABUSE_BLOCK_REASONS as readonly string[]).includes(value)) {
+    throw new HostWireParseError(`${label} is not a current block reason`);
+  }
+  return value as AbuseBlockReason;
+}
+
+function parseAdminBlocklistCursor(value: unknown, label: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > ADMIN_BLOCKLIST_CURSOR_MAX_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/.test(value)
+  ) {
+    throw new HostWireParseError(`${label} must be a bounded canonical base64url string`);
+  }
+  return value;
 }
 
 function promotionIdField(value: Record<string, unknown>, key: string, label: string): string {
@@ -1529,39 +1584,90 @@ export function parseAdminAuditLogsResponse(value: unknown): AdminAuditLogsRespo
 export function parseAdminBlocklistResponse(value: unknown): AdminBlocklistResponse {
   const label = 'AdminBlocklistResponse';
   const raw = record(value, label);
-  onlyKeys(raw, ['blocklist'], label);
+  onlyKeys(raw, ['blocklist', 'nextCursor'], label);
   if (!Array.isArray(raw.blocklist)) {
     throw new HostWireParseError(`${label}.blocklist must be an array`);
+  }
+  if (raw.blocklist.length > ADMIN_BLOCKLIST_MAX_LIMIT) {
+    throw new HostWireParseError(
+      `${label}.blocklist must contain at most ${ADMIN_BLOCKLIST_MAX_LIMIT} entries`,
+    );
   }
   return {
     blocklist: raw.blocklist.map((entryValue, index) => {
       const entryLabel = `${label}.blocklist[${index}]`;
       const entry = record(entryValue, entryLabel);
-      onlyKeys(entry, ['key', 'ttl'], entryLabel);
-      const ttl = safeIntegerField(entry, 'ttl', entryLabel);
-      if (ttl < -2) {
-        throw new HostWireParseError(`${entryLabel}.ttl must be a current Redis TTL`);
+      onlyKeys(entry, ['scope', 'subject', 'reason', 'blockedUntilMs'], entryLabel);
+      const scope = parseAdminBlockScope(entry.scope, `${entryLabel}.scope`);
+      const subject = parseAdminBlockSubject(scope, entry.subject, `${entryLabel}.subject`);
+      const reason = parseAbuseBlockReason(entry.reason, `${entryLabel}.reason`);
+      const blockedUntilMs = safeIntegerField(entry, 'blockedUntilMs', entryLabel);
+      if (blockedUntilMs <= 0) {
+        throw new HostWireParseError(`${entryLabel}.blockedUntilMs must be positive`);
       }
-      return { key: nonEmptyStringField(entry, 'key', entryLabel), ttl };
+      return { scope, subject, reason, blockedUntilMs };
     }),
+    nextCursor:
+      raw.nextCursor === null
+        ? null
+        : parseAdminBlocklistCursor(raw.nextCursor, `${label}.nextCursor`),
+  };
+}
+
+export function parseAdminBlocklistQuery(value: unknown): AdminBlocklistParams {
+  const label = 'AdminBlocklistQuery';
+  const raw = record(value, label);
+  onlyKeys(raw, ['cursor', 'limit'], label);
+  const limit =
+    raw.limit === undefined || raw.limit === ''
+      ? ADMIN_BLOCKLIST_DEFAULT_LIMIT
+      : typeof raw.limit === 'number'
+        ? raw.limit
+        : typeof raw.limit === 'string' && /^[1-9]\d*$/.test(raw.limit)
+          ? Number(raw.limit)
+          : Number.NaN;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > ADMIN_BLOCKLIST_MAX_LIMIT) {
+    throw new HostWireParseError(
+      `${label}.limit must be an integer from 1 through ${ADMIN_BLOCKLIST_MAX_LIMIT}`,
+    );
+  }
+  return {
+    cursor:
+      raw.cursor === undefined || raw.cursor === ''
+        ? null
+        : parseAdminBlocklistCursor(raw.cursor, `${label}.cursor`),
+    limit,
   };
 }
 
 export function parseAdminBlocklistDeleteRequest(value: unknown): AdminBlocklistDeleteRequest {
   const label = 'AdminBlocklistDeleteRequest';
   const raw = record(value, label);
-  onlyKeys(raw, ['key'], label);
-  return { key: nonEmptyStringField(raw, 'key', label) };
+  onlyKeys(raw, ['scope', 'subject'], label);
+  const scope = parseAdminBlockScope(raw.scope, `${label}.scope`);
+  return {
+    scope,
+    subject: parseAdminBlockSubject(scope, raw.subject, `${label}.subject`),
+  };
+}
+
+function parseAdminBlockSubject(scope: AdminBlockScope, value: unknown, label: string): string {
+  if (scope === 'studio_user') {
+    if (!isValidStudioUserId(value)) {
+      throw new HostWireParseError(
+        `${label} must be a Studio user ID containing 1-${STUDIO_USER_ID_MAX_LENGTH} ASCII letters, digits, or _ : . -`,
+      );
+    }
+    return value;
+  }
+  return boundedNonEmptyString(value, label, ADMIN_BLOCK_SUBJECT_MAX_LENGTH);
 }
 
 export function parseAdminBlocklistDeleteResponse(value: unknown): AdminBlocklistDeleteResponse {
   const label = 'AdminBlocklistDeleteResponse';
   const raw = record(value, label);
-  onlyKeys(raw, ['ok', 'deleted'], label);
-  if (raw.ok !== true) {
-    throw new HostWireParseError(`${label}.ok must be true`);
-  }
-  return { ok: true, deleted: nonEmptyStringField(raw, 'deleted', label) };
+  onlyKeys(raw, ['removed'], label);
+  return { removed: booleanField(raw, 'removed', label) };
 }
 
 export function parseAdminStudioResponse(value: unknown): AdminStudioResponse {
@@ -1700,7 +1806,7 @@ function parseAdminPromotionSummaryAt(value: unknown, label: string): AdminPromo
   onlyKeys(
     raw,
     [
-      'claimedUsers',
+      'claimedCount',
       'remainingParticipantSlots',
       'totalConsumedBudgetMist',
       'totalReservedBudgetMist',
@@ -1710,7 +1816,7 @@ function parseAdminPromotionSummaryAt(value: unknown, label: string): AdminPromo
     label,
   );
   return {
-    claimedUsers: nonNegativeSafeIntegerField(raw, 'claimedUsers', label),
+    claimedCount: nonNegativeSafeIntegerField(raw, 'claimedCount', label),
     remainingParticipantSlots: nonNegativeSafeIntegerField(raw, 'remainingParticipantSlots', label),
     totalConsumedBudgetMist: u64DecimalField(raw, 'totalConsumedBudgetMist', label),
     totalReservedBudgetMist: u64DecimalField(raw, 'totalReservedBudgetMist', label),
@@ -1727,56 +1833,6 @@ export function parseAdminPromotionDetailResponse(value: unknown): AdminPromotio
     promotion: parseAdminPromotionRecord(raw.promotion, `${label}.promotion`),
     summary:
       raw.summary === null ? null : parseAdminPromotionSummaryAt(raw.summary, `${label}.summary`),
-  };
-}
-
-export function parseAdminPromotionUsersResponse(value: unknown): AdminPromotionUsersResponse {
-  const label = 'AdminPromotionUsersResponse';
-  const raw = record(value, label);
-  onlyKeys(raw, ['promotionId', 'users', 'total'], label);
-  if (!Array.isArray(raw.users)) {
-    throw new HostWireParseError(`${label}.users must be an array`);
-  }
-  const users = raw.users.map((userValue, index): AdminClaimedUser => {
-    const userLabel = `${label}.users[${index}]`;
-    const user = record(userValue, userLabel);
-    onlyKeys(
-      user,
-      [
-        'userId',
-        'claimedAt',
-        'remainingGasAllowanceMist',
-        'consumedGasAllowanceMist',
-        'status',
-        'activeReservationReceiptId',
-      ],
-      userLabel,
-    );
-    const status =
-      user.status === null
-        ? null
-        : closedStringField(user, 'status', userLabel, PROMOTION_ENTITLEMENT_STATUSES);
-    return {
-      userId: nonEmptyStringField(user, 'userId', userLabel),
-      claimedAt: isoStringField(user, 'claimedAt', userLabel),
-      remainingGasAllowanceMist: nullableU64Field(user, 'remainingGasAllowanceMist', userLabel),
-      consumedGasAllowanceMist: nullableU64Field(user, 'consumedGasAllowanceMist', userLabel),
-      status,
-      activeReservationReceiptId: nullableNonEmptyStringField(
-        user,
-        'activeReservationReceiptId',
-        userLabel,
-      ),
-    };
-  });
-  const total = nonNegativeSafeIntegerField(raw, 'total', label);
-  if (total !== users.length) {
-    throw new HostWireParseError(`${label}.total must equal users.length`);
-  }
-  return {
-    promotionId: nonEmptyStringField(raw, 'promotionId', label),
-    users,
-    total,
   };
 }
 

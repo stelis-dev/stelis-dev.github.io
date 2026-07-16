@@ -14,6 +14,10 @@ import {
   PromotionCurrentConflictError,
   RedisPromotionStore,
 } from '../src/studio/promotionStore.js';
+import {
+  promotionAccountingKey,
+  PromotionRecordCorruptionError,
+} from '../src/studio/promotionRecords.js';
 import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 const PAGE_ALL = { cursor: null, limit: 100 } as const;
@@ -79,7 +83,6 @@ function withRecordReadBarrier(
     del: (...keys) => client.del(...keys),
     eval: (script, keys, args) => client.eval(script, keys, args),
     hgetall: (key) => client.hgetall(key),
-    scan: (pattern, count) => client.scan(pattern, count),
   };
 }
 
@@ -194,6 +197,41 @@ describe('RedisPromotionStore — real Redis bounded pages and atomic races', ()
     }
   });
 
+  it('rejects a Promotion record whose identity does not match its Redis key', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const randomUuid = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValueOnce(ID_A);
+    try {
+      const created = await store.create(makeInput());
+      await redis!.rawClient.sendCommand([
+        'SET',
+        store.recordKey(created.promotionId),
+        JSON.stringify({ ...created, promotionId: ID_B }),
+      ]);
+
+      await expect(store.readCurrent(created.promotionId)).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+    } finally {
+      randomUuid.mockRestore();
+    }
+  });
+
+  it('fails closed instead of deleting a draft with partial accounting state', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const created = await store.create(makeInput());
+    await redis!.rawClient.sendCommand([
+      'HSET',
+      promotionAccountingKey(created.promotionId),
+      'promotionId',
+      created.promotionId,
+    ]);
+
+    await expect(store.delete(created.promotionId)).rejects.toBeInstanceOf(
+      PromotionRecordCorruptionError,
+    );
+    await expect(store.get(created.promotionId)).resolves.toEqual(created);
+  });
+
   it('continues strictly after a cursor whose draft record was deleted', async () => {
     const store = new RedisPromotionStore(redis!.client);
     const randomUuid = vi
@@ -253,13 +291,64 @@ describe('RedisPromotionStore — real Redis bounded pages and atomic races', ()
     );
   });
 
+  it('fails closed when a record appears in more than one status index', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const created = await store.create(makeInput());
+    await redis!.rawClient.sendCommand([
+      'ZADD',
+      'stelis:promo:index:status:active',
+      '0',
+      created.promotionId,
+    ]);
+
+    await expect(store.listPage(PAGE_ALL, { status: 'active' })).rejects.toBeInstanceOf(
+      PromotionRecordCorruptionError,
+    );
+  });
+
+  it('fails closed when a status-index record is missing from the all index', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const created = await store.create(makeInput());
+    await redis!.rawClient.sendCommand(['ZREM', 'stelis:promo:index:all', created.promotionId]);
+
+    await expect(store.listPage(PAGE_ALL, { status: 'draft' })).rejects.toBeInstanceOf(
+      PromotionRecordCorruptionError,
+    );
+  });
+
+  it('fails closed when an all-index record is missing from its current status index', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const created = await store.create(makeInput());
+    await redis!.rawClient.sendCommand([
+      'ZREM',
+      'stelis:promo:index:status:draft',
+      created.promotionId,
+    ]);
+
+    await expect(store.listPage(PAGE_ALL)).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+  });
+
+  it('fails closed when a Promotion index member has a nonzero score', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+    const created = await store.create(makeInput());
+    await redis!.rawClient.sendCommand([
+      'ZADD',
+      'stelis:promo:index:status:draft',
+      '1',
+      created.promotionId,
+    ]);
+
+    await expect(store.listPage(PAGE_ALL)).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+  });
+
   it('refuses create, status, and delete mutations when their indexes are inconsistent', async () => {
     const store = new RedisPromotionStore(redis!.client);
     const randomUuid = vi
       .spyOn(globalThis.crypto, 'randomUUID')
       .mockReturnValueOnce(ID_A)
       .mockReturnValueOnce(ID_B)
-      .mockReturnValueOnce(ID_C);
+      .mockReturnValueOnce(ID_C)
+      .mockReturnValueOnce(ID_D);
     try {
       await redis!.rawClient.sendCommand(['ZADD', 'stelis:promo:index:all', '0', ID_A]);
       await expect(store.create(makeInput({ displayName: 'ghost collision' }))).rejects.toThrow(
@@ -288,9 +377,66 @@ describe('RedisPromotionStore — real Redis bounded pages and atomic races', ()
         `Promotion index conflict while deleting ${deleteRecord.promotionId}`,
       );
       await expect(store.get(deleteRecord.promotionId)).resolves.toEqual(deleteRecord);
+
+      const duplicateStatusRecord = await store.create(
+        makeInput({ displayName: 'duplicate status conflict' }),
+      );
+      await redis!.rawClient.sendCommand([
+        'ZADD',
+        'stelis:promo:index:status:archived',
+        '0',
+        duplicateStatusRecord.promotionId,
+      ]);
+      await expect(
+        store.transitionStatus(duplicateStatusRecord.promotionId, 'active'),
+      ).rejects.toThrow(
+        `Promotion index conflict while changing status for ${duplicateStatusRecord.promotionId}`,
+      );
+      await expect(store.delete(duplicateStatusRecord.promotionId)).rejects.toThrow(
+        `Promotion index conflict while deleting ${duplicateStatusRecord.promotionId}`,
+      );
+      await expect(store.get(duplicateStatusRecord.promotionId)).resolves.toMatchObject({
+        status: 'draft',
+      });
     } finally {
       randomUuid.mockRestore();
     }
+  });
+
+  it('refuses update when the full index projection is inconsistent', async () => {
+    const store = new RedisPromotionStore(redis!.client);
+
+    const missingAll = await store.create(makeInput({ displayName: 'missing all index' }));
+    await redis!.rawClient.sendCommand(['ZREM', 'stelis:promo:index:all', missingAll.promotionId]);
+    await expect(
+      store.update(missingAll.promotionId, { displayName: 'Must not persist' }),
+    ).rejects.toThrow(`Promotion index conflict while updating ${missingAll.promotionId}`);
+    await expect(store.get(missingAll.promotionId)).resolves.toEqual(missingAll);
+
+    const missingStatus = await store.create(makeInput({ displayName: 'missing status index' }));
+    await redis!.rawClient.sendCommand([
+      'ZREM',
+      'stelis:promo:index:status:draft',
+      missingStatus.promotionId,
+    ]);
+    await expect(
+      store.update(missingStatus.promotionId, { displayName: 'Must not persist' }),
+    ).rejects.toThrow(`Promotion index conflict while updating ${missingStatus.promotionId}`);
+    await expect(store.get(missingStatus.promotionId)).resolves.toEqual(missingStatus);
+
+    const duplicateStatus = await store.create(
+      makeInput({ displayName: 'duplicate status index' }),
+    );
+    await redis!.rawClient.sendCommand([
+      'ZADD',
+      'stelis:promo:index:status:active',
+      '0',
+      duplicateStatus.promotionId,
+    ]);
+    await expect(
+      store.update(duplicateStatus.promotionId, { displayName: 'Must not persist' }),
+    ).rejects.toThrow(`Promotion index conflict while updating ${duplicateStatus.promotionId}`);
+    await expect(store.get(duplicateStatus.promotionId)).resolves.toEqual(duplicateStatus);
   });
 
   it('allows exactly one of two updates and persists the complete winner record', async () => {

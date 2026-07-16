@@ -10,6 +10,9 @@ const AUDIT_PAGE_SIZE = 15;
 
 export function SecurityPage() {
   const [blocklist, setBlocklist] = useState<AdminBlocklistEntry[]>([]);
+  const [blockCursor, setBlockCursor] = useState<string | null>(null);
+  const [previousBlockCursors, setPreviousBlockCursors] = useState<(string | null)[]>([]);
+  const [nextBlockCursor, setNextBlockCursor] = useState<string | null>(null);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLogEntry[]>([]);
   const [auditPage, setAuditPage] = useState(0);
   const [msg, setMsg] = useState('');
@@ -17,12 +20,13 @@ export function SecurityPage() {
 
   const loadBlocklist = useCallback(async () => {
     try {
-      const json = await getBlocklist();
+      const json = await getBlocklist(blockCursor === null ? {} : { cursor: blockCursor });
       setBlocklist(json.blocklist);
-    } catch {
-      /* ignore */
+      setNextBlockCursor(json.nextCursor);
+    } catch (err) {
+      setMsg(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
     }
-  }, []);
+  }, [blockCursor]);
 
   const loadAuditLogs = useCallback(async () => {
     try {
@@ -36,21 +40,46 @@ export function SecurityPage() {
 
   useEffect(() => {
     void loadBlocklist();
-    void loadAuditLogs();
-  }, [loadAuditLogs, loadBlocklist]);
+  }, [loadBlocklist]);
 
-  async function unblock(key: string) {
+  useEffect(() => {
+    void loadAuditLogs();
+  }, [loadAuditLogs]);
+
+  async function unblock(entry: AdminBlocklistEntry) {
     setLoading(true);
     setMsg('');
     try {
-      await removeBlocklistEntry(key);
-      setMsg(`Unblocked: ${key}`);
+      const result = await removeBlocklistEntry({
+        scope: entry.scope,
+        subject: entry.subject,
+      });
+      setMsg(
+        result.removed
+          ? `Unblocked: ${entry.scope} ${entry.subject}`
+          : `Already unblocked: ${entry.scope} ${entry.subject}`,
+      );
       await loadBlocklist();
     } catch (err) {
       setMsg(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
     } finally {
       setLoading(false);
     }
+  }
+
+  function showNextBlockPage() {
+    if (nextBlockCursor === null) return;
+    setPreviousBlockCursors((current) => [...current, blockCursor]);
+    setBlockCursor(nextBlockCursor);
+    setNextBlockCursor(null);
+  }
+
+  function showPreviousBlockPage() {
+    const previous = previousBlockCursors[previousBlockCursors.length - 1];
+    if (previous === undefined) return;
+    setPreviousBlockCursors((current) => current.slice(0, -1));
+    setBlockCursor(previous);
+    setNextBlockCursor(null);
   }
 
   return (
@@ -89,23 +118,25 @@ export function SecurityPage() {
           <table className="admin-table" style={{ tableLayout: 'fixed', width: '100%' }}>
             <thead>
               <tr>
-                <th style={{ width: '60%' }}>Key</th>
-                <th style={{ width: '20%' }}>TTL (s)</th>
-                <th style={{ width: '20%', textAlign: 'right' }}>Action</th>
+                <th>Scope</th>
+                <th>Subject</th>
+                <th>Reason</th>
+                <th>Blocked until</th>
+                <th style={{ textAlign: 'right' }}>Action</th>
               </tr>
             </thead>
             <tbody>
               {blocklist.map((entry) => (
-                <tr key={entry.key}>
-                  <td style={{ wordBreak: 'break-all', fontSize: 12, fontFamily: 'monospace' }}>
-                    {entry.key}
-                  </td>
-                  <td>{entry.ttl}</td>
+                <tr key={`${entry.scope}:${entry.subject}`}>
+                  <td>{entry.scope}</td>
+                  <td style={{ wordBreak: 'break-all', fontSize: 12 }}>{entry.subject}</td>
+                  <td>{entry.reason}</td>
+                  <td>{new Date(entry.blockedUntilMs).toLocaleString()}</td>
                   <td style={{ textAlign: 'right' }}>
                     <button
                       className="admin-btn admin-btn-danger"
                       disabled={loading}
-                      onClick={() => void unblock(entry.key)}
+                      onClick={() => void unblock(entry)}
                     >
                       Unblock
                     </button>
@@ -115,6 +146,22 @@ export function SecurityPage() {
             </tbody>
           </table>
         )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <button
+            className="admin-btn"
+            disabled={previousBlockCursors.length === 0 || loading}
+            onClick={showPreviousBlockPage}
+          >
+            Previous
+          </button>
+          <button
+            className="admin-btn"
+            disabled={nextBlockCursor === null || loading}
+            onClick={showNextBlockPage}
+          >
+            Next
+          </button>
+        </div>
       </div>
 
       <div className="admin-card">

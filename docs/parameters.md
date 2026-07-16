@@ -59,7 +59,6 @@ These values are written by `packages/contracts/move/sources/config.move` at pac
 | `PREPARE_AUTHORIZATION_CLOCK_SKEW_MS` | `30000` | `packages/core-api/src/prepare/prepareAuthorization.ts` | Accepted client clock lead for prepare authorization timestamps. |
 | `PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS` | `60000` | `packages/core-api/src/studio/executionLedger.ts` | Default Studio promotion reservation TTL. |
 | `PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS` | `15000` | `packages/core-api/src/studio/executionLedger.ts` | Default Studio ledger expired-reservation sweep interval. |
-| `DEFAULT_USAGE_RETENTION_MS` | `2592000000` | `packages/core-api/src/studio/promotionUsageStore.ts` | Default promotion usage-event retention window. |
 
 Prepare records are temporary. Clients must prepare again when a receipt expires or when a sponsor returns `LEASE_EXPIRED`.
 

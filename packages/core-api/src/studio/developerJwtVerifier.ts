@@ -17,6 +17,7 @@
  */
 
 import { createVerify, createPublicKey, type KeyObject } from 'node:crypto';
+import { isValidStudioUserId, STUDIO_USER_ID_MAX_LENGTH } from '@stelis/contracts';
 
 // Shared Sui address validation helper.
 import { canonicalizeAddress } from '../addressConstraints.js';
@@ -352,9 +353,9 @@ export async function verifyDeveloperJwt(
   // Reject control characters, whitespace, and non-printable bytes to
   // avoid log-injection or key-confusion when the value reaches Redis or
   // structured-log consumers.
-  if (!USER_ID_PATTERN.test(rawUserId)) {
+  if (!isValidStudioUserId(rawUserId)) {
     throw new Error(
-      `developer JWT: userId at claim path "${trustConfig.claimPaths.userId}" failed opaque-ID validation (length 1-128, [A-Za-z0-9_:.\\-])`,
+      `developer JWT: userId at claim path "${trustConfig.claimPaths.userId}" failed opaque-ID validation (length 1-${STUDIO_USER_ID_MAX_LENGTH}, [A-Za-z0-9_:.\\-])`,
     );
   }
   const userId = rawUserId;
@@ -379,20 +380,6 @@ export async function verifyDeveloperJwt(
 
   return { userId, senderAddress };
 }
-
-// ─────────────────────────────────────────────
-// userId validation
-// ─────────────────────────────────────────────
-
-/**
- * Bounded opaque-ID pattern. The Studio promotion principal flows
- * directly into Redis keys and structured-log fields, so the value is
- * constrained to a conservative printable set without separators that
- * could collide with Redis-key conventions or pollute structured logs.
- * Length is capped at 128 characters; the floor of 1 character prevents
- * empty principals from reaching enforcement.
- */
-const USER_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,128}$/;
 
 // ─────────────────────────────────────────────
 // Claim path extraction

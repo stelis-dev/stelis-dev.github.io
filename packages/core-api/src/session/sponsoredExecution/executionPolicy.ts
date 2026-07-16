@@ -308,7 +308,7 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
   //     ledger consume, generic economics log).
   //   - on `result.success === false`: failure-side accounting (Studio
   //     ledger release on congestion, ledger consume on on-chain revert,
-  //     usage row append, `SponsorOnchainError` /
+  //     structured execution log, `SponsorOnchainError` /
   //     `SponsorCongestionError` classified throw).
   // The runner does not classify the failure itself — it propagates
   // any throw the hook raises so the public route adapter's outer catch can

@@ -11,6 +11,7 @@
  */
 
 import {
+  ADMIN_BLOCKLIST_READ_ERROR_CODES,
   ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
   ADMIN_PROMOTION_CREATE_ERROR_CODES,
   ADMIN_PROMOTION_DELETE_ERROR_CODES,
@@ -31,6 +32,7 @@ import {
   parseAdminAuthVerifyRequest,
   parseAdminBlocklistDeleteRequest,
   parseAdminBlocklistDeleteResponse,
+  parseAdminBlocklistQuery,
   parseAdminBlocklistResponse,
   parseAdminPromotionCreateRequest,
   parseAdminPromotionDeleteResponse,
@@ -50,6 +52,8 @@ import {
   parseAdminSponsorOperationsResponse,
   parseHostErrorResponse,
   type AdminPromotionCreateRequest,
+  type AdminBlocklistDeleteRequest,
+  type AdminBlocklistQuery,
   type AdminPromotionListQuery,
   type AdminPromotionStatusRequest,
   type AdminPromotionUpdateRequest,
@@ -181,13 +185,23 @@ export function getAuditLogs() {
 
 // ── Blocklist ──────────────────────────────────────────────────────────────
 
-export function getBlocklist() {
-  return apiFetch('/api/blocklist', undefined, parseAdminBlocklistResponse, ADMIN_READ_ERROR_CODES);
+export function getBlocklist(query: AdminBlocklistQuery = {}) {
+  const current = parseAdminBlocklistQuery(query);
+  const search = new URLSearchParams();
+  if (current.cursor !== null) search.set('cursor', current.cursor);
+  if (query.limit !== undefined) search.set('limit', String(current.limit));
+  const encoded = search.toString();
+  return apiFetch(
+    `/api/blocklist${encoded.length === 0 ? '' : `?${encoded}`}`,
+    undefined,
+    parseAdminBlocklistResponse,
+    ADMIN_BLOCKLIST_READ_ERROR_CODES,
+  );
 }
 
-export async function removeBlocklistEntry(key: string): Promise<void> {
-  const request = parseAdminBlocklistDeleteRequest({ key });
-  await apiFetch(
+export function removeBlocklistEntry(identity: AdminBlocklistDeleteRequest) {
+  const request = parseAdminBlocklistDeleteRequest(identity);
+  return apiFetch(
     '/api/blocklist',
     {
       method: 'DELETE',

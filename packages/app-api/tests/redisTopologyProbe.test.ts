@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let mockSendCommand: ((args: string[]) => Promise<unknown>) | undefined;
 let mockHasSendCommand = true;
+let mockMissingRuntimeMethod: string | null = null;
 /** Captures the last mock client created by createClient for quit() assertions. */
 let lastMockClient: Record<string, unknown> | null = null;
 
@@ -50,7 +51,6 @@ vi.mock('redis', () => ({
       del: vi.fn().mockResolvedValue(0),
       eval: vi.fn().mockResolvedValue(null),
       hGetAll: vi.fn().mockResolvedValue({}),
-      ttl: vi.fn().mockResolvedValue(60),
       lRange: vi.fn().mockResolvedValue([]),
       lPush: vi.fn().mockResolvedValue(1),
       lTrim: vi.fn().mockResolvedValue(undefined),
@@ -58,6 +58,9 @@ vi.mock('redis', () => ({
     // sendCommand is conditionally present based on test scenario
     if (mockHasSendCommand) {
       client.sendCommand = (...args: unknown[]) => mockSendCommand!(...(args as [string[]]));
+    }
+    if (mockMissingRuntimeMethod !== null) {
+      delete client[mockMissingRuntimeMethod];
     }
     lastMockClient = client;
     return client;
@@ -73,6 +76,7 @@ import { createRedisClient } from '../src/redisClient.js';
 describe('Redis topology probe (createRedisClient)', () => {
   beforeEach(() => {
     mockHasSendCommand = true;
+    mockMissingRuntimeMethod = null;
     mockSendCommand = vi.fn().mockResolvedValue(STANDALONE_INFO);
     lastMockClient = null;
   });
@@ -106,7 +110,7 @@ describe('Redis topology probe (createRedisClient)', () => {
     await client.dispose();
   });
 
-  it('reconnects once when a command observes a closed client race', async () => {
+  it('does not replay a command whose outcome is uncertain after the client closes', async () => {
     mockSendCommand = vi.fn().mockResolvedValue(STANDALONE_INFO);
 
     const client = await createRedisClient('redis://localhost');
@@ -117,11 +121,18 @@ describe('Redis topology probe (createRedisClient)', () => {
       throw closedError;
     });
 
-    await client.eval('return 1', ['stelis:test:key'], ['900000']);
+    await expect(client.eval('return 1', ['stelis:test:key'], ['900000'])).rejects.toBe(
+      closedError,
+    );
 
+    expect(lastMockClient!.connect).toHaveBeenCalledTimes(1);
+    expect(mockSendCommand).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.eval).toHaveBeenCalledTimes(1);
+
+    await client.get('stelis:test:key');
     expect(lastMockClient!.connect).toHaveBeenCalledTimes(2);
     expect(mockSendCommand).toHaveBeenCalledTimes(2);
-    expect(lastMockClient!.eval).toHaveBeenCalledTimes(2);
+    expect(lastMockClient!.get).toHaveBeenCalledTimes(1);
     await client.dispose();
   });
 
@@ -143,11 +154,22 @@ describe('Redis topology probe (createRedisClient)', () => {
     expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
   });
 
-  it('sendCommand missing → fail-closed + client cleaned up', async () => {
+  it('sendCommand missing → fails before connecting a partial client', async () => {
     mockHasSendCommand = false;
 
-    await expect(createRedisClient('redis://localhost')).rejects.toThrow('cannot probe topology');
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    await expect(createRedisClient('redis://localhost')).rejects.toThrow(
+      'missing required command methods: sendCommand',
+    );
+    expect(lastMockClient!.connect).not.toHaveBeenCalled();
+  });
+
+  it('required Redis command missing → fails before boot can expose a partial client', async () => {
+    mockMissingRuntimeMethod = 'hGetAll';
+
+    await expect(createRedisClient('redis://localhost')).rejects.toThrow(
+      'missing required command methods: hGetAll',
+    );
+    expect(lastMockClient!.connect).not.toHaveBeenCalled();
   });
 
   it('INFO server non-string response → fail-closed + client cleaned up', async () => {

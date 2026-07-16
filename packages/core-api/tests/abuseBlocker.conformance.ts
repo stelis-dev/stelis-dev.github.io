@@ -7,20 +7,20 @@
  * shared subject-family/carve-out decisions that both adapters must enact.
  * Failure-table vocabulary remains covered separately in `failures.test.ts`.
  *
- * Memory-only cases (MAX_BLOCK_KEYS bounded eviction white-box,
- * MAX_COUNTER_KEYS saturation) live in `abuseBlocking.test.ts`
- * under a clearly labeled "impl-only" describe.
  */
 
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { AbuseBlockerAdapter, AbuseBlockerConfig } from '../src/store/abuseBlockTypes.js';
+import { afterEach, expect, it } from 'vitest';
+import type { AbuseBlockerConfig } from '../src/store/abuseBlockTypes.js';
+import { abuseBlockMember, type AbuseBlockStore } from '../src/store/abuseBlockStore.js';
 
 // ─────────────────────────────────────────────
 // Factory contract
 // ─────────────────────────────────────────────
 
 export interface AbuseBlockerHandle {
-  blocker: AbuseBlockerAdapter;
+  blocker: AbuseBlockStore;
+  advanceTime(ms: number): Promise<void> | void;
+  seedEqualDeadlineStudioUsers(userIds: readonly string[]): Promise<void> | void;
   dispose(): Promise<void> | void;
 }
 
@@ -43,21 +43,15 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     return handle;
   }
 
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-15T00:00:00.000Z'));
-  });
-
   afterEach(async () => {
     if (handle) {
       await handle.dispose();
       handle = null;
     }
-    vi.useRealTimers();
   });
 
   it('IP threshold — blocks after the windowed counter exceeds the threshold, clears after TTL', async () => {
-    const { blocker } = await setup({
+    const { blocker, advanceTime } = await setup({
       ipFailureThreshold: 1,
       ipFailureWindowMs: 1_000,
       ipBlockDurationMs: 500,
@@ -83,7 +77,83 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     });
 
     // Advance past the block duration — block clears.
-    vi.advanceTimersByTime(501);
+    await advanceTime(501);
+    await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: false });
+  });
+
+  it('IP fixed window — expiry starts a new counter window instead of carrying the old count', async () => {
+    const { blocker, advanceTime } = await setup({
+      ipFailureThreshold: 1,
+      ipFailureWindowMs: 50,
+      ipBlockDurationMs: 500,
+    });
+
+    await blocker.recordSponsorFailure(IP, undefined, 'PREFLIGHT_FAILED');
+    await advanceTime(75);
+    await blocker.recordSponsorFailure(IP, undefined, 'PREFLIGHT_FAILED');
+    await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: false });
+
+    await blocker.recordSponsorFailure(IP, undefined, 'PREFLIGHT_FAILED');
+    await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
+  });
+
+  it('equal-deadline pages use Redis member byte ordering and exclusive cursors', async () => {
+    const { blocker, seedEqualDeadlineStudioUsers } = await setup({
+      manipulationBlockDurationMs: 60_000,
+    });
+    const userIds = ['z', '-', 'A'];
+    await seedEqualDeadlineStudioUsers(userIds);
+
+    const actualMembers: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = await blocker.listBlocks({ cursor, limit: 1 });
+      actualMembers.push(
+        ...page.blocks
+          .filter((block) => block.identity.scope === 'studio_user')
+          .map((block) => abuseBlockMember(block.identity)),
+      );
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+
+    expect(actualMembers).toEqual(
+      userIds.map((subject) => abuseBlockMember({ scope: 'studio_user', subject })).sort(),
+    );
+  });
+
+  it('ip, address, and studio_user removals return true once and false after deletion', async () => {
+    const { blocker } = await setup({
+      manipulationBlockDurationMs: 60_000,
+    });
+    await blocker.recordSponsorFailure(
+      IP,
+      { kind: 'address', address: ADDRESS },
+      'TAMPERING_DETECTED',
+    );
+    await blocker.recordSponsorFailure(
+      IP,
+      { kind: 'studio_user', userId: 'User-A' },
+      'TAMPERING_DETECTED',
+    );
+
+    const page = await blocker.listBlocks({ cursor: null, limit: 50 });
+    expect(new Set(page.blocks.map((block) => block.identity.scope))).toEqual(
+      new Set(['ip', 'address', 'studio_user']),
+    );
+    for (const block of page.blocks) {
+      await expect(blocker.removeBlock(block.identity)).resolves.toBe(true);
+      await expect(blocker.removeBlock(block.identity)).resolves.toBe(false);
+    }
+  });
+
+  it('expired removal returns false instead of reporting a stale block as removed', async () => {
+    const { blocker, advanceTime } = await setup({
+      manipulationBlockDurationMs: 25,
+    });
+    await blocker.recordSponsorFailure(IP, undefined, 'TAMPERING_DETECTED');
+    await advanceTime(40);
+
+    await expect(blocker.removeBlock({ scope: 'ip', subject: IP })).resolves.toBe(false);
     await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: false });
   });
 
@@ -187,6 +257,29 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     ).resolves.toMatchObject({ blocked: false });
   });
 
+  it('ignored codes short-circuit before IP validation while counted codes reject malformed IPs', async () => {
+    const { blocker } = await setup({
+      ipFailureThreshold: 0,
+      manipulationBlockDurationMs: 10_000,
+    });
+
+    await expect(
+      blocker.recordSponsorFailure(
+        'not-an-ip-address',
+        { kind: 'address', address: ADDRESS },
+        'NO_SPONSOR_SLOT',
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      blocker.recordSponsorFailure(
+        'not-an-ip-address',
+        { kind: 'address', address: ADDRESS },
+        'PREFLIGHT_FAILED',
+      ),
+    ).rejects.toThrow();
+  });
+
   it('non-manipulation sponsor failure — L2_POLICY_HASH_MISMATCH does NOT trigger a manipulation block', async () => {
     const { blocker } = await setup({
       ipFailureThreshold: 100, // high enough that windowed counter cannot trip in one call
@@ -236,6 +329,20 @@ export function runAbuseBlockerConformanceTests(factory: AbuseBlockerFactory): v
     // Subject still must not be blocked — proves `subject:'skip'` is
     // honored at runtime, not just in the table.
     await expect(blocker.checkSubject(STUDIO_USER)).resolves.toMatchObject({ blocked: false });
+  });
+
+  it('unused subject input is not validated before an IP-only policy records its counter', async () => {
+    const { blocker } = await setup({
+      ipFailureThreshold: 1,
+      ipFailureWindowMs: 60_000,
+      ipBlockDurationMs: 60_000,
+    });
+    const unusedSubject = { kind: 'address' as const, address: 'not-a-current-address' };
+
+    await blocker.recordSponsorFailure(IP, unusedSubject, 'PROMO_DEADLINE_PASSED');
+    await blocker.recordSponsorFailure(IP, unusedSubject, 'PROMO_DEADLINE_PASSED');
+
+    await expect(blocker.checkIp(IP)).resolves.toMatchObject({ blocked: true, scope: 'ip' });
   });
 
   it('normal row without storage family — L2_POLICY_HASH_MISMATCH never increments subject counter (address kind)', async () => {

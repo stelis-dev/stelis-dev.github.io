@@ -4,8 +4,7 @@
  * These are pure functions and type definitions for admin / service-user
  * read models. They aggregate data from:
  *   - `Promotion` (promotionStore) for configuration
- *   - `ExecutionLedger` read models (`getEntitlement`, `getClaimedCount`,
- *     `getBudgetSummary`, `listClaimedUsers`) for per-user and promotion-level
+ *   - `ExecutionLedger` status reads for per-user and promotion-level
  *     execution state
  *   - `computeTotalRequiredBudgetMist()` (domain) for budget derivation
  *
@@ -38,7 +37,7 @@ export type {
  */
 export interface PromotionAdminSummary {
   /** Number of users who have claimed this promotion. */
-  claimedUsers: number;
+  claimedCount: number;
   /** Remaining participant slots under the finite promotion cap. */
   remainingParticipantSlots: number;
   /** Total budget consumed so far in MIST. */
@@ -58,8 +57,8 @@ export interface PromotionAdminSummary {
 /**
  * Budget state snapshot for admin summary computation.
  *
- * Caller obtains these fields from `PromotionExecutionLedger.getBudgetSummary()`,
- * which returns `{ availableMist, reservedMist, consumedMist }` as bigint.
+ * Caller obtains these fields from
+ * `PromotionExecutionLedger.getPromotionLedgerStatus().budget`.
  */
 export interface BudgetSnapshot {
   availableMist: bigint;
@@ -71,8 +70,8 @@ export interface BudgetSnapshot {
  * Compute admin summary from promotion config and ExecutionLedger read models.
  *
  * @param promotion - Promotion record.
- * @param claimedCount - Number of claimed users (from `ExecutionLedger.getClaimedCount()`).
- * @param budget - Budget snapshot from `ExecutionLedger.getBudgetSummary()`.
+ * @param claimedCount - Number of claimed users from the ledger status.
+ * @param budget - Budget from the same ledger status.
  */
 export function computePromotionAdminSummary(
   promotion: Pick<Promotion, 'maxParticipants' | 'perUserGasAllowanceMist'>,
@@ -84,7 +83,7 @@ export function computePromotionAdminSummary(
   const remainingSlots = Math.max(0, promotion.maxParticipants - claimedCount);
 
   return {
-    claimedUsers: claimedCount,
+    claimedCount,
     remainingParticipantSlots: remainingSlots,
     totalConsumedBudgetMist: budget.consumedMist.toString(),
     totalReservedBudgetMist: budget.reservedMist.toString(),
@@ -199,8 +198,8 @@ export function computeUserPromotionDetail(
  *
  * @param promotion - Full promotion record.
  * @param entitlement - User's entitlement record (null if not claimed).
- * @param claimedCount - Current count of claimed users (from `ExecutionLedger.getClaimedCount()`).
- * @param availableBudgetMist - Available budget from `ExecutionLedger.getBudgetSummary().availableMist`.
+ * @param claimedCount - Current count of claimed users from the ledger status.
+ * @param availableBudgetMist - Available budget from the same ledger status.
  * @param now - Current timestamp for deadline checks.
  */
 export function computePromotionListItem(

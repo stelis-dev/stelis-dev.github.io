@@ -92,6 +92,10 @@ function reservationFailureCode(reason: ReserveFailureReason): PromotionPrepareE
       return 'ENTITLEMENT_INSUFFICIENT';
     case 'concurrent_reservation':
       return 'ENTITLEMENT_CONCURRENT_RESERVATION';
+    case 'record_changed':
+      return 'PROMOTION_CURRENT_CONFLICT';
+    case 'promotion_not_active':
+      return 'PROMOTION_NOT_ACTIVE';
   }
 }
 

@@ -6,14 +6,18 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
-import { ClientIpResolutionError } from '@stelis/core-api';
+import {
+  AbuseBlockCurrentConflictError,
+  AbuseBlockInputError,
+  ClientIpResolutionError,
+} from '@stelis/core-api';
 import {
   HOST_ERROR_HTTP_STATUS,
+  MAX_PROMOTION_LEDGER_VALUE_MIST,
   buildSponsorRefillAccountWithdrawMessage,
   hostErrorPublicMessage,
   parseAdminPromotionDetailResponse,
   parseAdminPromotionSummaryResponse,
-  parseAdminPromotionUsersResponse,
   parseAdminSettlementSwapPathsResponse,
   parseHostErrorResponse,
   type HostErrorCode,
@@ -23,6 +27,7 @@ import { PromotionCurrentConflictError } from '@stelis/core-api/studio';
 // ── Hoisted mocks ───────────────────────────────────────────────────────
 const {
   mockRedis,
+  mockAbuseStore,
   mockRequireAdminSessionFromContext,
   mockCheckAndIncrementAdminOperationAttempt,
   mockVerifySignedMessage,
@@ -33,11 +38,17 @@ const {
     get: vi.fn(),
     set: vi.fn(),
     del: vi.fn(),
-    scan: vi.fn(),
-    ttl: vi.fn(),
     lrange: vi.fn(),
     lpush: vi.fn(),
     ltrim: vi.fn(),
+  },
+  mockAbuseStore: {
+    listBlocks: vi.fn(),
+    removeBlock: vi.fn(),
+    stop: vi.fn(),
+    checkIp: vi.fn(),
+    checkSubject: vi.fn(),
+    recordSponsorFailure: vi.fn(),
   },
   mockRequireAdminSessionFromContext: vi.fn(),
   mockCheckAndIncrementAdminOperationAttempt: vi.fn(),
@@ -162,7 +173,6 @@ function createMockCtx(): AppApiContext {
     } as never,
     studio: null,
     promotionStore: null,
-    usageStore: null,
     executionLedger: null,
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,
@@ -176,6 +186,7 @@ function createMockCtx(): AppApiContext {
       ]),
     }),
     redis: mockRedis as never,
+    abuseStore: mockAbuseStore as never,
     sponsorOperations: {
       // Default returns a healthy single-slot state. Individual tests
       // override via `(ctx.sponsorOperations.readState as Mock).mockResolvedValue(...)`.
@@ -233,11 +244,12 @@ function resetMockDefaults(): void {
   mockRedis.get.mockResolvedValue(null);
   mockRedis.set.mockResolvedValue(undefined);
   mockRedis.del.mockResolvedValue(1);
-  mockRedis.scan.mockResolvedValue([]);
-  mockRedis.ttl.mockResolvedValue(300);
   mockRedis.lrange.mockResolvedValue([]);
   mockRedis.lpush.mockResolvedValue(1);
   mockRedis.ltrim.mockResolvedValue(undefined);
+  mockAbuseStore.listBlocks.mockResolvedValue({ blocks: [], nextCursor: null });
+  mockAbuseStore.removeBlock.mockResolvedValue(true);
+  mockAbuseStore.stop.mockResolvedValue(undefined);
 
   // Admin module defaults
   mockCheckAndIncrementAdminOperationAttempt.mockResolvedValue({
@@ -297,19 +309,42 @@ describe('admin routes', () => {
   });
 
   describe('GET /api/blocklist', () => {
-    it('returns 200 with blocklist entries', async () => {
-      mockRedis.scan.mockResolvedValueOnce(['stelis:abuse:block:ip:1.2.3.4']);
-      mockRedis.scan.mockResolvedValueOnce([]);
-      const res = await app.request('/api/blocklist');
+    it('returns one bounded typed page for all block scopes', async () => {
+      mockAbuseStore.listBlocks.mockResolvedValueOnce({
+        blocks: [
+          {
+            identity: { scope: 'studio_user', subject: 'User-A' },
+            reason: 'manipulation',
+            blockedUntilMs: 1_800_000_000_000,
+          },
+        ],
+        nextCursor: 'Y3Vyc29y',
+      });
+      const res = await app.request('/api/blocklist?limit=25');
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.blocklist).toBeDefined();
-      expect(Array.isArray(body.blocklist)).toBe(true);
+      await expect(res.json()).resolves.toEqual({
+        blocklist: [
+          {
+            scope: 'studio_user',
+            subject: 'User-A',
+            reason: 'manipulation',
+            blockedUntilMs: 1_800_000_000_000,
+          },
+        ],
+        nextCursor: 'Y3Vyc29y',
+      });
+      expect(mockAbuseStore.listBlocks).toHaveBeenCalledWith({ cursor: null, limit: 25 });
+    });
+
+    it('rejects an invalid page limit before calling the store', async () => {
+      const res = await app.request('/api/blocklist?limit=101');
+      await expectHostError(res, 'BAD_REQUEST');
+      expect(mockAbuseStore.listBlocks).not.toHaveBeenCalled();
     });
   });
 
   describe('DELETE /api/blocklist', () => {
-    it('returns 400 on missing key', async () => {
+    it('returns 400 on missing identity', async () => {
       const res = await app.request('/api/blocklist', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
@@ -318,24 +353,51 @@ describe('admin routes', () => {
       await expectHostError(res, 'BAD_REQUEST');
     });
 
-    it('returns 403 on unauthorized key prefix', async () => {
+    it('returns 400 on an unsupported scope', async () => {
       const res = await app.request('/api/blocklist', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'random:key' }),
+        body: JSON.stringify({ scope: 'unknown', subject: 'value' }),
       });
-      await expectHostError(res, 'ADMIN_FORBIDDEN');
+      await expectHostError(res, 'BAD_REQUEST');
     });
 
-    it('returns 200 on valid key', async () => {
+    it('maps invalid scope-specific identity to BAD_REQUEST', async () => {
+      mockAbuseStore.removeBlock.mockRejectedValueOnce(new AbuseBlockInputError('invalid address'));
       const res = await app.request('/api/blocklist', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'stelis:abuse:block:ip:1.2.3.4' }),
+        body: JSON.stringify({ scope: 'address', subject: 'not-an-address' }),
+      });
+      await expectHostError(res, 'BAD_REQUEST');
+    });
+
+    it('returns the idempotent typed removal result', async () => {
+      const res = await app.request('/api/blocklist', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'ip', subject: '127.0.0.1' }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.ok).toBe(true);
+      await expect(res.json()).resolves.toEqual({ removed: true });
+      expect(mockAbuseStore.removeBlock).toHaveBeenCalledWith({
+        scope: 'ip',
+        subject: '127.0.0.1',
+      });
+    });
+
+    it('maps an exact-current removal race to ADMIN_CONFLICT', async () => {
+      mockAbuseStore.removeBlock.mockRejectedValueOnce(
+        new AbuseBlockCurrentConflictError('remove'),
+      );
+
+      const res = await app.request('/api/blocklist', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'studio_user', subject: 'User-A' }),
+      });
+
+      await expectHostError(res, 'ADMIN_CONFLICT');
     });
   });
 
@@ -992,9 +1054,10 @@ describe('admin routes', () => {
       beforeEach(async () => {
         const { MemoryPromotionStore, MemoryPromotionExecutionLedger } =
           await import('@stelis/core-api/testing/studio');
-        (mockCtx as unknown as Record<string, unknown>).promotionStore = new MemoryPromotionStore();
+        const promotionStore = new MemoryPromotionStore();
+        (mockCtx as unknown as Record<string, unknown>).promotionStore = promotionStore;
         (mockCtx as unknown as Record<string, unknown>).executionLedger =
-          new MemoryPromotionExecutionLedger();
+          new MemoryPromotionExecutionLedger(promotionStore);
         // Reset body parser mock to clear stale once-queue state, then
         // restore default implementation that reads actual request body.
         mockReadJsonBodyWithLimit.mockReset();
@@ -1075,7 +1138,7 @@ describe('admin routes', () => {
               description: '',
               status: 'draft',
               maxParticipants: 2,
-              perUserGasAllowanceMist: Number.MAX_SAFE_INTEGER.toString(),
+              perUserGasAllowanceMist: MAX_PROMOTION_LEDGER_VALUE_MIST.toString(),
               claimDeadlineAt: null,
               postClaimUseWindowMs: 0,
               startAt: null,
@@ -1374,7 +1437,7 @@ describe('admin routes', () => {
           type: 'gas_sponsorship',
           displayName: 'Over-bound per-user',
           maxParticipants: 10,
-          perUserGasAllowanceMist: (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString(),
+          perUserGasAllowanceMist: (MAX_PROMOTION_LEDGER_VALUE_MIST + 1n).toString(),
         });
         const res = await app.request('/api/promotions', {
           method: 'POST',
@@ -1388,7 +1451,7 @@ describe('admin routes', () => {
           type: 'gas_sponsorship',
           displayName: 'Over-bound product (draft)',
           maxParticipants: 1_000_000,
-          // 1M × 9_007_199_254_740 ≈ 9.0 × 10^18 > MAX_SAFE_INTEGER
+          // 1M × 9_007_199_254_740 exceeds the contracts-owned ledger bound.
           perUserGasAllowanceMist: '9007199254740',
         });
         const res = await app.request('/api/promotions', {
@@ -1413,7 +1476,7 @@ describe('admin routes', () => {
         const created = (await createRes.json()) as { promotion: { promotionId: string } };
 
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
-          perUserGasAllowanceMist: (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString(),
+          perUserGasAllowanceMist: (MAX_PROMOTION_LEDGER_VALUE_MIST + 1n).toString(),
         });
         const updateRes = await app.request(`/api/promotions/${created.promotion.promotionId}`, {
           method: 'PUT',
@@ -1482,11 +1545,14 @@ describe('admin routes', () => {
           body: JSON.stringify({}),
         });
         const created = (await createRes.json()) as { promotion: { promotionId: string } };
+        const status = vi.spyOn(mockCtx.executionLedger!, 'getPromotionLedgerStatus');
 
         const res = await app.request(`/api/promotions/${created.promotion.promotionId}`);
         expect(res.status).toBe(200);
         const body = (await res.json()) as { promotion: { displayName: string } };
         expect(body.promotion.displayName).toBe('Fetch Me');
+        expect(status).toHaveBeenCalledTimes(1);
+        expect(status).toHaveBeenCalledWith(created.promotion.promotionId, null);
         expect(parseAdminPromotionDetailResponse(body)).toEqual(body);
       });
 
@@ -1925,91 +1991,6 @@ describe('admin routes', () => {
         expect(body.promotions).toHaveLength(1);
         expect(body.promotions[0].displayName).toBe('Active One');
       });
-      // ── admin claimed-user list ──────────────────────────────────
-      it('GET /api/promotions/:id/users returns 503 when executionLedger not available', async () => {
-        // Temporarily remove executionLedger to simulate generic-only mode
-        (mockCtx as unknown as Record<string, unknown>).executionLedger = null;
-        const res = await app.request('/api/promotions/some-id/users');
-        expect(res.status).toBe(503);
-      });
-
-      it('GET /api/promotions/:id/users returns 404 for non-existent promotion', async () => {
-        const res = await app.request('/api/promotions/nonexistent/users');
-        expect(res.status).toBe(404);
-      });
-
-      it('GET /api/promotions/:id/users returns empty user list for new promotion', async () => {
-        // Create promo
-        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
-          type: 'gas_sponsorship',
-          displayName: 'Users Test',
-          maxParticipants: 10,
-          perUserGasAllowanceMist: '1000000',
-        });
-        const createRes = await app.request('/api/promotions', {
-          method: 'POST',
-          body: JSON.stringify({}),
-        });
-        const created = (await createRes.json()) as { promotion: { promotionId: string } };
-
-        const res = await app.request(`/api/promotions/${created.promotion.promotionId}/users`);
-        expect(res.status).toBe(200);
-        const body = (await res.json()) as { users: unknown[]; total: number };
-        expect(body.users).toEqual([]);
-        expect(body.total).toBe(0);
-        expect(parseAdminPromotionUsersResponse(body)).toEqual(body);
-      });
-
-      // Cross-route: claim → admin users
-      it('GET /api/promotions/:id/users reflects claimed users after ExecutionLedger.claim()', async () => {
-        mockReadJsonBodyWithLimit.mockResolvedValueOnce({
-          type: 'gas_sponsorship',
-          displayName: 'ClaimedUsers Test',
-          maxParticipants: 10,
-          perUserGasAllowanceMist: '5000000',
-        });
-        const createRes = await app.request('/api/promotions', {
-          method: 'POST',
-          body: JSON.stringify({}),
-        });
-        const created = (await createRes.json()) as { promotion: { promotionId: string } };
-        const promoId = created.promotion.promotionId;
-
-        // Claim via ExecutionLedger (simulates POST /studio/promotions/:id/claim)
-        const ledger = (
-          mockCtx as unknown as {
-            executionLedger: import('@stelis/core-api/studio').PromotionExecutionLedger;
-          }
-        ).executionLedger;
-        await ledger.claim(promoId, 'user-alpha', {
-          maxParticipants: 10,
-          perUserGasAllowanceMist: '5000000',
-          useUntilAt: null,
-        });
-        await ledger.claim(promoId, 'user-beta', {
-          maxParticipants: 10,
-          perUserGasAllowanceMist: '5000000',
-          useUntilAt: null,
-        });
-
-        // Admin users response should reflect both claims immediately
-        const res = await app.request(`/api/promotions/${promoId}/users`);
-        expect(res.status).toBe(200);
-        const body = (await res.json()) as {
-          users: {
-            userId: string;
-            remainingGasAllowanceMist: string | null;
-            status: string | null;
-          }[];
-          total: number;
-        };
-        expect(body.total).toBe(2);
-        const userIds = body.users.map((u) => u.userId).sort();
-        expect(userIds).toEqual(['user-alpha', 'user-beta']);
-        expect(body.users[0].remainingGasAllowanceMist).toBe('5000000');
-        expect(body.users[0].status).toBe('active');
-      });
-
       // Cross-route: claim → admin summary
       it('GET /api/promotions/:id/summary reflects claimed count + budget after claim', async () => {
         mockReadJsonBodyWithLimit.mockResolvedValueOnce({
@@ -2030,9 +2011,13 @@ describe('admin routes', () => {
             executionLedger: import('@stelis/core-api/studio').PromotionExecutionLedger;
           }
         ).executionLedger;
+        const promotionStore = (
+          mockCtx as unknown as {
+            promotionStore: import('@stelis/core-api/studio').PromotionStoreAdapter;
+          }
+        ).promotionStore;
+        await promotionStore.transitionStatus(promoId, 'active');
         await ledger.claim(promoId, 'user-1', {
-          maxParticipants: 10,
-          perUserGasAllowanceMist: '5000000',
           useUntilAt: null,
         });
 
@@ -2040,11 +2025,11 @@ describe('admin routes', () => {
         expect(res.status).toBe(200);
         const body = (await res.json()) as {
           summary: {
-            claimedUsers: number;
+            claimedCount: number;
             totalRemainingBudgetMist: string;
           };
         };
-        expect(body.summary.claimedUsers).toBe(1);
+        expect(body.summary.claimedCount).toBe(1);
         // total = 10 * 5M = 50M, no reserves yet → available = 50M
         expect(body.summary.totalRemainingBudgetMist).toBe('50000000');
       });
@@ -2094,13 +2079,13 @@ describe('admin routes', () => {
         const body = (await res.json()) as {
           promotionId: string;
           summary: {
-            claimedUsers: number;
+            claimedCount: number;
             totalRequiredBudgetMist: string;
             totalRemainingBudgetMist: string;
           };
         };
         expect(body.promotionId).toBe(created.promotion.promotionId);
-        expect(body.summary.claimedUsers).toBe(0);
+        expect(body.summary.claimedCount).toBe(0);
         expect(body.summary.totalRequiredBudgetMist).toBe('50000000');
         expect(parseAdminPromotionSummaryResponse(body)).toEqual(body);
       });

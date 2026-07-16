@@ -11,8 +11,7 @@
  *
  * Production code MUST NOT import from this subpath. Production hosts
  * inject the Redis-backed adapters
- * (`RedisPromotionStore`, `RedisPromotionUsageStore`,
- * `RedisPromotionExecutionLedger`) which are exported from
+ * (`RedisPromotionStore`, `RedisPromotionExecutionLedger`) which are exported from
  * `@stelis/core-api/studio`.
  */
 export { MemoryPromotionStore } from '../studio/promotionStore.js';

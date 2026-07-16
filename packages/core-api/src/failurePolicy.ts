@@ -637,6 +637,11 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     classification: 'normal',
     abuseImpact: IP_ONLY,
   },
+  PROMOTION_CURRENT_CONFLICT: {
+    classification: 'ignored',
+    abuseImpact: SKIP_BOTH,
+    notes: 'Exact current Promotion or ledger state changed during one atomic operation.',
+  },
   NOT_CLAIMED: {
     classification: 'normal',
     abuseImpact: IP_ONLY,

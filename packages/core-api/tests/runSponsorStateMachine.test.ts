@@ -41,6 +41,7 @@ import type {
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
+import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { SponsorPool } from '../src/context.js';
 import { SponsorPostSignatureUncertaintyError } from '../src/session/sessionPrimitives.js';
 import { suiExecutionErrorMessage, type SuiExecutionError } from '@stelis/core-relay';
@@ -323,7 +324,7 @@ function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): Hos
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
-  const ledger = new MemoryPromotionExecutionLedger();
+  const ledger = new MemoryPromotionExecutionLedger(new MemoryPromotionStore());
 
   const signAndSubmitMock = vi.fn<SignAndSubmitPort>(async () => {
     if (opts?.signThrows) throw opts.signThrows;

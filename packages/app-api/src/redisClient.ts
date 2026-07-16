@@ -11,20 +11,43 @@ import { wrapRedisClient } from '@stelis/core-api';
 import { redactSensitiveText } from '@stelis/core-api/observability';
 
 interface RedisRuntimeClient extends RawRedisClient {
-  isOpen?: boolean;
+  isOpen: boolean;
   connect(): Promise<void>;
   quit(): Promise<void>;
-  ttl(key: string): Promise<number>;
   lRange(key: string, start: number, stop: number): Promise<string[]>;
   lPush(key: string, ...values: string[]): Promise<number>;
   lTrim(key: string, start: number, stop: number): Promise<void>;
   /** Raw command execution — used for topology probe before wrapping. */
-  sendCommand?(args: string[]): Promise<unknown>;
+  sendCommand(args: string[]): Promise<unknown>;
 }
 
-function isClientClosedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === 'ClientClosedError' || /client is closed/i.test(error.message);
+const REQUIRED_REDIS_RUNTIME_METHODS = [
+  'connect',
+  'quit',
+  'get',
+  'set',
+  'del',
+  'eval',
+  'hGetAll',
+  'lRange',
+  'lPush',
+  'lTrim',
+  'sendCommand',
+] as const;
+
+function assertRedisRuntimeClient(value: unknown): asserts value is RedisRuntimeClient {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Redis runtime did not create a client object');
+  }
+  const missing = REQUIRED_REDIS_RUNTIME_METHODS.filter(
+    (method) => typeof Reflect.get(value, method) !== 'function',
+  );
+  if (missing.length > 0) {
+    throw new Error(`Redis runtime is missing required command methods: ${missing.join(', ')}`);
+  }
+  if (typeof Reflect.get(value, 'isOpen') !== 'boolean') {
+    throw new Error('Redis runtime client is missing the required isOpen state');
+  }
 }
 
 async function loadRedisModule(): Promise<{
@@ -45,7 +68,6 @@ async function loadRedisModule(): Promise<{
 }
 
 export interface RedisClient extends RedisClientLike {
-  ttl(key: string): Promise<number>;
   lrange(key: string, start: number, stop: number): Promise<string[]>;
   lpush(key: string, value: string): Promise<number>;
   ltrim(key: string, start: number, stop: number): Promise<void>;
@@ -55,6 +77,7 @@ export interface RedisClient extends RedisClientLike {
 export async function createRedisClient(redisUrl: string): Promise<RedisClient> {
   const { createClient } = await loadRedisModule();
   const client = createClient({ url: redisUrl });
+  assertRedisRuntimeClient(client);
   let reconnectPromise: Promise<void> | null = null;
 
   async function connectAndProbe(): Promise<void> {
@@ -85,13 +108,12 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
 
   async function withOpenClient<T>(operation: () => Promise<T>): Promise<T> {
     await ensureOpen();
-    try {
-      return await operation();
-    } catch (err) {
-      if (!isClientClosedError(err)) throw err;
-      await ensureOpen();
-      return operation();
-    }
+    // Once a command has been submitted, a transport error does not prove
+    // whether Redis applied it. Replaying here would be unsafe for EVAL,
+    // LPUSH, counters, and other mutations. The current call fails closed;
+    // a later independent call reconnects and re-runs the topology probe
+    // before sending its own command.
+    return operation();
   }
 
   // ── Topology probe (fail-closed) ─────────────────────────────────
@@ -118,33 +140,11 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
       return withOpenClient(() => client.hGetAll(key));
     },
   };
-  if (client.scanIterator) {
-    commandClient.scanIterator = (options) =>
-      (async function* scanWithOpenClient() {
-        await ensureOpen();
-        for await (const key of client.scanIterator!(options)) {
-          yield key;
-        }
-      })();
-  }
-  if (client.ping) {
-    commandClient.ping = () => withOpenClient(() => client.ping!());
-  }
-  if (client.quit) {
-    commandClient.quit = async () => {
-      if (client.isOpen) {
-        await client.quit();
-      }
-    };
-  }
 
   const wrapped = wrapRedisClient(commandClient);
 
   return {
     ...wrapped,
-    ttl(key) {
-      return withOpenClient(() => client.ttl(key));
-    },
     lrange(key, start, stop) {
       return withOpenClient(() => client.lRange(key, start, stop));
     },
@@ -180,12 +180,6 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
 async function assertSupportedRedisTopology(client: RedisRuntimeClient): Promise<void> {
   let infoText: string;
   try {
-    if (!client.sendCommand) {
-      throw new Error(
-        'Redis client does not support sendCommand — cannot probe topology. ' +
-          'Ensure the redis package version supports raw command execution.',
-      );
-    }
     const result = await client.sendCommand(['INFO', 'server']);
     if (typeof result !== 'string') {
       throw new Error(

@@ -14,7 +14,6 @@ import { PROMOTION_PAGE_MAX_LIMIT } from '@stelis/contracts';
 import type {
   Entitlement,
   BudgetSummary,
-  ClaimedUserProjection,
   ClaimOpts,
   ClaimResult,
   ReserveParams,
@@ -29,6 +28,14 @@ export interface PromotionListLedgerStatus {
   entitlement: Entitlement | null;
   claimedCount: number;
   availableBudgetMist: bigint;
+}
+
+/** One internally consistent Promotion accounting read. */
+export interface PromotionLedgerStatus {
+  promotionId: string;
+  entitlement: Entitlement | null;
+  claimedCount: number;
+  budget: BudgetSummary;
 }
 
 /** Keep the page projection operation within the contracts-owned page bound. */
@@ -50,15 +57,15 @@ export function assertPromotionListLedgerBatchBound(promotionIds: readonly strin
  * Expired reservations are cleaned by sweepExpiredReservations().
  */
 export const PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS = 60_000;
+export const PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE = 100;
 
 /**
  * Default background reaper sweep interval in milliseconds.
  * Only used by implementations that run a background timer (e.g., Redis).
  *
- * The sweep walks `stelis:promotion_execution_ledger:res:*` via a non-blocking SCAN cursor
- * and a single `LUA_RELEASE` per expired key, so this cadence keeps
- * post-expiry recovery bounded for the expected promotion-reservation
- * working set.
+ * Redis keeps reservation deadlines in one ordered index and releases
+ * expired reservations in fixed-size batches using Redis server time.
+ * This cadence bounds how long an expired reservation remains visible.
  */
 export const PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS = 15_000;
 
@@ -83,33 +90,16 @@ export interface PromotionExecutionLedger {
    *
    * The dedupe + capacity guard + entitlement creation block is atomic
    * within the implementation (single Redis Lua EVAL or single in-memory
-   * synchronous block). If any of those sub-steps fails, no entitlement
-   * or claim record is committed.
+   * synchronous block). If any of those sub-steps fails, no accounting
+   * or entitlement mutation is committed.
    *
-   * Promotion budget materialization differs by adapter and is not part
-   * of the atomic dedupe/capacity/entitlement rollback unit:
-   *
-   *   - Redis: `budget:avail` (set to the derived total), `budget:res_total`,
-   *     and `budget:con_total` are installed by idempotent pre-Lua NX
-   *     writes immediately before the claim Lua script. NX writes never
-   *     overwrite an already-installed value, so a repeat claim is safe.
-   *     Summary reads do not create budget keys, and reserve may initialize
-   *     zero aggregate keys only after the entitlement gate passes inside
-   *     the reserve Lua script. Neither path can install a zero
-   *     `budget:avail` ahead of the real total.
-   *   - Memory: claim records the shared semantic guard's exact total budget;
-   *     the in-memory `budgets` map entry
-   *     is materialized lazily by `ensureBudget(promotionId)` on the
-   *     first reserve. Read paths (`getBudgetSummary`) derive an
-   *     ephemeral snapshot from that validated total without persisting any
-   *     `BudgetState`.
-   *
-   * Either way, after a successful claim the next `reserve()` sees a
-   * fully materialized budget equal to `maxParticipants × perUserGasAllowanceMist`.
+   * The first claim atomically creates the current Promotion accounting
+   * record and entitlement. Later claims must match the same immutable
+   * Promotion economics before incrementing the claim count.
    *
    * @param promotionId - Promotion to claim.
    * @param userId - User claiming the promotion.
-   * @param opts - Claim options (maxParticipants, perUserGasAllowanceMist, useUntilAt).
+   * @param opts - Claim options owned by the claim request.
    * @returns ClaimResult — ok with entitlement, or failure reason.
    */
   claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult>;
@@ -125,11 +115,10 @@ export interface PromotionExecutionLedger {
    * - Concurrent reservation already exists for this user+promotion.
    * - Promotion budget insufficient.
    *
-   * Implementations must reject the failure paths above before any
-   * mutation of budget accounting state. Promotion-budget keys may be
-   * lazily installed inside the same atomic block as the budget
-   * deduction, after the entitlement gate passes; a failed pre-claim
-   * reserve must not initialize or alter budget keys.
+   * Implementations validate the exact current Promotion, accounting,
+   * entitlement, reservation, and final-result records before mutation.
+   * A same-receipt retry succeeds only when the stored reservation and
+   * entitlement binding are exact.
    */
   reserve(params: ReserveParams): Promise<ReserveResult>;
 
@@ -147,10 +136,8 @@ export interface PromotionExecutionLedger {
    * effects) and the post-signature/post-submit failure branches
    * (post-signature uncertainty and on-chain revert). Failure-path callers
    * pass either the canonical `simGas` (validated on-chain effects) or
-   * `prepared.reservedGasMist` (post-signature uncertainty) and append a
-   * `result: 'failed'` usage row with a
-   * branch-specific `failureReason`. Pre-submit failures and congestion
-   * still call `release()` instead.
+   * `prepared.reservedGasMist` (post-signature uncertainty). Pre-submit
+   * failures and congestion still call `release()` instead.
    *
    * The reservation is terminalized after a successful consume — the
    * background reaper (`sweepExpiredReservations`) MUST NOT later
@@ -182,52 +169,42 @@ export interface PromotionExecutionLedger {
   getEntitlement(promotionId: string, userId: string): Promise<Entitlement | null>;
 
   /**
-   * Get promotion-level budget summary.
+   * Read one internally consistent accounting snapshot.
    *
-   * Read-only: must not install or mutate budget accounting state.
-   * Returns existing snapshot if available; otherwise an ephemeral
-   * `{ availableMist: total-from-config, reservedMist: 0n, consumedMist: 0n }`
-   * derived from a recorded promo config when present, else
-   * `{ 0n, 0n, 0n }`. Read paths cannot create budget keys or affect the
-   * later first-claim budget install.
+   * Pass a user ID when the same snapshot must include that user's
+   * entitlement. Pass null for a Promotion-only operator read. The method is
+   * read-only and returns zero accounting when no claim has created it.
    */
-  getBudgetSummary(promotionId: string): Promise<BudgetSummary>;
-
-  /**
-   * Get the number of users who have claimed a promotion.
-   */
-  getClaimedCount(promotionId: string): Promise<number>;
+  getPromotionLedgerStatus(
+    promotionId: string,
+    userId: string | null,
+  ): Promise<PromotionLedgerStatus>;
 
   /**
    * Read the Studio list projection for one bounded Promotion page.
    *
-   * Results preserve the exact input ID order. Implementations read their
-   * underlying state directly as one bounded adapter operation rather than
-   * calling the three single-Promotion read methods for every ID.
+   * Results preserve the exact input ID order. Implementations snapshot their
+   * underlying ledger state inside this bounded adapter operation rather than
+   * calling the single-Promotion read contract for every ID. Redis performs
+   * one atomic batch read; Memory snapshots its local records in one pass.
    */
   getPromotionListLedgerStatuses(
     promotionIds: readonly string[],
     userId: string,
   ): Promise<PromotionListLedgerStatus[]>;
 
-  /**
-   * Get enriched claimed-user projection for admin views.
-   *
-   * Returns userId + claimedAt + entitlement state per user,
-   * eliminating the caller-side N+1 join.
-   */
-  listClaimedUsers(promotionId: string): Promise<ClaimedUserProjection[]>;
-
   // ── Background ──
 
   /**
-   * Sweep expired reservations and restore their budget/entitlement.
-   * Called by background timer. Returns number of swept reservations.
+   * Sweep one bounded batch of expired reservations and restore their
+   * accounting and entitlement. A final result that still has a reservation
+   * deadline is storage corruption, not a stale index entry to repair.
+   * Returns the number of reservations actually released.
    */
   sweepExpiredReservations(): Promise<number>;
 
   /**
    * Dispose background resources (timers, connections).
    */
-  dispose(): void;
+  dispose(): Promise<void>;
 }

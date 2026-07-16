@@ -3,11 +3,7 @@
  *
  * The shared adapter contract is exercised by `abuseBlocker.conformance.ts`
  * and runs here once per backend (Memory + Redis). Memory-only cases
- * (MAX_BLOCK_KEYS bounded eviction via internal map seeding,
- * MAX_COUNTER_KEYS saturation) live under the
- * "MemoryAbuseBlocker — impl-only" describe. `RedisAbuseBlocker` has
- * no analogous bounded in-process map, so it has no corresponding
- * impl-only describe.
+ * cover constructor validation and deliberately corrupted fixture state.
  *
  * Besides the backend conformance suites, the file carries the
  * `recordSponsorFailureForAbuse — recorder-adapter fault policy`
@@ -24,7 +20,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AbuseBlockerAdapter } from '../src/store/abuseBlockTypes.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { RedisAbuseBlocker } from '../src/store/redisAbuseBlocker.js';
-import { FakeRedisClient } from './helpers/fakeRedisClient.js';
+import type { RedisClientLike } from '../src/store/redisClient.js';
 import {
   BlockCheckUnavailableError,
   checkBlockedRequest,
@@ -35,15 +31,32 @@ import {
   type AbuseBlockerFactory,
   type AbuseBlockerHandle,
 } from './abuseBlocker.conformance.js';
+import {
+  AbuseBlockCurrentConflictError,
+  AbuseBlockStorageCorruptionError,
+} from '../src/store/abuseBlockStore.js';
 
 // ─────────────────────────────────────────────
 // Memory backend
 // ─────────────────────────────────────────────
 
 const memoryFactory: AbuseBlockerFactory = (config) => {
-  const blocker = new MemoryAbuseBlocker(config);
+  let nowMs = Date.parse('2026-04-15T00:00:00.000Z');
+  const blocker = new MemoryAbuseBlocker(config, { nowMs: () => nowMs });
   const handle: AbuseBlockerHandle = {
     blocker,
+    advanceTime: (ms) => {
+      nowMs += ms;
+    },
+    seedEqualDeadlineStudioUsers: async (userIds) => {
+      for (const userId of userIds) {
+        await blocker.recordSponsorFailure(
+          '127.0.0.1',
+          { kind: 'studio_user', userId },
+          'TAMPERING_DETECTED',
+        );
+      }
+    },
     dispose: () => {
       /* no-op — MemoryAbuseBlocker holds no timers or external handles */
     },
@@ -63,88 +76,60 @@ describe('MemoryAbuseBlocker — impl-only', () => {
     ).toThrow('positive safe integer');
   });
 
-  // White-box: MAX_BLOCK_KEYS (100_000) is too large to fill via the
-  // public API. Seed the internal map at capacity, then trigger a
-  // new block via the public API and verify the evict-oldest path
-  // does not fail-open. If MAX_BLOCK_KEYS changes in the source, the
-  // constant below must follow.
-  it('block map bounded: evicts oldest entry at capacity via public API', async () => {
-    const blocker = new MemoryAbuseBlocker({
-      manipulationBlockDurationMs: 10_000,
-    });
+  it.each([
+    {
+      label: 'non-current reason',
+      record: {
+        identity: { scope: 'ip', subject: '127.0.0.1' },
+        reason: 'not_current',
+        blockedUntilMs: Date.now() + 60_000,
+      },
+    },
+    {
+      label: 'identity that differs from its map key',
+      record: {
+        identity: { scope: 'ip', subject: '127.0.0.2' },
+        reason: 'manipulation',
+        blockedUntilMs: Date.now() + 60_000,
+      },
+    },
+  ])('rejects a stored block with $label', async ({ record }) => {
+    const blocker = new MemoryAbuseBlocker();
+    const blocks = Reflect.get(blocker, '_ipBlocks') as Map<string, unknown>;
+    blocks.set('127.0.0.1', record);
 
-    const ipBlocks = (blocker as unknown as Record<string, Map<string, unknown>>)._ipBlocks as Map<
-      string,
-      { reason: string; expiresAt: number }
-    >;
-    const now = Date.now();
-    for (let i = 0; i < 100_000; i++) {
-      const fakeIp = `10.${Math.floor(i / 65536) % 256}.${Math.floor(i / 256) % 256}.${i % 256}`;
-      ipBlocks.set(fakeIp, {
-        reason: 'manipulation:TAMPERING_DETECTED',
-        expiresAt: now + 10_000 + i,
-      });
-    }
-    expect(ipBlocks.size).toBe(100_000);
-
-    const newIp = '192.168.1.1';
-    const ADDRESS = '0x' + '11'.repeat(32);
-    await blocker.recordSponsorFailure(
-      newIp,
-      { kind: 'address', address: ADDRESS },
-      'TAMPERING_DETECTED',
+    await expect(blocker.checkIp('127.0.0.1')).rejects.toBeInstanceOf(
+      AbuseBlockStorageCorruptionError,
     );
-
-    await expect(blocker.checkIp(newIp)).resolves.toMatchObject({ blocked: true });
-    await expect(blocker.checkIp('10.0.0.0')).resolves.toMatchObject({ blocked: false });
-    expect(ipBlocks.size).toBe(100_000);
-  });
-
-  it('counter map saturation: fresh key still tracked (no fail-open)', async () => {
-    // MAX_COUNTER_KEYS = 50_000. Saturate, then verify a fresh IP
-    // still crosses its threshold — i.e. the bounded counter map
-    // does not silently drop admissions.
-    const blocker = new MemoryAbuseBlocker({
-      ipFailureThreshold: 1,
-      ipFailureWindowMs: 60_000,
-      ipBlockDurationMs: 300_000,
-    });
-
-    for (let i = 0; i < 50_000; i++) {
-      await blocker.recordSponsorFailure(
-        `192.168.${Math.floor(i / 256)}.${i % 256}`,
-        undefined,
-        'PREFLIGHT_FAILED',
-      );
-    }
-
-    const freshIp = '10.99.99.99';
-    await blocker.recordSponsorFailure(freshIp, undefined, 'PREFLIGHT_FAILED');
-    await blocker.recordSponsorFailure(freshIp, undefined, 'PREFLIGHT_FAILED');
-
-    const status = await blocker.checkIp(freshIp);
-    expect(status.blocked).toBe(true);
   });
 });
 
-// ─────────────────────────────────────────────
-// Redis backend
-// ─────────────────────────────────────────────
+describe('RedisAbuseBlocker — finite transition results', () => {
+  it('maps a repeated deadline_elapsed result to one typed conflict after one re-read', async () => {
+    const evalCommand = vi
+      .fn<RedisClientLike['eval']>()
+      .mockResolvedValueOnce(['ok', '1000', '0', '', '0', ''])
+      .mockResolvedValueOnce(['deadline_elapsed', '1001'])
+      .mockResolvedValueOnce(['ok', '1002', '0', '', '0', ''])
+      .mockResolvedValueOnce(['deadline_elapsed', '1003']);
+    const client: RedisClientLike = {
+      get: vi.fn(),
+      set: vi.fn(),
+      del: vi.fn(),
+      hgetall: vi.fn(),
+      eval: evalCommand,
+    };
+    const blocker = new RedisAbuseBlocker(client);
 
-const redisFactory: AbuseBlockerFactory = (config) => {
-  const redis = new FakeRedisClient();
-  const blocker = new RedisAbuseBlocker(redis, config);
-  const handle: AbuseBlockerHandle = {
-    blocker,
-    dispose: () => {
-      /* no-op — FakeRedisClient has no long-lived handles */
-    },
-  };
-  return handle;
-};
-
-describe('RedisAbuseBlocker — shared conformance', () => {
-  runAbuseBlockerConformanceTests(redisFactory);
+    try {
+      await expect(
+        blocker.recordSponsorFailure('192.0.2.12', undefined, 'TAMPERING_DETECTED'),
+      ).rejects.toBeInstanceOf(AbuseBlockCurrentConflictError);
+      expect(evalCommand).toHaveBeenCalledTimes(4);
+    } finally {
+      await blocker.stop();
+    }
+  });
 });
 
 // ─────────────────────────────────────────────

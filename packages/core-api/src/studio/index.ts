@@ -48,11 +48,6 @@ export { PromotionLedgerValueError } from './executionLedgerValueGuards.js';
 // Promotion execution accounting is owned by PromotionExecutionLedger
 // (see executionLedger.ts).
 
-// Usage/event store adapter API (value types live in domain.ts).
-// Memory adapter is a test-only fixture; see comment above.
-export type { PromotionUsageStoreAdapter } from './promotionUsageStore.js';
-export { RedisPromotionUsageStore } from './promotionUsageStore.js';
-
 // Derived summary
 export type { PromotionAdminSummary } from './promotionDerivedSummary.js';
 export {

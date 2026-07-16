@@ -55,9 +55,6 @@ class StubRedis implements RedisClientLike {
     }
     return n;
   }
-  async scan(_p: string): Promise<string[]> {
-    return [];
-  }
 
   async hgetall(key: string): Promise<Record<string, string>> {
     this.hgetallCalls += 1;

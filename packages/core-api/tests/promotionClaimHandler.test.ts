@@ -47,7 +47,7 @@ function makeDeps(): ClaimHandlerDeps & {
   return {
     store,
     catalog: store,
-    ledger: new MemoryPromotionExecutionLedger(),
+    ledger: new MemoryPromotionExecutionLedger(store),
   };
 }
 
@@ -213,7 +213,7 @@ describe('handlePromotionClaim', () => {
     const promoId = await createActivatedPromo(deps.store);
     await handlePromotionClaim({ promotionId: promoId, userId: 'user-1' }, deps, NOW);
 
-    const count = await deps.ledger.getClaimedCount(promoId);
+    const count = (await deps.ledger.getPromotionLedgerStatus(promoId, null)).claimedCount;
     expect(count).toBe(1);
   });
 
@@ -222,16 +222,7 @@ describe('handlePromotionClaim', () => {
   // If claim() fails, nothing was committed.
   // If claim() succeeds, both dedupe and entitlement are committed atomically.
 
-  // ── Redis ledger reason mapping ────────────────────────────
-  /**
-   * When the Redis ledger closes the status race via the Lua re-check,
-   * it emits internal `promotion_not_active`. The handler maps this to
-   * the existing public `promotion_not_active` claim reason so the
-   * public claim schema stays unchanged and the claim route `statusMap`
-   * continues to produce 409. This test stubs a ledger that returns the
-   * internal ledger reason directly — it does NOT exercise the Lua path
-   * (that is owned by `executionLedger.redis.test.ts`).
-   */
+  // ── Atomic ledger reason mapping ────────────────────────────
   it('maps internal ledger promotion_not_active to public promotion_not_active', async () => {
     const promoId = await createActivatedPromo(deps.store);
 

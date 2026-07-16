@@ -34,7 +34,7 @@ import {
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../src/store/prepareTypes.js';
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
-import type { CreateUsageEventInput, Entitlement, Promotion } from '../src/studio/domain.js';
+import type { Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import type { OnchainConfig, SuiEndpointSnapshot, SuiExecutionError } from '@stelis/core-relay';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
@@ -174,19 +174,14 @@ function makeEntitlement(overrides: Partial<Entitlement> = {}): Entitlement {
   };
 }
 
-function makeContext(
-  overrides: Partial<StudioPolicyContext> = {},
-  usageRows: CreateUsageEventInput[] = [],
-): StudioPolicyContext {
+function makeContext(overrides: Partial<StudioPolicyContext> = {}): StudioPolicyContext {
   const ledger = {
     claim: vi.fn(),
     reserve: vi.fn(),
     consume: vi.fn(async () => ({ ok: true, entitlement: makeEntitlement() })),
     release: vi.fn(async () => ({ ok: true, entitlement: makeEntitlement() })),
     getEntitlement: vi.fn(async () => makeEntitlement()),
-    getBudgetSummary: vi.fn(),
-    getClaimedCount: vi.fn(),
-    listClaimedUsers: vi.fn(),
+    getPromotionLedgerStatus: vi.fn(),
     sweepExpiredReservations: vi.fn(),
     dispose: vi.fn(),
   } as unknown as PromotionExecutionLedger;
@@ -209,15 +204,6 @@ function makeContext(
       checkUserQuota: vi.fn(async () => 'ok' as const),
     },
     abuseBlocker: {} as StudioPolicyContext['abuseBlocker'],
-    usageStore: {
-      append: vi.fn(async (input: CreateUsageEventInput) => {
-        usageRows.push(input);
-        return { ...input, createdAt: '2026-01-01T00:00:00.000Z' };
-      }),
-      getByReceipt: vi.fn(),
-      getByUser: vi.fn(),
-      getByPromotion: vi.fn(),
-    },
     globalAllowedTargets: new Set([canonicalizePromotionTarget(ALLOWED_TARGET)]),
     getConfig: vi.fn(),
     onSponsorResult: undefined,
@@ -765,20 +751,16 @@ describe('studio sponsor postconsume hooks', () => {
 describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
   test('ClassifySponsorResult consumes actual gas on success, projects result, and Release invokes callback', async () => {
     const onSponsorResult = vi.fn();
-    const usageRows: CreateUsageEventInput[] = [];
     const consume = vi.fn(async () => ({ ok: true, entitlement: makeEntitlement() }));
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
-        ctx: makeContext(
-          {
-            executionLedger: {
-              ...makeContext().executionLedger,
-              consume,
-            } as unknown as PromotionExecutionLedger,
-            onSponsorResult,
-          },
-          usageRows,
-        ),
+        ctx: makeContext({
+          executionLedger: {
+            ...makeContext().executionLedger,
+            consume,
+          } as unknown as PromotionExecutionLedger,
+          onSponsorResult,
+        }),
       }),
     );
     seedSponsorState(state);
@@ -795,11 +777,6 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     const projected = projectStudioSponsorResult(makeSponsorOptions(), state);
 
     expect(consume).toHaveBeenCalledWith(RECEIPT_ID, 1300n);
-    expect(usageRows[0]).toMatchObject({
-      result: 'consumed',
-      consumedGasMist: '1300',
-      releasedGasMist: (RESERVED_GAS - 1300n).toString(),
-    });
     expect(projected).toEqual({
       digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
@@ -865,10 +842,9 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
   test('ClassifySponsorResult consumes actual gas and records studio-user abuse on on-chain revert', async () => {
     const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
     const recordSponsorFailureForAbuse = vi.fn();
-    const usageRows: CreateUsageEventInput[] = [];
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
-        ctx: makeContext({}, usageRows),
+        ctx: makeContext(),
         deps: {
           consumeLedgerReservationWithLog:
             consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
@@ -897,12 +873,6 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       'onchain_revert',
       expect.objectContaining({ txDigest: TEST_SUI_TRANSACTION_DIGEST }),
     );
-    expect(usageRows[0]).toMatchObject({
-      result: 'failed',
-      consumedGasMist: '1300',
-      releasedGasMist: (RESERVED_GAS - 1300n).toString(),
-      failureReason: 'onchain_revert',
-    });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',
@@ -1044,11 +1014,10 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
 
   test('signAndSubmit port handles post-signature cleanup and preserves typed stage for runner', async () => {
     const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
-    const usageRows: CreateUsageEventInput[] = [];
     const rawCause = new Error('rpc transport error');
     const expectedDigest = 'expected-sui-transaction-digest';
     const options = makeSponsorOptions({
-      ctx: makeContext({}, usageRows),
+      ctx: makeContext(),
       deps: {
         signAndSubmit: vi.fn(async () => {
           throw new SponsorPostSignatureUncertaintyError(expectedDigest, rawCause);
@@ -1075,12 +1044,6 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       'post_signature_uncertainty',
       expect.objectContaining({ txDigest: expectedDigest }),
     );
-    expect(usageRows[0]).toMatchObject({
-      result: 'failed',
-      txDigest: expectedDigest,
-      failureReason: 'post_signature_uncertainty',
-      consumedGasMist: RESERVED_GAS.toString(),
-    });
     expect(state.sponsor?.sponsorResultOutcome).toBe('internal_error');
     expect(state.sponsor?.sponsorResultDigest).toBe(expectedDigest);
     expect(state.sponsor?.sponsorResultEconomics).toMatchObject({

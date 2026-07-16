@@ -144,7 +144,7 @@ function createMockSui(): SuiEndpointSnapshot {
 
 async function setup() {
   const promotionStore = new MemoryPromotionStore();
-  const executionLedger = new MemoryPromotionExecutionLedger();
+  const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
@@ -157,8 +157,6 @@ async function setup() {
 
   // Claim promotion (creates entitlement atomically via ExecutionLedger)
   await executionLedger.claim(promoId, 'user-42', {
-    maxParticipants: BASE_PROMO.maxParticipants,
-    perUserGasAllowanceMist: PER_USER_ALLOWANCE,
     useUntilAt: null,
   });
 
@@ -563,8 +561,6 @@ describe('handlePromotionPrepare', () => {
     await promotionStore.transitionStatus(futurePromo.promotionId, 'active');
 
     await executionLedger.claim(futurePromo.promotionId, 'user-42', {
-      maxParticipants: BASE_PROMO.maxParticipants,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
 
@@ -590,8 +586,6 @@ describe('handlePromotionPrepare', () => {
 
     // Claim with a use window that has already expired
     const claim = await executionLedger.claim(promoId, 'user-expired', {
-      maxParticipants: BASE_PROMO.maxParticipants,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: new Date(Date.now() - 86400_000).toISOString(),
     });
     expect(claim.ok).toBe(true);

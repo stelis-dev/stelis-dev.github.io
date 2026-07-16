@@ -1,760 +1,1834 @@
-/**
- * RedisPromotionExecutionLedger — Redis-backed production implementation.
- *
- * Each mutation (claim, reserve, consume, release) executes its
- * dedupe / capacity / entitlement-gate / budget-deduction logic inside a
- * single Lua EVAL so the rollback unit is atomic. Promotion-budget keys
- * (`budget:avail`, `budget:res_total`, `budget:con_total`) are installed
- * by idempotent pre-Lua NX writes immediately before the claim Lua
- * script — they sit outside the rollback unit because NX writes never
- * overwrite an already-installed value, so a repeat or partial claim is
- * safe. Read paths (`getBudgetSummary`) are read-only. A failed pre-claim
- * `reserve()` cannot install `budget:avail = 0` because reserve-side NX
- * init runs inside the entitlement-gated Lua script.
- *
- * Key namespace: `stelis:promotion_execution_ledger:`.
- *
- * Key layout:
- *   stelis:promotion_execution_ledger:claim:{promotionId}:{userId}    → claimedAt ISO string
- *   stelis:promotion_execution_ledger:claim:idx:{promotionId}          → SET of userIds
- *   stelis:promotion_execution_ledger:ent:{promotionId}:{userId}:meta  → JSON(meta: useUntilAt, lastUsedAt, status)
- *   stelis:promotion_execution_ledger:ent:{promotionId}:{userId}:rem   → int64 (remaining MIST)
- *   stelis:promotion_execution_ledger:ent:{promotionId}:{userId}:con   → int64 (consumed MIST)
- *   stelis:promotion_execution_ledger:ent:{promotionId}:{userId}:res   → "{receiptId}:{amount}" or nil
- *   stelis:promotion_execution_ledger:budget:{promotionId}:avail       → int64 (available)
- *   stelis:promotion_execution_ledger:budget:{promotionId}:res_total   → int64 (reserved total)
- *   stelis:promotion_execution_ledger:budget:{promotionId}:con_total   → int64 (consumed total)
- *   stelis:promotion_execution_ledger:res:{receiptId}                   → JSON({promotionId,userId,amountMist,expiresAt}) with PX
- *   stelis:promotion_execution_ledger:terminal:{receiptId}              → "consumed"|"released" (with PX)
- *
- * Precision: All money arithmetic uses DECRBY/INCRBY (int64).
- *            Scratch keys for delta comparison. No tonumber() on money.
- *
- * @module studio/executionLedgerRedis
- */
-
-import type { PromotionExecutionLedger, PromotionListLedgerStatus } from './executionLedger.js';
-import {
-  assertPromotionListLedgerBatchBound,
-  PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
-  PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS,
-} from './executionLedger.js';
-import type {
-  Entitlement,
-  EntitlementStatus,
-  BudgetSummary,
-  ClaimedUserProjection,
-  ClaimOpts,
-  ClaimResult,
-  ReserveParams,
-  ReserveResult,
-  ConsumeResult,
-  ReleaseResult,
-} from './domain.js';
 import type { RedisClientLike } from '../store/redisClient.js';
-import { type Clock, systemClock } from '../clock.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PROMOTION_EXECUTION_LEDGER_REAPER_ERROR } from '../observability/events.js';
+import type {
+  PromotionExecutionLedger,
+  PromotionLedgerStatus,
+  PromotionListLedgerStatus,
+} from './executionLedger.js';
 import {
-  parseNonNegativeDecimalBigInt,
-  parsePromotionLedgerBudget,
-  assertPositiveMist,
+  assertPromotionListLedgerBatchBound,
+  PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS,
+  PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
+  PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE,
+} from './executionLedger.js';
+import type {
+  ClaimOpts,
+  ClaimResult,
+  ConsumeResult,
+  Entitlement,
+  ReleaseResult,
+  ReserveParams,
+  ReserveResult,
+} from './domain.js';
+import {
   assertNonNegativeMist,
+  assertPositiveMist,
   assertWithinLedgerBound,
 } from './executionLedgerValueGuards.js';
+import type { CurrentPromotionRecord, PromotionEntitlementRecord } from './promotionRecords.js';
+import {
+  assertPromotionAccountingMatchesPromotion,
+  assertPromotionAccountingIdentity,
+  assertPromotionEntitlementAccountingState,
+  assertPromotionEntitlementIdentity,
+  assertPromotionLedgerReadState,
+  assertPromotionOperationResultIdentity,
+  assertPromotionReservationAccountingState,
+  assertPromotionReservationIdentity,
+  createPromotionClaimTransition,
+  createPromotionFinalizeTransition,
+  createPromotionReserveStateChange,
+  createPromotionReserveTransition,
+  decodePromotionAccountingRecord,
+  decodePromotionEntitlementRecord,
+  decodePromotionOperationResultRecord,
+  decodePromotionRecord,
+  decodePromotionReservationRecord,
+  promotionAccountingKey,
+  promotionEntitlementFromRecord,
+  promotionEntitlementKey,
+  promotionOperationResultKey,
+  promotionOperationResultKeyPrefix,
+  promotionReservationDeadlineIndexKey,
+  promotionReservationDeadlineMember,
+  promotionReservationKey,
+  promotionReservationKeyPrefix,
+  PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT,
+  PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT,
+  samePromotionAccountingRecord,
+  samePromotionEntitlementRecord,
+  serializePromotionAccountingRecord,
+  serializePromotionEntitlementRecord,
+  serializePromotionOperationResultRecord,
+  serializePromotionReservationRecord,
+  type PromotionAccountingRecord,
+  type PromotionOperationResultRecord,
+  type PromotionReservationRecord,
+  type PromotionReserveTransition,
+  PromotionRecordCorruptionError,
+  PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE,
+} from './promotionRecords.js';
 
-// ─────────────────────────────────────────────
-// Prefix
-// ─────────────────────────────────────────────
+const ACCOUNTING_PAIR_LENGTH = PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT * 2;
+const ENTITLEMENT_PAIR_LENGTH = PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT * 2;
 
-const PFX = 'stelis:promotion_execution_ledger:';
-const DECIMAL_MIST_RE = /^(?:0|[1-9]\d*)$/;
-const TERMINAL_GUARD_TTL_GRACE_MS = 120_000;
+const CLAIM_EXPECTED_ACCOUNTING_START = 5;
+const CLAIM_EXPECTED_ENTITLEMENT_START = CLAIM_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const CLAIM_NEXT_ACCOUNTING_START = CLAIM_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH;
+const CLAIM_NEXT_ENTITLEMENT_START = CLAIM_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const CLAIM_ARGUMENT_COUNT = CLAIM_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1;
 
-function parseNonNegativeSafeInteger(value: unknown, label: string): number {
-  if (typeof value === 'number') {
-    if (Number.isSafeInteger(value) && value >= 0) return value;
-    throw new Error(`${label} must be a non-negative safe integer`);
-  }
+const RESERVE_DEADLINE_MEMBER_INDEX = 2;
+const RESERVE_RESERVATION_RAW_INDEX = RESERVE_DEADLINE_MEMBER_INDEX + 1;
+const RESERVE_DEADLINE_INDEX = RESERVE_RESERVATION_RAW_INDEX + 1;
+const RESERVE_EXPECTED_ACCOUNTING_START = RESERVE_DEADLINE_INDEX + 1;
+const RESERVE_EXPECTED_ENTITLEMENT_START =
+  RESERVE_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const RESERVE_RESERVATION_PREFIX_INDEX =
+  RESERVE_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH;
+const RESERVE_RESULT_PREFIX_INDEX = RESERVE_RESERVATION_PREFIX_INDEX + 1;
+const RESERVE_DECISION_INDEX = RESERVE_RESULT_PREFIX_INDEX + 1;
+const RESERVE_ACTIVE_MEMBER_INDEX = RESERVE_DECISION_INDEX + 1;
+const RESERVE_ACTIVE_RESERVATION_INDEX = RESERVE_ACTIVE_MEMBER_INDEX + 1;
+const RESERVE_ACTIVE_SCORE_INDEX = RESERVE_ACTIVE_RESERVATION_INDEX + 1;
+const RESERVE_NEXT_ACCOUNTING_START = RESERVE_ACTIVE_SCORE_INDEX + 1;
+const RESERVE_NEXT_ENTITLEMENT_START = RESERVE_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const RESERVE_ARGUMENT_COUNT = RESERVE_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1;
 
-  if (typeof value === 'string' && DECIMAL_MIST_RE.test(value)) {
-    const parsed = Number(value);
-    if (Number.isSafeInteger(parsed)) return parsed;
-  }
+const FINALIZE_EXPECTED_ACCOUNTING_START = 2;
+const FINALIZE_EXPECTED_ENTITLEMENT_START =
+  FINALIZE_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const FINALIZE_NEXT_ACCOUNTING_START =
+  FINALIZE_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH;
+const FINALIZE_NEXT_ENTITLEMENT_START = FINALIZE_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH;
+const FINALIZE_DEADLINE_INDEX = FINALIZE_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH;
+const FINALIZE_RECEIPT_INDEX = FINALIZE_DEADLINE_INDEX + 1;
+const FINALIZE_RESULT_INDEX = FINALIZE_RECEIPT_INDEX + 1;
+const FINALIZE_ARGUMENT_COUNT = FINALIZE_RESULT_INDEX;
 
-  throw new Error(`${label} must be a non-negative safe integer`);
+interface SweepBatchResult {
+  readonly swept: number;
+  readonly examined: number;
 }
 
-function parseNullableRedisString(value: unknown, label: string): string | null {
-  if (value === null || typeof value === 'string') return value;
-  throw new Error(`${label} must be a string or null`);
-}
-
-// Money-input parse + assertion helpers live in
-// `executionLedgerValueGuards.ts` so the Memory and Redis adapters
-// stay in lock-step on bound semantics and error messages.
-// `parseNonNegativeSafeInteger` above is intentionally Redis-local
-// — it coerces Redis return shapes (`SCARD` claimed count, `TIME`
-// milliseconds) and is not a money-input guard.
-
-// ─────────────────────────────────────────────
-// Key helpers
-// ─────────────────────────────────────────────
-
-const claimKey = (pid: string, uid: string) => `${PFX}claim:${pid}:${uid}`;
-const claimIdxKey = (pid: string) => `${PFX}claim:idx:${pid}`;
-const entMetaKey = (pid: string, uid: string) => `${PFX}ent:${pid}:${uid}:meta`;
-const entRemKey = (pid: string, uid: string) => `${PFX}ent:${pid}:${uid}:rem`;
-const entConKey = (pid: string, uid: string) => `${PFX}ent:${pid}:${uid}:con`;
-const entResKey = (pid: string, uid: string) => `${PFX}ent:${pid}:${uid}:res`;
-const budgetAvailKey = (pid: string) => `${PFX}budget:${pid}:avail`;
-const budgetResTotalKey = (pid: string) => `${PFX}budget:${pid}:res_total`;
-const budgetConTotalKey = (pid: string) => `${PFX}budget:${pid}:con_total`;
-const resKey = (receiptId: string) => `${PFX}res:${receiptId}`;
-const terminalKey = (receiptId: string) => `${PFX}terminal:${receiptId}`;
-
-// ─────────────────────────────────────────────
-// Lua: CLAIM (dedupe + capacity + entitlement)
-// ─────────────────────────────────────────────
-
-/**
- * Atomic: dedupe check + capacity guard + entitlement creation.
- *
- * Variant without promotion-record status re-check. Used when the ledger
- * is constructed without a `canonicalRecordKeyFor` getter (tests, or
- * wiring that does not require race closure).
- *
- * KEYS: [claimKey, claimIdxKey, entMetaKey, entRemKey, entConKey]
- * ARGV: [userId, maxParticipants, initialAllowanceMist, metaJson, claimedAt]
- *
- * Returns: 0 = created, -1 = capacity_exceeded, JSON string = duplicate
- */
-const LUA_CLAIM = `
-local existing = redis.call('GET', KEYS[1])
-if existing then return existing end
-
-local maxP = tonumber(ARGV[2])
-local cnt = redis.call('SCARD', KEYS[2])
-if cnt >= maxP then return -1 end
-
--- Create claim record
-redis.call('SET', KEYS[1], ARGV[5])
-redis.call('SADD', KEYS[2], ARGV[1])
-
--- Create entitlement (split-key)
-redis.call('SET', KEYS[3], ARGV[4])
-redis.call('SET', KEYS[4], ARGV[3])
-redis.call('SET', KEYS[5], '0')
-
-return 0
-`;
-
-/**
- * Atomic: promotion-status re-check + dedupe + capacity + entitlement.
- *
- * Race-closure variant. Used when the ledger is wired with a
- * `canonicalRecordKeyFor` getter, which supplies the promotion record
- * key owned by `RedisPromotionStore` (no second Redis key owner here).
- * The script re-reads the canonical promotion record inside the same
- * Redis round-trip as the capacity CAS and refuses to create the
- * entitlement when the current `status` is not `'active'` — closing the
- * admin pause/archive race between `promotionStore.get()` at the claim route
- * and the ledger's `claim` call.
- *
- * `claimDeadlineAt` is intentionally not inspected here. Deadline freeze
- * is upheld by the claim-route pre-check; this Lua contract re-checks
- * status only and avoids ISO/time parsing.
- *
- * KEYS: [claimKey, claimIdxKey, entMetaKey, entRemKey, entConKey, promotionRecordKey]
- * ARGV: [userId, maxParticipants, initialAllowanceMist, metaJson, claimedAt]
- *
- * Returns: 0 = created, -1 = capacity_exceeded, -2 = promotion_not_active,
- *          JSON string = duplicate
- */
-const LUA_CLAIM_WITH_STATUS_CHECK = `
-local existing = redis.call('GET', KEYS[1])
-if existing then return existing end
-
--- Re-read canonical promotion record; refuse if not active.
-local recordRaw = redis.call('GET', KEYS[6])
-if not recordRaw then return -2 end
-local ok, record = pcall(cjson.decode, recordRaw)
-if not ok or type(record) ~= 'table' or record.status ~= 'active' then
-  return -2
-end
-
-local maxP = tonumber(ARGV[2])
-local cnt = redis.call('SCARD', KEYS[2])
-if cnt >= maxP then return -1 end
-
--- Create claim record
-redis.call('SET', KEYS[1], ARGV[5])
-redis.call('SADD', KEYS[2], ARGV[1])
-
--- Create entitlement (split-key)
-redis.call('SET', KEYS[3], ARGV[4])
-redis.call('SET', KEYS[4], ARGV[3])
-redis.call('SET', KEYS[5], '0')
-
-return 0
-`;
-
-// ─────────────────────────────────────────────
-// Lua: RESERVE (budget + entitlement + reservation)
-// ─────────────────────────────────────────────
-
-/**
- * Atomic: budget deduct + entitlement deduct + reservation record.
- *
- * KEYS: [budgetAvail, entMeta, entRem, entRes, resKey, terminalKey, budgetResTotal]
- * ARGV: [amountMist, receiptId, promotionId, userId, ttlMs, reservationKeyTtlMs]
- *
- * Returns: 'OK' | 0(budget_insufficient) | 10(ent_not_found) | 11(ent_not_active)
- *          | 12(concurrent_reservation) | 13(ent_insufficient)
- */
-const LUA_RESERVE = `
--- Terminal guard
-if redis.call('EXISTS', KEYS[6]) == 1 then return 0 end
-
--- Entitlement: meta exists + active
-local metaRaw = redis.call('GET', KEYS[2])
-if not metaRaw then return 10 end
-local meta = cjson.decode(metaRaw)
-if meta.status ~= 'active' then return 11 end
-
--- Entitlement: no concurrent reservation
-local existingRes = redis.call('GET', KEYS[4])
-if existingRes then return 12 end
-
--- Budget keys are initialized only after entitlement validation passes.
--- A pre-claim reserve returns entitlement_not_found before reaching this
--- point, so failed reserves cannot create budget accounting keys.
-redis.call('SET', KEYS[1], '0', 'NX')
-redis.call('SET', KEYS[7], '0', 'NX')
-
--- Budget: deduct available
-local newAvail = redis.call('DECRBY', KEYS[1], ARGV[1])
-if newAvail < 0 then
-  redis.call('INCRBY', KEYS[1], ARGV[1])
-  return 0
-end
-
--- Entitlement: deduct remaining
-local newRem = redis.call('DECRBY', KEYS[3], ARGV[1])
-if newRem < 0 then
-  redis.call('INCRBY', KEYS[3], ARGV[1])
-  redis.call('INCRBY', KEYS[1], ARGV[1])
-  return 13
-end
-
--- Use Redis TIME for clock integrity
-local now = redis.call('TIME')
-local nowMs = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
-local expiresAt = nowMs + tonumber(ARGV[5])
-
--- Commit: reservation record
-local coordData = cjson.encode({
-  promotionId = ARGV[3],
-  userId = ARGV[4],
-  amountMist = ARGV[1],
-  expiresAt = expiresAt
-})
-redis.call('SET', KEYS[5], coordData)
-redis.call('PEXPIRE', KEYS[5], ARGV[6])
-
--- Commit: entitlement reservation marker
-redis.call('SET', KEYS[4], ARGV[2] .. ':' .. ARGV[1])
-
--- Commit: budget aggregate
-redis.call('INCRBY', KEYS[7], ARGV[1])
-
-return 'OK'
-`;
-
-// ─────────────────────────────────────────────
-// Lua: CONSUME (receipt-keyed, delta-release)
-// ─────────────────────────────────────────────
-
-/**
- * Atomic: resolve owner from reservation, delta-release budget+entitlement.
- * Returns JSON with owner info so TS can read back entitlement after consume.
- *
- * KEYS: [resKey, terminalKey]
- * ARGV: [actualAmountMist, terminalTtlMs, receiptId, timestamp,
- *        budgetPrefix, entPrefix]
- *
- * Returns: JSON({status,promotionId,userId}) | 20(reservation_not_found)
- */
-const LUA_CONSUME = `
-if redis.call('EXISTS', KEYS[2]) == 1 then return 20 end
-
-local coordRaw = redis.call('GET', KEYS[1])
-if not coordRaw then return 20 end
-
-local coord = cjson.decode(coordRaw)
-local pid = coord.promotionId
-local uid = coord.userId
-local reservedAmt = coord.amountMist
-
-local budgetAvail = ARGV[5] .. pid .. ':avail'
-local budgetResTotal = ARGV[5] .. pid .. ':res_total'
-local budgetConTotal = ARGV[5] .. pid .. ':con_total'
-local entMeta = ARGV[6] .. pid .. ':' .. uid .. ':meta'
-local entRem = ARGV[6] .. pid .. ':' .. uid .. ':rem'
-local entCon = ARGV[6] .. pid .. ':' .. uid .. ':con'
-local entRes = ARGV[6] .. pid .. ':' .. uid .. ':res'
-
-local entResRaw = redis.call('GET', entRes)
-if not entResRaw then return 20 end
-local sep = string.find(entResRaw, ':')
-if not sep then return 20 end
-local entResReceipt = string.sub(entResRaw, 1, sep - 1)
-if entResReceipt ~= ARGV[3] then return 20 end
-
--- Delta (int64-safe scratch key)
-local scratchKey = KEYS[1] .. ':scratch'
-redis.call('SET', scratchKey, reservedAmt)
-local delta = redis.call('DECRBY', scratchKey, ARGV[1])
-redis.call('DEL', scratchKey)
-
--- Budget delta with 0-clamp -- parity with the memory ledger
--- (executionLedgerMemory.ts): an overrun that would drive
--- budget.available negative is floored at 0 so admin summaries
--- and subsequent reserve()s never observe a negative total.
-if delta > 0 then
-  redis.call('INCRBY', budgetAvail, tostring(delta))
-elseif delta < 0 then
-  local absD = -delta
-  local clampScratch = budgetAvail .. ':clamp'
-  redis.call('SET', clampScratch, redis.call('GET', budgetAvail) or '0')
-  local afterDeduct = redis.call('DECRBY', clampScratch, tostring(absD))
-  redis.call('DEL', clampScratch)
-  if afterDeduct < 0 then
-    redis.call('SET', budgetAvail, '0')
-  else
-    redis.call('DECRBY', budgetAvail, tostring(absD))
-  end
-end
-
-redis.call('DECRBY', budgetResTotal, reservedAmt)
-redis.call('INCRBY', budgetConTotal, ARGV[1])
-
--- Entitlement delta with clamp
-local entScratch = entRes .. ':scratch'
-redis.call('SET', entScratch, reservedAmt)
-local entDelta = redis.call('DECRBY', entScratch, ARGV[1])
-redis.call('DEL', entScratch)
-
-if entDelta > 0 then
-  redis.call('INCRBY', entRem, tostring(entDelta))
-elseif entDelta < 0 then
-  local absD = -entDelta
-  local clampScratch = entRem .. ':clamp'
-  redis.call('SET', clampScratch, redis.call('GET', entRem) or '0')
-  local afterDeduct = redis.call('DECRBY', clampScratch, tostring(absD))
-  redis.call('DEL', clampScratch)
-  if afterDeduct < 0 then
-    redis.call('SET', entRem, '0')
-  else
-    redis.call('DECRBY', entRem, tostring(absD))
-  end
-end
-
-redis.call('INCRBY', entCon, ARGV[1])
-redis.call('DEL', entRes)
-
-local resultStatus = 'ok'
-local metaRaw = redis.call('GET', entMeta)
-if metaRaw then
-  local meta = cjson.decode(metaRaw)
-  meta.lastUsedAt = ARGV[4]
-  local newRem = redis.call('GET', entRem)
-  if newRem == '0' then
-    meta.status = 'exhausted'
-    resultStatus = 'exhausted'
-  end
-  redis.call('SET', entMeta, cjson.encode(meta))
-end
-
-redis.call('DEL', KEYS[1])
-redis.call('SET', KEYS[2], 'consumed', 'PX', ARGV[2])
-
-return cjson.encode({status = resultStatus, promotionId = pid, userId = uid})
-`;
-
-// ─────────────────────────────────────────────
-// Lua: RELEASE (receipt-keyed, full restore)
-// ─────────────────────────────────────────────
-
-/**
- * KEYS: [resKey, terminalKey]
- * ARGV: [terminalTtlMs, receiptId, budgetPrefix, entPrefix]
- *
- * Returns: JSON({status:'ok',promotionId,userId}) | 20(reservation_not_found)
- */
-const LUA_RELEASE = `
-if redis.call('EXISTS', KEYS[2]) == 1 then return 20 end
-
-local coordRaw = redis.call('GET', KEYS[1])
-if not coordRaw then return 20 end
-
-local coord = cjson.decode(coordRaw)
-local pid = coord.promotionId
-local uid = coord.userId
-local reservedAmt = coord.amountMist
-
-local budgetAvail = ARGV[3] .. pid .. ':avail'
-local budgetResTotal = ARGV[3] .. pid .. ':res_total'
-local entRem = ARGV[4] .. pid .. ':' .. uid .. ':rem'
-local entRes = ARGV[4] .. pid .. ':' .. uid .. ':res'
-
-redis.call('INCRBY', budgetAvail, reservedAmt)
-redis.call('DECRBY', budgetResTotal, reservedAmt)
-
-redis.call('INCRBY', entRem, reservedAmt)
-redis.call('DEL', entRes)
-
-redis.call('DEL', KEYS[1])
-redis.call('SET', KEYS[2], 'released', 'PX', ARGV[1])
-
-return cjson.encode({status = 'ok', promotionId = pid, userId = uid})
-`;
-
-/**
- * Read every ledger field needed by one bounded Studio Promotion list page.
- *
- * ARGV: [keyPrefix, userId, promotionId...]
- * Returns one JSON array whose row order exactly matches the input IDs.
- */
-const LUA_PROMOTION_LIST_LEDGER_STATUS = `
-local prefix = ARGV[1]
-local userId = ARGV[2]
-local rows = {}
-
-local function nullable(value)
-  if not value then return cjson.null end
-  return value
-end
-
-for i = 3, #ARGV do
-  local promotionId = ARGV[i]
-  local entitlementPrefix = prefix .. 'ent:' .. promotionId .. ':' .. userId
-  local metaRaw = redis.call('GET', entitlementPrefix .. ':meta')
-
-  rows[#rows + 1] = {
-    promotionId = promotionId,
-    entitlementMetaRaw = nullable(metaRaw),
-    entitlementRemainingRaw = nullable(redis.call('GET', entitlementPrefix .. ':rem')),
-    entitlementConsumedRaw = nullable(redis.call('GET', entitlementPrefix .. ':con')),
-    entitlementReservationRaw = nullable(redis.call('GET', entitlementPrefix .. ':res')),
-    claimedAtRaw = nullable(redis.call('GET', prefix .. 'claim:' .. promotionId .. ':' .. userId)),
-    claimedCount = redis.call('SCARD', prefix .. 'claim:idx:' .. promotionId),
-    availableBudgetMist = redis.call('GET', prefix .. 'budget:' .. promotionId .. ':avail') or '0'
-  }
-end
-
-return cjson.encode(rows)
-`;
-
-// ─────────────────────────────────────────────
-// Internal meta type (stored in Redis as JSON)
-// ─────────────────────────────────────────────
-
-interface EntitlementMeta {
-  useUntilAt: string | null;
-  lastUsedAt: string | null;
-  status: EntitlementStatus;
-}
-
-interface StoredEntitlementFields {
-  metaRaw: string | null;
-  remainingRaw: string | null;
-  consumedRaw: string | null;
-  reservationRaw: string | null;
-  claimedAtRaw: string | null;
-}
-
-function entitlementFromStoredFields(
-  promotionId: string,
-  userId: string,
-  fields: StoredEntitlementFields,
-): Entitlement | null {
-  if (fields.metaRaw === null) return null;
-
-  const meta: EntitlementMeta = JSON.parse(fields.metaRaw);
-  let activeReservationReceiptId: string | null = null;
-  let activeReservationAmountMist: string | null = null;
-  if (fields.reservationRaw !== null) {
-    const separator = fields.reservationRaw.indexOf(':');
-    if (separator > 0) {
-      activeReservationReceiptId = fields.reservationRaw.substring(0, separator);
-      activeReservationAmountMist = fields.reservationRaw.substring(separator + 1);
+type ReceiptState =
+  | { readonly status: 'missing' }
+  | {
+      readonly status: 'reserved';
+      readonly reservation: PromotionReservationRecord;
+      readonly score: number;
     }
-  }
+  | {
+      readonly status: 'finalized';
+      readonly result: PromotionOperationResultRecord;
+    };
 
+export interface RedisPromotionRecordAccess {
+  readCurrent(promotionId: string): Promise<CurrentPromotionRecord | null>;
+  recordKey(promotionId: string): string;
+}
+
+function isEmptyHash(fields: Record<string, string>): boolean {
+  return Object.keys(fields).length === 0;
+}
+
+function nonNegativeSafeInteger(value: unknown, label: string): number {
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw new PromotionRecordCorruptionError(`${label} must be a canonical integer string`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new PromotionRecordCorruptionError(`${label} must be a non-negative safe integer`);
+  }
+  return parsed;
+}
+
+function unreachableResult(value: never, label: string): never {
+  throw new PromotionRecordCorruptionError(
+    `${label} returned an unhandled result ${String(value)}`,
+  );
+}
+
+function taggedRecord<Tag extends string>(
+  value: unknown,
+  allowed: readonly Tag[],
+  label: string,
+): { tag: Tag; serialized: string } {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    typeof value[0] !== 'string' ||
+    typeof value[1] !== 'string' ||
+    !allowed.includes(value[0] as Tag)
+  ) {
+    throw new PromotionRecordCorruptionError(`${label} returned a malformed result`);
+  }
+  return { tag: value[0] as Tag, serialized: value[1] };
+}
+
+function hashRecordFromResult(
+  value: unknown,
+  startIndex: number,
+  pairLength: number,
+  label: string,
+): Record<string, string> {
+  if (!Array.isArray(value) || value.length < startIndex + pairLength) {
+    throw new PromotionRecordCorruptionError(`${label} returned a malformed stored record`);
+  }
+  const pairs = value.slice(startIndex, startIndex + pairLength);
+  if (pairs.some((field) => typeof field !== 'string')) {
+    throw new PromotionRecordCorruptionError(`${label} returned a malformed stored record`);
+  }
+  const fields: Record<string, string> = {};
+  for (let index = 0; index < pairs.length; index += 2) {
+    fields[pairs[index] as string] = pairs[index + 1] as string;
+  }
+  return fields;
+}
+
+function ledgerStateRecord<StateTag extends string, BareTag extends string>(
+  value: unknown,
+  stateTags: readonly StateTag[],
+  bareTags: readonly BareTag[],
+  label: string,
+): {
+  tag: StateTag | BareTag;
+  serialized: string;
+  accounting: PromotionAccountingRecord | null;
+  entitlement: PromotionEntitlementRecord | null;
+} {
+  if (
+    !Array.isArray(value) ||
+    value.length < 2 ||
+    typeof value[0] !== 'string' ||
+    typeof value[1] !== 'string'
+  ) {
+    throw new PromotionRecordCorruptionError(`${label} returned a malformed result`);
+  }
+  if (!stateTags.includes(value[0] as StateTag)) {
+    if (!bareTags.includes(value[0] as BareTag) || value.length !== 2) {
+      throw new PromotionRecordCorruptionError(`${label} returned a malformed result`);
+    }
+    return {
+      tag: value[0] as BareTag,
+      serialized: value[1],
+      accounting: null,
+      entitlement: null,
+    };
+  }
+  if (value.length !== 2 + ACCOUNTING_PAIR_LENGTH + ENTITLEMENT_PAIR_LENGTH) {
+    throw new PromotionRecordCorruptionError(`${label} returned a malformed ledger snapshot`);
+  }
   return {
-    promotionId,
-    userId,
-    claimedAt: fields.claimedAtRaw ?? '',
-    useUntilAt: meta.useUntilAt,
-    remainingGasAllowanceMist: fields.remainingRaw ?? '0',
-    consumedGasAllowanceMist: fields.consumedRaw ?? '0',
-    status: meta.status,
-    activeReservationReceiptId,
-    activeReservationAmountMist,
-    lastUsedAt: meta.lastUsedAt,
+    tag: value[0] as StateTag,
+    serialized: value[1],
+    accounting: decodePromotionAccountingRecord(
+      hashRecordFromResult(value, 2, ACCOUNTING_PAIR_LENGTH, label),
+    ),
+    entitlement: decodePromotionEntitlementRecord(
+      hashRecordFromResult(value, 2 + ACCOUNTING_PAIR_LENGTH, ENTITLEMENT_PAIR_LENGTH, label),
+    ),
   };
 }
 
-// ─────────────────────────────────────────────
-// Implementation
-// ─────────────────────────────────────────────
+type ClaimRecordTag =
+  | 'CLAIMED'
+  | 'DUPLICATE'
+  | 'CAPACITY'
+  | 'STATE_CHANGED'
+  | 'PROMOTION_CHANGED'
+  | 'CORRUPT';
 
-/**
- * Optional getter that returns the canonical Redis key for a given
- * promotion record. Supplied by wiring (`app-api/src/context.ts`) using
- * `RedisPromotionStore.recordKey(id)` so the promotion-record key shape
- * stays owned by the store. When provided, `claim()` runs the Lua
- * variant that re-reads the record and refuses inactive promotions.
- */
-export type CanonicalPromotionRecordKeyGetter = (promotionId: string) => string;
+function claimRecord(value: unknown): {
+  tag: ClaimRecordTag;
+  accounting: PromotionAccountingRecord | null;
+  entitlement: PromotionEntitlementRecord | null;
+} {
+  if (Array.isArray(value) && (value[0] === 'CAPACITY' || value[0] === 'STATE_CHANGED')) {
+    if (value[1] !== '') {
+      throw new PromotionRecordCorruptionError('Promotion claim returned a malformed snapshot');
+    }
+    if (value.length === 2) {
+      return { tag: value[0], accounting: null, entitlement: null };
+    }
+    if (value.length === 2 + ACCOUNTING_PAIR_LENGTH) {
+      return {
+        tag: value[0],
+        accounting: decodePromotionAccountingRecord(
+          hashRecordFromResult(value, 2, ACCOUNTING_PAIR_LENGTH, 'Promotion claim'),
+        ),
+        entitlement: null,
+      };
+    }
+    if (value.length === 2 + ACCOUNTING_PAIR_LENGTH + ENTITLEMENT_PAIR_LENGTH) {
+      return ledgerStateRecord(
+        value,
+        [value[0] as 'CAPACITY' | 'STATE_CHANGED'],
+        [],
+        'Promotion claim',
+      );
+    }
+    throw new PromotionRecordCorruptionError('Promotion claim returned a malformed snapshot');
+  }
+  if (Array.isArray(value) && value[0] === 'DUPLICATE') {
+    return ledgerStateRecord(value, ['DUPLICATE'], [], 'Promotion claim');
+  }
+  if (Array.isArray(value) && value[0] === 'CLAIMED') {
+    return ledgerStateRecord(value, ['CLAIMED'], [], 'Promotion claim');
+  }
+  const record = taggedRecord(value, ['PROMOTION_CHANGED', 'CORRUPT'], 'Promotion claim');
+  return {
+    tag: record.tag,
+    accounting: null,
+    entitlement: null,
+  };
+}
+
+type ReserveRecordTag =
+  | 'RESERVED'
+  | 'RESERVATION'
+  | 'RESULT'
+  | 'PROMOTION_CHANGED'
+  | 'CORRUPT'
+  | 'ENTITLEMENT_NOT_ACTIVE'
+  | 'CONCURRENT_RESERVATION'
+  | 'BUDGET_INSUFFICIENT'
+  | 'ENTITLEMENT_INSUFFICIENT'
+  | 'STATE_CHANGED';
+
+function reserveRecord(value: unknown): {
+  tag: ReserveRecordTag;
+  serialized: string;
+  score: string | null;
+  accounting: PromotionAccountingRecord | null;
+  entitlement: PromotionEntitlementRecord | null;
+} {
+  if (Array.isArray(value) && value[0] === 'RESERVATION') {
+    if (
+      value.length !== 3 + ACCOUNTING_PAIR_LENGTH + ENTITLEMENT_PAIR_LENGTH ||
+      typeof value[1] !== 'string' ||
+      typeof value[2] !== 'string'
+    ) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reserve returned a malformed current reservation',
+      );
+    }
+    return {
+      tag: 'RESERVATION',
+      serialized: value[1],
+      score: value[2],
+      accounting: decodePromotionAccountingRecord(
+        hashRecordFromResult(value, 3, ACCOUNTING_PAIR_LENGTH, 'Promotion reserve'),
+      ),
+      entitlement: decodePromotionEntitlementRecord(
+        hashRecordFromResult(
+          value,
+          3 + ACCOUNTING_PAIR_LENGTH,
+          ENTITLEMENT_PAIR_LENGTH,
+          'Promotion reserve',
+        ),
+      ),
+    };
+  }
+  if (Array.isArray(value) && value[0] === 'CONCURRENT_RESERVATION') {
+    if (
+      value.length !== 3 + ACCOUNTING_PAIR_LENGTH + ENTITLEMENT_PAIR_LENGTH ||
+      typeof value[1] !== 'string' ||
+      typeof value[2] !== 'string'
+    ) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reserve returned a malformed active reservation',
+      );
+    }
+    return {
+      tag: 'CONCURRENT_RESERVATION',
+      serialized: value[1],
+      score: value[2],
+      accounting: decodePromotionAccountingRecord(
+        hashRecordFromResult(value, 3, ACCOUNTING_PAIR_LENGTH, 'Promotion reserve'),
+      ),
+      entitlement: decodePromotionEntitlementRecord(
+        hashRecordFromResult(
+          value,
+          3 + ACCOUNTING_PAIR_LENGTH,
+          ENTITLEMENT_PAIR_LENGTH,
+          'Promotion reserve',
+        ),
+      ),
+    };
+  }
+  const record = ledgerStateRecord(
+    value,
+    [
+      'RESERVED',
+      'STATE_CHANGED',
+      'ENTITLEMENT_NOT_ACTIVE',
+      'ENTITLEMENT_INSUFFICIENT',
+      'BUDGET_INSUFFICIENT',
+    ],
+    ['RESULT', 'PROMOTION_CHANGED', 'CORRUPT'],
+    'Promotion reserve',
+  );
+  return { ...record, score: null };
+}
+
+type FinalizeRecordTag = 'STATE_CHANGED' | 'APPLIED' | 'RESULT' | 'MISSING' | 'CHANGED' | 'CORRUPT';
+
+function finalizeRecord(value: unknown): {
+  tag: FinalizeRecordTag;
+  serialized: string;
+  accounting: PromotionAccountingRecord | null;
+  entitlement: PromotionEntitlementRecord | null;
+} {
+  return ledgerStateRecord(
+    value,
+    ['STATE_CHANGED', 'APPLIED'],
+    ['RESULT', 'MISSING', 'CHANGED', 'CORRUPT'],
+    'Promotion final operation',
+  );
+}
+
+type LedgerReadRecordTag =
+  | 'COMPLETE'
+  | 'ACCOUNTING_ONLY'
+  | 'MISSING'
+  | 'ENTITLEMENT_WITHOUT_ACCOUNTING'
+  | 'CORRUPT';
+
+function ledgerReadRecord(value: unknown): {
+  tag: LedgerReadRecordTag;
+  accounting: PromotionAccountingRecord | null;
+  entitlement: PromotionEntitlementRecord | null;
+} {
+  if (Array.isArray(value) && value[0] === 'COMPLETE') {
+    const record = ledgerStateRecord(value, ['COMPLETE'], [], 'Promotion ledger read');
+    return {
+      tag: record.tag,
+      accounting: record.accounting,
+      entitlement: record.entitlement,
+    };
+  }
+  if (Array.isArray(value) && value[0] === 'ACCOUNTING_ONLY') {
+    if (value.length !== 2 + ACCOUNTING_PAIR_LENGTH || value[1] !== '') {
+      throw new PromotionRecordCorruptionError(
+        'Promotion ledger read returned a malformed accounting snapshot',
+      );
+    }
+    return {
+      tag: 'ACCOUNTING_ONLY',
+      accounting: decodePromotionAccountingRecord(
+        hashRecordFromResult(value, 2, ACCOUNTING_PAIR_LENGTH, 'Promotion ledger read'),
+      ),
+      entitlement: null,
+    };
+  }
+  const record = taggedRecord(
+    value,
+    ['MISSING', 'ENTITLEMENT_WITHOUT_ACCOUNTING', 'CORRUPT'],
+    'Promotion ledger read',
+  );
+  return { tag: record.tag, accounting: null, entitlement: null };
+}
+
+function promotionListLedgerRecords(
+  value: unknown,
+  promotionIds: readonly string[],
+  userId: string,
+): PromotionListLedgerStatus[] {
+  if (!Array.isArray(value) || value.length !== promotionIds.length) {
+    throw new PromotionRecordCorruptionError(
+      'Promotion list ledger read returned a malformed result',
+    );
+  }
+  return value.map((rowValue, index) => {
+    const promotionId = promotionIds[index]!;
+    if (
+      !Array.isArray(rowValue) ||
+      rowValue.length < 2 ||
+      typeof rowValue[0] !== 'string' ||
+      typeof rowValue[1] !== 'string'
+    ) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion list ledger read returned a malformed row',
+      );
+    }
+    const current =
+      rowValue[1] === ''
+        ? null
+        : (() => {
+            const promotion = decodePromotionRecord(rowValue[1]);
+            if (promotion.promotionId !== promotionId) {
+              throw new PromotionRecordCorruptionError(
+                'Promotion list record does not match its requested ID',
+              );
+            }
+            return { promotion, serialized: rowValue[1] } satisfies CurrentPromotionRecord;
+          })();
+    let accounting: PromotionAccountingRecord | null = null;
+    let entitlement: PromotionEntitlementRecord | null = null;
+    if (rowValue[0] === 'COMPLETE') {
+      const record = ledgerStateRecord(rowValue, ['COMPLETE'], [], 'Promotion list ledger read');
+      accounting = record.accounting;
+      entitlement = record.entitlement;
+    } else if (rowValue[0] === 'ACCOUNTING_ONLY') {
+      if (rowValue.length !== 2 + ACCOUNTING_PAIR_LENGTH) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion list ledger read returned a malformed accounting row',
+        );
+      }
+      accounting = decodePromotionAccountingRecord(
+        hashRecordFromResult(rowValue, 2, ACCOUNTING_PAIR_LENGTH, 'Promotion list ledger read'),
+      );
+    } else if (rowValue[0] === 'ENTITLEMENT_WITHOUT_ACCOUNTING') {
+      if (rowValue.length !== 2) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion list ledger read returned a malformed partial row',
+        );
+      }
+      throw new PromotionRecordCorruptionError(PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE);
+    } else if (rowValue[0] === 'CORRUPT') {
+      if (rowValue.length !== 2) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion list ledger read returned a malformed corrupt row',
+        );
+      }
+      throw new PromotionRecordCorruptionError(
+        'Promotion list ledger read found corrupt stored state',
+      );
+    } else if (rowValue[0] !== 'MISSING' || rowValue.length !== 2) {
+      throw new PromotionRecordCorruptionError(
+        `Promotion list ledger read returned unknown tag ${rowValue[0]}`,
+      );
+    }
+    assertPromotionLedgerReadState(current, promotionId, userId, accounting, entitlement);
+    return {
+      promotionId,
+      entitlement: entitlement ? promotionEntitlementFromRecord(entitlement) : null,
+      claimedCount: accounting?.claimedCount ?? 0,
+      availableBudgetMist: BigInt(accounting?.availableMist ?? '0'),
+    };
+  });
+}
+
+function exactOperationRetry(
+  serialized: string,
+  receiptId: string,
+  operation: 'consume' | 'release',
+  amountMist?: bigint,
+): PromotionOperationResultRecord | null {
+  const result = decodePromotionOperationResultRecord(serialized);
+  assertPromotionOperationResultIdentity(result, receiptId);
+  if (result.operation !== operation) return null;
+  if (amountMist !== undefined && result.amountMist !== amountMist.toString()) return null;
+  return result;
+}
+
+function operationRetryResult(
+  serialized: string,
+  receiptId: string,
+  operation: 'consume' | 'release',
+  amountMist?: bigint,
+): ConsumeResult | ReleaseResult {
+  const retry = exactOperationRetry(serialized, receiptId, operation, amountMist);
+  return retry
+    ? { ok: true, entitlement: promotionEntitlementFromRecord(retry.entitlement) }
+    : { ok: false, reason: 'record_changed' };
+}
+
+function receiptStateRecord(value: unknown, receiptId: string): ReceiptState {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    typeof value[0] !== 'string' ||
+    typeof value[1] !== 'string' ||
+    typeof value[2] !== 'string'
+  ) {
+    throw new PromotionRecordCorruptionError('Promotion receipt state returned a malformed result');
+  }
+  if (value[0] === 'CORRUPT') {
+    throw new PromotionRecordCorruptionError(
+      'Promotion receipt has contradictory reservation, result, or deadline state',
+    );
+  }
+  if (value[0] === 'MISSING') return { status: 'missing' };
+  const score =
+    value[2] === ''
+      ? null
+      : (() => {
+          const parsed = Number(value[2]);
+          if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+            throw new PromotionRecordCorruptionError(
+              'Promotion receipt deadline score must be a positive safe integer',
+            );
+          }
+          return parsed;
+        })();
+  if (value[0] === 'RESERVED') {
+    const reservation = decodePromotionReservationRecord(value[1]);
+    assertPromotionReservationIdentity(reservation, receiptId);
+    if (score === null || reservation.deadlineMs !== score) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation and deadline index are inconsistent',
+      );
+    }
+    return { status: 'reserved', reservation, score };
+  }
+  if (value[0] === 'FINALIZED') {
+    if (score !== null) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion final result must not retain a reservation deadline',
+      );
+    }
+    const result = decodePromotionOperationResultRecord(value[1]);
+    assertPromotionOperationResultIdentity(result, receiptId);
+    return { status: 'finalized', result };
+  }
+  throw new PromotionRecordCorruptionError(
+    `Promotion receipt state returned unknown tag ${value[0]}`,
+  );
+}
+
+function hashWriteArgs(fields: Record<string, string>): string[] {
+  return Object.entries(fields).flatMap(([field, value]) => [field, value]);
+}
+
+function hashWriteArgsOrEmpty(fields: Record<string, string> | null, fieldCount: number): string[] {
+  return fields === null ? Array<string>(fieldCount * 2).fill('') : hashWriteArgs(fields);
+}
+
+const LUA_EXACT_RECORD_HELPERS = `
+local function isExactHash(key, startIndex, fieldCount)
+  if redis.call('HLEN', key) ~= fieldCount then
+    return false
+  end
+  for fieldIndex = 0, fieldCount - 1 do
+    local argumentIndex = startIndex + fieldIndex * 2
+    if redis.call('HGET', key, ARGV[argumentIndex]) ~= ARGV[argumentIndex + 1] then
+      return false
+    end
+  end
+  return true
+end
+`;
+
+const LUA_LEDGER_STATE_RESULT_HELPER = `
+local function appendHash(result, key)
+  local fields = redis.call('HGETALL', key)
+  for _, field in ipairs(fields) do
+    result[#result + 1] = field
+  end
+end
+
+local function ledgerStateResult(tag, serialized, accountingKey, entitlementKey)
+  local result = {tag, serialized}
+  appendHash(result, accountingKey)
+  appendHash(result, entitlementKey)
+  return result
+end
+`;
+
+const LUA_READ_RECEIPT_STATE = `
+local reservationRaw = redis.call('GET', KEYS[1])
+local resultRaw = redis.call('GET', KEYS[2])
+local deadlineScore = redis.call('ZSCORE', KEYS[3], ARGV[1])
+if reservationRaw and resultRaw then return {'CORRUPT', '', deadlineScore or ''} end
+if reservationRaw then return {'RESERVED', reservationRaw, deadlineScore or ''} end
+if resultRaw and deadlineScore then return {'CORRUPT', '', deadlineScore} end
+if resultRaw then return {'FINALIZED', resultRaw, ''} end
+if deadlineScore then return {'CORRUPT', '', deadlineScore} end
+return {'MISSING', '', ''}
+`;
+
+const LUA_READ_REDIS_TIME = `
+local now = redis.call('TIME')
+return string.format(
+  '%.0f',
+  tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000))
+`;
+
+const LUA_READ_LEDGER_STATE = `
+${LUA_LEDGER_STATE_RESULT_HELPER}
+
+if ARGV[1] ~= '0' and ARGV[1] ~= '1' then return {'CORRUPT', ''} end
+local includeEntitlement = ARGV[1] == '1'
+local accountingExists = redis.call('EXISTS', KEYS[1])
+local entitlementExists = includeEntitlement and redis.call('EXISTS', KEYS[2]) or 0
+
+if accountingExists == 0 then
+  if entitlementExists == 1 then
+    return {'ENTITLEMENT_WITHOUT_ACCOUNTING', ''}
+  end
+  return {'MISSING', ''}
+end
+if not includeEntitlement or entitlementExists == 0 then
+  local result = {'ACCOUNTING_ONLY', ''}
+  appendHash(result, KEYS[1])
+  return result
+end
+return ledgerStateResult('COMPLETE', '', KEYS[1], KEYS[2])
+`;
+
+const LUA_READ_PROMOTION_LIST_LEDGER_STATES = `
+${LUA_LEDGER_STATE_RESULT_HELPER}
+
+local count = tonumber(ARGV[1])
+if not count or count < 0 or #KEYS ~= count * 3 then return {'CORRUPT'} end
+local result = {}
+for index = 1, count do
+  local offset = (index - 1) * 3
+  local promotionRaw = redis.call('GET', KEYS[offset + 1]) or ''
+  local accountingKey = KEYS[offset + 2]
+  local entitlementKey = KEYS[offset + 3]
+  local accountingExists = redis.call('EXISTS', accountingKey)
+  local entitlementExists = redis.call('EXISTS', entitlementKey)
+  local row = nil
+  if accountingExists == 0 then
+    row = {
+      entitlementExists == 1 and 'ENTITLEMENT_WITHOUT_ACCOUNTING' or 'MISSING',
+      promotionRaw,
+    }
+  elseif entitlementExists == 0 then
+    row = {'ACCOUNTING_ONLY', promotionRaw}
+    appendHash(row, accountingKey)
+  else
+    row = ledgerStateResult('COMPLETE', promotionRaw, accountingKey, entitlementKey)
+  end
+  result[#result + 1] = row
+end
+return result
+`;
+
+const LUA_CLAIM = `
+${LUA_EXACT_RECORD_HELPERS}
+${LUA_LEDGER_STATE_RESULT_HELPER}
+
+local function currentClaimState(tag)
+  local accountingExists = redis.call('EXISTS', KEYS[2])
+  local entitlementExists = redis.call('EXISTS', KEYS[3])
+  if accountingExists == 0 and
+     (entitlementExists == 1 or ARGV[2] == '1') then
+    return {'CORRUPT', ''}
+  end
+  if accountingExists == 0 then return {tag, ''} end
+  if entitlementExists == 0 and ARGV[3] == '1' then return {'CORRUPT', ''} end
+  if entitlementExists == 0 then
+    local result = {tag, ''}
+    appendHash(result, KEYS[2])
+    return result
+  end
+  return ledgerStateResult(tag, '', KEYS[2], KEYS[3])
+end
+
+if #ARGV ~= ${CLAIM_ARGUMENT_COUNT} then return {'CORRUPT', ''} end
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return {'PROMOTION_CHANGED', ''} end
+if (ARGV[2] ~= '0' and ARGV[2] ~= '1') or
+   (ARGV[3] ~= '0' and ARGV[3] ~= '1') then
+  return {'CORRUPT', ''}
+end
+
+local accountingExists = redis.call('EXISTS', KEYS[2])
+local entitlementExists = redis.call('EXISTS', KEYS[3])
+local accountingMatches =
+  (ARGV[2] == '0' and accountingExists == 0)
+  or (ARGV[2] == '1' and accountingExists == 1
+      and isExactHash(
+        KEYS[2],
+        ${CLAIM_EXPECTED_ACCOUNTING_START},
+        ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT}))
+local entitlementMatches =
+  (ARGV[3] == '0' and entitlementExists == 0)
+  or (ARGV[3] == '1' and entitlementExists == 1
+      and isExactHash(
+        KEYS[3],
+        ${CLAIM_EXPECTED_ENTITLEMENT_START},
+        ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}))
+if not accountingMatches or not entitlementMatches then
+  return currentClaimState('STATE_CHANGED')
+end
+
+local decision = ARGV[4]
+if decision == 'duplicate' then
+  if ARGV[2] ~= '1' or ARGV[3] ~= '1' then return {'CORRUPT', ''} end
+  return ledgerStateResult('DUPLICATE', '', KEYS[2], KEYS[3])
+end
+if decision == 'capacity_exceeded' then
+  if ARGV[2] ~= '1' or ARGV[3] ~= '0' then return {'CORRUPT', ''} end
+  local result = {'CAPACITY', ''}
+  appendHash(result, KEYS[2])
+  return result
+end
+if decision ~= 'claim' or ARGV[3] ~= '0' then return {'CORRUPT', ''} end
+
+redis.call(
+  'HSET',
+  KEYS[2],
+  unpack(
+    ARGV,
+    ${CLAIM_NEXT_ACCOUNTING_START},
+    ${CLAIM_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+redis.call(
+  'HSET',
+  KEYS[3],
+  unpack(
+    ARGV,
+    ${CLAIM_NEXT_ENTITLEMENT_START},
+    ${CLAIM_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+if not isExactHash(
+     KEYS[2],
+     ${CLAIM_NEXT_ACCOUNTING_START},
+     ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT})
+   or not isExactHash(
+     KEYS[3],
+     ${CLAIM_NEXT_ENTITLEMENT_START},
+     ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}) then
+  if ARGV[2] == '1' then
+    redis.call(
+      'HSET',
+      KEYS[2],
+      unpack(
+        ARGV,
+        ${CLAIM_EXPECTED_ACCOUNTING_START},
+        ${CLAIM_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+  else
+    redis.call('DEL', KEYS[2])
+  end
+  if ARGV[3] == '1' then
+    redis.call(
+      'HSET',
+      KEYS[3],
+      unpack(
+        ARGV,
+        ${CLAIM_EXPECTED_ENTITLEMENT_START},
+        ${CLAIM_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+  else
+    redis.call('DEL', KEYS[3])
+  end
+  return {'CORRUPT', ''}
+end
+return ledgerStateResult('CLAIMED', '', KEYS[2], KEYS[3])
+`;
+
+const LUA_RESERVE = `
+${LUA_EXACT_RECORD_HELPERS}
+${LUA_LEDGER_STATE_RESULT_HELPER}
+
+local function reservationStateResult(tag, serialized, score, accountingKey, entitlementKey)
+  local result = {tag, serialized, score}
+  appendHash(result, accountingKey)
+  appendHash(result, entitlementKey)
+  return result
+end
+
+if #ARGV ~= ${RESERVE_ARGUMENT_COUNT} then return {'CORRUPT', ''} end
+local promotionRaw = redis.call('GET', KEYS[1])
+local finalRaw = redis.call('GET', KEYS[5])
+local reservationRaw = redis.call('GET', KEYS[4])
+local deadlineScore =
+  redis.call('ZSCORE', KEYS[6], ARGV[${RESERVE_DEADLINE_MEMBER_INDEX}])
+if finalRaw and reservationRaw then return {'CORRUPT', ''} end
+if finalRaw and deadlineScore then return {'CORRUPT', ''} end
+if finalRaw then return {'RESULT', finalRaw} end
+if reservationRaw then
+  if not promotionRaw or not deadlineScore or
+     redis.call('EXISTS', KEYS[2]) == 0 or
+     redis.call('EXISTS', KEYS[3]) == 0 then
+    return {'CORRUPT', ''}
+  end
+  return reservationStateResult(
+    'RESERVATION',
+    reservationRaw,
+    deadlineScore,
+    KEYS[2],
+    KEYS[3])
+end
+if deadlineScore then return {'CORRUPT', ''} end
+if promotionRaw ~= ARGV[1] then return {'PROMOTION_CHANGED', ''} end
+if redis.call('EXISTS', KEYS[2]) == 0 or redis.call('EXISTS', KEYS[3]) == 0 then
+  return {'CORRUPT', ''}
+end
+if not isExactHash(
+     KEYS[2],
+     ${RESERVE_EXPECTED_ACCOUNTING_START},
+     ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT})
+   or not isExactHash(
+     KEYS[3],
+     ${RESERVE_EXPECTED_ENTITLEMENT_START},
+     ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}) then
+  return ledgerStateResult('STATE_CHANGED', '', KEYS[2], KEYS[3])
+end
+
+local decision = ARGV[${RESERVE_DECISION_INDEX}]
+if decision == 'entitlement_not_active' then
+  return ledgerStateResult('ENTITLEMENT_NOT_ACTIVE', '', KEYS[2], KEYS[3])
+end
+if decision == 'entitlement_insufficient' then
+  return ledgerStateResult('ENTITLEMENT_INSUFFICIENT', '', KEYS[2], KEYS[3])
+end
+if decision == 'budget_insufficient' then
+  return ledgerStateResult('BUDGET_INSUFFICIENT', '', KEYS[2], KEYS[3])
+end
+if decision == 'concurrent_reservation' then
+  local activeMember = ARGV[${RESERVE_ACTIVE_MEMBER_INDEX}]
+  if activeMember == ''
+     or ARGV[${RESERVE_ACTIVE_RESERVATION_INDEX}] == ''
+     or ARGV[${RESERVE_ACTIVE_SCORE_INDEX}] == '' then
+    return {'CORRUPT', ''}
+  end
+  local activeReservationRaw =
+    redis.call('GET', ARGV[${RESERVE_RESERVATION_PREFIX_INDEX}] .. activeMember)
+  local activeResultRaw =
+    redis.call('GET', ARGV[${RESERVE_RESULT_PREFIX_INDEX}] .. activeMember)
+  local activeScore = redis.call('ZSCORE', KEYS[6], activeMember)
+  if activeReservationRaw ~= ARGV[${RESERVE_ACTIVE_RESERVATION_INDEX}]
+     or activeResultRaw
+     or activeScore ~= ARGV[${RESERVE_ACTIVE_SCORE_INDEX}] then
+    return {'CORRUPT', ''}
+  end
+  return reservationStateResult(
+    'CONCURRENT_RESERVATION',
+    activeReservationRaw,
+    activeScore,
+    KEYS[2],
+    KEYS[3])
+end
+if decision ~= 'reserve' then return {'CORRUPT', ''} end
+
+local deadline = tonumber(ARGV[${RESERVE_DEADLINE_INDEX}])
+if ARGV[${RESERVE_RESERVATION_RAW_INDEX}] == '' or
+   not deadline or
+   deadline <= 0 or
+   deadline > ${Number.MAX_SAFE_INTEGER} or
+   string.format('%.0f', deadline) ~= ARGV[${RESERVE_DEADLINE_INDEX}] then
+  return {'CORRUPT', ''}
+end
+
+redis.call(
+  'HSET',
+  KEYS[2],
+  unpack(
+    ARGV,
+    ${RESERVE_NEXT_ACCOUNTING_START},
+    ${RESERVE_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+redis.call(
+  'HSET',
+  KEYS[3],
+  unpack(
+    ARGV,
+    ${RESERVE_NEXT_ENTITLEMENT_START},
+    ${RESERVE_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+if not isExactHash(
+     KEYS[2],
+     ${RESERVE_NEXT_ACCOUNTING_START},
+     ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT})
+   or not isExactHash(
+     KEYS[3],
+     ${RESERVE_NEXT_ENTITLEMENT_START},
+     ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}) then
+  redis.call(
+    'HSET',
+    KEYS[2],
+    unpack(
+      ARGV,
+      ${RESERVE_EXPECTED_ACCOUNTING_START},
+      ${RESERVE_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+  redis.call(
+    'HSET',
+    KEYS[3],
+    unpack(
+      ARGV,
+      ${RESERVE_EXPECTED_ENTITLEMENT_START},
+      ${RESERVE_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+  return {'CORRUPT', ''}
+end
+
+redis.call('SET', KEYS[4], ARGV[${RESERVE_RESERVATION_RAW_INDEX}])
+redis.call('ZADD', KEYS[6], deadline, ARGV[${RESERVE_DEADLINE_MEMBER_INDEX}])
+return ledgerStateResult(
+  'RESERVED',
+  ARGV[${RESERVE_RESERVATION_RAW_INDEX}],
+  KEYS[2],
+  KEYS[3])
+`;
+
+const LUA_FINALIZE = `
+${LUA_EXACT_RECORD_HELPERS}
+${LUA_LEDGER_STATE_RESULT_HELPER}
+
+if #ARGV ~= ${FINALIZE_ARGUMENT_COUNT} then return {'CORRUPT', ''} end
+local currentReservation = redis.call('GET', KEYS[1])
+local finalRaw = redis.call('GET', KEYS[2])
+local deadlineScore = redis.call('ZSCORE', KEYS[3], ARGV[${FINALIZE_RECEIPT_INDEX}])
+if finalRaw and (currentReservation or deadlineScore) then return {'CORRUPT', ''} end
+if finalRaw then return {'RESULT', finalRaw} end
+if not currentReservation then
+  if deadlineScore then return {'CORRUPT', ''} end
+  return {'MISSING', ''}
+end
+if currentReservation ~= ARGV[1] then return {'CHANGED', ''} end
+if not deadlineScore or deadlineScore ~= ARGV[${FINALIZE_DEADLINE_INDEX}] then
+  return {'CORRUPT', ''}
+end
+if redis.call('EXISTS', KEYS[4]) == 0 or redis.call('EXISTS', KEYS[5]) == 0 then
+  return {'CORRUPT', ''}
+end
+if not isExactHash(
+     KEYS[4],
+     ${FINALIZE_EXPECTED_ACCOUNTING_START},
+     ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT})
+   or not isExactHash(
+     KEYS[5],
+     ${FINALIZE_EXPECTED_ENTITLEMENT_START},
+     ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}) then
+  return ledgerStateResult('STATE_CHANGED', '', KEYS[4], KEYS[5])
+end
+
+redis.call(
+  'HSET',
+  KEYS[4],
+  unpack(
+    ARGV,
+    ${FINALIZE_NEXT_ACCOUNTING_START},
+    ${FINALIZE_NEXT_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+redis.call(
+  'HSET',
+  KEYS[5],
+  unpack(
+    ARGV,
+    ${FINALIZE_NEXT_ENTITLEMENT_START},
+    ${FINALIZE_NEXT_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+if not isExactHash(
+     KEYS[4],
+     ${FINALIZE_NEXT_ACCOUNTING_START},
+     ${PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT})
+   or not isExactHash(
+     KEYS[5],
+     ${FINALIZE_NEXT_ENTITLEMENT_START},
+     ${PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT}) then
+  redis.call(
+    'HSET',
+    KEYS[4],
+    unpack(
+      ARGV,
+      ${FINALIZE_EXPECTED_ACCOUNTING_START},
+      ${FINALIZE_EXPECTED_ACCOUNTING_START + ACCOUNTING_PAIR_LENGTH - 1}))
+  redis.call(
+    'HSET',
+    KEYS[5],
+    unpack(
+      ARGV,
+      ${FINALIZE_EXPECTED_ENTITLEMENT_START},
+      ${FINALIZE_EXPECTED_ENTITLEMENT_START + ENTITLEMENT_PAIR_LENGTH - 1}))
+  return {'CORRUPT', ''}
+end
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', KEYS[3], ARGV[${FINALIZE_RECEIPT_INDEX}])
+redis.call('SET', KEYS[2], ARGV[${FINALIZE_RESULT_INDEX}])
+return ledgerStateResult('APPLIED', ARGV[${FINALIZE_RESULT_INDEX}], KEYS[4], KEYS[5])
+`;
+
+const LUA_DUE_RESERVATIONS = `
+local now = redis.call('TIME')
+local nowMs = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+local due = redis.call(
+  'ZRANGEBYSCORE',
+  KEYS[1],
+  '-inf',
+  nowMs,
+  'WITHSCORES',
+  'LIMIT',
+  0,
+  tonumber(ARGV[1]))
+local result = {string.format('%.0f', nowMs), tostring(#due / 2)}
+for index = 1, #due, 2 do
+  local receiptId = due[index]
+  local score = due[index + 1]
+  local raw = redis.call('GET', ARGV[2] .. receiptId)
+  local finalRaw = redis.call('GET', ARGV[3] .. receiptId)
+  if raw and finalRaw then
+    result[#result + 1] = 'CORRUPT'
+    result[#result + 1] = receiptId
+    result[#result + 1] = score
+    result[#result + 1] = ''
+  elseif raw then
+    result[#result + 1] = 'RESERVATION'
+    result[#result + 1] = receiptId
+    result[#result + 1] = score
+    result[#result + 1] = raw
+  elseif finalRaw then
+    result[#result + 1] = 'CORRUPT'
+    result[#result + 1] = receiptId
+    result[#result + 1] = score
+    result[#result + 1] = ''
+  else
+    result[#result + 1] = 'MISSING'
+    result[#result + 1] = receiptId
+    result[#result + 1] = score
+    result[#result + 1] = ''
+  end
+end
+return result
+`;
 
 export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
-  private readonly redis: RedisClientLike;
-  private readonly ttlMs: number;
-  private readonly _clock: Clock;
-  private readonly canonicalRecordKeyFor: CanonicalPromotionRecordKeyGetter | null;
-  private reaperTimer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private runningSweep: Promise<void> | null = null;
+  private runningBatch: Promise<SweepBatchResult> | null = null;
+  private stopping = false;
 
   constructor(
-    redis: RedisClientLike,
-    ttlMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
+    private readonly redis: RedisClientLike,
+    private readonly promotionStore: RedisPromotionRecordAccess,
+    private readonly ttlMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
     reaperIntervalMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS,
-    clock: Clock = systemClock,
-    canonicalRecordKeyFor: CanonicalPromotionRecordKeyGetter | null = null,
   ) {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 0) {
       throw new Error('RedisPromotionExecutionLedger: ttlMs must be a non-negative safe integer');
-    }
-    if (ttlMs > Number.MAX_SAFE_INTEGER - TERMINAL_GUARD_TTL_GRACE_MS) {
-      throw new Error('RedisPromotionExecutionLedger: ttlMs overflows terminal TTL range');
     }
     if (!Number.isSafeInteger(reaperIntervalMs) || reaperIntervalMs < 0) {
       throw new Error(
         'RedisPromotionExecutionLedger: reaperIntervalMs must be a non-negative safe integer',
       );
     }
-    this.redis = redis;
-    this.ttlMs = ttlMs;
-    this._clock = clock;
-    this.canonicalRecordKeyFor = canonicalRecordKeyFor;
-
-    if (reaperIntervalMs > 0 && reaperIntervalMs < 999_999_000) {
-      this.reaperTimer = setInterval(() => {
-        this.sweepExpiredReservations().catch((err) => {
-          logStructuredEvent(
-            PROMOTION_EXECUTION_LEDGER_REAPER_ERROR,
-            {
-              error: err instanceof Error ? err.message : String(err),
-            },
-            'error',
-          );
-        });
-      }, reaperIntervalMs);
-      if (this.reaperTimer.unref) this.reaperTimer.unref();
+    if (reaperIntervalMs !== 0) {
+      this.timer = setInterval(() => this.startScheduledSweep(), reaperIntervalMs);
+      this.timer.unref?.();
     }
   }
 
-  private get terminalTtlMs(): number {
-    return this.ttlMs + TERMINAL_GUARD_TTL_GRACE_MS;
+  private async requireActivePromotion(
+    promotionId: string,
+  ): Promise<CurrentPromotionRecord | null> {
+    const current = await this.promotionStore.readCurrent(promotionId);
+    return current?.promotion.status === 'active' ? current : null;
   }
 
-  // ── Claim ──────────────────────────────────
+  private async readReceiptState(receiptId: string): Promise<ReceiptState> {
+    return receiptStateRecord(
+      await this.redis.eval(
+        LUA_READ_RECEIPT_STATE,
+        [
+          promotionReservationKey(receiptId),
+          promotionOperationResultKey(receiptId),
+          promotionReservationDeadlineIndexKey(),
+        ],
+        [promotionReservationDeadlineMember(receiptId)],
+      ),
+      receiptId,
+    );
+  }
+
+  private async readRedisTimeMs(): Promise<number> {
+    return nonNegativeSafeInteger(
+      await this.redis.eval(LUA_READ_REDIS_TIME, [], []),
+      'Redis current time',
+    );
+  }
+
+  private async validateFinalResultState(result: PromotionOperationResultRecord): Promise<void> {
+    const { accounting, entitlement } = await this.readLedgerState(
+      result.promotionId,
+      result.userId,
+    );
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion final result is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionEntitlementIdentity(entitlement, result.promotionId, result.userId);
+    assertPromotionEntitlementAccountingState(accounting, entitlement);
+  }
+
+  private async validateReservedReceiptState(state: Extract<ReceiptState, { status: 'reserved' }>) {
+    const { accounting, entitlement } = await this.readLedgerState(
+      state.reservation.promotionId,
+      state.reservation.userId,
+    );
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionReservationAccountingState(accounting, entitlement, state.reservation);
+    return { accounting, entitlement };
+  }
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
-    const { perUserGasAllowanceMist: perUserBigInt, totalBudgetMist } = parsePromotionLedgerBudget(
-      opts.maxParticipants,
-      opts.perUserGasAllowanceMist,
+    const current = await this.requireActivePromotion(promotionId);
+    if (!current) return { ok: false, reason: 'promotion_not_active' };
+    const claimedAt = new Date().toISOString();
+    const observed = ledgerReadRecord(
+      await this.redis.eval(
+        LUA_READ_LEDGER_STATE,
+        [promotionAccountingKey(promotionId), promotionEntitlementKey(promotionId, userId)],
+        ['1'],
+      ),
     );
-    const perUserGasAllowanceMist = perUserBigInt.toString();
-    const now = new Date().toISOString();
-    const meta: EntitlementMeta = {
-      useUntilAt: opts.useUntilAt,
-      lastUsedAt: null,
-      status: 'active',
-    };
-
-    // Budget lazy-init (NX-safe): set available to the finite configured total.
-    const totalBudget = totalBudgetMist.toString();
-    await this.redis.set(budgetAvailKey(promotionId), totalBudget, { nx: true });
-    // Ensure aggregate keys exist (NX-safe)
-    await this.redis.set(budgetResTotalKey(promotionId), '0', { nx: true });
-    await this.redis.set(budgetConTotalKey(promotionId), '0', { nx: true });
-
-    const useStatusCheck = this.canonicalRecordKeyFor !== null;
-    const script = useStatusCheck ? LUA_CLAIM_WITH_STATUS_CHECK : LUA_CLAIM;
-    const keys = [
-      claimKey(promotionId, userId),
-      claimIdxKey(promotionId),
-      entMetaKey(promotionId, userId),
-      entRemKey(promotionId, userId),
-      entConKey(promotionId, userId),
-    ];
-    if (useStatusCheck) {
-      keys.push(this.canonicalRecordKeyFor!(promotionId));
+    if (observed.tag === 'ENTITLEMENT_WITHOUT_ACCOUNTING') {
+      throw new PromotionRecordCorruptionError(PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE);
     }
-
-    const result = await this.redis.eval(script, keys, [
+    if (observed.tag === 'CORRUPT') {
+      throw new PromotionRecordCorruptionError('Promotion claim read found corrupt stored state');
+    }
+    assertPromotionLedgerReadState(
+      current,
+      promotionId,
       userId,
-      opts.maxParticipants.toString(),
-      perUserGasAllowanceMist,
-      JSON.stringify(meta),
-      now,
-    ]);
-
-    if (result === 0) {
-      const ent = await this.readEntitlement(promotionId, userId);
-      return { ok: true, entitlement: ent! };
+      observed.accounting,
+      observed.entitlement,
+    );
+    const transition = createPromotionClaimTransition({
+      promotion: current.promotion,
+      accounting: observed.accounting,
+      entitlement: observed.entitlement,
+      userId,
+      claimedAt,
+      useUntilAt: opts.useUntilAt,
+    });
+    const decision = 'status' in transition ? transition.status : 'claim';
+    const nextAccounting = 'status' in transition ? observed.accounting : transition.accounting;
+    const nextEntitlement = 'status' in transition ? observed.entitlement : transition.entitlement;
+    const claim = claimRecord(
+      await this.redis.eval(
+        LUA_CLAIM,
+        [
+          this.promotionStore.recordKey(promotionId),
+          promotionAccountingKey(promotionId),
+          promotionEntitlementKey(promotionId, userId),
+        ],
+        [
+          current.serialized,
+          observed.accounting === null ? '0' : '1',
+          observed.entitlement === null ? '0' : '1',
+          decision,
+          ...hashWriteArgsOrEmpty(
+            observed.accounting === null
+              ? null
+              : serializePromotionAccountingRecord(observed.accounting),
+            PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT,
+          ),
+          ...hashWriteArgsOrEmpty(
+            observed.entitlement === null
+              ? null
+              : serializePromotionEntitlementRecord(observed.entitlement),
+            PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT,
+          ),
+          ...hashWriteArgsOrEmpty(
+            nextAccounting === null ? null : serializePromotionAccountingRecord(nextAccounting),
+            PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT,
+          ),
+          ...hashWriteArgsOrEmpty(
+            nextEntitlement === null ? null : serializePromotionEntitlementRecord(nextEntitlement),
+            PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT,
+          ),
+        ],
+      ),
+    );
+    const { tag } = claim;
+    if (tag === 'PROMOTION_CHANGED') {
+      const latest = await this.promotionStore.readCurrent(promotionId);
+      return latest?.promotion.status === 'active'
+        ? { ok: false, reason: 'record_changed' }
+        : { ok: false, reason: 'promotion_not_active' };
     }
-    if (result === -1) {
+    if (tag === 'STATE_CHANGED') {
+      assertPromotionLedgerReadState(
+        current,
+        promotionId,
+        userId,
+        claim.accounting,
+        claim.entitlement,
+      );
+      return { ok: false, reason: 'record_changed' };
+    }
+    if (tag === 'DUPLICATE') {
+      if (!claim.accounting || !claim.entitlement) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion duplicate claim omitted its ledger snapshot',
+        );
+      }
+      assertPromotionAccountingIdentity(claim.accounting, promotionId);
+      assertPromotionEntitlementIdentity(claim.entitlement, promotionId, userId);
+      assertPromotionAccountingMatchesPromotion(current.promotion, claim.accounting);
+      assertPromotionEntitlementAccountingState(claim.accounting, claim.entitlement);
+      if (
+        decision !== 'duplicate' ||
+        observed.accounting === null ||
+        observed.entitlement === null ||
+        !samePromotionAccountingRecord(claim.accounting, observed.accounting) ||
+        !samePromotionEntitlementRecord(claim.entitlement, observed.entitlement)
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion duplicate claim contradicts the TypeScript-owned transition',
+        );
+      }
+      return { ok: false, reason: 'duplicate' };
+    }
+    if (tag === 'CAPACITY') {
+      if (!claim.accounting || claim.entitlement) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion capacity result omitted its accounting snapshot',
+        );
+      }
+      assertPromotionAccountingIdentity(claim.accounting, promotionId);
+      assertPromotionAccountingMatchesPromotion(current.promotion, claim.accounting);
+      if (
+        decision !== 'capacity_exceeded' ||
+        observed.accounting === null ||
+        !samePromotionAccountingRecord(claim.accounting, observed.accounting)
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion claim capacity result contradicts the TypeScript-owned transition',
+        );
+      }
       return { ok: false, reason: 'capacity_exceeded' };
     }
-    if (result === -2) {
-      return { ok: false, reason: 'promotion_not_active' };
+    if (tag === 'CORRUPT') {
+      throw new PromotionRecordCorruptionError('Promotion claim found corrupt accounting state');
     }
-    // String result = duplicate (existing claimedAt)
-    return { ok: false, reason: 'duplicate' };
+    if (tag !== 'CLAIMED' || !claim.accounting || !claim.entitlement) {
+      throw new PromotionRecordCorruptionError(`Promotion claim returned unknown tag ${tag}`);
+    }
+    assertPromotionAccountingIdentity(claim.accounting, promotionId);
+    assertPromotionEntitlementIdentity(claim.entitlement, promotionId, userId);
+    assertPromotionAccountingMatchesPromotion(current.promotion, claim.accounting);
+    assertPromotionEntitlementAccountingState(claim.accounting, claim.entitlement);
+    if (
+      decision !== 'claim' ||
+      'status' in transition ||
+      !samePromotionAccountingRecord(transition.accounting, claim.accounting) ||
+      !samePromotionEntitlementRecord(transition.entitlement, claim.entitlement)
+    ) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion claim did not apply the TypeScript-owned state transition',
+      );
+    }
+    return { ok: true, entitlement: promotionEntitlementFromRecord(claim.entitlement) };
   }
-
-  // ── Reserve ────────────────────────────────
 
   async reserve(params: ReserveParams): Promise<ReserveResult> {
     const { promotionId, userId, receiptId, amountMist } = params;
     assertPositiveMist(amountMist, 'amountMist');
     assertWithinLedgerBound(amountMist, 'amountMist');
-
-    // Budget keys NX init happens inside LUA_RESERVE after the
-    // entitlement gate passes, so failed pre-claim reserves leave budget
-    // keys untouched.
-    const result = await this.redis.eval(
-      LUA_RESERVE,
-      [
-        budgetAvailKey(promotionId),
-        entMetaKey(promotionId, userId),
-        entRemKey(promotionId, userId),
-        entResKey(promotionId, userId),
-        resKey(receiptId),
-        terminalKey(receiptId),
-        budgetResTotalKey(promotionId),
-      ],
-      [
-        amountMist.toString(),
+    const current = await this.promotionStore.readCurrent(promotionId);
+    const [receiptState, accountingFields, entitlementFields] = await Promise.all([
+      this.readReceiptState(receiptId),
+      this.redis.hgetall(promotionAccountingKey(promotionId)),
+      this.redis.hgetall(promotionEntitlementKey(promotionId, userId)),
+    ]);
+    if (receiptState.status === 'finalized') {
+      await this.validateFinalResultState(receiptState.result);
+      return { ok: false, reason: 'record_changed' };
+    }
+    const existingReservation =
+      receiptState.status === 'reserved' ? receiptState.reservation : null;
+    if (existingReservation) {
+      assertPromotionReservationIdentity(existingReservation, receiptId);
+      if (!current) {
+        throw new PromotionRecordCorruptionError('Reservation exists without its Promotion record');
+      }
+      if (
+        existingReservation.promotionId !== promotionId ||
+        existingReservation.userId !== userId ||
+        existingReservation.amountMist !== amountMist.toString()
+      ) {
+        return { ok: false, reason: 'record_changed' };
+      }
+    } else if (!current || current.promotion.status !== 'active') {
+      return { ok: false, reason: 'promotion_not_active' };
+    }
+    if (isEmptyHash(accountingFields)) {
+      if (!isEmptyHash(entitlementFields)) {
+        throw new PromotionRecordCorruptionError(PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE);
+      }
+      if (existingReservation) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation exists without its accounting record',
+        );
+      }
+      return { ok: false, reason: 'entitlement_not_found' };
+    }
+    const accounting = decodePromotionAccountingRecord(accountingFields);
+    const storedEntitlement = isEmptyHash(entitlementFields)
+      ? null
+      : decodePromotionEntitlementRecord(entitlementFields);
+    assertPromotionLedgerReadState(current, promotionId, userId, accounting, storedEntitlement);
+    if (storedEntitlement === null) {
+      if (existingReservation) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation exists without its entitlement record',
+        );
+      }
+      return { ok: false, reason: 'entitlement_not_found' };
+    }
+    if (receiptState.status === 'reserved') {
+      assertPromotionReservationAccountingState(
+        accounting,
+        storedEntitlement,
+        receiptState.reservation,
+      );
+      if (receiptState.reservation.deadlineMs !== receiptState.score) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reservation and deadline index are inconsistent',
+        );
+      }
+    } else {
+      assertPromotionEntitlementAccountingState(accounting, storedEntitlement);
+    }
+    const stateChange =
+      existingReservation === null
+        ? createPromotionReserveStateChange({
+            promotion: current.promotion,
+            accounting,
+            entitlement: storedEntitlement,
+            receiptId,
+            amountMist,
+          })
+        : null;
+    const expectedDecision =
+      stateChange === null
+        ? 'existing_reservation'
+        : 'status' in stateChange
+          ? stateChange.status
+          : 'reserve';
+    let reserveTransition: PromotionReserveTransition | null = null;
+    if (stateChange !== null && !('status' in stateChange)) {
+      const nowMs = await this.readRedisTimeMs();
+      const deadlineMs = nowMs + this.ttlMs;
+      if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0) {
+        throw new Error(
+          'RedisPromotionExecutionLedger: reservation deadline exceeds the safe integer range',
+        );
+      }
+      const planned = createPromotionReserveTransition({
+        promotion: current.promotion,
+        accounting,
+        entitlement: storedEntitlement,
         receiptId,
+        amountMist,
+        deadlineMs,
+      });
+      if ('status' in planned) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve transition changed after its state decision',
+        );
+      }
+      reserveTransition = planned;
+    }
+    let activeReservationRaw = '';
+    let activeReservationScore = '';
+    let activeReservationMember = '';
+    if (expectedDecision === 'concurrent_reservation') {
+      const activeReceiptId = storedEntitlement.activeReservationReceiptId;
+      if (activeReceiptId === null) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve decision omitted its active reservation receipt',
+        );
+      }
+      const activeState = await this.readReceiptState(activeReceiptId);
+      if (activeState.status !== 'reserved') {
+        throw new PromotionRecordCorruptionError(
+          'Promotion entitlement points to a missing or finalized reservation',
+        );
+      }
+      assertPromotionReservationAccountingState(
+        accounting,
+        storedEntitlement,
+        activeState.reservation,
+      );
+      activeReservationMember = promotionReservationDeadlineMember(activeReceiptId);
+      activeReservationRaw = serializePromotionReservationRecord(activeState.reservation);
+      activeReservationScore = String(activeState.score);
+    }
+    const expectedAccounting =
+      reserveTransition === null ? accounting : reserveTransition.accounting;
+    const expectedEntitlement =
+      reserveTransition === null ? storedEntitlement : reserveTransition.entitlement;
+    const expectedReservationRaw =
+      reserveTransition === null
+        ? ''
+        : serializePromotionReservationRecord(reserveTransition.reservation);
+    const expectedDeadlineRaw =
+      reserveTransition === null ? '' : String(reserveTransition.reservation.deadlineMs);
+    const result = reserveRecord(
+      await this.redis.eval(
+        LUA_RESERVE,
+        [
+          this.promotionStore.recordKey(promotionId),
+          promotionAccountingKey(promotionId),
+          promotionEntitlementKey(promotionId, userId),
+          promotionReservationKey(receiptId),
+          promotionOperationResultKey(receiptId),
+          promotionReservationDeadlineIndexKey(),
+        ],
+        [
+          current.serialized,
+          promotionReservationDeadlineMember(receiptId),
+          expectedReservationRaw,
+          expectedDeadlineRaw,
+          ...hashWriteArgs(serializePromotionAccountingRecord(accounting)),
+          ...hashWriteArgs(serializePromotionEntitlementRecord(storedEntitlement)),
+          promotionReservationKeyPrefix(),
+          promotionOperationResultKeyPrefix(),
+          expectedDecision === 'reserve' ? 'reserve' : expectedDecision,
+          activeReservationMember,
+          activeReservationRaw,
+          activeReservationScore,
+          ...hashWriteArgs(serializePromotionAccountingRecord(expectedAccounting)),
+          ...hashWriteArgs(serializePromotionEntitlementRecord(expectedEntitlement)),
+        ],
+      ),
+    );
+    if (result.tag === 'PROMOTION_CHANGED') {
+      const latest = await this.promotionStore.readCurrent(promotionId);
+      return latest?.promotion.status === 'active'
+        ? { ok: false, reason: 'record_changed' }
+        : { ok: false, reason: 'promotion_not_active' };
+    }
+    if (result.tag === 'RESULT') {
+      const finalResult = decodePromotionOperationResultRecord(result.serialized);
+      assertPromotionOperationResultIdentity(finalResult, receiptId);
+      await this.validateFinalResultState(finalResult);
+      return { ok: false, reason: 'record_changed' };
+    }
+    if (result.tag === 'RESERVATION') {
+      const existing = decodePromotionReservationRecord(result.serialized);
+      assertPromotionReservationIdentity(existing, receiptId);
+      if (
+        existing.promotionId !== promotionId ||
+        existing.userId !== userId ||
+        existing.amountMist !== amountMist.toString()
+      ) {
+        return { ok: false, reason: 'record_changed' };
+      }
+      if (!result.accounting || !result.entitlement || result.score === null) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve omitted its current reservation state',
+        );
+      }
+      const score = Number(result.score);
+      if (!Number.isSafeInteger(score) || score <= 0 || existing.deadlineMs !== score) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reservation and deadline index are inconsistent',
+        );
+      }
+      assertPromotionAccountingMatchesPromotion(current.promotion, result.accounting);
+      assertPromotionReservationAccountingState(result.accounting, result.entitlement, existing);
+      return { ok: true, entitlement: promotionEntitlementFromRecord(result.entitlement) };
+    }
+    if (result.tag === 'RESERVED') {
+      const reservation = decodePromotionReservationRecord(result.serialized);
+      assertPromotionReservationIdentity(reservation, receiptId);
+      if (!result.accounting || !result.entitlement) {
+        throw new PromotionRecordCorruptionError('Promotion reserve omitted its ledger snapshot');
+      }
+      assertPromotionAccountingIdentity(result.accounting, promotionId);
+      assertPromotionEntitlementIdentity(result.entitlement, promotionId, userId);
+      assertPromotionAccountingMatchesPromotion(current.promotion, result.accounting);
+      assertPromotionReservationAccountingState(result.accounting, result.entitlement, reservation);
+      if (expectedDecision !== 'reserve' || reserveTransition === null) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve mutated despite a TypeScript-owned failure decision',
+        );
+      }
+      if (
+        serializePromotionReservationRecord(reserveTransition.reservation) !== result.serialized ||
+        !samePromotionAccountingRecord(reserveTransition.accounting, result.accounting) ||
+        !samePromotionEntitlementRecord(reserveTransition.entitlement, result.entitlement)
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve did not apply the TypeScript-owned state transition',
+        );
+      }
+      return { ok: true, entitlement: promotionEntitlementFromRecord(result.entitlement) };
+    }
+    if (result.tag === 'CORRUPT') {
+      throw new PromotionRecordCorruptionError('Promotion reserve found corrupt stored state');
+    }
+    if (result.tag === 'CONCURRENT_RESERVATION') {
+      const activeReservation = decodePromotionReservationRecord(result.serialized);
+      const score = Number(result.score);
+      if (
+        !result.accounting ||
+        !result.entitlement ||
+        !Number.isSafeInteger(score) ||
+        score <= 0 ||
+        activeReservation.deadlineMs !== score ||
+        activeReservation.receiptId !== storedEntitlement.activeReservationReceiptId
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion entitlement points to an inconsistent active reservation',
+        );
+      }
+      if (expectedDecision !== 'concurrent_reservation') {
+        throw new PromotionRecordCorruptionError(
+          'Promotion concurrent-reservation result contradicts the TypeScript-owned decision',
+        );
+      }
+      assertPromotionReservationAccountingState(
+        result.accounting,
+        result.entitlement,
+        activeReservation,
+      );
+      if (
+        !samePromotionAccountingRecord(result.accounting, accounting) ||
+        !samePromotionEntitlementRecord(result.entitlement, storedEntitlement)
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion concurrent-reservation result changed its ledger snapshot',
+        );
+      }
+      return { ok: false, reason: 'concurrent_reservation' };
+    }
+    if (
+      result.tag === 'ENTITLEMENT_NOT_ACTIVE' ||
+      result.tag === 'ENTITLEMENT_INSUFFICIENT' ||
+      result.tag === 'BUDGET_INSUFFICIENT'
+    ) {
+      const failureReason =
+        result.tag === 'ENTITLEMENT_NOT_ACTIVE'
+          ? 'entitlement_not_active'
+          : result.tag === 'ENTITLEMENT_INSUFFICIENT'
+            ? 'entitlement_insufficient'
+            : 'budget_insufficient';
+      if (
+        expectedDecision !== failureReason ||
+        !result.accounting ||
+        !result.entitlement ||
+        !samePromotionAccountingRecord(result.accounting, accounting) ||
+        !samePromotionEntitlementRecord(result.entitlement, storedEntitlement)
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve failure contradicts the TypeScript-owned decision',
+        );
+      }
+      return { ok: false, reason: failureReason };
+    }
+    if (result.tag === 'STATE_CHANGED') {
+      if (!result.accounting || !result.entitlement) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion reserve state change omitted its ledger snapshot',
+        );
+      }
+      assertPromotionLedgerReadState(
+        current,
         promotionId,
         userId,
-        this.ttlMs.toString(),
-        this.terminalTtlMs.toString(),
-      ],
-    );
-
-    if (result === 'OK') {
-      const ent = await this.readEntitlement(promotionId, userId);
-      return { ok: true, entitlement: ent! };
+        result.accounting,
+        result.entitlement,
+      );
+      return { ok: false, reason: 'record_changed' };
     }
-
-    const code = result as number;
-    if (code === 0) return { ok: false, reason: 'budget_insufficient' };
-    if (code === 10) return { ok: false, reason: 'entitlement_not_found' };
-    if (code === 11) return { ok: false, reason: 'entitlement_not_active' };
-    if (code === 12) return { ok: false, reason: 'concurrent_reservation' };
-    if (code === 13) return { ok: false, reason: 'entitlement_insufficient' };
-    return { ok: false, reason: 'budget_insufficient' };
+    return unreachableResult(result.tag, 'Promotion reserve');
   }
-
-  // ── Consume ────────────────────────────────
 
   async consume(receiptId: string, actualGasMist: bigint): Promise<ConsumeResult> {
     assertNonNegativeMist(actualGasMist, 'actualGasMist');
     assertWithinLedgerBound(actualGasMist, 'actualGasMist');
-    const result = await this.redis.eval(
-      LUA_CONSUME,
-      [resKey(receiptId), terminalKey(receiptId)],
-      [
-        actualGasMist.toString(),
-        this.terminalTtlMs.toString(),
+    const state = await this.readReceiptState(receiptId);
+    if (state.status === 'finalized') {
+      await this.validateFinalResultState(state.result);
+      return operationRetryResult(
+        serializePromotionOperationResultRecord(state.result),
         receiptId,
-        new Date().toISOString(),
-        `${PFX}budget:`,
-        `${PFX}ent:`,
-      ],
-    );
-
-    if (result === 20) {
-      return { ok: false, reason: 'reservation_not_found' };
+        'consume',
+        actualGasMist,
+      );
     }
-
-    // Lua returns JSON with owner info
-    const parsed = JSON.parse(result as string) as {
-      status: string;
-      promotionId: string;
-      userId: string;
-    };
-    const ent = await this.readEntitlement(parsed.promotionId, parsed.userId);
-    return { ok: true, entitlement: ent! };
+    if (state.status === 'missing') return { ok: false, reason: 'reservation_not_found' };
+    await this.validateReservedReceiptState(state);
+    return this.finalize(state.reservation, 'consume', actualGasMist);
   }
-
-  // ── Release ────────────────────────────────
 
   async release(receiptId: string): Promise<ReleaseResult> {
-    const result = await this.redis.eval(
-      LUA_RELEASE,
-      [resKey(receiptId), terminalKey(receiptId)],
-      [this.terminalTtlMs.toString(), receiptId, `${PFX}budget:`, `${PFX}ent:`],
-    );
+    const state = await this.readReceiptState(receiptId);
+    if (state.status === 'finalized') {
+      await this.validateFinalResultState(state.result);
+      return operationRetryResult(
+        serializePromotionOperationResultRecord(state.result),
+        receiptId,
+        'release',
+      );
+    }
+    if (state.status === 'missing') return { ok: false, reason: 'reservation_not_found' };
+    await this.validateReservedReceiptState(state);
+    return this.finalize(state.reservation, 'release', 0n);
+  }
 
-    if (result === 20) {
-      return { ok: false, reason: 'reservation_not_found' };
+  private async finalize(
+    reservation: PromotionReservationRecord,
+    operation: 'consume' | 'release',
+    actualGasMist: bigint,
+  ): Promise<ConsumeResult | ReleaseResult> {
+    const { accounting, entitlement } = await this.readLedgerState(
+      reservation.promotionId,
+      reservation.userId,
+    );
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation is missing accounting or entitlement state',
+      );
+    }
+    try {
+      assertPromotionReservationAccountingState(accounting, entitlement, reservation);
+    } catch (error) {
+      const latest = await this.readReceiptState(reservation.receiptId);
+      if (latest.status === 'finalized') {
+        await this.validateFinalResultState(latest.result);
+        return operationRetryResult(
+          serializePromotionOperationResultRecord(latest.result),
+          reservation.receiptId,
+          operation,
+          operation === 'consume' ? actualGasMist : undefined,
+        );
+      }
+      throw error;
     }
 
-    const parsed = JSON.parse(result as string) as {
-      status: string;
-      promotionId: string;
-      userId: string;
-    };
-    const ent = await this.readEntitlement(parsed.promotionId, parsed.userId);
-    return { ok: true, entitlement: ent! };
+    const chargedMist = operation === 'consume' ? actualGasMist : 0n;
+    const transition = createPromotionFinalizeTransition({
+      accounting,
+      entitlement,
+      reservation,
+      operation,
+      chargedMist,
+      usedAt: operation === 'consume' ? new Date().toISOString() : null,
+    });
+    const resultRaw = serializePromotionOperationResultRecord(transition.result);
+    const result = finalizeRecord(
+      await this.redis.eval(
+        LUA_FINALIZE,
+        [
+          promotionReservationKey(reservation.receiptId),
+          promotionOperationResultKey(reservation.receiptId),
+          promotionReservationDeadlineIndexKey(),
+          promotionAccountingKey(reservation.promotionId),
+          promotionEntitlementKey(reservation.promotionId, reservation.userId),
+        ],
+        [
+          serializePromotionReservationRecord({
+            receiptId: reservation.receiptId,
+            promotionId: reservation.promotionId,
+            userId: reservation.userId,
+            amountMist: reservation.amountMist,
+            deadlineMs: reservation.deadlineMs,
+          }),
+          ...hashWriteArgs(serializePromotionAccountingRecord(accounting)),
+          ...hashWriteArgs(serializePromotionEntitlementRecord(entitlement)),
+          ...hashWriteArgs(serializePromotionAccountingRecord(transition.accounting)),
+          ...hashWriteArgs(serializePromotionEntitlementRecord(transition.entitlement)),
+          String(reservation.deadlineMs),
+          promotionReservationDeadlineMember(reservation.receiptId),
+          resultRaw,
+        ],
+      ),
+    );
+    if (result.tag === 'RESULT') {
+      const retry = exactOperationRetry(
+        result.serialized,
+        reservation.receiptId,
+        operation,
+        operation === 'consume' ? actualGasMist : undefined,
+      );
+      if (retry) await this.validateFinalResultState(retry);
+      return retry
+        ? { ok: true, entitlement: promotionEntitlementFromRecord(retry.entitlement) }
+        : { ok: false, reason: 'record_changed' };
+    }
+    if (result.tag === 'MISSING') return { ok: false, reason: 'reservation_not_found' };
+    if (result.tag === 'STATE_CHANGED') {
+      if (!result.accounting || !result.entitlement) {
+        throw new PromotionRecordCorruptionError(
+          'Promotion final operation state change omitted its ledger snapshot',
+        );
+      }
+      const current = await this.promotionStore.readCurrent(reservation.promotionId);
+      assertPromotionLedgerReadState(
+        current,
+        reservation.promotionId,
+        reservation.userId,
+        result.accounting,
+        result.entitlement,
+      );
+      assertPromotionReservationAccountingState(result.accounting, result.entitlement, reservation);
+      return { ok: false, reason: 'record_changed' };
+    }
+    if (result.tag === 'CHANGED') return { ok: false, reason: 'record_changed' };
+    if (result.tag === 'CORRUPT') {
+      throw new PromotionRecordCorruptionError('Promotion final operation found corrupt state');
+    }
+    const applied = decodePromotionOperationResultRecord(result.serialized);
+    assertPromotionOperationResultIdentity(applied, reservation.receiptId);
+    if (!result.accounting || !result.entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion final operation omitted its applied ledger snapshot',
+      );
+    }
+    if (
+      serializePromotionOperationResultRecord(applied) !== resultRaw ||
+      !samePromotionAccountingRecord(result.accounting, transition.accounting) ||
+      !samePromotionEntitlementRecord(result.entitlement, transition.entitlement)
+    ) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion final operation did not apply the TypeScript-owned state transition',
+      );
+    }
+    return { ok: true, entitlement: promotionEntitlementFromRecord(applied.entitlement) };
   }
-
-  // Read models and reservation sweep.
 
   async getEntitlement(promotionId: string, userId: string): Promise<Entitlement | null> {
-    return this.readEntitlement(promotionId, userId);
+    const { entitlement } = await this.readLedgerState(promotionId, userId);
+    return entitlement ? promotionEntitlementFromRecord(entitlement) : null;
   }
 
-  async getBudgetSummary(promotionId: string): Promise<BudgetSummary> {
-    // Read-only: missing keys are reported as zero without creating them.
-    // Claim installs the first real budget total; reserve may initialize
-    // aggregate keys only after entitlement validation passes.
-    const [avail, reserved, consumed] = await Promise.all([
-      this.redis.get(budgetAvailKey(promotionId)),
-      this.redis.get(budgetResTotalKey(promotionId)),
-      this.redis.get(budgetConTotalKey(promotionId)),
-    ]);
-
-    return {
-      availableMist: parseNonNegativeDecimalBigInt(avail ?? '0', 'budget available MIST'),
-      reservedMist: parseNonNegativeDecimalBigInt(reserved ?? '0', 'budget reserved MIST'),
-      consumedMist: parseNonNegativeDecimalBigInt(consumed ?? '0', 'budget consumed MIST'),
-    };
-  }
-
-  async getClaimedCount(promotionId: string): Promise<number> {
-    const result = await this.redis.eval(
-      'return redis.call("SCARD", KEYS[1])',
-      [claimIdxKey(promotionId)],
-      [],
+  private async readLedgerState(
+    promotionId: string,
+    userId: string | null,
+  ): Promise<{
+    accounting: PromotionAccountingRecord | null;
+    entitlement: PromotionEntitlementRecord | null;
+  }> {
+    const result = ledgerReadRecord(
+      await this.redis.eval(
+        LUA_READ_LEDGER_STATE,
+        userId === null
+          ? [promotionAccountingKey(promotionId)]
+          : [promotionAccountingKey(promotionId), promotionEntitlementKey(promotionId, userId)],
+        [userId === null ? '0' : '1'],
+      ),
     );
-    return parseNonNegativeSafeInteger(result ?? 0, 'Redis claimed count');
+    if (result.tag === 'ENTITLEMENT_WITHOUT_ACCOUNTING') {
+      throw new PromotionRecordCorruptionError(PROMOTION_ENTITLEMENT_WITHOUT_ACCOUNTING_MESSAGE);
+    }
+    if (result.tag === 'CORRUPT') {
+      throw new PromotionRecordCorruptionError('Promotion ledger read found corrupt stored state');
+    }
+    const current = result.accounting ? await this.promotionStore.readCurrent(promotionId) : null;
+    assertPromotionLedgerReadState(
+      current,
+      promotionId,
+      userId,
+      result.accounting,
+      result.entitlement,
+    );
+    return { accounting: result.accounting, entitlement: result.entitlement };
+  }
+
+  async getPromotionLedgerStatus(
+    promotionId: string,
+    userId: string | null,
+  ): Promise<PromotionLedgerStatus> {
+    const { accounting, entitlement } = await this.readLedgerState(promotionId, userId);
+    return {
+      promotionId,
+      entitlement: entitlement ? promotionEntitlementFromRecord(entitlement) : null,
+      claimedCount: accounting?.claimedCount ?? 0,
+      budget: {
+        availableMist: BigInt(accounting?.availableMist ?? '0'),
+        reservedMist: BigInt(accounting?.reservedMist ?? '0'),
+        consumedMist: BigInt(accounting?.consumedMist ?? '0'),
+      },
+    };
   }
 
   async getPromotionListLedgerStatuses(
@@ -763,169 +1837,142 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
   ): Promise<PromotionListLedgerStatus[]> {
     assertPromotionListLedgerBatchBound(promotionIds);
     if (promotionIds.length === 0) return [];
-
-    const result = await this.redis.eval(
-      LUA_PROMOTION_LIST_LEDGER_STATUS,
-      [],
-      [PFX, userId, ...promotionIds],
+    const keys = promotionIds.flatMap((promotionId) => [
+      this.promotionStore.recordKey(promotionId),
+      promotionAccountingKey(promotionId),
+      promotionEntitlementKey(promotionId, userId),
+    ]);
+    return promotionListLedgerRecords(
+      await this.redis.eval(LUA_READ_PROMOTION_LIST_LEDGER_STATES, keys, [
+        String(promotionIds.length),
+      ]),
+      promotionIds,
+      userId,
     );
-    if (typeof result !== 'string') {
-      throw new Error('Redis Promotion list ledger status must be JSON');
-    }
-
-    const rows: unknown = JSON.parse(result);
-    if (!Array.isArray(rows) || rows.length !== promotionIds.length) {
-      throw new Error('Redis Promotion list ledger status length mismatch');
-    }
-
-    return rows.map((rowValue, index) => {
-      if (typeof rowValue !== 'object' || rowValue === null || Array.isArray(rowValue)) {
-        throw new Error('Redis Promotion list ledger status row must be an object');
-      }
-      const row = rowValue as Record<string, unknown>;
-      const promotionId = promotionIds[index];
-      if (row.promotionId !== promotionId) {
-        throw new Error('Redis Promotion list ledger status ID mismatch');
-      }
-      if (typeof row.availableBudgetMist !== 'string') {
-        throw new Error('Redis Promotion list available budget must be a decimal string');
-      }
-      return {
-        promotionId,
-        entitlement: entitlementFromStoredFields(promotionId, userId, {
-          metaRaw: parseNullableRedisString(
-            row.entitlementMetaRaw,
-            'Redis Promotion list entitlement meta',
-          ),
-          remainingRaw: parseNullableRedisString(
-            row.entitlementRemainingRaw,
-            'Redis Promotion list entitlement remaining allowance',
-          ),
-          consumedRaw: parseNullableRedisString(
-            row.entitlementConsumedRaw,
-            'Redis Promotion list entitlement consumed allowance',
-          ),
-          reservationRaw: parseNullableRedisString(
-            row.entitlementReservationRaw,
-            'Redis Promotion list entitlement reservation',
-          ),
-          claimedAtRaw: parseNullableRedisString(
-            row.claimedAtRaw,
-            'Redis Promotion list claim time',
-          ),
-        }),
-        claimedCount: parseNonNegativeSafeInteger(
-          row.claimedCount,
-          'Redis Promotion list claimed count',
-        ),
-        availableBudgetMist: parseNonNegativeDecimalBigInt(
-          row.availableBudgetMist,
-          'Redis Promotion list available budget MIST',
-        ),
-      };
-    });
-  }
-
-  async listClaimedUsers(promotionId: string): Promise<ClaimedUserProjection[]> {
-    // Get all userIds from claim index
-    const userIds = (await this.redis.eval(
-      'return redis.call("SMEMBERS", KEYS[1])',
-      [claimIdxKey(promotionId)],
-      [],
-    )) as string[] | null;
-
-    if (!userIds || userIds.length === 0) return [];
-
-    // Batch read entitlements
-    const results: ClaimedUserProjection[] = [];
-    for (const userId of userIds) {
-      const [claimedAt, ent] = await Promise.all([
-        this.redis.get(claimKey(promotionId, userId)),
-        this.readEntitlement(promotionId, userId),
-      ]);
-      results.push({
-        userId,
-        claimedAt: claimedAt ?? '',
-        remainingGasAllowanceMist: ent?.remainingGasAllowanceMist ?? null,
-        consumedGasAllowanceMist: ent?.consumedGasAllowanceMist ?? null,
-        status: ent?.status ?? null,
-        activeReservationReceiptId: ent?.activeReservationReceiptId ?? null,
-      });
-    }
-    return results;
   }
 
   async sweepExpiredReservations(): Promise<number> {
-    const keys = await this.redis.scan(`${PFX}res:*`);
-    let swept = 0;
-
-    const now = await this.getRedisTimeMs();
-
-    for (const key of keys) {
-      const raw = await this.redis.get(key);
-      if (!raw) continue;
-
-      let data: { expiresAt?: number };
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        continue;
-      }
-
-      if (!data.expiresAt || data.expiresAt > now) continue;
-
-      // Extract receiptId from key: stelis:promotion_execution_ledger:res:{receiptId}
-      const receiptId = key.slice(`${PFX}res:`.length);
-
-      // Release expired reservation (same as release)
-      const result = await this.redis.eval(
-        LUA_RELEASE,
-        [resKey(receiptId), terminalKey(receiptId)],
-        [this.terminalTtlMs.toString(), receiptId, `${PFX}budget:`, `${PFX}ent:`],
-      );
-      if (result !== 20) swept++;
-    }
-
-    return swept;
+    return (await this.runSweepBatch()).swept;
   }
 
-  dispose(): void {
-    if (this.reaperTimer) {
-      clearInterval(this.reaperTimer);
-      this.reaperTimer = null;
-    }
-  }
-
-  // ── Private helpers ────────────────────────
-
-  private async readEntitlement(promotionId: string, userId: string): Promise<Entitlement | null> {
-    const [metaRaw, rem, con, resRaw, claimedAt] = await Promise.all([
-      this.redis.get(entMetaKey(promotionId, userId)),
-      this.redis.get(entRemKey(promotionId, userId)),
-      this.redis.get(entConKey(promotionId, userId)),
-      this.redis.get(entResKey(promotionId, userId)),
-      this.redis.get(claimKey(promotionId, userId)),
-    ]);
-
-    return entitlementFromStoredFields(promotionId, userId, {
-      metaRaw,
-      remainingRaw: rem,
-      consumedRaw: con,
-      reservationRaw: resRaw,
-      claimedAtRaw: claimedAt,
+  private runSweepBatch(): Promise<SweepBatchResult> {
+    if (this.runningBatch) return this.runningBatch;
+    this.runningBatch = this.sweepExpiredReservationsBatch().finally(() => {
+      this.runningBatch = null;
     });
+    return this.runningBatch;
   }
 
-  private async getRedisTimeMs(): Promise<number> {
-    try {
-      const result = await this.redis.eval(
-        'local t = redis.call("TIME"); return tostring(tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000))',
-        [],
-        [],
-      );
-      return parseNonNegativeSafeInteger(result, 'Redis TIME milliseconds');
-    } catch {
-      return this._clock.nowMs();
+  private async sweepExpiredReservationsBatch(): Promise<SweepBatchResult> {
+    const value = await this.redis.eval(
+      LUA_DUE_RESERVATIONS,
+      [promotionReservationDeadlineIndexKey()],
+      [
+        String(PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE),
+        promotionReservationKeyPrefix(),
+        promotionOperationResultKeyPrefix(),
+      ],
+    );
+    if (
+      !Array.isArray(value) ||
+      value.length < 2 ||
+      typeof value[0] !== 'string' ||
+      typeof value[1] !== 'string'
+    ) {
+      throw new PromotionRecordCorruptionError('Reservation deadline read returned malformed data');
     }
+    const nowMs = Number(value[0]);
+    const examined = Number(value[1]);
+    if (
+      !Number.isSafeInteger(nowMs) ||
+      nowMs < 0 ||
+      !Number.isSafeInteger(examined) ||
+      examined < 0 ||
+      examined > PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE ||
+      value.length !== 2 + examined * 4
+    ) {
+      throw new PromotionRecordCorruptionError('Reservation deadline read returned malformed data');
+    }
+    let swept = 0;
+    for (let index = 2; index < value.length; index += 4) {
+      const kind = value[index];
+      const receiptId = value[index + 1];
+      const scoreRaw = value[index + 2];
+      const raw = value[index + 3];
+      if (
+        (kind !== 'RESERVATION' && kind !== 'MISSING' && kind !== 'CORRUPT') ||
+        typeof receiptId !== 'string' ||
+        typeof scoreRaw !== 'string' ||
+        typeof raw !== 'string'
+      ) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation deadline member must be a tagged receipt/record tuple',
+        );
+      }
+      const score = Number(scoreRaw);
+      if (!Number.isSafeInteger(score) || score <= 0) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation deadline index score must be a positive safe integer',
+        );
+      }
+      if (kind === 'MISSING') {
+        throw new PromotionRecordCorruptionError(
+          `Reservation deadline index has no record or operation result for ${receiptId}`,
+        );
+      }
+      if (kind === 'CORRUPT') {
+        throw new PromotionRecordCorruptionError(
+          `Reservation deadline receipt ${receiptId} has contradictory reservation or final result state`,
+        );
+      }
+      const reservation = decodePromotionReservationRecord(raw);
+      assertPromotionReservationIdentity(reservation, receiptId);
+      promotionReservationDeadlineMember(receiptId);
+      if (reservation.deadlineMs !== score || reservation.deadlineMs > nowMs) {
+        throw new PromotionRecordCorruptionError(
+          'Reservation deadline index contradicts its record',
+        );
+      }
+      const result = await this.finalize(reservation, 'release', 0n);
+      if (result.ok) swept += 1;
+      else if (result.reason !== 'record_changed') {
+        throw new PromotionRecordCorruptionError(
+          `Expired reservation could not be released: ${result.reason}`,
+        );
+      }
+    }
+    return { swept, examined };
+  }
+
+  private startScheduledSweep(): void {
+    if (this.stopping || this.runningSweep) return;
+    this.runningSweep = this.drainExpiredReservations()
+      .catch((error) => {
+        logStructuredEvent(
+          PROMOTION_EXECUTION_LEDGER_REAPER_ERROR,
+          { error: error instanceof Error ? error.message : String(error) },
+          'error',
+        );
+      })
+      .finally(() => {
+        this.runningSweep = null;
+      });
+  }
+
+  private async drainExpiredReservations(): Promise<void> {
+    while (!this.stopping) {
+      const { examined } = await this.runSweepBatch();
+      if (examined < PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.stopping = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    await Promise.all([this.runningSweep, this.runningBatch]);
   }
 }

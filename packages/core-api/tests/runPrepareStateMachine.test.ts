@@ -24,12 +24,13 @@ import type {
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
+import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { SponsorPool } from '../src/context.js';
 
 const SPONSOR_KP = Ed25519Keypair.generate();
 const TEST_HMAC_SECRET = 'unit-8-prepare-runner-test-hmac-secret';
 const TEST_SENDER = `0x${'be'.repeat(32)}`;
-const TEST_PROMO = 'unit-8-promotion';
+const TEST_PROMO = '00000000-0000-4000-8000-000000000208';
 const TEST_USER = 'unit-8-user';
 const TEST_CLIENT_IP = '127.0.0.1';
 const TEST_BUILD_RESULT: GasBoundBuildResult = {
@@ -154,6 +155,7 @@ interface HostBuild {
   readonly inflight: MemoryPrepareInflight;
   readonly prepareStore: MemoryPrepareStore;
   readonly ledger: MemoryPromotionExecutionLedger;
+  readonly promotionStore: MemoryPromotionStore;
   readonly sponsorPool: SponsorPool;
   readonly observedReceiptIds: {
     readonly checkout: string[];
@@ -168,7 +170,13 @@ function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = 
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
   );
-  const ledger = new MemoryPromotionExecutionLedger();
+  class FixedPromotionStore extends MemoryPromotionStore {
+    protected override generateId(): string {
+      return TEST_PROMO;
+    }
+  }
+  const promotionStore = new FixedPromotionStore();
+  const ledger = new MemoryPromotionExecutionLedger(promotionStore);
   const inflight = new MemoryPrepareInflight(8);
   const observedReceiptIds = {
     checkout: [] as string[],
@@ -248,6 +256,7 @@ function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = 
     inflight,
     prepareStore,
     ledger,
+    promotionStore,
     sponsorPool,
     observedReceiptIds,
   };
@@ -284,9 +293,14 @@ async function makePromotionRequest(
     readonly projectionError?: Error;
   } = {},
 ): Promise<PrepareStateMachineRequest<TestPrepareResponse>> {
-  await host.ledger.claim(TEST_PROMO, TEST_USER, {
+  const promotion = await host.promotionStore.create({
+    type: 'gas_sponsorship',
+    displayName: 'Prepare runner promotion',
     maxParticipants: 16,
     perUserGasAllowanceMist: options.allowanceMist ?? '100000000',
+  });
+  await host.promotionStore.transitionStatus(promotion.promotionId, 'active');
+  await host.ledger.claim(TEST_PROMO, TEST_USER, {
     useUntilAt: null,
   });
   return {

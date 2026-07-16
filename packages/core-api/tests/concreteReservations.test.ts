@@ -379,7 +379,7 @@ describe('LedgerBudgetReservationImpl', () => {
           : { ok: true };
       }),
       getEntitlement: vi.fn(),
-      getBudgetSummary: vi.fn(),
+      getPromotionLedgerStatus: vi.fn(),
     } as unknown as PromotionExecutionLedger;
   }
 

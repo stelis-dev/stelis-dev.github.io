@@ -16,6 +16,7 @@ import {
   type PromotionStoreFilter,
 } from '../src/studio/promotionStore.js';
 import { PromotionLedgerValueError } from '../src/studio/executionLedgerValueGuards.js';
+import { PromotionRecordCorruptionError } from '../src/studio/promotionRecords.js';
 import { computeTotalRequiredBudgetMist } from '../src/studio/domain.js';
 import type { PromotionStatus } from '../src/studio/domain.js';
 
@@ -42,6 +43,16 @@ class SequenceMemoryPromotionStore extends MemoryPromotionStore {
       throw new Error('SequenceMemoryPromotionStore ID list exhausted');
     return promotionId;
   }
+}
+
+function memoryIndexes(store: MemoryPromotionStore): {
+  all: string[];
+  statuses: Record<PromotionStatus, string[]>;
+} {
+  return {
+    all: Reflect.get(store, '_allIds') as string[],
+    statuses: Reflect.get(store, '_statusIds') as Record<PromotionStatus, string[]>,
+  };
 }
 
 // ── Fixtures ────────────────────────────────────────────────────────────
@@ -203,6 +214,32 @@ describe('MemoryPromotionStore', () => {
       expect(actives[0].displayName).toBe('Draft');
     });
 
+    it('fails closed when a record appears in more than one status index', async () => {
+      const created = await store.create(makeInput());
+      memoryIndexes(store).statuses.active.push(created.promotionId);
+
+      await expect(listRecords(store, { status: 'active' })).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+    });
+
+    it('fails closed when a status-index record is missing from the all index', async () => {
+      const created = await store.create(makeInput());
+      memoryIndexes(store).all.splice(0, 1);
+
+      await expect(listRecords(store, { status: 'draft' })).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+      await expect(store.get(created.promotionId)).resolves.toEqual(created);
+    });
+
+    it('fails closed when an all-index record is missing from its current status index', async () => {
+      await store.create(makeInput());
+      memoryIndexes(store).statuses.draft.splice(0, 1);
+
+      await expect(listRecords(store)).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+    });
+
     it('does not expose stored records through list', async () => {
       const created = await store.create(makeInput());
       const listed = await listRecords(store);
@@ -288,6 +325,40 @@ describe('MemoryPromotionStore', () => {
       expect(updated!.perUserGasAllowanceMist).toBe('10000000');
       // updatedAt is set
       expect(updated!.updatedAt).toBeTruthy();
+    });
+
+    it('does not update a record whose full index projection is inconsistent', async () => {
+      const missingAllStore = new MemoryPromotionStore();
+      const missingAll = await missingAllStore.create(makeInput());
+      memoryIndexes(missingAllStore).all.splice(0, 1);
+      await expect(
+        missingAllStore.update(missingAll.promotionId, { displayName: 'Must not persist' }),
+      ).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+      await expect(missingAllStore.get(missingAll.promotionId)).resolves.toEqual(missingAll);
+
+      const missingStatusStore = new MemoryPromotionStore();
+      const missingStatus = await missingStatusStore.create(makeInput());
+      memoryIndexes(missingStatusStore).statuses.draft.splice(0, 1);
+      await expect(
+        missingStatusStore.update(missingStatus.promotionId, {
+          displayName: 'Must not persist',
+        }),
+      ).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+      await expect(missingStatusStore.get(missingStatus.promotionId)).resolves.toEqual(
+        missingStatus,
+      );
+
+      const duplicateStatusStore = new MemoryPromotionStore();
+      const duplicateStatus = await duplicateStatusStore.create(makeInput());
+      memoryIndexes(duplicateStatusStore).statuses.active.push(duplicateStatus.promotionId);
+      await expect(
+        duplicateStatusStore.update(duplicateStatus.promotionId, {
+          displayName: 'Must not persist',
+        }),
+      ).rejects.toBeInstanceOf(PromotionRecordCorruptionError);
+      await expect(duplicateStatusStore.get(duplicateStatus.promotionId)).resolves.toEqual(
+        duplicateStatus,
+      );
     });
 
     it('rejects a draft update whose complete budget exceeds the ledger bound', async () => {
@@ -424,6 +495,16 @@ describe('MemoryPromotionStore', () => {
       expect(result!.pauseReason).toBe('Budget review');
     });
 
+    it('does not transition a record with unrelated status-index membership', async () => {
+      const created = await store.create(makeInput());
+      memoryIndexes(store).statuses.archived.push(created.promotionId);
+
+      await expect(store.transitionStatus(created.promotionId, 'active')).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+      await expect(store.get(created.promotionId)).resolves.toMatchObject({ status: 'draft' });
+    });
+
     it('paused → active (preserves pauseReason)', async () => {
       const created = await store.create(makeInput());
       await store.transitionStatus(created.promotionId, 'active');
@@ -510,6 +591,16 @@ describe('MemoryPromotionStore', () => {
       expect(found).toBeNull();
     });
 
+    it('does not delete a draft with unrelated status-index membership', async () => {
+      const created = await store.create(makeInput());
+      memoryIndexes(store).statuses.active.push(created.promotionId);
+
+      await expect(store.delete(created.promotionId)).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+      await expect(store.get(created.promotionId)).resolves.toEqual(created);
+    });
+
     it('refuses to delete non-draft promotions', async () => {
       const created = await store.create(makeInput());
       await store.transitionStatus(created.promotionId, 'active');
@@ -520,6 +611,16 @@ describe('MemoryPromotionStore', () => {
       // Record still exists
       const found = await store.get(created.promotionId);
       expect(found).not.toBeNull();
+    });
+
+    it('fails closed when a draft has accounting state', async () => {
+      const created = await store.create(makeInput());
+      store.bindAccountingExists((promotionId) => promotionId === created.promotionId);
+
+      await expect(store.delete(created.promotionId)).rejects.toBeInstanceOf(
+        PromotionRecordCorruptionError,
+      );
+      await expect(store.get(created.promotionId)).resolves.toEqual(created);
     });
   });
 });

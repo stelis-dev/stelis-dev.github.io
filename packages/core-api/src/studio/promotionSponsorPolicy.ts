@@ -112,7 +112,7 @@ export type ConsumeLedgerOutcome =
  * evidence, never from whether this entitlement update succeeded.
  *
  * Branch-specific failure reasons stay at the call site (they go into the
- * UsageEvent `failureReason`); this helper only logs ledger-call outcome.
+ * operator execution logs); this helper only logs ledger-call outcome.
  */
 export async function consumeLedgerReservationWithLog(
   ledger: PromotionExecutionLedger,

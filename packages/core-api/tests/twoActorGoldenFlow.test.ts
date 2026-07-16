@@ -620,7 +620,7 @@ interface StudioHarness {
 
 async function makeStudioHarness(): Promise<StudioHarness> {
   const promotionStore = new MemoryPromotionStore();
-  const executionLedger = new MemoryPromotionExecutionLedger();
+  const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
     sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
@@ -641,8 +641,6 @@ async function makeStudioHarness(): Promise<StudioHarness> {
   const promoId = promoRecord.promotionId;
   await promotionStore.transitionStatus(promoId, 'active');
   await executionLedger.claim(promoId, STUDIO_USER_ID, {
-    maxParticipants: 16,
-    perUserGasAllowanceMist: '100000000',
     useUntilAt: null,
   });
 
@@ -678,7 +676,6 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     prepareStore,
     abuseBlocker,
     globalAllowedTargets: STUDIO_GLOBAL_ALLOWED_TARGETS,
-    usageStore: null,
   };
 
   return {

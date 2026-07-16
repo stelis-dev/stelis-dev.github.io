@@ -89,8 +89,7 @@ Default Redis namespaces are owned by their adapter modules:
 | `stelis:app-api:sponsor-operations:` | Sponsor slot health, sponsor refill account health, and sponsor operations locks. |
 | `stelis:sponsored_logs:` | Sponsored execution aggregate and recent entries read by admin routes. |
 | `stelis:promo:` | Promotion records and promotion indexes. |
-| `stelis:promo:usage` | Promotion usage-event records. |
-| `stelis:promotion_execution_ledger:` | Promotion claims, entitlements, budgets, and reservations. |
+| `stelis:promotion_execution_ledger:` | Promotion accounting, entitlements, reservations, final operation results, and reservation deadlines. |
 | `stelis:app-api:admin:not_before` | Admin session invalidation timestamp. |
 
 ## Redis Deployment Topology
@@ -212,7 +211,7 @@ When these variables are present, the Host runs in dual mode: generic relay rout
 
 `STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds. The callback response is the closed current shape `{ "valid": boolean, "reason"?: string }`: an explicit `false` is `AUTH_JWT_INVALID`, while transport failure or a malformed/non-current response is `AUTH_UNAVAILABLE`. Both fail closed.
 
-Promotion execution uses Redis-backed promotion records, usage-event records, and the promotion execution ledger. The ledger reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
+Promotion execution uses Redis-backed promotion records and one promotion execution ledger. The ledger owns Promotion accounting, entitlements, reservations, permanent final operation results, and the reservation deadline index. It reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
 
 ## Admin Operations
 
@@ -270,7 +269,7 @@ Current structured event families:
 | Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
 | Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY` |
 | Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `LEDGER_CONSUME_FAILED_IN_HANDLER`, `LEDGER_CONSUME_THREW_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
-| Redis infrastructure | `REDIS_SCAN_UNAVAILABLE` |
+| Abuse blocking | `ABUSE_BLOCK_EXPIRY_TASK_FAILED` |
 
 Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.
 

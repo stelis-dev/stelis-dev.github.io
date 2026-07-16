@@ -1058,7 +1058,7 @@ describe('SecurityPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/blocklist': { blocklist: [] },
+        '/api/blocklist': { blocklist: [], nextCursor: null },
         '/api/logs': {
           logs: [
             {
@@ -1086,6 +1086,87 @@ describe('SecurityPage integration', () => {
       },
       { timeout: 3000 },
     );
+  });
+
+  it('pages block records without reloading the independent audit log', async () => {
+    const cursor = 'Y3Vyc29y';
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
+        if (url === '/api/blocklist') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                blocklist: [
+                  {
+                    scope: 'ip',
+                    subject: '127.0.0.1',
+                    reason: 'manipulation',
+                    blockedUntilMs: 1_800_000_000_000,
+                  },
+                ],
+                nextCursor: cursor,
+              }),
+          });
+        }
+        if (url === `/api/blocklist?cursor=${cursor}`) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                blocklist: [
+                  {
+                    scope: 'studio_user',
+                    subject: 'User-A',
+                    reason: 'dry_run_failure_threshold',
+                    blockedUntilMs: 1_800_000_001_000,
+                  },
+                ],
+                nextCursor: null,
+              }),
+          });
+        }
+        if (url === '/api/logs') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                logs: [
+                  {
+                    ts: '2026-01-02T03:04:05.000Z',
+                    event: 'admin_login_success',
+                    ip: '127.0.0.1',
+                  },
+                ],
+              }),
+          });
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    const { SecurityPage } = await import('../src/pages/SecurityPage');
+    render(<DirectOutletProvider element={<SecurityPage />} />);
+    await waitFor(() => expect(screen.getByText('manipulation')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByText('User-A')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    await waitFor(() => expect(screen.getByText('manipulation')).toBeDefined());
+
+    expect(requestedUrls.filter((url) => url === '/api/logs')).toHaveLength(1);
+    expect(requestedUrls.filter((url) => url.startsWith('/api/blocklist'))).toEqual([
+      '/api/blocklist',
+      `/api/blocklist?cursor=${cursor}`,
+      '/api/blocklist',
+    ]);
   });
 });
 

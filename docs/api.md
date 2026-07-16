@@ -233,7 +233,7 @@ success responses. `/api/logs` returns structured audit entries with `ts`,
 
 Mounted admin routes:
 
-- `GET /api/blocklist`
+- `GET /api/blocklist?cursor=<opaqueCursor>&limit=<1..100>`
 - `DELETE /api/blocklist`
 - `GET /api/logs`
 - `GET /api/sponsored-logs/summary`
@@ -249,11 +249,15 @@ Mounted admin routes:
 - `PUT /api/promotions/:id`
 - `POST /api/promotions/:id/status`
 - `DELETE /api/promotions/:id`
-- `GET /api/promotions/:id/users`
 - `GET /api/promotions/:id/summary`
 
 The Admin Promotion list uses the same bounded cursor contract as the Studio
 list. `status` is optional and accepts the current Promotion status values.
+
+The blocklist route returns a bounded page of typed `ip`, `address`, and
+`studio_user` identities with their reason and expiry time. Its cursor is
+opaque. Deletion accepts the same typed identity and does not expose Redis
+keys or TTL sentinel values.
 
 ## MCP Boundary
 

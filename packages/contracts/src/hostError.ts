@@ -37,6 +37,7 @@ export const STUDIO_CLAIM_ERROR_CODES = [
   'CLAIM_DEADLINE_PASSED',
   'PROMOTION_CAPACITY_REACHED',
   'ALREADY_CLAIMED',
+  'PROMOTION_CURRENT_CONFLICT',
 ] as const;
 
 export const RELAY_PREPARE_ERROR_CODES = [
@@ -165,6 +166,7 @@ export const PROMOTION_PREPARE_ERROR_CODES = [
   'ENTITLEMENT_NOT_ACTIVE',
   'ENTITLEMENT_INSUFFICIENT',
   'ENTITLEMENT_CONCURRENT_RESERVATION',
+  'PROMOTION_CURRENT_CONFLICT',
   'PREPARE_STUDIO_USER_QUOTA_EXCEEDED',
   'SPONSOR_LEASE_COMMIT_FAILED',
   'INTERNAL_ERROR',
@@ -236,12 +238,19 @@ export const ADMIN_SESSION_ERROR_CODES = ['ADMIN_UNAUTHORIZED'] as const;
 /** Current errors for Admin reads without route parameters. */
 export const ADMIN_READ_ERROR_CODES = ['ADMIN_UNAUTHORIZED', 'INTERNAL_ERROR'] as const;
 
+/** Current errors for `GET /api/blocklist`. */
+export const ADMIN_BLOCKLIST_READ_ERROR_CODES = [
+  'BAD_REQUEST',
+  'ADMIN_UNAUTHORIZED',
+  'INTERNAL_ERROR',
+] as const;
+
 /** Current errors for `DELETE /api/blocklist`. */
 export const ADMIN_BLOCKLIST_DELETE_ERROR_CODES = [
   'BAD_REQUEST',
   'REQUEST_BODY_TOO_LARGE',
   'ADMIN_UNAUTHORIZED',
-  'ADMIN_FORBIDDEN',
+  'ADMIN_CONFLICT',
   'INTERNAL_ERROR',
 ] as const;
 
@@ -353,6 +362,7 @@ type AdminAuthVerifyErrorCode = (typeof ADMIN_AUTH_VERIFY_ERROR_CODES)[number];
 type AdminAuthLogoutErrorCode = (typeof ADMIN_AUTH_LOGOUT_ERROR_CODES)[number];
 type AdminSessionErrorCode = (typeof ADMIN_SESSION_ERROR_CODES)[number];
 type AdminReadErrorCode = (typeof ADMIN_READ_ERROR_CODES)[number];
+type AdminBlocklistReadErrorCode = (typeof ADMIN_BLOCKLIST_READ_ERROR_CODES)[number];
 type AdminBlocklistDeleteErrorCode = (typeof ADMIN_BLOCKLIST_DELETE_ERROR_CODES)[number];
 type AdminSponsoredLogsErrorCode = (typeof ADMIN_SPONSORED_LOGS_ERROR_CODES)[number];
 type AdminPromotionListErrorCode = (typeof ADMIN_PROMOTION_LIST_ERROR_CODES)[number];
@@ -378,6 +388,7 @@ export type HostErrorCode =
   | AdminAuthLogoutErrorCode
   | AdminSessionErrorCode
   | AdminReadErrorCode
+  | AdminBlocklistReadErrorCode
   | AdminBlocklistDeleteErrorCode
   | AdminSponsoredLogsErrorCode
   | AdminPromotionListErrorCode
@@ -404,6 +415,7 @@ const HOST_ERROR_CODE_SET: ReadonlySet<string> = new Set([
   ...ADMIN_AUTH_LOGOUT_ERROR_CODES,
   ...ADMIN_SESSION_ERROR_CODES,
   ...ADMIN_READ_ERROR_CODES,
+  ...ADMIN_BLOCKLIST_READ_ERROR_CODES,
   ...ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
   ...ADMIN_SPONSORED_LOGS_ERROR_CODES,
   ...ADMIN_PROMOTION_LIST_ERROR_CODES,
@@ -606,7 +618,6 @@ export const HOST_ERROR_HTTP_STATUS = {
   ONCHAIN_REVERT: 422,
   CONSUME_FAILED: 500,
   ADMIN_UNAUTHORIZED: 401,
-  ADMIN_FORBIDDEN: 403,
   ADMIN_NOT_FOUND: 404,
   ADMIN_CONFLICT: 409,
   ADMIN_UNPROCESSABLE: 422,

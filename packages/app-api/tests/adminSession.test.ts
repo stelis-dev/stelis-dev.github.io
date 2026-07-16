@@ -16,8 +16,6 @@ const { mockRedis } = vi.hoisted(() => ({
     lpush: vi.fn().mockResolvedValue(1),
     ltrim: vi.fn().mockResolvedValue(undefined),
     lrange: vi.fn().mockResolvedValue([]),
-    scan: vi.fn().mockResolvedValue([]),
-    ttl: vi.fn().mockResolvedValue(-1),
     eval: vi.fn().mockResolvedValue(null),
   },
 }));

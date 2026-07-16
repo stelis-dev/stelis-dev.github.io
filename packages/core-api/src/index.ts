@@ -66,8 +66,10 @@ export { RedisPrepareInflight } from './store/redisPrepareInflight.js';
 // Production rate limiter. Its interface and memory adapter are internal.
 export { RedisRateLimiter } from './store/redisRateLimiter.js';
 
-// Production abuse blocker. Its interface and memory adapter are internal.
+// Production abuse store. The memory adapter remains internal.
 export { RedisAbuseBlocker } from './store/redisAbuseBlocker.js';
+export type { AbuseBlockStore } from './store/abuseBlockStore.js';
+export { AbuseBlockCurrentConflictError, AbuseBlockInputError } from './store/abuseBlockStore.js';
 
 // Sponsor slot leasing — only the production adapter and host-facing key
 // parsers are exported.

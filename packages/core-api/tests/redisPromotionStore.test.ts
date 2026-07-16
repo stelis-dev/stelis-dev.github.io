@@ -21,6 +21,7 @@ const ID_A = '00000000-0000-4000-8000-000000000001';
 const ID_B = '00000000-0000-4000-8000-000000000002';
 const ID_C = '00000000-0000-4000-8000-000000000003';
 const ID_D = '00000000-0000-4000-8000-000000000004';
+const MISSING_ID = 'ffffffff-ffff-4fff-bfff-ffffffffffff';
 
 async function listRecords(store: PromotionStoreAdapter, filter?: PromotionStoreFilter) {
   return (await store.listPage(PAGE_ALL, filter)).promotions;
@@ -347,7 +348,7 @@ describe('RedisPromotionStore', () => {
   });
 
   it('distinguishes a non-existent delete', async () => {
-    const result = await store.delete('nope');
+    const result = await store.delete(MISSING_ID);
     expect(result).toEqual({ status: 'not_found' });
   });
 

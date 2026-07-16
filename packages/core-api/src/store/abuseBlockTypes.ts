@@ -1,3 +1,5 @@
+import type { AbuseBlockReason, AdminBlockScope } from '@stelis/contracts';
+
 /**
  * Typed abuse subject. The non-IP enforcement principal differs by route
  * family:
@@ -20,9 +22,9 @@ export type AbuseSubject =
 
 export interface AbuseBlockStatus {
   blocked: boolean;
-  reason?: string;
+  reason?: AbuseBlockReason;
   retryAfterMs?: number;
-  scope?: 'ip' | 'address' | 'studio_user';
+  scope?: AdminBlockScope;
 }
 
 /** Optional structured metadata attached to sponsor failure records for observability. */

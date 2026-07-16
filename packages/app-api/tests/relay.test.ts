@@ -126,6 +126,7 @@ function createMockCtx(): AppApiContext {
     studio: null,
 
     redis: {} as never,
+    abuseStore: {} as never,
     sponsorOperations: {
       // Default mock returns a healthy single-slot state so the request
       // gate admits by default; deny-path tests override `readState`
@@ -157,7 +158,6 @@ function createMockCtx(): AppApiContext {
       dispose: vi.fn(),
     } as never,
     promotionStore: null,
-    usageStore: null,
     executionLedger: null,
     studioGlobalAllowedTargets: null,
     developerJwtTrustConfig: null,

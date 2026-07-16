@@ -70,7 +70,6 @@ function makeMockRedis(): {
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(0),
     hgetall: vi.fn().mockResolvedValue({}),
-    scan: vi.fn().mockResolvedValue([]),
   };
   return { client, evalSpy };
 }

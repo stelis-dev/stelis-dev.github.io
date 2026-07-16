@@ -2,7 +2,7 @@
  * Studio Promotion Domain Types — shared domain/value types.
  *
  * Authoritative source for promotion value types (`Promotion`,
- * `Entitlement`, `UsageEvent`, …), ExecutionLedger operation result types,
+ * `Entitlement`), ExecutionLedger operation result types,
  * and pure domain helpers (`computeTotalRequiredBudgetMist`). Handlers and
  * derived read models import from here.
  *
@@ -108,7 +108,7 @@ export type Entitlement = PromotionEntitlement;
 /**
  * BudgetSummary — promotion-level budget snapshot for read models.
  *
- * All values in MIST (bigint). Returned by ExecutionLedger.getBudgetSummary().
+ * All values in MIST (bigint). Returned in a Promotion ledger status.
  */
 export interface BudgetSummary {
   /** Available budget (total - reserved - consumed). */
@@ -120,63 +120,11 @@ export interface BudgetSummary {
 }
 
 // ─────────────────────────────────────────────
-// Claimed User Projection (admin read model)
-// ─────────────────────────────────────────────
-
-/**
- * ClaimedUserProjection — enriched projection for admin claimed-user list.
- *
- * Single read model returned by `ExecutionLedger.listClaimedUsers()` — it
- * joins the claimed-user index and per-user entitlement state in one call,
- * so callers never need a per-user follow-up read.
- */
-export interface ClaimedUserProjection {
-  userId: string;
-  claimedAt: string;
-  remainingGasAllowanceMist: string | null;
-  consumedGasAllowanceMist: string | null;
-  status: EntitlementStatus | null;
-  activeReservationReceiptId: string | null;
-}
-
-// ─────────────────────────────────────────────
-// Usage Event (append-only audit)
-// ─────────────────────────────────────────────
-
-/** Usage event result classification. */
-export type UsageEventResult = 'reserved' | 'consumed' | 'released' | 'failed';
-
-/**
- * UsageEvent — append-only audit record for each sponsored action lifecycle event.
- */
-export interface UsageEvent {
-  promotionId: string;
-  userId: string;
-  senderAddress: string;
-  receiptId: string;
-  txDigest: string | null;
-  reservedGasMist: string;
-  consumedGasMist: string;
-  releasedGasMist: string;
-  result: UsageEventResult;
-  createdAt: string;
-  failureReason: string | null;
-  policyCheckResult: string | null;
-}
-
-/** Input for appending a usage event. createdAt is auto-generated. */
-export type CreateUsageEventInput = Omit<UsageEvent, 'createdAt'>;
-
-// ─────────────────────────────────────────────
 // Claim types
 // ─────────────────────────────────────────────
 
 /** Options for ExecutionLedger.claim(). */
 export interface ClaimOpts {
-  /** Maximum allowed participants. Must be a positive safe integer. */
-  maxParticipants: number;
-  /** Per-user gas allowance in MIST. */
-  perUserGasAllowanceMist: string;
   /** Post-claim use window end. null = unlimited. */
   useUntilAt: string | null;
 }
@@ -189,18 +137,15 @@ export type ClaimResult =
 /**
  * Internal ExecutionLedger claim failure reasons.
  *
- * `promotion_not_active` is emitted only by `RedisPromotionExecutionLedger`
- * when the atomic claim script re-reads the canonical promotion record
- * and finds `status !== 'active'`. This closes the race window between
- * `promotionStore.get()` at the claim route and the Lua claim CAS (admin
- * pause/archive can slip in between). Memory ledger does not emit this
- * reason — there is no practical cross-process race at that scale and the
- * shared conformance suite treats reason set as adapter-implementation
- * detail. `packages/core-api/src/studio/promotionClaimHandler.ts` maps
- * this internal reason to the existing public `promotion_not_active`
- * claim reason.
+ * `promotion_not_active` means the current Promotion is absent or inactive.
+ * `record_changed` means an otherwise active Promotion or ledger record
+ * changed before the atomic claim mutation.
  */
-export type ClaimFailureReason = 'duplicate' | 'capacity_exceeded' | 'promotion_not_active';
+export type ClaimFailureReason =
+  | 'duplicate'
+  | 'capacity_exceeded'
+  | 'promotion_not_active'
+  | 'record_changed';
 
 // ─────────────────────────────────────────────
 // Reserve / Consume / Release types
@@ -224,21 +169,23 @@ export type ReserveFailureReason =
   | 'entitlement_not_found'
   | 'entitlement_not_active'
   | 'entitlement_insufficient'
-  | 'concurrent_reservation';
+  | 'concurrent_reservation'
+  | 'promotion_not_active'
+  | 'record_changed';
 
 /** Discriminated union result from ExecutionLedger.consume(). */
 export type ConsumeResult =
   | { ok: true; entitlement: Entitlement }
   | { ok: false; reason: ConsumeFailureReason };
 
-export type ConsumeFailureReason = 'reservation_not_found';
+export type ConsumeFailureReason = 'reservation_not_found' | 'record_changed';
 
 /** Discriminated union result from ExecutionLedger.release(). */
 export type ReleaseResult =
   | { ok: true; entitlement: Entitlement }
   | { ok: false; reason: ReleaseFailureReason };
 
-export type ReleaseFailureReason = 'reservation_not_found';
+export type ReleaseFailureReason = 'reservation_not_found' | 'record_changed';
 
 // ─────────────────────────────────────────────
 // Pure domain helpers

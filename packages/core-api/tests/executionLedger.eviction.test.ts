@@ -13,8 +13,8 @@ import { describe, it, expect } from 'vitest';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
 import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
 import type { PreparedTxEntry, PromotionPreparedTxDraft } from '../src/store/prepareTypes.js';
+import { createMemoryPromotionLedgerStore, PROMO_ID } from './helpers/promotionLedgerFixture.js';
 
-const PROMO_ID = 'evict-promo-1';
 const USER_ID = 'evict-user-1';
 const PER_USER_ALLOWANCE = '5000000'; // 5M MIST
 const RESERVE_AMOUNT = 1_000_000n; // 1M MIST
@@ -41,12 +41,10 @@ function makePromotionDraft(
 
 describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
   it('TTL eviction triggers executionLedger.release() and restores budget + allowance', async () => {
-    const ledger = new MemoryPromotionExecutionLedger();
+    const ledger = new MemoryPromotionExecutionLedger(await createMemoryPromotionLedgerStore());
 
     // Setup: claim + reserve
     await ledger.claim(PROMO_ID, USER_ID, {
-      maxParticipants: 10,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
     const reserve = await ledger.reserve({
@@ -60,7 +58,7 @@ describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
     // Verify reserve state
     const entBefore = await ledger.getEntitlement(PROMO_ID, USER_ID);
     expect(entBefore!.activeReservationReceiptId).toBe('receipt-evict-1');
-    const budgetBefore = await ledger.getBudgetSummary(PROMO_ID);
+    const budgetBefore = (await ledger.getPromotionLedgerStatus(PROMO_ID, null)).budget;
     expect(budgetBefore.reservedMist).toBe(RESERVE_AMOUNT);
 
     // Build prepare-store with eviction callback wired to ledger.release()
@@ -88,19 +86,17 @@ describe('ExecutionLedger + PrepareStore eviction cleanup', () => {
     expect(entAfter!.activeReservationReceiptId).toBeNull();
     expect(entAfter!.remainingGasAllowanceMist).toBe(PER_USER_ALLOWANCE);
 
-    const budgetAfter = await ledger.getBudgetSummary(PROMO_ID);
+    const budgetAfter = (await ledger.getPromotionLedgerStatus(PROMO_ID, null)).budget;
     expect(budgetAfter.reservedMist).toBe(0n);
 
     prepareStore.dispose();
   });
 
   it('IP overflow eviction triggers executionLedger.release() for evicted entry', async () => {
-    const ledger = new MemoryPromotionExecutionLedger();
+    const ledger = new MemoryPromotionExecutionLedger(await createMemoryPromotionLedgerStore());
 
     // Claim + reserve two different entries
     await ledger.claim(PROMO_ID, USER_ID, {
-      maxParticipants: 10,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
 

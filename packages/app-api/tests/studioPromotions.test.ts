@@ -42,6 +42,7 @@ import {
   MemoryPromotionStore,
   MemoryPromotionExecutionLedger,
 } from '@stelis/core-api/testing/studio';
+import { recordPromotionAbuseEvent } from '@stelis/core-api/studio';
 import type { AdminPromotionCreateRequest } from '@stelis/contracts';
 
 const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
@@ -73,8 +74,7 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
     prepareConfig: {} as never,
     studio: {} as never,
     promotionStore,
-    usageStore: null,
-    executionLedger: new MemoryPromotionExecutionLedger(),
+    executionLedger: new MemoryPromotionExecutionLedger(promotionStore),
     developerJwtTrustConfig: {
       issuer: 'test',
       audience: 'test',
@@ -84,6 +84,7 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
     },
     developerJwtVerifyUrl: null,
     redis: {} as never,
+    abuseStore: {} as never,
     sponsorOperations: {} as never,
     dispose: vi.fn(),
     ...overrides,
@@ -150,8 +151,7 @@ describe('studio promotion routes', () => {
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
       const batch = vi.spyOn(ctx.executionLedger!, 'getPromotionListLedgerStatuses');
       const entitlement = vi.spyOn(ctx.executionLedger!, 'getEntitlement');
-      const claimedCount = vi.spyOn(ctx.executionLedger!, 'getClaimedCount');
-      const budgetSummary = vi.spyOn(ctx.executionLedger!, 'getBudgetSummary');
+      const status = vi.spyOn(ctx.executionLedger!, 'getPromotionLedgerStatus');
 
       const res = await app.request('/studio/promotions', {
         headers: { Authorization: 'Bearer test-jwt' },
@@ -161,8 +161,7 @@ describe('studio promotion routes', () => {
       expect(batch).toHaveBeenCalledTimes(1);
       expect(batch).toHaveBeenCalledWith([record.promotionId], 'user-1');
       expect(entitlement).not.toHaveBeenCalled();
-      expect(claimedCount).not.toHaveBeenCalled();
-      expect(budgetSummary).not.toHaveBeenCalled();
+      expect(status).not.toHaveBeenCalled();
     });
 
     it('returns a deterministic cursor for the next active page', async () => {
@@ -308,6 +307,36 @@ describe('studio promotion routes', () => {
       expect(parsePromotionDetailResponse(body)).toEqual(body);
     });
 
+    it('derives detail count and budget from one ledger snapshot', async () => {
+      const record = await ctx.promotionStore!.create(BASE_PROMO);
+      await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      const status = vi
+        .spyOn(ctx.executionLedger!, 'getPromotionLedgerStatus')
+        .mockResolvedValueOnce({
+          promotionId: record.promotionId,
+          entitlement: null,
+          claimedCount: record.maxParticipants,
+          budget: {
+            availableMist: 50_000_000n,
+            reservedMist: 0n,
+            consumedMist: 0n,
+          },
+        });
+      const entitlement = vi.spyOn(ctx.executionLedger!, 'getEntitlement');
+
+      const res = await app.request(`/studio/promotions/${record.promotionId}`, {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(status).toHaveBeenCalledTimes(1);
+      expect(status).toHaveBeenCalledWith(record.promotionId, 'user-1');
+      expect(entitlement).not.toHaveBeenCalled();
+      const body = await res.json();
+      expect(body.promotionRemainingBudgetMist).toBe('50000000');
+      expect(body.detail.canClaim).toBe(false);
+    });
+
     it('checks block state and rate-limit keys on successful detail', async () => {
       const record = await ctx.promotionStore!.create(BASE_PROMO);
       await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
@@ -428,6 +457,28 @@ describe('studio promotion routes', () => {
       expect(body.entitlement.remainingGasAllowanceMist).toBe('5000000');
 
       expect(parsePromotionClaimResponse(body)).toEqual(body);
+    });
+
+    it('returns PROMOTION_CURRENT_CONFLICT without recording abuse for an active-record race', async () => {
+      const record = await ctx.promotionStore!.create(BASE_PROMO);
+      await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      vi.spyOn(ctx.executionLedger!, 'claim').mockResolvedValueOnce({
+        ok: false,
+        reason: 'record_changed',
+      });
+
+      const res = await app.request(`/studio/promotions/${record.promotionId}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-jwt' },
+        body: JSON.stringify({}),
+      });
+
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toMatchObject({
+        code: 'PROMOTION_CURRENT_CONFLICT',
+        error: 'Request conflicts with current state',
+      });
+      expect(recordPromotionAbuseEvent).not.toHaveBeenCalled();
     });
 
     it('returns PROMOTION_NOT_ACTIVE when startAt is in the future', async () => {

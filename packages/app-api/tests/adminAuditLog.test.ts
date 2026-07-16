@@ -8,8 +8,6 @@ function makeRedis(): AdminRedisClient {
     get: vi.fn(),
     set: vi.fn(),
     del: vi.fn(),
-    scan: vi.fn(),
-    ttl: vi.fn(),
     lrange: vi.fn(),
     lpush: vi.fn().mockResolvedValue(1),
     ltrim: vi.fn().mockResolvedValue(undefined),

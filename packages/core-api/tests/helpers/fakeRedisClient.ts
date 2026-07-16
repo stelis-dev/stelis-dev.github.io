@@ -11,7 +11,7 @@ interface FakeRedisEntry {
  * Minimal in-memory Redis implementation for adapter unit tests.
  *
  * It intentionally supports only the subset used by Stelis adapters:
- * `GET`, `SET NX PX`, `DEL`, `HGETALL`, `SCAN`, and the small Lua scripts
+ * `GET`, `SET NX PX`, `DEL`, `HGETALL`, and the small Lua scripts
  * embedded in the Redis-backed stores. Counter and TTL mutations inside Lua
  * scripts are emulated by private helpers, not exposed on RedisClientLike.
  *
@@ -170,7 +170,8 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes("redis.call('GET', KEYS[1])") &&
       script.includes("redis.call('DEL', KEYS[1])") &&
-      !script.includes('cjson.decode')
+      !script.includes('cjson.decode') &&
+      !script.includes("redis.call('ZREM', KEYS[2], ARGV[2])")
     ) {
       const value = await this.get(keys[0]);
       if (value !== null) {
@@ -687,7 +688,13 @@ export class FakeRedisClient implements RedisClientLike {
       for (const id of ids) {
         const raw = await this.get(args[0] + id);
         if (raw === null) return ['INDEX_RECORD_MISSING', id];
-        results.push(id, raw);
+        const memberships: string[] = [];
+        for (const indexKey of keys.slice(1, 6)) {
+          const score = this._zscore(indexKey, id);
+          if (score !== null && score !== 0) return ['INDEX_SCORE_INVALID', id];
+          memberships.push(score === null ? '0' : '1');
+        }
+        results.push(id, raw, ...memberships);
       }
       return results;
     }
@@ -696,7 +703,8 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      !script.includes("redis.call('ZREM', KEYS[2], ARGV[3])")
+      !script.includes("redis.call('ZREM', KEYS[2], ARGV[3])") &&
+      !script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
@@ -708,51 +716,73 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      script.includes("redis.call('ZREM', KEYS[2], ARGV[3])") &&
-      script.includes("redis.call('ZADD', KEYS[3], 0, ARGV[3])")
+      script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[3])") &&
+      script.includes("redis.call('ZADD', KEYS[targetIndex], 0, ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
+      const currentIndex = Number(args[3]) - 1;
+      const targetIndex = Number(args[4]) - 1;
       if (
-        this._zscore(keys[1], args[2]) !== 0 ||
-        this._zscore(keys[2], args[2]) !== null ||
-        this._zscore(keys[3], args[2]) !== 0
-      ) {
+        currentIndex < 2 ||
+        currentIndex > 5 ||
+        targetIndex < 2 ||
+        targetIndex > 5 ||
+        currentIndex === targetIndex ||
+        this._zscore(keys[1], args[2]) !== 0
+      )
         return 'INDEX_CONFLICT';
+      for (let index = 2; index <= 5; index++) {
+        const score = this._zscore(keys[index], args[2]);
+        if (index === currentIndex ? score !== 0 : score !== null) return 'INDEX_CONFLICT';
       }
       await this.set(keys[0], args[1]);
-      this._zrem(keys[1], args[2]);
-      this._zadd(keys[2], 0, args[2]);
+      this._zrem(keys[currentIndex], args[2]);
+      this._zadd(keys[targetIndex], 0, args[2]);
       return 'OK';
     }
 
     // ── PromotionStore DELETE_LUA emulation ──
     if (
-      script.includes("current.status ~= 'draft'") &&
+      script.includes("ARGV[3] ~= 'delete'") &&
+      script.includes("redis.call('EXISTS', KEYS[7])") &&
       script.includes("redis.call('DEL', KEYS[1])") &&
       script.includes("redis.call('ZREM', KEYS[2], ARGV[2])") &&
-      script.includes("redis.call('ZREM', KEYS[3], ARGV[2])")
+      script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[2])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null) {
         if (args[0] !== '') return 'CURRENT_CONFLICT';
-        if (this._zscore(keys[1], args[1]) !== null || this._zscore(keys[2], args[1]) !== null) {
-          return 'INDEX_CONFLICT';
+        for (const indexKey of keys.slice(1, 6)) {
+          if (this._zscore(indexKey, args[1]) !== null) return 'INDEX_CONFLICT';
         }
+        if (
+          (await this.get(keys[6])) !== null ||
+          Object.keys(await this.hgetall(keys[6])).length > 0
+        )
+          return 'ACCOUNTING_PRESENT';
         return 'NOT_FOUND';
       }
       if (args[0] === '' || raw !== args[0]) return 'CURRENT_CONFLICT';
-      const current = JSON.parse(raw) as { status?: string };
-      const allScore = this._zscore(keys[1], args[1]);
-      const draftScore = this._zscore(keys[2], args[1]);
-      if (current.status !== 'draft') {
-        if (allScore !== 0 || draftScore !== null) return 'INDEX_CONFLICT';
-        return 'NOT_DELETABLE';
+      const currentIndex = Number(args[3]) - 1;
+      if (currentIndex < 2 || currentIndex > 5 || this._zscore(keys[1], args[1]) !== 0) {
+        return 'INDEX_CONFLICT';
       }
-      if (allScore !== 0 || draftScore !== 0) return 'INDEX_CONFLICT';
+      for (let index = 2; index <= 5; index++) {
+        const score = this._zscore(keys[index], args[1]);
+        if (index === currentIndex ? score !== 0 : score !== null) return 'INDEX_CONFLICT';
+      }
+      if (args[2] !== 'delete') return 'NOT_DELETABLE';
+      if (currentIndex !== 2) return 'INDEX_CONFLICT';
+      if (
+        (await this.get(keys[6])) !== null ||
+        Object.keys(await this.hgetall(keys[6])).length > 0
+      ) {
+        return 'ACCOUNTING_PRESENT';
+      }
       await this.del(keys[0]);
       this._zrem(keys[1], args[1]);
-      this._zrem(keys[2], args[1]);
+      this._zrem(keys[currentIndex], args[1]);
       return 'OK';
     }
 
@@ -767,30 +797,6 @@ export class FakeRedisClient implements RedisClientLike {
       result[field] = value;
     }
     return result;
-  }
-
-  async ping(): Promise<string> {
-    return 'PONG';
-  }
-
-  async quit(): Promise<void> {
-    this._store.clear();
-    this._zsets.clear();
-  }
-
-  async scan(pattern: string, _count?: number): Promise<string[]> {
-    // Convert Redis MATCH glob to regex (supports only * and ?)
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    const regexStr = escaped.replace(/\*/g, '.*').replace(/\?/g, '.');
-    const regex = new RegExp(`^${regexStr}$`);
-    const results: string[] = [];
-    for (const key of this._store.keys()) {
-      this.evictIfExpired(key);
-      if (this._store.has(key) && regex.test(key)) {
-        results.push(key);
-      }
-    }
-    return results;
   }
 
   private pttl(key: string): number {

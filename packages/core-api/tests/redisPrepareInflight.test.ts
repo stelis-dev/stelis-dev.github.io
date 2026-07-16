@@ -39,7 +39,6 @@ function createMockRedisClient(): RedisClientLike {
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(0),
     hgetall: vi.fn().mockResolvedValue({}),
-    scan: vi.fn().mockResolvedValue([]),
 
     async eval(script: string, _keys: string[], args: string[]): Promise<unknown> {
       if (script.includes('ZREMRANGEBYSCORE') && script.includes('ZADD')) {
