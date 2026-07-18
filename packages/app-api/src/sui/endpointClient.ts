@@ -125,6 +125,7 @@ export function createSuiRpcEndpointClient(
     baseUrl: immutableEndpoint.baseUrl,
     meta: immutableEndpoint.meta,
     timeout: SUI_OPERATION_ATTEMPT_TIMEOUT_MS,
+    fetchInit: { redirect: 'error' },
   });
   return Object.freeze({
     endpoint: immutableEndpoint,

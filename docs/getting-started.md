@@ -61,6 +61,10 @@ cp packages/app-api/.env.example packages/app-api/.env
 
 Fill in real values in `.env`. `packages/app-api/settlement-swap-paths.json` and `packages/app-api/rpc.json` are tracked config files; confirm the section selected by `NETWORK` has the pool IDs and RPC endpoints for that network.
 
+Each `rpc.json` `baseUrl` is the final Sui gRPC base URL. The Host appends the
+requested gRPC method path and does not follow HTTP redirects; configure each
+failover endpoint directly in its intended order.
+
 Start the Host:
 
 ```bash
