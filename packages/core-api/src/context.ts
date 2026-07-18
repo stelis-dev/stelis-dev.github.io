@@ -13,29 +13,40 @@ import type {
   ChainBoundSuiEndpointSnapshot,
 } from '@stelis/core-relay';
 
-import type { PrepareStoreAdapter } from './store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from './store/sponsoredExecutionStore.js';
 import type { PrepareRequestNonceStore } from './store/prepareRequestNonceStore.js';
 import type { RateLimitAdapter } from './store/rateLimitTypes.js';
 import type { AbuseBlockerAdapter } from './store/abuseBlockTypes.js';
 import type { PrepareInflightLimiter } from './store/prepareInflightTypes.js';
 import type { SponsorResultCallback } from './handlers/sponsorResult.js';
+import { PREPARE_TTL_MS } from './preparePolicy.js';
 import { canonicalizeAddress, validateAddressConstraints } from './addressConstraints.js';
 import { logStructuredEvent } from './structuredEventLog.js';
 import {
   SPONSOR_POOL_LEASE_CHECKIN,
   SPONSOR_POOL_LEASE_CHECKOUT,
-  SPONSOR_POOL_LEASE_COMMITTED,
   SPONSOR_POOL_LEASE_EXHAUSTED,
   SPONSOR_POOL_SIGN,
 } from './observability/events.js';
 import { createHash } from 'node:crypto';
 import { SponsorLeaseExpiredError } from './store/sponsorPoolErrors.js';
 import {
-  computeLeaseProof,
-  leaseProofMatches,
-  COMMIT_DIGEST_RESERVED,
-  SponsorLeaseCommitError,
+  assertSponsorLeaseRecordProof,
+  createReservedSponsorLeaseRecord,
+  materializeExecutingSponsorLeaseRecordTransition,
+  planCommittedSponsorLeaseRecordTransition,
+  planExecutingSponsorLeaseRecordTransition,
+  planSponsorLeaseRecordRemoval,
+  parseSponsorLeaseRecord,
+  serializeSponsorLeaseRecord,
   SPONSOR_LEASE_HMAC_SECRET_MIN_LENGTH,
+  type SponsorLeaseRecordAccess,
+  type MemorySponsorLeaseRecordAccess,
+  type SponsorLeaseRecordRemoval,
+  type SponsorLeaseRemovalExpectation,
+  type SponsorLeaseRecordSnapshot,
+  type SponsorLeaseRecordDeadlineTransition,
+  type SponsorLeaseRecordTransition,
 } from './store/sponsorLeaseProof.js';
 import { assertSponsorSlotCount } from './sponsorSlotPolicy.js';
 import {
@@ -63,12 +74,11 @@ export { parseSponsorKey, parseSponsorKeys } from './sponsorKeyParser.js';
  * Serializable sponsor slot lease. The sponsor address is the lease identity
  * across processes and is persisted in Redis-backed prepare records.
  *
- * The adapter commits a
- * two-stage HMAC lease proof to its lease store — reserved at
- * `checkout`, committed after the caller-driven `commit` — and verifies
- * it on `sign` / `checkin`. `sponsorAddress` is the lease identity;
- * `receiptId` binds that lease to one prepare operation, and the prepare
- * commit digest (`txBytesHash`) is the authenticator bound at `commit()`.
+ * The adapter stores one current lease record whose stage is `reserved`,
+ * `committed`, or `executing`. Receipt-store mutations advance and remove the
+ * latter two stages atomically with the receipt lifecycle. `sponsorAddress` is the lease identity;
+ * `receiptId` binds that lease to one prepare operation, and `txBytesHash`
+ * binds it to the validated transaction bytes at prepared-receipt commit.
  */
 export interface SponsorLease {
   readonly sponsorAddress: string;
@@ -79,35 +89,37 @@ export interface SponsorLease {
  *
  * Implementations are responsible for:
  *   1. leasing a slot for /sponsor (reserved proof keyed by `receiptId`)
- *   2. committing the leased slot to a specific prepare commit (`txBytesHash`)
+ *   2. exposing exact lease-record transitions to the sponsored execution store
  *   3. releasing it after /sponsor completes or TTL expiry
  *   4. resolving the matching signing key for /sponsor
  *
- * Lease contract (two-stage proof):
+ * Lease contract:
  *
  *   checkout(receiptId)
- *     → lease proof = HMAC(secret, receiptId || sponsorAddress || ":reserved")
- *     → reserved stage; `sign()` cannot satisfy this HMAC for any tx
- *       because `hash(txBytes)` never equals the literal `":reserved"`
+ *     → lease proof = HMAC(secret, "reserved" | receiptId | sponsorAddress)
+ *     → reserved stage; `sign()` accepts only an executing-stage record
  *
- *   commit(sponsorAddress, receiptId, txBytesHash)
- *     → CAS: require current Redis value == reserved proof, then
- *       write committed proof = HMAC(secret, receiptId || sponsorAddress || txBytesHash)
- *     → fails closed (SponsorLeaseCommitError) if the reservation is
- *       missing, already committed, or stamped by a different
- *       `(receiptId, sponsorAddress)` pair. Silent no-op is not allowed
+ *   prepared receipt commit
+ *     → the sponsored execution store atomically replaces the reserved proof
+ *       with HMAC(secret, "committed" | receiptId | sponsorAddress | txBytesHash)
+ *
+ *   execution start
+ *     → the sponsored execution store atomically advances the lease to
+ *       `executing` and binds the expected Sui transaction digest in the proof
  *
  *   sign(sponsorAddress, receiptId, txBytes)
- *     → computes HMAC(secret, receiptId || sponsorAddress || hash(txBytes))
- *     → only matches when the submitted txBytes hashes to the committed
- *       prepare digest; a Redis-only attacker who overwrites an entry's
- *       `txBytesHash` after `commit()` cannot satisfy this gate because
+ *     → verifies the executing proof for the same receipt, sponsor,
+ *       hash(txBytes), and stored Sui transaction digest
+ *     → only matches when the submitted txBytes hash equals the validated
+ *       transaction-bytes hash; a Redis-only attacker who overwrites an entry's
+ *       `txBytesHash` after the atomic commit cannot satisfy this gate because
  *       the committed Redis value still references the original hash
  *
- *   checkin(sponsorAddress, receiptId, txBytesHash | null)
- *     → txBytesHash = string: verifies committed proof, deletes
- *     → txBytesHash = null:   verifies reserved proof, deletes
- *     → HMAC mismatch is a silent no-op (TTL safety net covers it);
+ *   checkin(sponsorAddress, receiptId)
+ *     → verifies and deletes only a pre-commit `reserved` lease
+ *     → committed and executing leases can be removed only by the atomic
+ *       receipt-store transition that owns their corresponding state
+ *     → HMAC mismatch is a silent no-op (TTL safety net covers reserved state);
  *       the same lease key cannot be stolen by a forged receipt
  */
 export interface SponsorPoolAdapter {
@@ -117,43 +129,24 @@ export interface SponsorPoolAdapter {
   readonly primaryAddress: string;
   /**
    * Attempt to lease a slot for the given `receiptId`. Returns null when all
-   * slots are busy. The pool stores the reserved HMAC proof
-   * `HMAC(secret, receiptId || sponsorAddress || ":reserved")`.
+   * slots are busy. The pool stores the stage-separated reserved HMAC proof.
    */
   checkout(receiptId: string): Promise<SponsorLease | null>;
   /**
-   * Promote a leased slot from the reserved stage to the committed stage.
-   *
-   * Must be called after the prepare runner has built the final
-   * PTB and computed its `txBytesHash`, and just before
-   * `prepareStore.store()`. CAS semantics: the current lease proof must
-   * equal the reserved proof for `(receiptId, sponsorAddress)`. Any other state
-   * (missing key, different receiptId, already committed, TTL expired)
-   * throws `SponsorLeaseCommitError` and the caller must fall through to
-   * the error path (release pending nonce reservation + checkin the slot
-   * with the appropriate state). Silent no-op is not allowed — a failed
-   * commit indicates either a forged state or a concurrent actor.
+   * Release a lease that has not reached prepared-receipt commit.
+   * Committed and executing leases are removed only by the receipt store's
+   * atomic discard/finalization mutation.
    */
-  commit(sponsorAddress: string, receiptId: string, txBytesHash: string): Promise<void>;
-  /**
-   * Release a leased slot.
-   *
-   * `txBytesHash === null` → verify and delete the reserved proof.
-   * `txBytesHash` is a hex string → verify and delete the committed proof.
-   *
-   * HMAC mismatch is a silent no-op; the Redis lease TTL covers residual
-   * state.
-   */
-  checkin(sponsorAddress: string, receiptId: string, txBytesHash: string | null): Promise<void>;
+  checkin(sponsorAddress: string, receiptId: string): Promise<void>;
   /** Current sponsor slot lease occupancy for admin observability. */
   leaseStatus(): Promise<SponsorSlotLeaseSummary>;
   /** Return all configured sponsor addresses. */
   addresses(): string[];
   /**
-   * Sign txBytes with the slot's keypair. Verifies the committed HMAC
-   * lease proof for `(receiptId, sponsorAddress, hash(txBytes))` before touching
-   * the in-memory keypair. Reserved-stage leases fail this check because
-   * the reservation sentinel cannot equal any hex SHA-256 digest.
+   * Sign txBytes with the slot's keypair. Verifies the executing lease record
+   * and its HMAC for `(receiptId, sponsorAddress, hash(txBytes), transactionDigest)`
+   * before touching the in-memory keypair. Reserved and committed leases fail
+   * because only the executing-stage record can authorize signing.
    * Redis compromise alone cannot satisfy this check without the HMAC
    * secret held in process env.
    */
@@ -163,6 +156,12 @@ export interface SponsorPoolAdapter {
     txBytes: Uint8Array,
   ): Promise<{ signature: string }>;
 }
+
+/** Sponsor pool with exact current lease-record access for receipt coordination. */
+export interface SponsorPoolRecordAdapter extends SponsorPoolAdapter, SponsorLeaseRecordAccess {}
+
+export interface MemorySponsorPoolRecordAdapter
+  extends SponsorPoolAdapter, MemorySponsorLeaseRecordAccess {}
 
 /**
  * Options shared by `SponsorPool` (in-memory) and `RedisSponsorPool`.
@@ -184,7 +183,7 @@ function assertLeaseHmacSecret(secret: string, label: string): void {
   }
 }
 
-/** Hex SHA-256 digest of `txBytes` — the canonical commit digest. */
+/** Canonical lowercase SHA-256 hash of the validated transaction bytes. */
 function sha256Hex(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
 }
@@ -192,24 +191,19 @@ function sha256Hex(data: Uint8Array): string {
 /**
  * Pool of sponsor slots. Supports single-key or multi-key deployments.
  *
- * Capacity = max concurrent sponsored TXs = target TPS × finality delay.
- * Sponsor Refill Account Key is responsible for topping up each slot's gas coins.
+ * Capacity is exactly the configured sponsor-address count: one address can
+ * own one outstanding prepared or executing receipt. Multiple addresses
+ * provide parallel capacity. The Sponsor Refill Account funds each address's
+ * SUI address balance.
  *
- * The in-memory pool stores the same two-stage HMAC lease proof format as
+ * The in-memory pool stores the same strict three-stage lease record as
  * `RedisSponsorPool`, so both adapters share one fencing
  * semantics. Tests covering `pool.sign()` behaviour run the same HMAC
  * code path.
  */
-export class SponsorPool implements SponsorPoolAdapter {
+export class SponsorPool implements MemorySponsorPoolRecordAdapter {
   private readonly _keypairs: Map<string, Ed25519Keypair>;
-  private readonly _inUse = new Set<string>();
-  /**
-   * sponsorAddress → HMAC lease proof. The HMAC input starts as
-   * `receiptId || sponsorAddress || ":reserved"` at `checkout` and is replaced
-   * atomically by `receiptId || sponsorAddress || txBytesHash` at `commit`. The
-   * raw receiptId and the raw txBytesHash are not stored here.
-   */
-  private readonly _leaseProofs = new Map<string, string>();
+  private readonly _leaseRecords = new Map<string, string>();
   private readonly _addresses: string[];
   private readonly _hmacSecret: string;
 
@@ -239,13 +233,13 @@ export class SponsorPool implements SponsorPoolAdapter {
 
   /**
    * Atomically checks out an available slot for the given `receiptId`.
-   * Stores the reserved-stage HMAC proof. Returns null if all slots are
+   * Stores the reserved-stage lease record. Returns null if all slots are
    * busy — caller maps to NO_SPONSOR_SLOT (503).
    *
    * Node.js single-threaded: this is effectively a mutex-free atomic operation.
    */
   async checkout(receiptId: string): Promise<SponsorLease | null> {
-    const sponsorAddress = this._addresses.find((address) => !this._inUse.has(address));
+    const sponsorAddress = this._addresses.find((address) => !this._leaseRecords.has(address));
     if (!sponsorAddress) {
       logStructuredEvent(SPONSOR_POOL_LEASE_EXHAUSTED, {
         adapter: 'memory',
@@ -253,16 +247,18 @@ export class SponsorPool implements SponsorPoolAdapter {
       });
       return null;
     }
-    this._inUse.add(sponsorAddress);
-    this._leaseProofs.set(
+    const record = createReservedSponsorLeaseRecord({
+      secret: this._hmacSecret,
+      receiptId,
       sponsorAddress,
-      computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, COMMIT_DIGEST_RESERVED),
-    );
+      deadlineMs: leaseDeadline(Date.now(), PREPARE_TTL_MS + 5_000),
+    });
+    this._leaseRecords.set(sponsorAddress, serializeSponsorLeaseRecord(record));
     logStructuredEvent(SPONSOR_POOL_LEASE_CHECKOUT, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
       pool_size: this.size,
-      in_use: this._inUse.size,
+      in_use: this._leaseRecords.size,
     });
     return {
       sponsorAddress,
@@ -270,68 +266,31 @@ export class SponsorPool implements SponsorPoolAdapter {
   }
 
   /**
-   * Transition a leased slot from the reserved stage to the committed
-   * stage. CAS semantics: the current proof must equal the reserved
-   * proof for `(receiptId, sponsorAddress)`. Any mismatch throws
-   * `SponsorLeaseCommitError` — silent no-op is not allowed.
-   */
-  async commit(sponsorAddress: string, receiptId: string, txBytesHash: string): Promise<void> {
-    const current = this._leaseProofs.get(sponsorAddress);
-    if (typeof current !== 'string') {
-      throw new SponsorLeaseCommitError(
-        'LEASE_MISSING',
-        `SponsorPool.commit: no active lease for sponsor ${sponsorAddress}`,
-      );
-    }
-    const reservedProof = computeLeaseProof(
-      this._hmacSecret,
-      receiptId,
-      sponsorAddress,
-      COMMIT_DIGEST_RESERVED,
-    );
-    if (!leaseProofMatches(current, reservedProof)) {
-      throw new SponsorLeaseCommitError(
-        'LEASE_COMMIT_CAS_FAILED',
-        `SponsorPool.commit: lease for sponsor ${sponsorAddress} is not in reserved state for the given receiptId`,
-      );
-    }
-    this._leaseProofs.set(
-      sponsorAddress,
-      computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, txBytesHash),
-    );
-    logStructuredEvent(SPONSOR_POOL_LEASE_COMMITTED, {
-      adapter: 'memory',
-      sponsor_address: sponsorAddress,
-    });
-  }
-
-  /**
    * Returns a slot to the pool after /sponsor completes, or on TTL
    * expiry, or on prepare-path failure.
    *
-   * `txBytesHash === null` → verify reserved proof then delete.
-   * Otherwise                → verify committed proof then delete.
-   *
-   * Mismatch is a silent no-op to keep background eviction paths
-   * idempotent; the Redis lease TTL covers any residual state.
+   * Only a reserved lease can be released through this path. Committed and
+   * executing state belongs to the atomic sponsored-execution store.
    */
-  async checkin(
-    sponsorAddress: string,
-    receiptId: string,
-    txBytesHash: string | null,
-  ): Promise<void> {
-    const current = this._leaseProofs.get(sponsorAddress);
-    const commitDigest = txBytesHash ?? COMMIT_DIGEST_RESERVED;
-    const expected = computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, commitDigest);
-    if (!leaseProofMatches(current, expected)) return;
-    this._inUse.delete(sponsorAddress);
-    this._leaseProofs.delete(sponsorAddress);
+  async checkin(sponsorAddress: string, receiptId: string): Promise<void> {
+    const snapshot = await this.readSponsorLeaseRecord(sponsorAddress);
+    if (!snapshot) return;
+    let removal: SponsorLeaseRecordRemoval;
+    try {
+      removal = this.prepareSponsorLeaseRecordRemoval(snapshot, {
+        stage: 'reserved',
+        receiptId,
+      });
+    } catch {
+      return;
+    }
+    if (!this.applySponsorLeaseRecordRemoval(removal)) return;
     logStructuredEvent(SPONSOR_POOL_LEASE_CHECKIN, {
       adapter: 'memory',
       sponsor_address: sponsorAddress,
-      stage: txBytesHash === null ? 'reserved' : 'committed',
+      stage: snapshot.record.stage,
       pool_size: this.size,
-      in_use: this._inUse.size,
+      in_use: this._leaseRecords.size,
     });
   }
 
@@ -345,7 +304,7 @@ export class SponsorPool implements SponsorPoolAdapter {
   async leaseStatus(): Promise<SponsorSlotLeaseSummary> {
     const slots = this._addresses.map((address) => ({
       address,
-      leased: this._inUse.has(address),
+      leased: this._leaseRecords.has(address),
     }));
     const leasedSlots = slots.filter((slot) => slot.leased).length;
     return {
@@ -362,15 +321,15 @@ export class SponsorPool implements SponsorPoolAdapter {
   ): Promise<{ signature: string }> {
     // Committed HMAC lease proof check — the only gate between a
     // Redis-only attacker and the in-memory signing keypair.
-    // Reserved-stage leases fail this check because the reservation
-    // sentinel can never collide with a hex SHA-256 digest.
-    const expected = computeLeaseProof(
-      this._hmacSecret,
-      receiptId,
-      sponsorAddress,
-      sha256Hex(txBytes),
-    );
-    if (!leaseProofMatches(this._leaseProofs.get(sponsorAddress), expected)) {
+    // Reserved and committed leases fail because signing requires the exact
+    // executing-stage record and its transaction-byte hash.
+    const snapshot = await this.readSponsorLeaseRecord(sponsorAddress);
+    if (
+      !snapshot ||
+      snapshot.record.stage !== 'executing' ||
+      snapshot.record.receiptId !== receiptId ||
+      snapshot.record.txBytesHash !== sha256Hex(txBytes)
+    ) {
       throw new SponsorLeaseExpiredError(sponsorAddress);
     }
     const keypair = this._keypairs.get(sponsorAddress);
@@ -384,6 +343,112 @@ export class SponsorPool implements SponsorPoolAdapter {
     });
     return keypair.signTransaction(txBytes);
   }
+
+  sponsorLeaseRecordKey(sponsorAddress: string): string {
+    return sponsorAddress;
+  }
+
+  async readSponsorLeaseRecord(sponsorAddress: string): Promise<SponsorLeaseRecordSnapshot | null> {
+    const raw = this._leaseRecords.get(sponsorAddress);
+    if (raw === undefined) return null;
+    const record = parseSponsorLeaseRecord(raw);
+    assertSponsorLeaseRecordProof(record, this._hmacSecret);
+    if (record.sponsorAddress !== sponsorAddress) {
+      throw new Error('SponsorPool: lease record sponsor does not match its key');
+    }
+    return { raw, record };
+  }
+
+  prepareCommittedSponsorLeaseRecord(
+    snapshot: SponsorLeaseRecordSnapshot,
+    receiptId: string,
+    txBytesHash: string,
+    deadlineMs: number,
+  ): SponsorLeaseRecordTransition {
+    return planCommittedSponsorLeaseRecordTransition({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      receiptId,
+      txBytesHash,
+      deadlineMs,
+    });
+  }
+
+  prepareExecutingSponsorLeaseRecord(
+    snapshot: SponsorLeaseRecordSnapshot,
+    receiptId: string,
+    txBytesHash: string,
+    transactionDigest: string,
+  ): SponsorLeaseRecordDeadlineTransition {
+    return planExecutingSponsorLeaseRecordTransition({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      receiptId,
+      txBytesHash,
+      transactionDigest,
+    });
+  }
+
+  prepareSponsorLeaseRecordRemoval(
+    snapshot: SponsorLeaseRecordSnapshot,
+    expectation: SponsorLeaseRemovalExpectation,
+  ): SponsorLeaseRecordRemoval {
+    return planSponsorLeaseRecordRemoval({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      expectation,
+    });
+  }
+
+  /** Exact single-record CAS used by the in-memory receipt coordinator. */
+  matchesSponsorLeaseRecordTransition(transition: SponsorLeaseRecordTransition): boolean {
+    return (
+      transition.key === transition.nextRecord.sponsorAddress &&
+      this._leaseRecords.get(transition.nextRecord.sponsorAddress) === transition.expectedRaw
+    );
+  }
+
+  applySponsorLeaseRecordTransition(transition: SponsorLeaseRecordTransition): boolean {
+    if (!this.matchesSponsorLeaseRecordTransition(transition)) return false;
+    this._leaseRecords.set(transition.nextRecord.sponsorAddress, transition.nextRaw);
+    return true;
+  }
+
+  matchesSponsorLeaseRecordDeadlineTransition(
+    transition: SponsorLeaseRecordDeadlineTransition,
+  ): boolean {
+    return this._leaseRecords.get(transition.key) === transition.expectedRaw;
+  }
+
+  applySponsorLeaseRecordDeadlineTransition(
+    transition: SponsorLeaseRecordDeadlineTransition,
+    deadlineMs: number,
+  ): boolean {
+    if (!this.matchesSponsorLeaseRecordDeadlineTransition(transition)) return false;
+    const materialized = materializeExecutingSponsorLeaseRecordTransition(transition, deadlineMs);
+    this._leaseRecords.set(materialized.nextRecord.sponsorAddress, materialized.nextRaw);
+    return true;
+  }
+
+  matchesSponsorLeaseRecordRemoval(removal: SponsorLeaseRecordRemoval): boolean {
+    return this._leaseRecords.get(removal.key) === removal.expectedRaw;
+  }
+
+  applySponsorLeaseRecordRemoval(removal: SponsorLeaseRecordRemoval): boolean {
+    if (!this.matchesSponsorLeaseRecordRemoval(removal)) return false;
+    return this._leaseRecords.delete(removal.key);
+  }
+}
+
+function leaseDeadline(nowMs: number, ttlMs: number): number {
+  const deadlineMs = nowMs + ttlMs;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= nowMs) {
+    throw new Error('Sponsor lease deadline exceeds the safe integer range');
+  }
+  return deadlineMs;
 }
 
 // ─────────────────────────────────────────────
@@ -392,7 +457,7 @@ export class SponsorPool implements SponsorPoolAdapter {
 
 /** Minimal interface for objects that support explicit cleanup */
 interface Disposable {
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 /** Type guard — returns true if `obj` has a callable `dispose()` method */
@@ -442,16 +507,22 @@ export interface HostRuntimeConfig {
    */
   sponsorPool: SponsorPoolAdapter;
   /**
+   * Receipt-time availability check for the sponsor address already assigned
+   * by `sponsorPool`. The Host implementation must include observation
+   * freshness; aggregate pool availability is not sufficient here.
+   */
+  isSponsorAddressAvailable(sponsorAddress: string): Promise<boolean>;
+  /**
    * Abuse blocker — required. Hosts inject `RedisAbuseBlocker` (or a
    * test-only `MemoryAbuseBlocker` from a fixture path). No runtime
    * default.
    */
   abuseBlocker: AbuseBlockerAdapter;
   /**
-   * PrepareStoreAdapter — required. Hosts inject `RedisPrepareStore` (or
-   * a test-only memory adapter). No runtime default.
+   * Sponsored execution store — required. It owns prepared, executing,
+   * final, callback, nonce, and bounded recovery state for one receipt.
    */
-  prepareStore: PrepareStoreAdapter;
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /**
    * Prepare request nonce store — required. Hosts inject a short-TTL store
    * so signed `/relay/prepare` requests cannot be replayed before
@@ -473,16 +544,12 @@ export interface HostRuntimeConfig {
   /** Pre-registered settlement swap paths for L2 validation. */
   allowedSettlementSwapPaths?: AllowedSettlementSwapPath[];
   /**
-   * Optional host-provided sponsor result callback. Invoked by sponsor
-   * SponsoredExecutionPolicy `Release` hooks after the sponsor runner's
-   * `safeSlotCheckin()` boundary, on every path that reached the
-   * post-consume stage.
-   * Must be best-effort / never-throws (the callback implementation
-   * catches its own errors; Release hooks also wrap the invocation in
-   * try/catch as defence-in-depth). Used by app-api to drive per-action
-   * sponsor operations state updates.
+   * Host-provided sponsor result callback. The sponsor runner attempts it
+   * after atomically storing the final receipt. Failed delivery remains
+   * pending and the recovery task retries it. Used by app-api to drive
+   * per-action sponsor operations state updates.
    */
-  onSponsorResult?: SponsorResultCallback;
+  onSponsorResult: SponsorResultCallback;
 }
 
 // ─────────────────────────────────────────────
@@ -493,12 +560,16 @@ export interface HostContext {
   network: SuiNetwork;
   sui: ChainBoundSuiEndpointSnapshot;
   /**
-   * Sponsor pool — checkout a slot before signing, checkin after TX completes.
+   * Sponsor pool — reserves a sponsor address during prepare. The sponsored
+   * execution store advances and releases the durable lease with each receipt
+   * transition.
    * Pool size = max concurrent sponsored TXs.
    *
    * Single-key deployments have pool size 1. Multi-key deployments have pool size N.
    */
   sponsorPool: SponsorPoolAdapter;
+  /** Check the fresh availability of the exact sponsor assigned to a receipt. */
+  isSponsorAddressAvailable(sponsorAddress: string): Promise<boolean>;
   packageId: string;
   configId: string;
   vaultRegistryId: string;
@@ -515,15 +586,14 @@ export interface HostContext {
    */
   abuseBlocker: AbuseBlockerAdapter;
   /**
-   * Prepare store — binds /prepare-issued txBytes + slot lease to a
-   * receiptId. Host-injected; production hosts use `RedisPrepareStore`,
-   * tests use a fixture adapter. Includes IP concurrency enforcement
-   * (max 2 outstanding per IP).
+   * Receipt lifecycle store — binds prepared bytes, sponsor lease, execution,
+   * final accounting, callback delivery, and bounded indexes to one receipt.
    */
-  prepareStore: PrepareStoreAdapter;
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /**
    * Short-TTL store for client-generated prepare request nonces. This is
-   * separate from the on-chain settlement nonce stored in `prepareStore`.
+   * separate from the on-chain settlement nonce reserved by the sponsored
+   * execution store.
    */
   prepareRequestNonceStore: PrepareRequestNonceStore;
   /**
@@ -554,8 +624,8 @@ export interface HostContext {
   invalidateConfigCache(): void;
   /**
    * Releases background resources held by injected coordination
-   * adapters that implement `Disposable` (e.g. `MemoryPrepareStore`'s
-   * eviction timer in test fixtures). Production Redis-backed adapters
+   * adapters that implement `Disposable` (for example memory fixtures
+   * with retained timers). Production Redis-backed adapters
    * do not implement `Disposable`; the host disposes the underlying
    * Redis client via its own shutdown flow (see
    * `app-api/src/context.ts` `dispose()`).
@@ -573,20 +643,20 @@ export interface HostContext {
    * Call on graceful shutdown or in test teardown. Not required for
    * normal process exit (memory-fixture timers are unref'd).
    */
-  dispose(): void;
+  dispose(): Promise<void>;
   /**
    * Host-provided post-sponsor result callback for sponsor handlers. See
    * `onSponsorResult` in `HostRuntimeConfig` for the contract.
    * `undefined` means no callback is wired; handlers skip invocation.
    */
-  onSponsorResult?: SponsorResultCallback;
+  onSponsorResult: SponsorResultCallback;
 }
 
 /**
  * Creates a HostContext from configuration.
  * Call once at server startup, then pass to all handlers.
  *
- * Every coordination adapter (`sponsorPool`, `prepareStore`,
+ * Every coordination adapter (`sponsorPool`, `sponsoredExecutionStore`,
  * `prepareRequestNonceStore`, `prepareInflightLimiter`, `rateLimiter`,
  * `abuseBlocker`) is required. There is no in-memory runtime default. Hosts
  * must inject production-capable adapters (Redis-backed for `app-api`); test
@@ -604,10 +674,11 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
       'createHostContext: sponsorPool is required (production hosts inject RedisSponsorPool; tests inject a fixture pool). No runtime default is provided.',
     );
   }
-  if (!config.prepareStore) {
-    throw new Error(
-      'createHostContext: prepareStore is required (production hosts inject RedisPrepareStore; tests inject a fixture store).',
-    );
+  if (typeof config.isSponsorAddressAvailable !== 'function') {
+    throw new Error('createHostContext: isSponsorAddressAvailable is required');
+  }
+  if (!config.sponsoredExecutionStore) {
+    throw new Error('createHostContext: sponsoredExecutionStore is required');
   }
   if (!config.prepareRequestNonceStore) {
     throw new Error(
@@ -691,6 +762,7 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
     network: config.network,
     sui,
     sponsorPool,
+    isSponsorAddressAvailable: config.isSponsorAddressAvailable,
     packageId: chainIds.packageId,
     configId: chainIds.configId,
     vaultRegistryId: chainIds.vaultRegistryId,
@@ -698,12 +770,12 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
     // All coordination adapters are host-injected (validated above);
     // there is no in-memory runtime default. Production hosts inject
     // Redis-backed adapters (`RedisRateLimiter`, `RedisAbuseBlocker`,
-    // `RedisPrepareStore`, `RedisPrepareInflight`, `RedisSponsorPool`).
+    // `RedisSponsoredExecutionStore`, `RedisPrepareInflight`, `RedisSponsorPool`).
     // Test code injects memory fixtures directly through this same
     // contract. See "Production Store Adapters" in `docs/operations.md`.
     rateLimiter: config.rateLimiter,
     abuseBlocker: config.abuseBlocker,
-    prepareStore: config.prepareStore,
+    sponsoredExecutionStore: config.sponsoredExecutionStore,
     prepareRequestNonceStore: config.prepareRequestNonceStore,
     prepareInflightLimiter: config.prepareInflightLimiter,
     settlementPayoutRecipientAddress: recipientAddr,
@@ -716,18 +788,22 @@ export function createHostContext(config: HostRuntimeConfig): HostContext {
       // between /prepare and /sponsor time without waiting for the cache TTL.
       cacheTimestamp = 0;
     },
-    dispose() {
+    async dispose() {
       // Dispatch dispose() to every injected adapter that implements
       // it. Hosts and tests own the underlying lifecycle (see the
       // `dispose()` doc on `HostContext`); this dispatcher fans out
       // to memory fixtures that hold background timers (e.g.
-      // `MemoryPrepareStore`) so test teardown does not have to walk
+      // `MemorySponsoredExecutionStore`) so test teardown does not have to walk
       // every adapter manually. Production Redis adapters do not
       // implement `Disposable`, so the corresponding branches are
       // no-ops at runtime.
-      if (isDisposable(this.prepareStore)) this.prepareStore.dispose();
-      if (isDisposable(this.prepareInflightLimiter)) this.prepareInflightLimiter.dispose();
-      if (isDisposable(this.rateLimiter)) this.rateLimiter.dispose();
+      if (isDisposable(this.sponsoredExecutionStore)) {
+        await this.sponsoredExecutionStore.dispose();
+      }
+      if (isDisposable(this.prepareInflightLimiter)) {
+        await this.prepareInflightLimiter.dispose();
+      }
+      if (isDisposable(this.rateLimiter)) await this.rateLimiter.dispose();
       if (isDisposable(this.abuseBlocker)) this.abuseBlocker.dispose();
       if (isDisposable(this.sponsorPool)) this.sponsorPool.dispose();
     },

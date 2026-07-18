@@ -202,7 +202,7 @@ const suiClient = new SuiGrpcClient({
 const sdk = await StelisSDK.connect('http://localhost:3200/relay', {
   pinnedPackageId: STELIS_CONTRACT_IDS.testnet?.packageId, // fail-closed if null
   requestTimeouts: {
-    // Optional overrides (ms). Defaults are defined by StelisRequestTimeouts.
+    // Optional overrides (1..2,147,483,647 ms). Defaults are defined by StelisRequestTimeouts.
     sponsorMs: 25_000,
   },
 });

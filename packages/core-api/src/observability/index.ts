@@ -9,10 +9,9 @@
 
 export { logStructuredEvent } from '../structuredEventLog.js';
 export {
-  PREPARE_STORE_EVICT_CLEANUP_FAILED,
-  PREPARE_STORE_EVICT_CLEANUP_THREW,
   SPONSORED_LOGS_RECORDER_FAILED,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
+  SPONSOR_OPERATIONS_TASK_FAILED,
   SPONSOR_RESULT_CALLBACK_FAILED,
 } from './events.js';
 export { redactEndpointUrl, redactSensitiveText, safeErrorSummary } from './redaction.js';

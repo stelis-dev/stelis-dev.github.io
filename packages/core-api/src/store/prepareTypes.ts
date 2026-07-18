@@ -1,22 +1,16 @@
-/**
- * PrepareStoreAdapter — interface for /prepare binding storage.
- *
- * Binds receiptId → PreparedTx and holds one sponsor-address lease until
- * /sponsor or TTL expiry.
- *
- * Implementations:
- *   - `RedisPrepareStore` — required for production hosts; `app-api`
- *     injects this at boot.
- *   - `MemoryPrepareStore` — test-only fixture; not exported from the
- *     `@stelis/core-api` main barrel and not used as a runtime
- *     fallback.
- *
- * Key invariants:
- *   - Single-use: consume() deletes the entry (1-time use per receiptId)
- *   - Slot lease: sponsor slot is held from /prepare → /sponsor or TTL expiry
- *   - IP concurrency: max MAX_CONCURRENT_PER_IP outstanding entries per IP
- *   - Background eviction: expired entries auto-evict and release slots
- */
+/** Current prepared receipt records shared by the prepare and sponsor runners. */
+import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
+import {
+  isValidStudioUserId,
+  MAX_PROMOTION_LEDGER_VALUE_MIST,
+  parsePromotionId,
+} from '@stelis/contracts';
+import { canonicalizeIpAddress } from '../clientIp.js';
+
+const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const U64_MAX = (1n << 64n) - 1n;
+const ORDER_ID_MAX_UTF8_BYTES = 128;
 // ─────────────────────────────────────────────
 // Draft and committed fields shared by all modes
 // ─────────────────────────────────────────────
@@ -51,15 +45,11 @@ interface PreparedTxDraftBase {
   // ── Slot reservation (from ExecuteTicketStore pattern) ────────
   /** Sponsor address that identifies the leased pool entry. */
   sponsorAddress: string;
-  // The raw lease fencing token is gone. The sponsor pool adapter commits
-  // `HMAC(secret, receiptId || sponsorAddress || commitDigest)` to its lease
-  // store, where `commitDigest` is a reserved sentinel after
-  // `checkout()` and `txBytesHash` after the prepare runner calls
-  // `sponsorPool.commit()` just before `prepareStore.store()`. `sign()`
-  // verifies that proof against `hash(txBytes)`. `sponsorAddress` is the
-  // lease identity; `receiptId` binds it to one prepare operation and
-  // `txBytesHash` (elsewhere in this entry) is the prepare-commit
-  // authenticator. No extra lease material lives here.
+  // The sponsor execution store atomically advances the stage-separated
+  // sponsor lease proof with this prepared receipt. `sign()` verifies the
+  // committed proof against `txBytesHash`. `sponsorAddress` is the lease
+  // identity, `receiptId` binds it to one prepare operation, and no duplicate
+  // lease material lives in this record.
 
   // ── IP tracking (for max concurrent enforcement) ─────────────
   /** Client IP that issued this prepare request */
@@ -76,10 +66,6 @@ interface PreparedTxDraftBase {
   // ── Order ID (payment tracking) ─────────────────────────────────
   /** Original orderId from /prepare request (null if not provided). */
   orderId: string | null;
-
-  // ── S-14: Monotonic nonce ──────────────────────────────────────
-  /** Server-assigned monotonic nonce for on-chain replay prevention. */
-  nonce: bigint;
 }
 
 /** Store-committed fields shared by both modes. */
@@ -92,14 +78,16 @@ interface PreparedTxEntryBase extends PreparedTxDraftBase {
 // Mode-specific draft and committed entry types
 // ─────────────────────────────────────────────
 
-/** Generic prepare draft accepted by `PrepareStoreAdapter.store()`. */
+/** Generic prepare draft accepted by the sponsored execution store. */
 export interface GenericPreparedTxDraft extends PreparedTxDraftBase {
   mode: 'generic';
+  /** Server-assigned monotonic nonce for on-chain replay prevention. */
+  nonce: bigint;
   promotionId?: never;
   userId?: never;
 }
 
-/** Promotion prepare draft accepted by `PrepareStoreAdapter.store()`. */
+/** Promotion prepare draft accepted by the sponsored execution store. */
 export interface PromotionPreparedTxDraft extends PreparedTxDraftBase {
   mode: 'promotion';
   promotionId: string;
@@ -116,8 +104,9 @@ export type PreparedTxDraft = GenericPreparedTxDraft | PromotionPreparedTxDraft;
  * Coordination-only at `/relay/sponsor`. Every execution-critical settle
  * value (executionCostClaim, fee components, profile, policyHash,
  * quoteTimestampMs) is derived from the submitted `txBytes` via
- * `parseSettleArgs(...)` at sponsor time; `consume()` verifies the submitted
- * bytes' SHA-256 against `txBytesHash` from the /prepare commit. The store therefore carries
+ * `parseSettleArgs(...)` at sponsor time; `beginSponsoredExecution()` verifies
+ * the submitted bytes' SHA-256 against `txBytesHash` from the prepare commit.
+ * The store therefore carries
  * only the coordination fields the sponsor lifecycle needs (slot
  * identity, hash binding, receipt identity, IP/execution-path observability echo,
  * monotonic nonce compaction key, optional orderId echo for L2
@@ -133,6 +122,8 @@ export type PreparedTxDraft = GenericPreparedTxDraft | PromotionPreparedTxDraft;
  */
 export interface GenericPreparedTxEntry extends PreparedTxEntryBase {
   mode: 'generic';
+  /** Server-assigned monotonic nonce for on-chain replay prevention. */
+  nonce: bigint;
   // Generic mode never carries promotion fields.
   promotionId?: never;
   userId?: never;
@@ -200,7 +191,14 @@ const GENERIC_PREPARED_DRAFT_KEYS = [
 ] as const;
 
 const PROMOTION_PREPARED_DRAFT_KEYS = [
-  ...GENERIC_PREPARED_DRAFT_KEYS,
+  'mode',
+  'receiptId',
+  'senderAddress',
+  'txBytesHash',
+  'sponsorAddress',
+  'clientIp',
+  'executionPathKey',
+  'orderId',
   'promotionId',
   'userId',
   'reservedGasMist',
@@ -259,7 +257,7 @@ function assertCurrentPreparedTxDraftKeys(value: unknown): 'generic' | 'promotio
  *
  * Redis calls this before converting decimal strings to bigint; Memory calls
  * it as part of the full runtime parser. Keeping the key authority here makes
- * versioned, dual-identity, and cross-mode records fail in both adapters.
+ * unexpected, dual-identity, and cross-mode records fail in both adapters.
  * This symbol is store-internal and is not re-exported from the package barrel.
  */
 export function assertCurrentPreparedTxEntryKeys(value: unknown): 'generic' | 'promotion' {
@@ -271,26 +269,84 @@ export function assertCurrentPreparedTxEntryKeys(value: unknown): 'generic' | 'p
   );
 }
 
-function requireString(
+function requireNonEmptyString(
   record: Record<string, unknown>,
   field: string,
   shapeName: PreparedShapeName,
 ): string {
   const value = record[field];
-  if (typeof value !== 'string') {
-    throw new Error(`${shapeName}.${field} must be a string`);
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${shapeName}.${field} must be a non-empty string`);
   }
   return value;
 }
 
-function requireUnsignedBigInt(
+function requireCanonicalReceiptId(
+  record: Record<string, unknown>,
+  shapeName: PreparedShapeName,
+): string {
+  const value = requireNonEmptyString(record, 'receiptId', shapeName);
+  if (!RECEIPT_ID_RE.test(value)) {
+    throw new Error(`${shapeName}.receiptId must be a canonical receipt ID`);
+  }
+  return value;
+}
+
+function requireCanonicalAddress(
+  record: Record<string, unknown>,
+  field: 'senderAddress' | 'sponsorAddress',
+  shapeName: PreparedShapeName,
+): string {
+  const value = requireNonEmptyString(record, field, shapeName);
+  if (!isValidSuiAddress(value) || normalizeSuiAddress(value) !== value) {
+    throw new Error(`${shapeName}.${field} must be a canonical Sui address`);
+  }
+  return value;
+}
+
+function requireSha256Hex(record: Record<string, unknown>, shapeName: PreparedShapeName): string {
+  const value = requireNonEmptyString(record, 'txBytesHash', shapeName);
+  if (!SHA256_HEX_RE.test(value)) {
+    throw new Error(`${shapeName}.txBytesHash must be a lowercase SHA-256 hex string`);
+  }
+  return value;
+}
+
+function requireCanonicalClientIp(
+  record: Record<string, unknown>,
+  shapeName: PreparedShapeName,
+): string {
+  const value = requireNonEmptyString(record, 'clientIp', shapeName);
+  if (canonicalizeIpAddress(value) !== value) {
+    throw new Error(`${shapeName}.clientIp must be a canonical IP address`);
+  }
+  return value;
+}
+
+function requireBigIntRange(
   record: Record<string, unknown>,
   field: string,
   shapeName: PreparedShapeName,
+  minimum: bigint,
+  maximum: bigint,
 ): bigint {
   const value = record[field];
-  if (typeof value !== 'bigint' || value < 0n) {
-    throw new Error(`${shapeName}.${field} must be a non-negative bigint`);
+  if (typeof value !== 'bigint' || value < minimum || value > maximum) {
+    throw new Error(
+      `${shapeName}.${field} must be a bigint from ${minimum.toString()} to ${maximum.toString()}`,
+    );
+  }
+  return value;
+}
+
+function requireOrderId(value: unknown, shapeName: PreparedShapeName): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string') {
+    throw new Error(`${shapeName}.orderId must be a string or null`);
+  }
+  const length = Buffer.byteLength(value, 'utf8');
+  if (length === 0 || length > ORDER_ID_MAX_UTF8_BYTES) {
+    throw new Error(`${shapeName}.orderId must be 1-${ORDER_ID_MAX_UTF8_BYTES} UTF-8 bytes`);
   }
   return value;
 }
@@ -300,30 +356,45 @@ function parsePreparedTxFields(
   mode: 'generic' | 'promotion',
   shapeName: PreparedShapeName,
 ): PreparedTxDraft {
-  const orderId = record.orderId;
-  if (orderId !== null && typeof orderId !== 'string') {
-    throw new Error(`${shapeName}.orderId must be a string or null`);
-  }
   const common = {
-    receiptId: requireString(record, 'receiptId', shapeName),
-    senderAddress: requireString(record, 'senderAddress', shapeName),
-    txBytesHash: requireString(record, 'txBytesHash', shapeName),
-    sponsorAddress: requireString(record, 'sponsorAddress', shapeName),
-    clientIp: requireString(record, 'clientIp', shapeName),
-    executionPathKey: requireString(record, 'executionPathKey', shapeName),
-    orderId,
-    nonce: requireUnsignedBigInt(record, 'nonce', shapeName),
+    receiptId: requireCanonicalReceiptId(record, shapeName),
+    senderAddress: requireCanonicalAddress(record, 'senderAddress', shapeName),
+    txBytesHash: requireSha256Hex(record, shapeName),
+    sponsorAddress: requireCanonicalAddress(record, 'sponsorAddress', shapeName),
+    clientIp: requireCanonicalClientIp(record, shapeName),
+    executionPathKey: requireNonEmptyString(record, 'executionPathKey', shapeName),
+    orderId: requireOrderId(record.orderId, shapeName),
   } as const;
 
   if (mode === 'generic') {
-    return { ...common, mode: 'generic' };
+    return {
+      ...common,
+      mode: 'generic',
+      nonce: requireBigIntRange(record, 'nonce', shapeName, 1n, U64_MAX),
+    };
+  }
+  const promotionId = requireNonEmptyString(record, 'promotionId', shapeName);
+  try {
+    parsePromotionId(promotionId, `${shapeName}.promotionId`);
+  } catch {
+    throw new Error(`${shapeName}.promotionId must be a canonical Promotion ID`);
+  }
+  const userId = requireNonEmptyString(record, 'userId', shapeName);
+  if (!isValidStudioUserId(userId)) {
+    throw new Error(`${shapeName}.userId must be a valid Studio user ID`);
   }
   return {
     ...common,
     mode: 'promotion',
-    promotionId: requireString(record, 'promotionId', shapeName),
-    userId: requireString(record, 'userId', shapeName),
-    reservedGasMist: requireUnsignedBigInt(record, 'reservedGasMist', shapeName),
+    promotionId,
+    userId,
+    reservedGasMist: requireBigIntRange(
+      record,
+      'reservedGasMist',
+      shapeName,
+      1n,
+      MAX_PROMOTION_LEDGER_VALUE_MIST,
+    ),
   };
 }
 
@@ -345,145 +416,82 @@ export function parseCurrentPreparedTxEntry(value: unknown): PreparedTxEntry {
   const mode = assertCurrentPreparedTxEntryKeys(value);
   const record = value as Record<string, unknown>;
   const issuedAt = record.issuedAt;
-  if (!Number.isSafeInteger(issuedAt) || (issuedAt as number) < 0) {
-    throw new Error('PreparedTxEntry.issuedAt must be a non-negative safe integer');
+  if (!Number.isSafeInteger(issuedAt) || (issuedAt as number) <= 0) {
+    throw new Error('PreparedTxEntry.issuedAt must be a positive safe integer');
   }
   const draft = parsePreparedTxFields(record, mode, 'PreparedTxEntry');
   return { ...draft, issuedAt: issuedAt as number };
 }
 
-// ─────────────────────────────────────────────
-// Store adapter interface
-// ─────────────────────────────────────────────
+const SERIALIZED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
+
+function serializedBigInt(value: unknown, field: string): bigint {
+  if (typeof value !== 'string' || !SERIALIZED_DECIMAL_RE.test(value)) {
+    throw new Error(`PreparedTxEntry.${field} must be a canonical decimal string`);
+  }
+  return BigInt(value);
+}
 
 /**
- * Store adapter for prepare entries.
+ * Serialize the one supported prepared-transaction record format.
  *
- * Implementations must guarantee:
- *   1. Atomic 1-time consume semantics (same as ExecuteTicketStore)
- *   2. Sponsor-address lease release on TTL expiry or error
- *   3. IP concurrency enforcement (max outstanding per IP)
+ * Redis coordination code exact-compares this returned byte string. It must
+ * not reconstruct a second JSON shape or partially decode a malformed record
+ * to invent cleanup identities.
  */
-export interface PrepareStoreAdapter {
-  /**
-   * Commit a prepared TX draft and return the exact stored entry.
-   *
-   * Before storing, enforces IP concurrency limit:
-   *   - If the IP already has MAX_CONCURRENT_PER_IP outstanding entries,
-   *     evicts the oldest one (releasing its slot) before storing the new one.
-   *
-   * The implementation uses `draft.receiptId` as the sole storage key.
-   * The slot MUST already be checked out before calling this.
-   */
-  store(draft: PreparedTxDraft): Promise<PreparedTxEntry>;
+export function serializePreparedTxEntry(value: PreparedTxEntry): string {
+  const entry = parseCurrentPreparedTxEntry(value);
+  const common = {
+    mode: entry.mode,
+    receiptId: entry.receiptId,
+    senderAddress: entry.senderAddress,
+    txBytesHash: entry.txBytesHash,
+    sponsorAddress: entry.sponsorAddress,
+    clientIp: entry.clientIp,
+    executionPathKey: entry.executionPathKey,
+    orderId: entry.orderId,
+  } as const;
+  if (entry.mode === 'generic') {
+    return JSON.stringify({ ...common, nonce: entry.nonce.toString(), issuedAt: entry.issuedAt });
+  }
+  return JSON.stringify({
+    ...common,
+    mode: 'promotion',
+    promotionId: entry.promotionId,
+    userId: entry.userId,
+    reservedGasMist: entry.reservedGasMist.toString(),
+    issuedAt: entry.issuedAt,
+  });
+}
 
-  /**
-   * Atomically consume a prepare entry in /sponsor.
-   *
-   * Returns:
-   *   - PreparedTxEntry: success — entry deleted, slot NOT released (caller's finally)
-   *   - 'not_found': receiptId absent (never stored, already consumed, or evicted)
-   *   - 'expired': TTL exceeded — slot released internally, entry deleted
-   *   - 'hash_mismatch': txBytesHash mismatch — slot released, entry deleted
-   *
-   * Note: background eviction may convert 'expired' → 'not_found' (race condition).
-   * Clients should treat both as "retry /prepare".
-   */
-  consume(
-    receiptId: string,
-    txBytesHash: string,
-  ): Promise<PreparedTxEntry | 'not_found' | 'expired' | 'hash_mismatch'>;
-
-  /**
-   * Read without consuming. Returns null if not found or logically expired.
-   *
-   * Throws if the entry exists but cannot be deserialized (corrupt JSON,
-   * malformed or non-current stored shape, etc.). Callers must catch the throw and
-   * use `evictPreparedEntry(receiptId)` to release the held slot before
-   * rejecting the request — silently returning `null` would let an
-   * unparseable entry hold its sponsor slot until lease TTL.
-   */
-  peek(receiptId: string): Promise<PreparedTxEntry | null>;
-
-  /**
-   * Best-effort invalidation of a stored prepared entry: atomically deletes
-   * the entry and releases the held sponsor slot. Idempotent and never
-   * throws.
-   *
-   * Used for corrupt-entry eviction. `peek()` or `consume()` threw on
-   * deserialize failure; raw JSON is read without invoking the typed
-   * deserializer, recoverable `sponsorAddress` and `txBytesHash` are extracted
-   * from it, and the entry is deleted. The method argument remains the
-   * authoritative receipt identity selected by the store key. Sponsor-time
-   * policy rejections that parse cleanly are
-   * owned by their route-local lifecycle code and may intentionally preserve
-   * the prepared entry for retry.
-   *
-   * Implementation contract:
-   *   1. Extract `sponsorAddress` and `txBytesHash` from whatever form of the
-   *      entry is available (raw JSON fallback if typed read failed), while
-   *      retaining the method's `receiptId` as authority.
-   *   2. Delete the entry from the store atomically.
-   *   3. Call the configured
-   *      `onRelease(sponsorAddress, receiptId, txBytesHash)` to return the
-   *      sponsor slot via the HMAC lease fencing path.
-   *
-   * Idempotent: a no-op if the entry is already gone. Must NEVER throw —
-   * callers are already on a failure path.
-   */
-  evictPreparedEntry(receiptId: string): Promise<void>;
-
-  /**
-   * Pre-check Studio user quota before slot checkout for the promotion
-   * route.
-   *
-   * Counts live promotion-mode entries by verified developer JWT
-   * `userId`. Generic `/relay/prepare` skips per-subject quota because
-   * unauthenticated `senderAddress` enables victim-targeted DoS; only
-   * the promotion route has a pre-verified subject (`userId`) suitable
-   * for outstanding-prepare quota enforcement.
-   *
-   * The authoritative quota check still lives in `store()` and uses the
-   * same userIndex; this method is the best-effort precheck before
-   * slot/RPC resources are consumed.
-   *
-   * Returns 'ok' or `{ exceeded: true, limit }` where `limit` is the
-   * adapter's configured max so the prepare route can report the actual value
-   * in errors.
-   */
-  checkUserQuota(userId: string): Promise<'ok' | { exceeded: true; limit: number }>;
-
-  /**
-   * S-14: Reserve the next monotonic nonce for a verified sender.
-   *
-   * Returns `max(onchainLastNonce, maxLiveNonce, maxPendingNonce) + 1` atomically.
-   * The reservation is a live token, not a lifetime HWM:
-   *   - `store()` promotes the pending reservation to a live entry (implicit confirm).
-   *   - `releaseReservation()` removes the pending reservation on pre-store failure.
-   *   - Entry expiry/consume removes the nonce from the live set.
-   *
-   * Also enforces the sender outstanding-prepare quota against live and
-   * pending sender-local entries. This method is called only after
-   * prepare authorization proves control of `senderAddress`.
-   *
-   * No standalone sender HWM is retained after all reservations and entries are gone.
-   *
-   * @param senderAddress   - User wallet address
-   * @param onchainLastNonce - Current on-chain vault.last_nonce (from queryUserCredit)
-   * @param reservationId   - Unique reservation identity (canonical receiptId hex string)
-   */
-  reserveNonce(
-    senderAddress: string,
-    onchainLastNonce: bigint,
-    reservationId: string,
-  ): Promise<bigint>;
-
-  /**
-   * Release a pending nonce reservation on pre-store failure.
-   *
-   * Must be called when `reserveNonce()` succeeded but `store()` was never reached
-   * (e.g. build failure, validation failure after nonce reservation).
-   * No-op if the reservation does not exist (idempotent).
-   */
-  releaseReservation(reservationId: string, senderAddress: string): Promise<void>;
+/** Decode and validate the one supported serialized prepared record. */
+export function decodePreparedTxEntry(
+  serialized: string,
+  expectedReceiptId?: string,
+): PreparedTxEntry {
+  if (typeof serialized !== 'string' || serialized.length === 0) {
+    throw new Error('PreparedTxEntry must be non-empty JSON');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw new Error('PreparedTxEntry must be valid JSON');
+  }
+  const mode = assertCurrentPreparedTxEntryKeys(parsed);
+  const raw = parsed as Record<string, unknown>;
+  if (expectedReceiptId !== undefined && raw.receiptId !== expectedReceiptId) {
+    throw new Error('PreparedTxEntry receiptId does not match its storage key');
+  }
+  const converted: Record<string, unknown> = { ...raw };
+  if (mode === 'generic') {
+    converted.nonce = serializedBigInt(raw.nonce, 'nonce');
+  } else {
+    converted.reservedGasMist = serializedBigInt(raw.reservedGasMist, 'reservedGasMist');
+  }
+  const entry = parseCurrentPreparedTxEntry(converted);
+  if (serializePreparedTxEntry(entry) !== serialized) {
+    throw new Error('PreparedTxEntry must use canonical JSON');
+  }
+  return entry;
 }

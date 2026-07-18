@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisClient, StelisApiException } from '../src/client.js';
 import type { RelayConfigResponse } from '../src/types.js';
-import { hostErrorPublicMessage, type HostErrorCode } from '@stelis/contracts';
+import {
+  hostErrorPublicMessage,
+  NODE_TIMER_MAX_DELAY_MS,
+  type HostErrorCode,
+} from '@stelis/contracts';
 import { makeRelayPrepareRequest } from './helpers/currentFixtures.js';
 
 // Mock global fetch
@@ -144,14 +148,14 @@ describe('StelisClient', () => {
             endpoint: 'http://localhost:3000/relay',
             requestTimeouts: { sponsorMs: 0 },
           }),
-      ).toThrow('requestTimeouts.sponsorMs must be a positive integer');
+      ).toThrow('requestTimeouts.sponsorMs must be an integer from 1 through');
       expect(
         () =>
           new StelisClient({
             endpoint: 'http://localhost:3000/relay',
-            requestTimeouts: { sponsorMs: Number.MAX_SAFE_INTEGER + 1 },
+            requestTimeouts: { sponsorMs: NODE_TIMER_MAX_DELAY_MS + 1 },
           }),
-      ).toThrow('Number.MAX_SAFE_INTEGER');
+      ).toThrow(String(NODE_TIMER_MAX_DELAY_MS));
     });
   });
 
@@ -509,6 +513,12 @@ describe('StelisClient', () => {
             client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
         },
         {
+          code: 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY',
+          status: 503,
+          request: () =>
+            client.sponsor({ txBytes: 'tx', userSignature: 'sig', receiptId: 'receipt' }),
+        },
+        {
           code: 'ONCHAIN_REVERT',
           status: 422,
           request: () =>
@@ -521,6 +531,16 @@ describe('StelisClient', () => {
         {
           code: 'GAS_EXCEEDS_TX_CAP',
           status: 422,
+          request: () =>
+            client.promotionSponsor(
+              'promotion',
+              { receiptId: 'receipt', txBytes: 'tx', userSignature: 'sig' },
+              'jwt',
+            ),
+        },
+        {
+          code: 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY',
+          status: 503,
           request: () =>
             client.promotionSponsor(
               'promotion',
@@ -696,7 +716,7 @@ describe('StelisClient', () => {
     });
 
     it('rejects non-current successful status bodies instead of casting them', async () => {
-      for (const body of [{ ok: false }, { ok: true, legacyStatus: 'ready' }]) {
+      for (const body of [{ ok: false }, { ok: true, unexpectedState: 'ready' }]) {
         mockFetch.mockResolvedValueOnce(jsonResponse(body));
         await expect(client.getStatus()).rejects.toThrow(/RelayStatusResponse/);
       }
@@ -884,7 +904,7 @@ describe('StelisClient', () => {
             {
               promotionId: PROMOTION_ID,
               displayName: 'Test Promo',
-              type: 'legacy_kind',
+              type: 'unknown_kind',
               status: 'active',
               canClaim: true,
               canUseSponsoredAction: false,

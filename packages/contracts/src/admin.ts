@@ -39,13 +39,8 @@ export function isPositiveU64DecimalString(value: string): boolean {
 // ─────────────────────────────────────────────
 
 /**
- * Runtime state of a single sponsor slot as persisted in the shared
- * sponsor operations Redis state store.
- *
- * `null` represents the pre-write bootstrap/reset state at the admin
- * payload boundary; the request gate never sees `null` because boot
- * blocks HTTP listen until `bootstrapSponsorOperations()` has written every
- * slot HASH.
+ * Current state of one sponsor address. The Host derives it from the latest
+ * balance observation and refill operation; Redis does not store this state.
  *
  * Gate-available state: `healthy`.
  * Gate-degraded states (counted as unavailable by the request gate):
@@ -76,20 +71,26 @@ export type SponsorAvailabilityErrorCode =
   | 'SPONSOR_CAPACITY_UNAVAILABLE'
   | 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY';
 
+/** Calculate the current public and prepare-admission availability code. */
+export function calculateSponsorAvailabilityErrorCode(input: {
+  readonly healthySlots: number;
+  readonly hasFreeHealthySponsorSlot: boolean;
+  readonly sponsorRefillAccountHealthy: boolean;
+}): SponsorAvailabilityErrorCode | null {
+  if (input.hasFreeHealthySponsorSlot) return null;
+  return input.healthySlots === 0 && !input.sponsorRefillAccountHealthy
+    ? 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY'
+    : 'SPONSOR_CAPACITY_UNAVAILABLE';
+}
+
 // ─────────────────────────────────────────────
 // Admin-facing sponsor operations payload
 // ─────────────────────────────────────────────
 
 export interface SponsorSlotStatus {
   readonly address: string;
-  /**
-   * `null` when the slot HASH is absent before bootstrap writes land or
-   * after an intentional state reset. In normal runtime the request
-   * gate never observes `null` because HTTP listen begins only after
-   * bootstrap writes finish.
-   */
-  readonly state: SponsorSlotState | null;
-  readonly balanceMist: string | null;
+  readonly state: SponsorSlotState;
+  readonly addressBalanceMist: string | null;
   readonly lastObservedAtMs: number | null;
   readonly lastError: string | null;
 }
@@ -107,22 +108,21 @@ export interface SponsorSlotLeaseSummary {
 
 export interface SponsorRefillAccountStatus {
   readonly address: string;
-  readonly balanceMist: string | null;
+  readonly totalBalanceMist: string | null;
   readonly healthy: boolean;
-  readonly refillsRemaining: number | null;
   readonly lastObservedAtMs: number | null;
   readonly lastError: string | null;
 }
 
 /**
  * Composite sponsor operations payload returned by `/api/sponsor-operations` as the
- * `sponsorOperations` field. The route does a bounded sponsor refill account probe and reads the
+ * `sponsorOperations` field. The route requests one bounded balance observation and reads the
  * shared state on every request, so the payload has no empty bootstrap
  * sentinel.
  */
 export interface SponsorOperationsStatus {
   readonly gateErrorCode: SponsorAvailabilityErrorCode | null;
-  readonly availableSlots: number;
+  readonly healthySlots: number;
   readonly degradedSlots: number;
   readonly slotLeases: SponsorSlotLeaseSummary;
   readonly slots: readonly SponsorSlotStatus[];

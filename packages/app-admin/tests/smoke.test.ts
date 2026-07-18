@@ -208,7 +208,7 @@ describe('API client', () => {
       // asserts the request shape and return pass-through.
       sponsorOperations: {
         gateErrorCode: null,
-        availableSlots: 1,
+        healthySlots: 1,
         degradedSlots: 0,
         slotLeases: {
           leasedSlots: 0,
@@ -219,16 +219,15 @@ describe('API client', () => {
           {
             address: '0x' + '11'.repeat(32),
             state: 'healthy',
-            balanceMist: '1000',
+            addressBalanceMist: '1000',
             lastObservedAtMs: 1_700_000_000_000,
             lastError: null,
           },
         ],
         sponsorRefillAccount: {
           address: '0x' + '55'.repeat(32),
-          balanceMist: '0',
+          totalBalanceMist: '0',
           healthy: true,
-          refillsRemaining: 0,
           lastObservedAtMs: 1_700_000_000_000,
           lastError: null,
         },
@@ -237,6 +236,7 @@ describe('API client', () => {
       settlementPayoutRecipientAddress: '0xR',
       sponsorBalanceWarnMist: '1000',
       sponsorBalanceRefillTargetMist: '2000',
+      sponsorRefillAccountRunwayTargetMist: '2000',
       refillEnabled: true,
       quotedHostFeeMist: '0',
       feeConfig: null,

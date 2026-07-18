@@ -27,6 +27,8 @@ import {
 import {
   STELIS_CONTRACT_IDS,
   DEEPBOOK_IDS,
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
   requireContractId,
   type SingleHopSettlementSwapPath,
 } from '@stelis/contracts';
@@ -53,6 +55,7 @@ import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
 import type { ContextRuntimeInput } from './context.js';
 import type { AdminAuthRuntimeConfig } from './adminAuth.js';
+import { createSponsorOperationsSettings } from './sponsor-operations/settings.js';
 
 /** Runtime mode resolved at boot — determines which route groups are active. */
 export interface BootSummary {
@@ -71,12 +74,6 @@ export interface AppRuntimeInput {
   readonly corsAllowedOrigins: readonly string[];
   readonly adminAddress: string | null;
   readonly adminAuth: AdminAuthRuntimeConfig;
-  readonly adminSponsorOperations: {
-    readonly refillEnabled: boolean;
-    /** Existing admin runway/withdraw fallback, distinct from the optional worker target. */
-    readonly refillTargetMist: bigint;
-    readonly warnMist: bigint;
-  };
 }
 
 export interface BootValidationResult {
@@ -309,7 +306,13 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         `[app-api] ${name} is required (see docs/parameters.md Sponsor Operations settings)`,
       );
     }
-    return parseRequiredPositiveIntegerEnv(name, raw);
+    const value = parseRequiredPositiveIntegerEnv(name, raw);
+    if (!isNodeTimerDelayMs(value)) {
+      throw new Error(
+        `[app-api] ${name} must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}`,
+      );
+    }
+    return value;
   };
   const slotBalanceTimeoutMs = parseRequiredSponsorOperationsTimeout(
     'SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS',
@@ -326,6 +329,10 @@ export async function runBootValidation(): Promise<BootValidationResult> {
   const confirmationTimeoutMs = parseRequiredSponsorOperationsTimeout(
     'SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS',
     environment.SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS,
+  );
+  const reconciliationIntervalMs = parseRequiredSponsorOperationsTimeout(
+    'SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS',
+    environment.SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS,
   );
 
   // ── 8. Address constraint validation ─────────────────────────────────────
@@ -388,6 +395,23 @@ export async function runBootValidation(): Promise<BootValidationResult> {
       domain: cookieDomain,
     },
   };
+
+  const sponsorOperationsSettings = createSponsorOperationsSettings({
+    network,
+    sponsorAddresses: sponsorAddrs,
+    sponsorRefillAccountAddress,
+    settlementPayoutRecipientAddress: recipientAddr,
+    refillEnabled,
+    refillTargetMist: refillTargetMist ?? null,
+    runwayTargetMist: sponsorRefillAccountRunwayTargetMist,
+    warnMist,
+    slotBalanceTimeoutMs,
+    sponsorRefillAccountBalanceTimeoutMs,
+    refillTimeoutMs,
+    confirmationTimeoutMs,
+    reconciliationIntervalMs,
+    withdrawalReceiptTtlMs,
+  });
 
   const corsAllowedOrigins = parseCorsAllowedOrigins(environment.CORS_ORIGINS);
 
@@ -532,16 +556,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
         prepareInflightCapacity,
         sponsorOperations: {
           sponsorRefillAccountKey,
-          sponsorRefillAccountAddress,
-          refillEnabled,
-          refillTargetMist: refillTargetMist ?? null,
-          runwayTargetMist: sponsorRefillAccountRunwayTargetMist,
-          warnMist,
-          slotBalanceTimeoutMs,
-          sponsorRefillAccountBalanceTimeoutMs,
-          refillTimeoutMs,
-          confirmationTimeoutMs,
-          withdrawalReceiptTtlMs,
+          settings: sponsorOperationsSettings,
         },
         studio: studioRuntimeInput,
       },
@@ -549,11 +564,6 @@ export async function runBootValidation(): Promise<BootValidationResult> {
       corsAllowedOrigins,
       adminAddress,
       adminAuth,
-      adminSponsorOperations: {
-        refillEnabled,
-        refillTargetMist: sponsorRefillAccountRunwayTargetMist,
-        warnMist,
-      },
     },
     publicSummary: {
       mode,

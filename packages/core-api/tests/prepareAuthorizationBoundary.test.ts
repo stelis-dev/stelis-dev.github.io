@@ -61,7 +61,6 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
     sui: {},
     sponsorPool: {
       checkout: vi.fn(),
-      commit: vi.fn(),
       checkin: vi.fn(),
       sign: vi.fn(),
     },
@@ -76,14 +75,6 @@ function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
     },
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue(options.nonceClaim ?? 'ok'),
-    },
-    prepareStore: {
-      store: vi.fn(),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn(),
-      reserveNonce: vi.fn(),
-      releaseReservation: vi.fn(),
     },
     settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn(),

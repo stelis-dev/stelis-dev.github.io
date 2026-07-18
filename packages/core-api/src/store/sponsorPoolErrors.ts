@@ -12,14 +12,14 @@
  */
 
 /**
- * Thrown by `SponsorPoolAdapter.sign()` when the committed two-stage HMAC
- * lease proof for `(receiptId, sponsorAddress, hash(submittedTxBytes))` does not
+ * Thrown by `SponsorPoolAdapter.sign()` when the executing lease record and its
+ * HMAC for `(receiptId, sponsorAddress, hash(submittedTxBytes))` do not
  * match the stored value — either because the slot was re-allocated
  * after TTL expiry, the lease is still in the reservation stage and
  * therefore cannot satisfy any submitted tx, or the Redis lease value
  * references a different `txBytesHash` than the submitted bytes (for
  * example after a Redis-write attacker overwrites an existing
- * `entry[receiptId].txBytesHash` under a live committed lease).
+ * prepared receipt's `txBytesHash` under a live executing lease).
  *
  * Maps to HTTP 503 with `Retry-After: 1`.
  * The client must re-call `/prepare` to obtain a fresh slot and lease.

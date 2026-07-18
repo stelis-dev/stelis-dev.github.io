@@ -10,33 +10,16 @@
  */
 
 /** Prepare-side policy hook names. */
-export type PrepareState =
-  | 'Intent'
-  | 'RequestValidation'
-  | 'InflightAdmission'
-  | 'ChainSnapshot'
-  | 'ExecutionPolicySelected'
-  | 'SlotFreePlan'
-  | 'SponsorSlotReservationAcquired'
-  | 'RouteReservationBeforeBuild'
-  | 'GasBoundBuild'
-  | 'RouteReservationAfterBuild'
-  | 'SelfCheck'
-  | 'SponsorLeaseCommitted';
+export type PrepareState = 'Intent' | 'RequestValidation' | 'ChainSnapshot' | 'GasBoundBuild';
 
 /** Sponsor-side states (run inside the `/sponsor` request). */
 export type SponsorState =
   | 'DecodeSponsorSubmission'
   | 'UserSignatureValidation'
-  | 'Consume'
-  | 'SharedPostconsumeChecks'
-  | 'PolicyPostconsumeChecks'
+  | 'SharedSponsorChecks'
+  | 'PolicySponsorChecks'
   | 'Preflight'
-  | 'PolicyApproval'
-  | 'SponsorSign'
-  | 'Submit'
-  | 'ClassifySponsorResult'
-  | 'Release';
+  | 'ClassifySponsorResult';
 
 /** Discriminated union of every named state on the SponsoredExecution machine. */
 export type SponsoredExecutionState = PrepareState | SponsorState;

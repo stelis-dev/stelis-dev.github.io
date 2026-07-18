@@ -1,111 +1,57 @@
+import {
+  isValidSuiAddress,
+  isValidTransactionDigest,
+  normalizeSuiAddress,
+} from '@mysten/sui/utils';
 import type { RedisClientLike } from '@stelis/core-api';
+import { isPositiveU64DecimalString, type SuiNetwork } from '@stelis/contracts';
 import {
-  isPositiveU64DecimalString,
-  type SponsorSlotState,
-  type SuiNetwork,
-} from '@stelis/contracts';
-import {
-  SPONSOR_OPERATIONS_KEY_PREFIX,
+  decodeSponsorRefillAccountSpendRecord,
+  decodeSponsorRefillAccountRecord,
+  createSponsorRefillAccountWithdrawalOperationId,
+  serializeSponsorRefillAccountSpendRecord,
+  SPONSOR_REFILL_ACCOUNT_HASH_FIELDS,
   SPONSOR_REFILL_ACCOUNT_KEY,
+  SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS,
+  SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
+  SPONSOR_OPERATIONS_MAX_SEQUENCE,
+  SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT,
+  SPONSOR_SLOT_HASH_FIELDS,
   slotKey,
-  type RefillReconciliationResult,
+  throwIfSponsorOperationsSequenceLimitReached,
+  type ActiveSponsorRefillAccountSpend,
+  type FailedSponsorRefillAccountSpend,
+  type ReadySponsorRefillAccountSpend,
+  type ReconcilingSponsorRefillAccountSpend,
+  type ReservedSponsorRefillAccountSpend,
+  type SponsorRefillAccountSpend,
+  type SponsorRefillAccountSpendKind,
+  type SponsorRefillAccountSpendState,
+  type SponsorRefillAccountSpendTerminalFailureKind,
   type SponsorRefillAccountWriteFields,
+  type TerminalSponsorRefillAccountSpend,
 } from './redisState.js';
+import type { SponsorOperationsSettings } from './settings.js';
+import {
+  ACTIVE_SPONSOR_REFILL_OPERATION_STATES,
+  isActiveSponsorRefillOperationState,
+} from './status.js';
 
-export const SPONSOR_REFILL_ACCOUNT_SPEND_KINDS = ['refill', 'withdrawal'] as const;
-export type SponsorRefillAccountSpendKind = (typeof SPONSOR_REFILL_ACCOUNT_SPEND_KINDS)[number];
-
-export const SPONSOR_REFILL_ACCOUNT_SPEND_STATES = [
-  'reserved',
-  'ready',
-  'reconciling',
-  'succeeded',
-  'failed',
-] as const;
-export type SponsorRefillAccountSpendState = (typeof SPONSOR_REFILL_ACCOUNT_SPEND_STATES)[number];
-
-export type SponsorRefillAccountSpendTerminalFailureKind = 'runway_blocked' | 'failed';
-
-interface SponsorRefillAccountSpendBase {
-  readonly network: SuiNetwork;
-  readonly operationId: string;
-  readonly sourceAddress: string;
-  readonly destinationAddress: string;
-  readonly amountMist: string;
-  readonly sequence: number;
-}
-
-type SponsorRefillAccountSpendKindFields =
-  | {
-      readonly kind: 'refill';
-      readonly slotAddress: string;
-      readonly nonceKey: null;
-    }
-  | {
-      readonly kind: 'withdrawal';
-      readonly slotAddress: null;
-      readonly nonceKey: string;
-    };
-
-interface SponsorRefillAccountTransactionIdentity {
-  readonly gasBudgetMist: string;
-  readonly transactionBytesBase64: string;
-  readonly signature: string;
-  readonly digest: string;
-}
-
-export type ReservedSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
-  SponsorRefillAccountSpendKindFields & {
-    readonly state: 'reserved';
-  };
-
-export type ReadySponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
-  SponsorRefillAccountSpendKindFields &
-  SponsorRefillAccountTransactionIdentity & {
-    readonly state: 'ready';
-  };
-
-export type ReconcilingSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
-  SponsorRefillAccountSpendKindFields &
-  SponsorRefillAccountTransactionIdentity &
-  (
-    | {
-        readonly state: 'reconciling';
-        readonly chainResult: 'succeeded';
-      }
-    | {
-        readonly state: 'reconciling';
-        readonly chainResult: 'failed';
-        readonly error: string;
-      }
-  );
-
-export type SucceededSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
-  SponsorRefillAccountSpendKindFields & {
-    readonly state: 'succeeded';
-    readonly digest: string;
-  };
-
-export type FailedSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
-  SponsorRefillAccountSpendKindFields & {
-    readonly state: 'failed';
-    readonly digest: string | null;
-    readonly failureKind: SponsorRefillAccountSpendTerminalFailureKind;
-    readonly error: string;
-  };
-
-export type ActiveSponsorRefillAccountSpend =
-  | ReservedSponsorRefillAccountSpend
-  | ReadySponsorRefillAccountSpend
-  | ReconcilingSponsorRefillAccountSpend;
-
-export type TerminalSponsorRefillAccountSpend =
-  | SucceededSponsorRefillAccountSpend
-  | FailedSponsorRefillAccountSpend;
-
-export type SponsorRefillAccountSpend =
-  | ActiveSponsorRefillAccountSpend
-  | TerminalSponsorRefillAccountSpend;
+export type {
+  ActiveSponsorRefillAccountSpend,
+  FailedSponsorRefillAccountSpend,
+  ReadySponsorRefillAccountSpend,
+  ReconcilingSponsorRefillAccountSpend,
+  ReservedSponsorRefillAccountSpend,
+  SponsorRefillAccountSpend,
+  SponsorRefillAccountSpendKind,
+  SponsorRefillAccountSpendState,
+  SponsorRefillAccountSpendTerminalFailureKind,
+  SucceededSponsorRefillAccountSpend,
+  TerminalSponsorRefillAccountSpend,
+} from './redisState.js';
+export { SPONSOR_REFILL_ACCOUNT_SPEND_KINDS } from './redisState.js';
+export { createSponsorRefillAccountWithdrawalOperationId } from './redisState.js';
 
 export type SponsorRefillAccountWithdrawalTerminalResult =
   | {
@@ -127,10 +73,7 @@ export type SponsorRefillAccountWithdrawalTerminalResult =
     };
 
 export type SponsorRefillAccountWithdrawalReceipt =
-  | {
-      readonly type: 'issued';
-      readonly network: SuiNetwork;
-    }
+  | { readonly type: 'issued'; readonly network: SuiNetwork }
   | {
       readonly type: 'accepted';
       readonly network: SuiNetwork;
@@ -180,9 +123,19 @@ export function encodeSponsorRefillAccountWithdrawalIssuedReceipt(network: SuiNe
   return encodeWithdrawalReceipt({ type: 'issued', network });
 }
 
+function canonicalAddress(raw: unknown, label: string): string {
+  if (typeof raw !== 'string' || !isValidSuiAddress(raw)) {
+    throw new Error(`${label} is not a Sui address`);
+  }
+  const normalized = normalizeSuiAddress(raw);
+  if (normalized !== raw) throw new Error(`${label} is not canonical`);
+  return normalized;
+}
+
 function parseWithdrawalReceipt(
   raw: string,
   expectedNetwork: SuiNetwork,
+  expectedNonceKey?: string,
 ): SponsorRefillAccountWithdrawalReceipt {
   let value: unknown;
   try {
@@ -197,74 +150,92 @@ function parseWithdrawalReceipt(
   ) {
     throw new Error('Sponsor Refill Account withdrawal receipt has an invalid network or schema');
   }
+  let receipt: SponsorRefillAccountWithdrawalReceipt;
   if (value[1] === 'issued' && value.length === 3) {
-    return { type: 'issued', network: expectedNetwork };
+    receipt = { type: 'issued', network: expectedNetwork };
+  } else {
+    const operationId = value[3];
+    const amountMist = value[6];
+    if (
+      typeof operationId !== 'string' ||
+      operationId.length === 0 ||
+      typeof amountMist !== 'string' ||
+      !isPositiveU64DecimalString(amountMist)
+    ) {
+      throw new Error(
+        'Sponsor Refill Account withdrawal receipt has an invalid operation identity',
+      );
+    }
+    const sourceAddress = canonicalAddress(value[4], 'Withdrawal receipt sourceAddress');
+    const destinationAddress = canonicalAddress(value[5], 'Withdrawal receipt destinationAddress');
+    if (
+      expectedNonceKey !== undefined &&
+      operationId !==
+        createSponsorRefillAccountWithdrawalOperationId({
+          network: expectedNetwork,
+          sourceAddress,
+          destinationAddress,
+          amountMist,
+          nonceKey: expectedNonceKey,
+        })
+    ) {
+      throw new Error('Sponsor Refill Account withdrawal receipt operation identity is invalid');
+    }
+    if (value[1] === 'accepted' && value.length === 7) {
+      receipt = {
+        type: 'accepted',
+        network: expectedNetwork,
+        operationId,
+        sourceAddress,
+        destinationAddress,
+        amountMist,
+      };
+    } else {
+      if (value[1] !== 'terminal' || value.length !== 10) {
+        throw new Error('Sponsor Refill Account withdrawal receipt has an invalid state');
+      }
+      const status = value[7];
+      const digest = value[8];
+      const error = value[9];
+      if (
+        (status !== 'succeeded' && status !== 'failed' && status !== 'runway_blocked') ||
+        (digest !== null && (typeof digest !== 'string' || !isValidTransactionDigest(digest))) ||
+        (error !== null && (typeof error !== 'string' || error.length === 0)) ||
+        (status === 'succeeded' && (digest === null || error !== null)) ||
+        (status === 'runway_blocked' && (digest !== null || error === null)) ||
+        (status === 'failed' && error === null)
+      ) {
+        throw new Error('Sponsor Refill Account withdrawal terminal receipt is inconsistent');
+      }
+      receipt = {
+        type: 'terminal',
+        network: expectedNetwork,
+        result:
+          status === 'succeeded'
+            ? {
+                status,
+                operationId,
+                sourceAddress,
+                destinationAddress,
+                amountMist,
+                digest: digest!,
+              }
+            : {
+                status,
+                operationId,
+                sourceAddress,
+                destinationAddress,
+                amountMist,
+                digest,
+                error: error!,
+              },
+      };
+    }
   }
-  const operationId = value[3];
-  const sourceAddress = value[4];
-  const destinationAddress = value[5];
-  const amountMist = value[6];
-  if (
-    typeof operationId !== 'string' ||
-    operationId.length === 0 ||
-    typeof sourceAddress !== 'string' ||
-    sourceAddress.length === 0 ||
-    typeof destinationAddress !== 'string' ||
-    destinationAddress.length === 0 ||
-    typeof amountMist !== 'string' ||
-    !isPositiveU64DecimalString(amountMist)
-  ) {
-    throw new Error('Sponsor Refill Account withdrawal receipt has an invalid operation identity');
+  if (encodeWithdrawalReceipt(receipt) !== raw) {
+    throw new Error('Sponsor Refill Account withdrawal receipt is not canonical');
   }
-  if (value[1] === 'accepted' && value.length === 7) {
-    return {
-      type: 'accepted',
-      network: expectedNetwork,
-      operationId,
-      sourceAddress,
-      destinationAddress,
-      amountMist,
-    };
-  }
-  if (value[1] !== 'terminal' || value.length !== 10) {
-    throw new Error('Sponsor Refill Account withdrawal receipt has an invalid state');
-  }
-  const status = value[7];
-  const digest = value[8];
-  const error = value[9];
-  if (
-    (status !== 'succeeded' && status !== 'failed' && status !== 'runway_blocked') ||
-    (digest !== null && (typeof digest !== 'string' || digest.length === 0)) ||
-    (error !== null && (typeof error !== 'string' || error.length === 0)) ||
-    (status === 'succeeded' && (digest === null || error !== null)) ||
-    (status === 'runway_blocked' && (digest !== null || error === null)) ||
-    (status === 'failed' && error === null)
-  ) {
-    throw new Error('Sponsor Refill Account withdrawal terminal receipt is inconsistent');
-  }
-  return {
-    type: 'terminal',
-    network: expectedNetwork,
-    result:
-      status === 'succeeded'
-        ? {
-            status,
-            operationId,
-            sourceAddress,
-            destinationAddress,
-            amountMist,
-            digest: digest!,
-          }
-        : {
-            status,
-            operationId,
-            sourceAddress,
-            destinationAddress,
-            amountMist,
-            digest,
-            error: error!,
-          },
-  };
+  return receipt;
 }
 
 export interface ReserveSponsorRefillAccountSpendInput {
@@ -274,9 +245,8 @@ export interface ReserveSponsorRefillAccountSpendInput {
   readonly destinationAddress: string;
   readonly slotAddress: string | null;
   readonly amountMist: string;
-  readonly observedSlotBalanceMist: string | null;
+  readonly observedSlotAddressBalanceMist: string | null;
   readonly expectedSlotWriteSequence: number | null;
-  /** Bind automatic source-balance evidence to the account HASH observed before reservation. */
   readonly expectedSourceObservationWriteSequence: number | null;
   readonly nonceKey: string | null;
 }
@@ -298,7 +268,6 @@ export interface MarkSponsorRefillAccountSpendReadyInput {
   readonly signature: string;
   readonly digest: string;
   readonly sourceBalanceMist: string;
-  readonly refillsRemaining: string;
 }
 
 export interface CompleteSponsorRefillAccountSpendInput {
@@ -310,10 +279,8 @@ export interface CompleteSponsorRefillAccountSpendInput {
   readonly account: SponsorRefillAccountWriteFields;
   readonly slot: {
     readonly address: string;
-    readonly state: SponsorSlotState;
-    readonly balanceMist: string;
+    readonly addressBalanceMist: string;
     readonly lastError: string;
-    readonly reconciliationResult: RefillReconciliationResult;
     readonly expectedWriteSequence: number;
   } | null;
 }
@@ -335,202 +302,17 @@ export interface FailReservedSponsorRefillAccountSpendInput {
 
 export interface SponsorRefillAccountObservationCursor {
   readonly operationId: string | null;
+  readonly spendState: SponsorRefillAccountSpendState | null;
   readonly spendSequence: number;
   readonly writeSequence: number;
-}
-
-const ACTIVE_SPEND_STATES = new Set<SponsorRefillAccountSpendState>([
-  'reserved',
-  'ready',
-  'reconciling',
-]);
-function isDecimal(raw: string | undefined): raw is string {
-  return raw !== undefined && /^(?:0|[1-9]\d*)$/.test(raw);
 }
 
 function isPositiveU64(raw: string | undefined): raw is string {
   return raw !== undefined && isPositiveU64DecimalString(raw);
 }
 
-function parseSequence(raw: string | undefined): number | null {
-  if (!isDecimal(raw)) return null;
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
-
-function parseSpend(
-  hash: Record<string, string>,
-  expectedNetwork: SuiNetwork,
-): SponsorRefillAccountSpend | null {
-  const stateRaw = hash.spendState;
-  if (stateRaw === undefined || stateRaw === '') {
-    if (hash.spendOperationId || hash.spendNetwork || hash.spendNonceKey) {
-      throw new Error('Sponsor Refill Account spend has identity without a state');
-    }
-    return null;
-  }
-  if (hash.spendNetwork !== expectedNetwork) {
-    throw new Error('Sponsor Refill Account spend belongs to a different or missing network');
-  }
-  if (!(SPONSOR_REFILL_ACCOUNT_SPEND_STATES as readonly string[]).includes(stateRaw)) {
-    throw new Error(`Sponsor Refill Account spend has invalid state '${stateRaw}'`);
-  }
-  const state = stateRaw as SponsorRefillAccountSpendState;
-  const kindRaw = hash.spendKind;
-  if (!(SPONSOR_REFILL_ACCOUNT_SPEND_KINDS as readonly string[]).includes(kindRaw ?? '')) {
-    throw new Error('Sponsor Refill Account spend has invalid kind');
-  }
-  const kind = kindRaw as SponsorRefillAccountSpendKind;
-  const sequence = parseSequence(hash.spendSequence);
-  if (
-    !hash.spendOperationId ||
-    !hash.spendSourceAddress ||
-    !hash.spendDestinationAddress ||
-    !isPositiveU64(hash.spendAmountMist) ||
-    sequence === null ||
-    sequence <= 0
-  ) {
-    throw new Error('Sponsor Refill Account spend is malformed');
-  }
-  const slotAddress = hash.spendSlotAddress || null;
-  if ((kind === 'refill') !== (slotAddress !== null)) {
-    throw new Error('Sponsor Refill Account spend has inconsistent slot identity');
-  }
-  const nonceKey = hash.spendNonceKey || null;
-  if ((kind === 'withdrawal') !== (nonceKey !== null)) {
-    throw new Error('Sponsor Refill Account spend has inconsistent withdrawal receipt identity');
-  }
-
-  const gasBudgetMist = hash.spendGasBudgetMist || null;
-  const transactionBytesBase64 = hash.spendTransactionBytesBase64 || null;
-  const signature = hash.spendSignature || null;
-  const digest = hash.spendDigest || null;
-  const chainResultRaw = hash.spendChainResult || null;
-  if (chainResultRaw !== null && chainResultRaw !== 'succeeded' && chainResultRaw !== 'failed') {
-    throw new Error('Sponsor Refill Account spend has invalid chain result');
-  }
-  const chainResult = chainResultRaw as 'succeeded' | 'failed' | null;
-  const terminalFailureKindRaw = hash.spendTerminalFailureKind || null;
-  if (
-    terminalFailureKindRaw !== null &&
-    terminalFailureKindRaw !== 'runway_blocked' &&
-    terminalFailureKindRaw !== 'failed'
-  ) {
-    throw new Error('Sponsor Refill Account spend has an invalid terminal failure kind');
-  }
-  const terminalFailureKind =
-    terminalFailureKindRaw as SponsorRefillAccountSpendTerminalFailureKind | null;
-  const lastError = hash.spendLastError || null;
-  const hasCompleteIdentity =
-    isPositiveU64(gasBudgetMist ?? undefined) &&
-    transactionBytesBase64 !== null &&
-    signature !== null &&
-    digest !== null;
-  const hasAnyIdentity =
-    gasBudgetMist !== null ||
-    transactionBytesBase64 !== null ||
-    signature !== null ||
-    digest !== null;
-  const common = {
-    network: expectedNetwork,
-    operationId: hash.spendOperationId,
-    sourceAddress: hash.spendSourceAddress,
-    destinationAddress: hash.spendDestinationAddress,
-    amountMist: hash.spendAmountMist,
-    sequence,
-    ...(kind === 'refill'
-      ? { kind, slotAddress: slotAddress!, nonceKey: null }
-      : { kind, slotAddress: null, nonceKey: nonceKey! }),
-  } as const;
-
-  if (state === 'reserved') {
-    if (
-      hasAnyIdentity ||
-      chainResult !== null ||
-      terminalFailureKind !== null ||
-      lastError !== null
-    ) {
-      throw new Error(
-        'Sponsor Refill Account reserved spend contains premature transaction identity',
-      );
-    }
-    return { ...common, state };
-  }
-
-  if (state === 'ready') {
-    if (
-      !hasCompleteIdentity ||
-      chainResult !== null ||
-      terminalFailureKind !== null ||
-      lastError !== null
-    ) {
-      throw new Error('Sponsor Refill Account ready spend has an inconsistent identity');
-    }
-    return {
-      ...common,
-      state,
-      gasBudgetMist: gasBudgetMist!,
-      transactionBytesBase64: transactionBytesBase64!,
-      signature: signature!,
-      digest: digest!,
-    };
-  }
-
-  if (state === 'reconciling') {
-    if (
-      !hasCompleteIdentity ||
-      chainResult === null ||
-      terminalFailureKind !== null ||
-      (chainResult === 'succeeded' ? lastError !== null : lastError === null)
-    ) {
-      throw new Error('Sponsor Refill Account reconciling spend has an inconsistent result');
-    }
-    const identity = {
-      ...common,
-      state,
-      gasBudgetMist: gasBudgetMist!,
-      transactionBytesBase64: transactionBytesBase64!,
-      signature: signature!,
-      digest: digest!,
-    };
-    return chainResult === 'succeeded'
-      ? { ...identity, chainResult }
-      : { ...identity, chainResult, error: lastError! };
-  }
-
-  const hasRetainedSigningIdentity =
-    gasBudgetMist !== null || transactionBytesBase64 !== null || signature !== null;
-  if (state === 'succeeded') {
-    if (
-      hasRetainedSigningIdentity ||
-      digest === null ||
-      chainResult !== 'succeeded' ||
-      terminalFailureKind !== null ||
-      lastError !== null
-    ) {
-      throw new Error('Sponsor Refill Account succeeded spend has an inconsistent result');
-    }
-    return { ...common, state, digest };
-  }
-
-  if (
-    hasRetainedSigningIdentity ||
-    terminalFailureKind === null ||
-    lastError === null ||
-    !(
-      (chainResult === null && digest === null) ||
-      (chainResult === 'failed' && digest !== null && terminalFailureKind === 'failed')
-    )
-  ) {
-    throw new Error('Sponsor Refill Account failed spend has an inconsistent result');
-  }
-  return {
-    ...common,
-    state,
-    digest,
-    failureKind: terminalFailureKind,
-    error: lastError,
-  };
+function isU64(raw: string | undefined): raw is string {
+  return raw === '0' || isPositiveU64(raw);
 }
 
 function assertSequence(value: number, label: string): void {
@@ -539,309 +321,251 @@ function assertSequence(value: number, label: string): void {
   }
 }
 
-function assertReserveInput(input: ReserveSponsorRefillAccountSpendInput): void {
-  if (!input.operationId || !input.sourceAddress || !input.destinationAddress) {
-    throw new Error('Sponsor Refill Account spend reservation requires operation identities');
-  }
-  if (!isPositiveU64(input.amountMist)) {
-    throw new Error('Sponsor Refill Account spend amount must be a positive u64 decimal string');
-  }
-  if ((input.kind === 'refill') !== (input.slotAddress !== null)) {
-    throw new Error('Sponsor Refill Account refill reservation requires exactly one slot address');
-  }
-  if ((input.kind === 'withdrawal') !== (input.nonceKey !== null && input.nonceKey.length > 0)) {
-    throw new Error(
-      'Sponsor Refill Account withdrawal reservation requires exactly one receipt key',
-    );
-  }
-  if (input.kind === 'refill' && !isDecimal(input.observedSlotBalanceMist ?? undefined)) {
-    throw new Error('Sponsor Refill Account refill reservation requires an observed slot balance');
-  }
-  if (input.kind === 'refill') {
-    assertSequence(input.expectedSlotWriteSequence ?? -1, 'expectedSlotWriteSequence');
-  } else if (input.expectedSlotWriteSequence !== null) {
-    throw new Error('Sponsor Refill Account withdrawal cannot carry a slot write sequence');
-  }
-  if (input.expectedSourceObservationWriteSequence !== null) {
-    if (input.kind !== 'refill') {
-      throw new Error(
-        'Sponsor Refill Account withdrawal cannot carry a source observation sequence',
-      );
-    }
-    assertSequence(
-      input.expectedSourceObservationWriteSequence,
-      'expectedSourceObservationWriteSequence',
-    );
-  }
-}
-
-function accountWriteArgs(fields: SponsorRefillAccountWriteFields): readonly string[] {
+function exactHashGuardLua(key: string, fields: readonly string[], indent = ''): readonly string[] {
   return [
-    fields.balanceMist ?? '',
-    fields.healthy ?? '0',
-    fields.refillsRemaining ?? '',
-    fields.lastError ?? '',
+    `${indent}if redis.call('HLEN', ${key}) ~= ${fields.length} then return { 'MALFORMED' } end`,
+    ...fields.map(
+      (field) =>
+        `${indent}if redis.call('HEXISTS', ${key}, '${field}') ~= 1 then return { 'MALFORMED' } end`,
+    ),
   ];
 }
 
-const STAMP_ENTITY_LUA = [
-  "local time = redis.call('TIME')",
-  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
-  "local writeSeq = redis.call('HINCRBY', KEYS[1], 'writeSeq', 1)",
-  "redis.call('HSET', KEYS[1], 'lastObservedAtMs', nowMs)",
-].join('\n');
+function expectedHashGuardLua(
+  key: string,
+  fields: readonly string[],
+  firstArg: number,
+): readonly string[] {
+  return [
+    ...exactHashGuardLua(key, fields),
+    ...fields.map(
+      (field, index) =>
+        `if (redis.call('HGET', ${key}, '${field}') or '') ~= ARGV[${firstArg + index}] then return { 'STALE' } end`,
+    ),
+  ];
+}
 
-const ASSERT_SPEND_SLOT_KEY_LUA = [
-  "local slotAddress = redis.call('HGET', KEYS[1], 'spendSlotAddress') or ''",
-  `local expectedSlotKey = slotAddress == '' and KEYS[1] or '${SPONSOR_OPERATIONS_KEY_PREFIX}slot:' .. slotAddress`,
-  "if KEYS[2] ~= expectedSlotKey then return { 'SLOT_MISMATCH' } end",
-];
+function writeHashLua(
+  key: string,
+  fields: readonly string[],
+  firstArg: number,
+  indent = '',
+): string {
+  const pairs = fields.flatMap((field, index) => [`'${field}'`, `ARGV[${firstArg + index}]`]);
+  return `${indent}redis.call('HSET', ${key}, ${pairs.join(', ')})`;
+}
+
+const SPEND_FIELD_COUNT = SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS.length;
+const NEXT_SPEND_FIRST_ARG = SPEND_FIELD_COUNT + 1;
+const AFTER_NEXT_SPEND_ARG = SPEND_FIELD_COUNT * 2 + 1;
+
+const RESERVE_USES_NONCE_ARG = 1;
+const RESERVE_SPEND_FIRST_ARG = 2;
+const RESERVE_SLOT_BALANCE_ARG = RESERVE_SPEND_FIRST_ARG + SPEND_FIELD_COUNT;
+const RESERVE_SLOT_SEQUENCE_ARG = RESERVE_SLOT_BALANCE_ARG + 1;
+const RESERVE_ISSUED_RECEIPT_ARG = RESERVE_SLOT_SEQUENCE_ARG + 1;
+const RESERVE_ACCEPTED_RECEIPT_ARG = RESERVE_ISSUED_RECEIPT_ARG + 1;
+const RESERVE_RECEIPT_TTL_ARG = RESERVE_ACCEPTED_RECEIPT_ARG + 1;
+const RESERVE_ACCOUNT_SEQUENCE_ARG = RESERVE_RECEIPT_TTL_ARG + 1;
 
 export const RESERVE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA = [
-  "local currentState = redis.call('HGET', KEYS[1], 'spendState') or ''",
-  "local currentOperationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "if currentState == '' and currentOperationId ~= '' then return { 'MALFORMED' } end",
-  "if currentState ~= '' and (redis.call('HGET', KEYS[1], 'spendNetwork') or '') ~= ARGV[11] then",
-  "  return { 'NETWORK_MISMATCH' }",
+  "local spendExists = redis.call('EXISTS', KEYS[1])",
+  'if spendExists == 1 then',
+  ...exactHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, '  '),
+  "  local currentState = redis.call('HGET', KEYS[1], 'state') or ''",
+  "  if currentState ~= 'succeeded' and currentState ~= 'failed' then return { 'ACTIVE' } end",
   'end',
-  "if ARGV[1] == '1' then",
-  "  local receipt = redis.call('GET', KEYS[2])",
+  `if ARGV[${RESERVE_USES_NONCE_ARG}] == '1' then`,
+  "  local receipt = redis.call('GET', KEYS[3])",
   "  if not receipt then return { 'NONCE_MISSING' } end",
-  "  if receipt ~= ARGV[12] then return { 'RECEIPT', receipt } end",
+  `  if receipt ~= ARGV[${RESERVE_ISSUED_RECEIPT_ARG}] then return { 'RECEIPT', receipt } end`,
   'end',
-  "if currentState ~= '' and currentState ~= 'succeeded' and currentState ~= 'failed' then",
-  "  return { 'ACTIVE' }",
+  `if ARGV[${RESERVE_ACCOUNT_SEQUENCE_ARG}] ~= '' then`,
+  ...exactHashGuardLua('KEYS[2]', SPONSOR_REFILL_ACCOUNT_HASH_FIELDS, '  '),
+  `  if (redis.call('HGET', KEYS[2], 'writeSeq') or '') ~= ARGV[${RESERVE_ACCOUNT_SEQUENCE_ARG}] then return { 'SOURCE_CHANGED' } end`,
   'end',
-  "if ARGV[15] ~= '' and (redis.call('HGET', KEYS[1], 'writeSeq') or '0') ~= ARGV[15] then",
-  "  return { 'SOURCE_CHANGED' }",
+  `if ARGV[${RESERVE_SLOT_SEQUENCE_ARG}] ~= '' then`,
+  ...exactHashGuardLua('KEYS[4]', SPONSOR_SLOT_HASH_FIELDS, '  '),
+  `  if (redis.call('HGET', KEYS[4], 'writeSeq') or '') ~= ARGV[${RESERVE_SLOT_SEQUENCE_ARG}] then return { 'SLOT_CHANGED' } end`,
+  `  if (redis.call('HGET', KEYS[4], 'addressBalanceMist') or '') ~= ARGV[${RESERVE_SLOT_BALANCE_ARG}] then return { 'SLOT_CHANGED' } end`,
+  `  if ARGV[${RESERVE_SLOT_SEQUENCE_ARG}] == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
   'end',
-  "if ARGV[8] == '1' then",
-  `  if KEYS[3] ~= '${SPONSOR_OPERATIONS_KEY_PREFIX}slot:' .. ARGV[6] then return { 'SLOT_MISMATCH' } end`,
-  "  local slotWriteSeq = redis.call('HGET', KEYS[3], 'writeSeq') or '0'",
-  "  if slotWriteSeq ~= ARGV[10] then return { 'SLOT_CHANGED' } end",
-  'end',
-  "if ARGV[1] == '1' then redis.call('SET', KEYS[2], ARGV[13], 'PX', ARGV[14]) end",
-  "local spendSeq = redis.call('HINCRBY', KEYS[1], 'spendSequence', 1)",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'spendNetwork', ARGV[11],",
-  "  'spendOperationId', ARGV[2],",
-  "  'spendKind', ARGV[3],",
-  "  'spendSourceAddress', ARGV[4],",
-  "  'spendDestinationAddress', ARGV[5],",
-  "  'spendSlotAddress', ARGV[6],",
-  "  'spendNonceKey', ARGV[1] == '1' and KEYS[2] or '',",
-  "  'spendAmountMist', ARGV[7],",
-  "  'spendGasBudgetMist', '',",
-  "  'spendTransactionBytesBase64', '',",
-  "  'spendSignature', '',",
-  "  'spendDigest', '',",
-  "  'spendChainResult', '',",
-  "  'spendTerminalFailureKind', '',",
-  "  'spendState', 'reserved',",
-  "  'spendLastError', '')",
-  "if ARGV[8] == '1' then",
-  "  local slotTime = redis.call('TIME')",
-  '  local slotNowMs = tostring(tonumber(slotTime[1]) * 1000 + math.floor(tonumber(slotTime[2]) / 1000))',
-  "  redis.call('HINCRBY', KEYS[3], 'writeSeq', 1)",
-  "  redis.call('HSET', KEYS[3],",
-  "    'lastObservedAtMs', slotNowMs,",
-  "    'state', 'refilling',",
-  "    'balanceMist', ARGV[9],",
-  "    'lastError', '',",
-  "    'pendingRefillDigest', '',",
-  "    'refillAttemptedAmountMist', ARGV[7],",
-  "    'refillObservedBalanceMist', ARGV[9],",
-  "    'refillReconciliationResult', 'dispatch_started',",
-  "    'refillOperationId', ARGV[2],",
-  "    'refillOperationSequence', tostring(spendSeq),",
-  "    'refillOperationState', 'reserved',",
-  "    'refillRequiredSourceBalanceMist', '')",
-  'end',
-  "return { 'CREATED', tostring(spendSeq) }",
+  `if ARGV[${RESERVE_USES_NONCE_ARG}] == '1' then redis.call('SET', KEYS[3], ARGV[${RESERVE_ACCEPTED_RECEIPT_ARG}], 'PX', ARGV[${RESERVE_RECEIPT_TTL_ARG}]) end`,
+  `if ARGV[${RESERVE_SLOT_SEQUENCE_ARG}] ~= '' then redis.call('HSET', KEYS[4], 'writeSeq', tostring(tonumber(ARGV[${RESERVE_SLOT_SEQUENCE_ARG}]) + 1)) end`,
+  writeHashLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, RESERVE_SPEND_FIRST_ARG),
+  "return { 'CREATED' }",
 ].join('\n');
+
+const READY_ACCOUNT_SEQUENCE_ARG = AFTER_NEXT_SPEND_ARG;
+const READY_ACCOUNT_BALANCE_ARG = READY_ACCOUNT_SEQUENCE_ARG + 1;
 
 export const MARK_SPONSOR_REFILL_ACCOUNT_SPEND_READY_LUA = [
-  "local operationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "local sequence = redis.call('HGET', KEYS[1], 'spendSequence') or ''",
-  "local accountWriteSeq = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
-  "local state = redis.call('HGET', KEYS[1], 'spendState') or ''",
-  "if operationId ~= ARGV[1] or sequence ~= ARGV[2] or state ~= 'reserved' then",
-  "  return { 'STALE' }",
+  ...expectedHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, 1),
+  "if redis.call('HGET', KEYS[1], 'state') ~= 'reserved' then return { 'STALE' } end",
+  "local accountExists = redis.call('EXISTS', KEYS[2])",
+  'if accountExists == 1 then',
+  ...exactHashGuardLua('KEYS[2]', SPONSOR_REFILL_ACCOUNT_HASH_FIELDS, '  '),
   'end',
-  ...ASSERT_SPEND_SLOT_KEY_LUA,
-  "local nextSeq = redis.call('HINCRBY', KEYS[1], 'spendSequence', 1)",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'spendGasBudgetMist', ARGV[4],",
-  "  'spendTransactionBytesBase64', ARGV[5],",
-  "  'spendSignature', ARGV[6],",
-  "  'spendDigest', ARGV[7],",
-  "  'spendState', 'ready',",
-  "  'spendChainResult', '',",
-  "  'spendLastError', '')",
-  'if accountWriteSeq == ARGV[3] then',
-  "  redis.call('HSET', KEYS[1],",
-  "    'balanceMist', ARGV[8],",
-  "    'healthy', '1',",
-  "    'refillsRemaining', ARGV[9],",
-  "    'lastError', '')",
+  "local currentAccountSequence = redis.call('HGET', KEYS[2], 'writeSeq') or '0'",
+  `local updateAccount = currentAccountSequence == ARGV[${READY_ACCOUNT_SEQUENCE_ARG}]`,
+  `if updateAccount and currentAccountSequence == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
+  "local nextAccountSequence = updateAccount and tostring(tonumber(currentAccountSequence) + 1) or ''",
+  "local nowMs = ''",
+  'if updateAccount then',
+  "  local time = redis.call('TIME')",
+  '  nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
   'end',
-  "if slotAddress ~= '' then",
-  "  local slotTime = redis.call('TIME')",
-  '  local slotNowMs = tostring(tonumber(slotTime[1]) * 1000 + math.floor(tonumber(slotTime[2]) / 1000))',
-  "  redis.call('HINCRBY', KEYS[2], 'writeSeq', 1)",
-  "  redis.call('HSET', KEYS[2],",
-  "    'lastObservedAtMs', slotNowMs,",
-  "    'pendingRefillDigest', ARGV[7],",
-  "    'refillReconciliationResult', 'dispatch_ready',",
-  "    'refillOperationSequence', tostring(nextSeq),",
-  "    'refillOperationState', 'ready')",
+  writeHashLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, NEXT_SPEND_FIRST_ARG),
+  'if updateAccount then',
+  `  redis.call('HSET', KEYS[2], 'totalBalanceMist', ARGV[${READY_ACCOUNT_BALANCE_ARG}], 'lastError', '', 'lastObservedAtMs', nowMs, 'writeSeq', nextAccountSequence)`,
   'end',
-  "return { 'READY', tostring(nextSeq) }",
-].join('\n');
-
-export const COMPLETE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA = [
-  "local operationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "local sequence = redis.call('HGET', KEYS[1], 'spendSequence') or ''",
-  "local accountWriteSeq = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
-  "local state = redis.call('HGET', KEYS[1], 'spendState') or ''",
-  "local chainResult = redis.call('HGET', KEYS[1], 'spendChainResult') or ''",
-  "if operationId ~= ARGV[1] or sequence ~= ARGV[2] or state ~= 'reconciling' then",
-  "  return { 'STALE' }",
-  'end',
-  "if chainResult ~= ARGV[4] then return { 'CHAIN_RESULT_MISMATCH' } end",
-  ...ASSERT_SPEND_SLOT_KEY_LUA,
-  "local nonceKey = redis.call('HGET', KEYS[1], 'spendNonceKey') or ''",
-  "if nonceKey ~= '' and (nonceKey ~= KEYS[3] or ARGV[17] == '') then",
-  "  return { 'RECEIPT_MISMATCH' }",
-  'end',
-  "if ARGV[10] == '1' then",
-  "  local slotOperationId = redis.call('HGET', KEYS[2], 'refillOperationId') or ''",
-  "  local slotOperationSequence = redis.call('HGET', KEYS[2], 'refillOperationSequence') or ''",
-  "  local slotWriteSeq = redis.call('HGET', KEYS[2], 'writeSeq') or '0'",
-  '  if slotOperationId ~= ARGV[1] or slotOperationSequence ~= ARGV[2] or slotWriteSeq ~= ARGV[11] then',
-  "    return { 'STALE' }",
-  '  end',
-  'end',
-  "local nextSeq = redis.call('HINCRBY', KEYS[1], 'spendSequence', 1)",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'spendState', ARGV[4],",
-  "  'spendGasBudgetMist', '',",
-  "  'spendTransactionBytesBase64', '',",
-  "  'spendSignature', '',",
-  "  'spendTerminalFailureKind', ARGV[16],",
-  "  'spendLastError', ARGV[5])",
-  'if accountWriteSeq == ARGV[3] then',
-  "  redis.call('HSET', KEYS[1],",
-  "    'balanceMist', ARGV[6],",
-  "    'healthy', ARGV[7],",
-  "    'refillsRemaining', ARGV[8],",
-  "    'lastError', ARGV[9])",
-  'end',
-  "if ARGV[10] == '1' then",
-  "  local slotTime = redis.call('TIME')",
-  '  local slotNowMs = tostring(tonumber(slotTime[1]) * 1000 + math.floor(tonumber(slotTime[2]) / 1000))',
-  "  redis.call('HINCRBY', KEYS[2], 'writeSeq', 1)",
-  "  redis.call('HSET', KEYS[2],",
-  "    'lastObservedAtMs', slotNowMs,",
-  "    'state', ARGV[12],",
-  "    'balanceMist', ARGV[13],",
-  "    'lastError', ARGV[14],",
-  "    'refillObservedBalanceMist', ARGV[13],",
-  "    'refillReconciliationResult', ARGV[15],",
-  "    'refillOperationSequence', tostring(nextSeq),",
-  "    'refillOperationState', ARGV[4],",
-  "    'refillRequiredSourceBalanceMist', '')",
-  "  if ARGV[15] == 'dispatch_succeeded' or ARGV[15] == 'dispatch_failed' then",
-  "    redis.call('HSET', KEYS[2], 'pendingRefillDigest', '')",
-  '  end',
-  'end',
-  "if nonceKey ~= '' then redis.call('SET', KEYS[3], ARGV[17], 'PX', ARGV[18]) end",
-  "return { 'COMPLETED', tostring(nextSeq) }",
+  "return { 'READY' }",
 ].join('\n');
 
 export const RECONCILE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA = [
-  "local operationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "local sequence = redis.call('HGET', KEYS[1], 'spendSequence') or ''",
-  "local state = redis.call('HGET', KEYS[1], 'spendState') or ''",
-  "if operationId ~= ARGV[1] or sequence ~= ARGV[2] or state ~= 'ready' then",
-  "  return { 'STALE' }",
-  'end',
-  ...ASSERT_SPEND_SLOT_KEY_LUA,
-  "local nextSeq = redis.call('HINCRBY', KEYS[1], 'spendSequence', 1)",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'spendState', 'reconciling',",
-  "  'spendChainResult', ARGV[3],",
-  "  'spendLastError', ARGV[4])",
-  "if slotAddress ~= '' then",
-  "  local slotTime = redis.call('TIME')",
-  '  local slotNowMs = tostring(tonumber(slotTime[1]) * 1000 + math.floor(tonumber(slotTime[2]) / 1000))',
-  "  redis.call('HINCRBY', KEYS[2], 'writeSeq', 1)",
-  "  redis.call('HSET', KEYS[2],",
-  "    'lastObservedAtMs', slotNowMs,",
-  "    'refillReconciliationResult', 'dispatch_submitted',",
-  "    'refillOperationSequence', tostring(nextSeq),",
-  "    'refillOperationState', 'reconciling')",
-  'end',
-  "return { 'RECONCILING', tostring(nextSeq) }",
+  ...expectedHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, 1),
+  "if redis.call('HGET', KEYS[1], 'state') ~= 'ready' then return { 'STALE' } end",
+  writeHashLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, NEXT_SPEND_FIRST_ARG),
+  "return { 'RECONCILING' }",
 ].join('\n');
 
+const FAIL_RECEIPT_ARG = AFTER_NEXT_SPEND_ARG;
+const FAIL_RECEIPT_TTL_ARG = FAIL_RECEIPT_ARG + 1;
+
 export const FAIL_RESERVED_SPONSOR_REFILL_ACCOUNT_SPEND_LUA = [
-  "local operationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "local sequence = redis.call('HGET', KEYS[1], 'spendSequence') or ''",
-  "local state = redis.call('HGET', KEYS[1], 'spendState') or ''",
-  "if operationId ~= ARGV[1] or sequence ~= ARGV[2] or state ~= 'reserved' then",
-  "  return { 'STALE' }",
+  ...expectedHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, 1),
+  "if redis.call('HGET', KEYS[1], 'state') ~= 'reserved' then return { 'STALE' } end",
+  "local nonceKey = redis.call('HGET', KEYS[1], 'nonceKey') or ''",
+  "if nonceKey ~= '' and nonceKey ~= KEYS[2] then return { 'RECEIPT_MISMATCH' } end",
+  writeHashLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, NEXT_SPEND_FIRST_ARG),
+  `if nonceKey ~= '' then redis.call('SET', KEYS[2], ARGV[${FAIL_RECEIPT_ARG}], 'PX', ARGV[${FAIL_RECEIPT_TTL_ARG}]) end`,
+  "return { 'FAILED' }",
+].join('\n');
+
+const COMPLETE_ACCOUNT_SEQUENCE_ARG = AFTER_NEXT_SPEND_ARG;
+const COMPLETE_ACCOUNT_BALANCE_ARG = COMPLETE_ACCOUNT_SEQUENCE_ARG + 1;
+const COMPLETE_ACCOUNT_ERROR_ARG = COMPLETE_ACCOUNT_BALANCE_ARG + 1;
+const COMPLETE_HAS_SLOT_ARG = COMPLETE_ACCOUNT_ERROR_ARG + 1;
+const COMPLETE_SLOT_SEQUENCE_ARG = COMPLETE_HAS_SLOT_ARG + 1;
+const COMPLETE_SLOT_BALANCE_ARG = COMPLETE_SLOT_SEQUENCE_ARG + 1;
+const COMPLETE_SLOT_ERROR_ARG = COMPLETE_SLOT_BALANCE_ARG + 1;
+const COMPLETE_RECEIPT_ARG = COMPLETE_SLOT_ERROR_ARG + 1;
+const COMPLETE_RECEIPT_TTL_ARG = COMPLETE_RECEIPT_ARG + 1;
+
+export const COMPLETE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA = [
+  ...expectedHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, 1),
+  "if redis.call('HGET', KEYS[1], 'state') ~= 'reconciling' then return { 'STALE' } end",
+  "local nonceKey = redis.call('HGET', KEYS[1], 'nonceKey') or ''",
+  "if nonceKey ~= '' and nonceKey ~= KEYS[4] then return { 'RECEIPT_MISMATCH' } end",
+  "local accountExists = redis.call('EXISTS', KEYS[2])",
+  'if accountExists == 1 then',
+  ...exactHashGuardLua('KEYS[2]', SPONSOR_REFILL_ACCOUNT_HASH_FIELDS, '  '),
   'end',
-  ...ASSERT_SPEND_SLOT_KEY_LUA,
-  "local nonceKey = redis.call('HGET', KEYS[1], 'spendNonceKey') or ''",
-  "if nonceKey ~= '' and (nonceKey ~= KEYS[3] or ARGV[7] == '') then",
-  "  return { 'RECEIPT_MISMATCH' }",
+  "local currentAccountSequence = redis.call('HGET', KEYS[2], 'writeSeq') or '0'",
+  `local updateAccount = currentAccountSequence == ARGV[${COMPLETE_ACCOUNT_SEQUENCE_ARG}]`,
+  `if updateAccount and currentAccountSequence == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
+  "local nextAccountSequence = updateAccount and tostring(tonumber(currentAccountSequence) + 1) or ''",
+  `local updateSlot = ARGV[${COMPLETE_HAS_SLOT_ARG}] == '1'`,
+  "local nextSlotSequence = ''",
+  'if updateSlot then',
+  ...exactHashGuardLua('KEYS[3]', SPONSOR_SLOT_HASH_FIELDS, '  '),
+  `  if redis.call('HGET', KEYS[3], 'writeSeq') ~= ARGV[${COMPLETE_SLOT_SEQUENCE_ARG}] then return { 'STALE' } end`,
+  `  if ARGV[${COMPLETE_SLOT_SEQUENCE_ARG}] == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
+  `  nextSlotSequence = tostring(tonumber(ARGV[${COMPLETE_SLOT_SEQUENCE_ARG}]) + 1)`,
   'end',
-  "local nextSeq = redis.call('HINCRBY', KEYS[1], 'spendSequence', 1)",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'spendState', 'failed',",
-  "  'spendTerminalFailureKind', ARGV[5],",
-  "  'spendLastError', ARGV[3])",
-  "if ARGV[4] == '1' then",
-  "  local slotTime = redis.call('TIME')",
-  '  local slotNowMs = tostring(tonumber(slotTime[1]) * 1000 + math.floor(tonumber(slotTime[2]) / 1000))',
-  "  redis.call('HINCRBY', KEYS[2], 'writeSeq', 1)",
-  "  redis.call('HSET', KEYS[2],",
-  "    'lastObservedAtMs', slotNowMs,",
-  "    'state', 'refill_failed',",
-  "    'lastError', ARGV[3],",
-  "    'pendingRefillDigest', '',",
-  "    'refillReconciliationResult', 'dispatch_failed',",
-  "    'refillOperationSequence', tostring(nextSeq),",
-  "    'refillOperationState', 'failed',",
-  "    'refillRequiredSourceBalanceMist', ARGV[6])",
+  "local observationNowMs = ''",
+  'if updateAccount or updateSlot then',
+  "  local time = redis.call('TIME')",
+  '  observationNowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
   'end',
-  "if nonceKey ~= '' then redis.call('SET', KEYS[3], ARGV[7], 'PX', ARGV[8]) end",
-  "return { 'FAILED', tostring(nextSeq) }",
+  writeHashLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, NEXT_SPEND_FIRST_ARG),
+  'if updateAccount then',
+  `  redis.call('HSET', KEYS[2], 'totalBalanceMist', ARGV[${COMPLETE_ACCOUNT_BALANCE_ARG}], 'lastError', ARGV[${COMPLETE_ACCOUNT_ERROR_ARG}], 'lastObservedAtMs', ARGV[${COMPLETE_ACCOUNT_BALANCE_ARG}] ~= '' and observationNowMs or '', 'writeSeq', nextAccountSequence)`,
+  'end',
+  'if updateSlot then',
+  `  redis.call('HSET', KEYS[3], 'addressBalanceMist', ARGV[${COMPLETE_SLOT_BALANCE_ARG}], 'lastError', ARGV[${COMPLETE_SLOT_ERROR_ARG}], 'lastObservedAtMs', ARGV[${COMPLETE_SLOT_BALANCE_ARG}] ~= '' and observationNowMs or '', 'writeSeq', nextSlotSequence)`,
+  'end',
+  `if nonceKey ~= '' then redis.call('SET', KEYS[4], ARGV[${COMPLETE_RECEIPT_ARG}], 'PX', ARGV[${COMPLETE_RECEIPT_TTL_ARG}]) end`,
+  "return { 'COMPLETED' }",
 ].join('\n');
 
 export const UPDATE_SPONSOR_REFILL_ACCOUNT_OBSERVATION_LUA = [
-  "local operationId = redis.call('HGET', KEYS[1], 'spendOperationId') or ''",
-  "local spendSequence = redis.call('HGET', KEYS[1], 'spendSequence') or '0'",
-  "local writeSequence = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
-  "if operationId ~= ARGV[1] or spendSequence ~= ARGV[2] or writeSequence ~= ARGV[3] then return { 'STALE' } end",
-  STAMP_ENTITY_LUA,
-  "redis.call('HSET', KEYS[1],",
-  "  'balanceMist', ARGV[4],",
-  "  'healthy', ARGV[5],",
-  "  'refillsRemaining', ARGV[6],",
-  "  'lastError', ARGV[7])",
+  "local spendExists = redis.call('EXISTS', KEYS[1])",
+  'if spendExists == 1 then',
+  ...exactHashGuardLua('KEYS[1]', SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, '  '),
+  'end',
+  "local operationId = spendExists == 1 and (redis.call('HGET', KEYS[1], 'operationId') or '') or ''",
+  "local spendSequence = spendExists == 1 and (redis.call('HGET', KEYS[1], 'sequence') or '0') or '0'",
+  "local spendState = spendExists == 1 and (redis.call('HGET', KEYS[1], 'state') or '') or ''",
+  `if spendExists == 1 and (${ACTIVE_SPONSOR_REFILL_OPERATION_STATES.map((state) => `spendState == '${state}'`).join(' or ')}) then return { 'STALE' } end`,
+  "if operationId ~= ARGV[1] or spendSequence ~= ARGV[2] then return { 'STALE' } end",
+  "local accountExists = redis.call('EXISTS', KEYS[2])",
+  'if accountExists == 1 then',
+  ...exactHashGuardLua('KEYS[2]', SPONSOR_REFILL_ACCOUNT_HASH_FIELDS, '  '),
+  'end',
+  "local currentAccountSequence = redis.call('HGET', KEYS[2], 'writeSeq') or '0'",
+  "if currentAccountSequence ~= ARGV[3] then return { 'STALE' } end",
+  `if currentAccountSequence == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
+  'local nextAccountSequence = tostring(tonumber(currentAccountSequence) + 1)',
+  "local time = redis.call('TIME')",
+  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
+  "redis.call('HSET', KEYS[2], 'totalBalanceMist', ARGV[4], 'lastError', ARGV[5], 'lastObservedAtMs', ARGV[4] ~= '' and nowMs or '', 'writeSeq', nextAccountSequence)",
   "return { 'UPDATED' }",
 ].join('\n');
 
+const READ_CURSOR_LUA = [
+  "return { redis.call('HGETALL', KEYS[1]), redis.call('HGETALL', KEYS[2]) }",
+].join('\n');
+
 function firstResult(raw: unknown): string | null {
-  if (!Array.isArray(raw) || typeof raw[0] !== 'string') return null;
-  return raw[0];
+  return Array.isArray(raw) && typeof raw[0] === 'string' ? raw[0] : null;
+}
+
+function hashFromRedisRow(raw: unknown, label: string): Record<string, string> {
+  if (!Array.isArray(raw) || raw.length % 2 !== 0) throw new Error(`${label} is malformed`);
+  const hash: Record<string, string> = {};
+  for (let index = 0; index < raw.length; index += 2) {
+    const field = raw[index];
+    const value = raw[index + 1];
+    if (typeof field !== 'string' || typeof value !== 'string' || Object.hasOwn(hash, field)) {
+      throw new Error(`${label} is malformed`);
+    }
+    hash[field] = value;
+  }
+  return hash;
+}
+
+function flattenSpend(
+  spend: SponsorRefillAccountSpend,
+  settings: SponsorOperationsSettings,
+): string[] {
+  const hash = serializeSponsorRefillAccountSpendRecord(spend, settings);
+  return SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS.map((field) => hash[field]!);
+}
+
+function terminalReceipt(
+  spend: SponsorRefillAccountSpend,
+  result:
+    | { readonly status: 'succeeded'; readonly digest: string }
+    | {
+        readonly status: SponsorRefillAccountSpendTerminalFailureKind;
+        readonly digest: string | null;
+        readonly error: string;
+      },
+  settings: SponsorOperationsSettings,
+): string {
+  if (spend.kind !== 'withdrawal') return '';
+  return encodeWithdrawalReceipt({
+    type: 'terminal',
+    network: settings.network,
+    result: {
+      ...result,
+      operationId: spend.operationId,
+      sourceAddress: spend.sourceAddress,
+      destinationAddress: spend.destinationAddress,
+      amountMist: spend.amountMist,
+    } as SponsorRefillAccountWithdrawalTerminalResult,
+  });
 }
 
 export interface SponsorRefillAccountSpendStateStore {
@@ -870,52 +594,98 @@ export interface SponsorRefillAccountSpendStateStore {
 }
 
 export interface SponsorRefillAccountSpendStateOptions {
-  readonly network: SuiNetwork;
-  readonly acceptedReceiptTtlMs: number;
+  readonly settings: SponsorOperationsSettings;
 }
 
 export function createSponsorRefillAccountSpendState(
   client: RedisClientLike,
   options: SponsorRefillAccountSpendStateOptions,
 ): SponsorRefillAccountSpendStateStore {
-  if (options.network !== 'testnet' && options.network !== 'mainnet') {
-    throw new Error('Sponsor Refill Account spend network is invalid');
-  }
-  if (!Number.isSafeInteger(options.acceptedReceiptTtlMs) || options.acceptedReceiptTtlMs <= 0) {
-    throw new Error('Sponsor Refill Account accepted receipt TTL must be a positive safe integer');
-  }
+  const { settings } = options;
 
   async function read(): Promise<SponsorRefillAccountSpend | null> {
-    return parseSpend(await client.hgetall(SPONSOR_REFILL_ACCOUNT_KEY), options.network);
+    return decodeSponsorRefillAccountSpendRecord(
+      await client.hgetall(SPONSOR_REFILL_ACCOUNT_SPEND_KEY),
+      settings,
+    );
   }
 
   async function readWithdrawalReceipt(
     nonceKey: string,
   ): Promise<SponsorRefillAccountWithdrawalReceipt | null> {
-    if (!nonceKey) {
-      throw new Error('Sponsor Refill Account withdrawal receipt key must be non-empty');
-    }
+    if (!nonceKey) throw new Error('Withdrawal receipt key must be non-empty');
     const raw = await client.get(nonceKey);
-    return raw === null ? null : parseWithdrawalReceipt(raw, options.network);
+    return raw === null ? null : parseWithdrawalReceipt(raw, settings.network, nonceKey);
   }
 
   async function readAccountObservationCursor(): Promise<SponsorRefillAccountObservationCursor> {
-    const hash = await client.hgetall(SPONSOR_REFILL_ACCOUNT_KEY);
-    if (hash.spendState) {
-      parseSpend(hash, options.network);
-    } else if (hash.spendOperationId) {
-      throw new Error('Sponsor Refill Account observation cursor has an operation without state');
-    }
-    const spendSequence = parseSequence(hash.spendSequence ?? '0');
-    const writeSequence = parseSequence(hash.writeSeq ?? '0');
-    if (spendSequence === null || writeSequence === null) {
+    const raw = await client.eval(
+      READ_CURSOR_LUA,
+      [SPONSOR_REFILL_ACCOUNT_SPEND_KEY, SPONSOR_REFILL_ACCOUNT_KEY],
+      [],
+    );
+    if (!Array.isArray(raw) || !Array.isArray(raw[0]) || !Array.isArray(raw[1])) {
       throw new Error('Sponsor Refill Account observation cursor is malformed');
     }
+    const spend = decodeSponsorRefillAccountSpendRecord(
+      hashFromRedisRow(raw[0], 'Sponsor Refill Account spend'),
+      settings,
+    );
+    const accountHash = hashFromRedisRow(raw[1], 'Sponsor Refill Account observation');
+    const account =
+      Object.keys(accountHash).length === 0
+        ? null
+        : decodeSponsorRefillAccountRecord(accountHash, settings);
     return {
-      operationId: hash.spendOperationId || null,
-      spendSequence,
-      writeSequence,
+      operationId: spend?.operationId ?? null,
+      spendState: spend?.state ?? null,
+      spendSequence: spend?.sequence ?? 0,
+      writeSequence: account?.writeSeq ?? 0,
     };
+  }
+
+  function assertReserveInput(input: ReserveSponsorRefillAccountSpendInput): void {
+    if (!input.operationId || !isPositiveU64(input.amountMist)) {
+      throw new Error('Sponsor Refill Account reservation is malformed');
+    }
+    if (
+      canonicalAddress(input.sourceAddress, 'Reservation sourceAddress') !==
+      settings.sponsorRefillAccountAddress
+    ) {
+      throw new Error('Reservation sourceAddress is not the configured refill account');
+    }
+    const destination = canonicalAddress(
+      input.destinationAddress,
+      'Reservation destinationAddress',
+    );
+    if (input.kind === 'refill') {
+      if (
+        input.slotAddress === null ||
+        canonicalAddress(input.slotAddress, 'Reservation slotAddress') !== destination ||
+        !settings.sponsorAddresses.includes(destination) ||
+        input.nonceKey !== null ||
+        !isU64(input.observedSlotAddressBalanceMist ?? undefined) ||
+        input.expectedSlotWriteSequence === null
+      ) {
+        throw new Error('Refill reservation is not bound to one configured sponsor address');
+      }
+      assertSequence(input.expectedSlotWriteSequence, 'expectedSlotWriteSequence');
+    } else if (
+      input.slotAddress !== null ||
+      input.nonceKey === null ||
+      input.nonceKey.length === 0 ||
+      input.observedSlotAddressBalanceMist !== null ||
+      input.expectedSlotWriteSequence !== null ||
+      input.expectedSourceObservationWriteSequence !== null
+    ) {
+      throw new Error('Withdrawal reservation is not bound to one verified request');
+    }
+    if (input.expectedSourceObservationWriteSequence !== null) {
+      assertSequence(
+        input.expectedSourceObservationWriteSequence,
+        'expectedSourceObservationWriteSequence',
+      );
+    }
   }
 
   async function reserve(
@@ -923,14 +693,40 @@ export function createSponsorRefillAccountSpendState(
   ): Promise<ReserveSponsorRefillAccountSpendResult> {
     assertReserveInput(input);
     const usesNonce = input.nonceKey !== null;
-    const usesSlot = input.slotAddress !== null;
+    const next: ReservedSponsorRefillAccountSpend =
+      input.kind === 'refill'
+        ? {
+            network: settings.network,
+            operationId: input.operationId,
+            kind: input.kind,
+            sourceAddress: input.sourceAddress,
+            destinationAddress: input.destinationAddress,
+            slotAddress: input.slotAddress!,
+            nonceKey: null,
+            amountMist: input.amountMist,
+            state: 'reserved',
+            sequence: 1,
+          }
+        : {
+            network: settings.network,
+            operationId: input.operationId,
+            kind: input.kind,
+            sourceAddress: input.sourceAddress,
+            destinationAddress: input.destinationAddress,
+            slotAddress: null,
+            nonceKey: input.nonceKey!,
+            amountMist: input.amountMist,
+            state: 'reserved',
+            sequence: 1,
+          };
+    const nextFields = flattenSpend(next, settings);
     const issuedReceipt = usesNonce
-      ? encodeSponsorRefillAccountWithdrawalIssuedReceipt(options.network)
+      ? encodeSponsorRefillAccountWithdrawalIssuedReceipt(settings.network)
       : '';
     const acceptedReceipt = usesNonce
       ? encodeWithdrawalReceipt({
           type: 'accepted',
-          network: options.network,
+          network: settings.network,
           operationId: input.operationId,
           sourceAddress: input.sourceAddress,
           destinationAddress: input.destinationAddress,
@@ -940,25 +736,19 @@ export function createSponsorRefillAccountSpendState(
     const raw = await client.eval(
       RESERVE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
       [
+        SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
         SPONSOR_REFILL_ACCOUNT_KEY,
-        input.nonceKey ?? SPONSOR_REFILL_ACCOUNT_KEY,
-        input.slotAddress === null ? SPONSOR_REFILL_ACCOUNT_KEY : slotKey(input.slotAddress),
+        input.nonceKey ?? SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
+        input.slotAddress === null ? SPONSOR_REFILL_ACCOUNT_SPEND_KEY : slotKey(input.slotAddress),
       ],
       [
         usesNonce ? '1' : '0',
-        input.operationId,
-        input.kind,
-        input.sourceAddress,
-        input.destinationAddress,
-        input.slotAddress ?? '',
-        input.amountMist,
-        usesSlot ? '1' : '0',
-        input.observedSlotBalanceMist ?? '',
-        input.expectedSlotWriteSequence === null ? '0' : String(input.expectedSlotWriteSequence),
-        options.network,
+        ...nextFields,
+        input.observedSlotAddressBalanceMist ?? '',
+        input.expectedSlotWriteSequence === null ? '' : String(input.expectedSlotWriteSequence),
         issuedReceipt,
         acceptedReceipt,
-        String(options.acceptedReceiptTtlMs),
+        String(settings.withdrawalReceiptTtlMs),
         input.expectedSourceObservationWriteSequence === null
           ? ''
           : String(input.expectedSourceObservationWriteSequence),
@@ -968,30 +758,22 @@ export function createSponsorRefillAccountSpendState(
     if (status === 'NONCE_MISSING') return { status: 'nonce_missing' };
     if (status === 'SLOT_CHANGED') return { status: 'slot_changed' };
     if (status === 'SOURCE_CHANGED') return { status: 'source_changed' };
-    if (status === 'SLOT_MISMATCH') {
-      throw new Error('Sponsor Refill Account reservation slot identity changed');
-    }
-    if (status === 'NETWORK_MISMATCH' || status === 'MALFORMED') {
-      throw new Error('Sponsor Refill Account durable spend has an invalid network or shape');
-    }
+    if (status === 'MALFORMED')
+      throw new Error('Sponsor Refill Account durable record is malformed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
     if (status === 'RECEIPT') {
       const receiptRaw = Array.isArray(raw) && typeof raw[1] === 'string' ? raw[1] : null;
-      if (receiptRaw === null) {
-        throw new Error('Sponsor Refill Account reservation returned a malformed receipt result');
-      }
-      const receipt = parseWithdrawalReceipt(receiptRaw, options.network);
-      if (receipt.type === 'issued') {
-        throw new Error('Sponsor Refill Account issued receipt does not use the exact encoding');
-      }
-      return { status: 'receipt', receipt };
+      if (receiptRaw === null) throw new Error('Withdrawal receipt result is malformed');
+      return {
+        status: 'receipt',
+        receipt: parseWithdrawalReceipt(receiptRaw, settings.network, input.nonceKey ?? undefined),
+      };
     }
     const spend = await read();
-    if (spend === null) {
-      throw new Error('Sponsor Refill Account spend reservation returned without state');
-    }
+    if (spend === null) throw new Error('Sponsor Refill Account reservation did not persist');
     if (status === 'ACTIVE') return { status: 'active', spend };
     if (status !== 'CREATED' || spend.operationId !== input.operationId) {
-      throw new Error('Sponsor Refill Account spend reservation returned an invalid result');
+      throw new Error('Sponsor Refill Account reservation returned an invalid result');
     }
     return { status: 'created', spend };
   }
@@ -1003,41 +785,86 @@ export function createSponsorRefillAccountSpendState(
     assertSequence(input.expectedAccountWriteSequence, 'expectedAccountWriteSequence');
     if (
       !isPositiveU64(input.gasBudgetMist) ||
-      !isDecimal(input.sourceBalanceMist) ||
+      !isU64(input.sourceBalanceMist) ||
       !input.transactionBytesBase64 ||
       !input.signature ||
-      !input.digest ||
-      !(input.refillsRemaining === '' || isDecimal(input.refillsRemaining))
+      !input.digest
     ) {
-      throw new Error('Sponsor Refill Account ready transition contains malformed identity fields');
+      throw new Error('Ready transition identity is malformed');
     }
     const before = await read();
-    const slotAddress = before?.operationId === input.operationId ? before.slotAddress : null;
+    if (
+      before === null ||
+      before.operationId !== input.operationId ||
+      before.sequence !== input.expectedSequence ||
+      before.state !== 'reserved'
+    )
+      return null;
+    const next: ReadySponsorRefillAccountSpend = {
+      ...before,
+      state: 'ready',
+      gasBudgetMist: input.gasBudgetMist,
+      transactionBytesBase64: input.transactionBytesBase64,
+      signature: input.signature,
+      digest: input.digest,
+      sequence: 2,
+    };
     const raw = await client.eval(
       MARK_SPONSOR_REFILL_ACCOUNT_SPEND_READY_LUA,
+      [SPONSOR_REFILL_ACCOUNT_SPEND_KEY, SPONSOR_REFILL_ACCOUNT_KEY],
       [
-        SPONSOR_REFILL_ACCOUNT_KEY,
-        slotAddress === null ? SPONSOR_REFILL_ACCOUNT_KEY : slotKey(slotAddress),
-      ],
-      [
-        input.operationId,
-        String(input.expectedSequence),
+        ...flattenSpend(before, settings),
+        ...flattenSpend(next, settings),
         String(input.expectedAccountWriteSequence),
-        input.gasBudgetMist,
-        input.transactionBytesBase64,
-        input.signature,
-        input.digest,
         input.sourceBalanceMist,
-        input.refillsRemaining,
       ],
     );
-    if (firstResult(raw) === 'STALE') return null;
-    if (firstResult(raw) === 'SLOT_MISMATCH') {
-      throw new Error('Sponsor Refill Account ready slot identity changed');
+    const status = firstResult(raw);
+    if (status === 'STALE') return null;
+    if (status === 'MALFORMED')
+      throw new Error('Sponsor Refill Account durable record is malformed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'READY') throw new Error('Ready transition returned an invalid result');
+    return read();
+  }
+
+  async function markReconciling(
+    input: ReconcileSponsorRefillAccountSpendInput,
+  ): Promise<SponsorRefillAccountSpend | null> {
+    assertSequence(input.expectedSequence, 'expectedSequence');
+    if ((input.chainResult === 'succeeded') !== (input.lastError === '')) {
+      throw new Error('Reconciliation result and error disagree');
     }
-    if (firstResult(raw) !== 'READY') {
-      throw new Error('Sponsor Refill Account ready transition returned an invalid result');
-    }
+    const before = await read();
+    if (
+      before === null ||
+      before.operationId !== input.operationId ||
+      before.sequence !== input.expectedSequence ||
+      before.state !== 'ready'
+    )
+      return null;
+    const next: ReconcilingSponsorRefillAccountSpend =
+      input.chainResult === 'succeeded'
+        ? { ...before, state: 'reconciling', chainResult: 'succeeded', sequence: 3 }
+        : {
+            ...before,
+            state: 'reconciling',
+            chainResult: 'failed',
+            error: input.lastError,
+            sequence: 3,
+          };
+    const raw = await client.eval(
+      RECONCILE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+      [SPONSOR_REFILL_ACCOUNT_SPEND_KEY],
+      [...flattenSpend(before, settings), ...flattenSpend(next, settings)],
+    );
+    const status = firstResult(raw);
+    if (status === 'STALE') return null;
+    if (status === 'MALFORMED')
+      throw new Error('Sponsor Refill Account durable record is malformed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'RECONCILING')
+      throw new Error('Reconciliation transition returned an invalid result');
     return read();
   }
 
@@ -1046,167 +873,120 @@ export function createSponsorRefillAccountSpendState(
   ): Promise<TerminalSponsorRefillAccountSpend | null> {
     assertSequence(input.expectedSequence, 'expectedSequence');
     assertSequence(input.expectedAccountWriteSequence, 'expectedAccountWriteSequence');
-    if (input.slot !== null) {
-      assertSequence(input.slot.expectedWriteSequence, 'slot.expectedWriteSequence');
-    }
-    if (
-      (input.state === 'succeeded' && input.lastError !== '') ||
-      (input.state === 'failed' && input.lastError.length === 0)
-    ) {
-      throw new Error('Sponsor Refill Account terminal transition has an inconsistent error');
+    if ((input.state === 'succeeded') !== (input.lastError === '')) {
+      throw new Error('Terminal state and error disagree');
     }
     const before = await read();
-    const beforeMatches =
-      before?.operationId === input.operationId &&
-      before.sequence === input.expectedSequence &&
-      before.state === 'reconciling';
-    if (beforeMatches && before.chainResult !== input.state) {
-      throw new Error('Sponsor Refill Account terminal state disagrees with its chain result');
-    }
-    const targetSlotAddress = beforeMatches ? before.slotAddress : null;
-    if (
-      beforeMatches &&
-      ((input.slot === null) !== (targetSlotAddress === null) ||
-        (input.slot !== null && input.slot.address !== targetSlotAddress))
-    ) {
-      throw new Error('Sponsor Refill Account terminal slot identity changed');
-    }
-    const targetSlotKey =
-      targetSlotAddress === null ? SPONSOR_REFILL_ACCOUNT_KEY : slotKey(targetSlotAddress);
-    const terminalFailureKind = input.state === 'failed' ? 'failed' : '';
-    const terminalReceipt =
-      before?.operationId === input.operationId &&
-      before.state === 'reconciling' &&
-      before.kind === 'withdrawal'
-        ? encodeWithdrawalReceipt({
-            type: 'terminal',
-            network: options.network,
-            result:
-              input.state === 'succeeded'
-                ? {
-                    status: 'succeeded',
-                    operationId: before.operationId,
-                    sourceAddress: before.sourceAddress,
-                    destinationAddress: before.destinationAddress,
-                    amountMist: before.amountMist,
-                    digest: before.digest,
-                  }
-                : {
-                    status: 'failed',
-                    operationId: before.operationId,
-                    sourceAddress: before.sourceAddress,
-                    destinationAddress: before.destinationAddress,
-                    amountMist: before.amountMist,
-                    digest: before.digest,
-                    error: input.lastError,
-                  },
-          })
-        : '';
-    const raw = await client.eval(
-      COMPLETE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
-      [SPONSOR_REFILL_ACCOUNT_KEY, targetSlotKey, before?.nonceKey ?? SPONSOR_REFILL_ACCOUNT_KEY],
-      [
-        input.operationId,
-        String(input.expectedSequence),
-        String(input.expectedAccountWriteSequence),
-        input.state,
-        input.lastError,
-        ...accountWriteArgs(input.account),
-        input.slot === null ? '0' : '1',
-        input.slot === null ? '0' : String(input.slot.expectedWriteSequence),
-        input.slot?.state ?? '',
-        input.slot?.balanceMist ?? '',
-        input.slot?.lastError ?? '',
-        input.slot?.reconciliationResult ?? '',
-        terminalFailureKind,
-        terminalReceipt,
-        String(options.acceptedReceiptTtlMs),
-      ],
-    );
-    if (firstResult(raw) === 'STALE') return null;
-    if (firstResult(raw) === 'CHAIN_RESULT_MISMATCH') {
-      throw new Error('Sponsor Refill Account terminal state disagrees with its chain result');
-    }
-    if (firstResult(raw) === 'RECEIPT_MISMATCH') {
-      throw new Error('Sponsor Refill Account terminal receipt identity changed');
-    }
-    if (firstResult(raw) === 'SLOT_MISMATCH') {
-      throw new Error('Sponsor Refill Account terminal slot identity changed');
-    }
-    if (firstResult(raw) !== 'COMPLETED') {
-      throw new Error('Sponsor Refill Account terminal transition returned an invalid result');
-    }
     if (
       before === null ||
       before.operationId !== input.operationId ||
       before.sequence !== input.expectedSequence ||
       before.state !== 'reconciling'
-    ) {
-      throw new Error('Sponsor Refill Account terminal transition lost its source state');
-    }
-    const common = {
-      network: before.network,
-      operationId: before.operationId,
-      sourceAddress: before.sourceAddress,
-      destinationAddress: before.destinationAddress,
-      amountMist: before.amountMist,
-      sequence: before.sequence + 1,
-      ...(before.kind === 'refill'
-        ? { kind: 'refill' as const, slotAddress: before.slotAddress, nonceKey: null }
-        : { kind: 'withdrawal' as const, slotAddress: null, nonceKey: before.nonceKey }),
-    };
-    return input.state === 'succeeded'
-      ? { ...common, state: 'succeeded', digest: before.digest }
-      : {
-          ...common,
-          state: 'failed',
-          digest: before.digest,
-          failureKind: 'failed',
-          error: input.lastError,
-        };
-  }
-
-  async function markReconciling(
-    input: ReconcileSponsorRefillAccountSpendInput,
-  ): Promise<SponsorRefillAccountSpend | null> {
-    assertSequence(input.expectedSequence, 'expectedSequence');
+    )
+      return null;
+    if (before.chainResult !== input.state)
+      throw new Error('Terminal state disagrees with chain result');
     if (
-      (input.chainResult === 'succeeded' && input.lastError !== '') ||
-      (input.chainResult === 'failed' && input.lastError.length === 0)
+      (input.slot === null) !== (before.kind === 'withdrawal') ||
+      (input.slot !== null && input.slot.address !== before.slotAddress)
     ) {
-      throw new Error('Sponsor Refill Account reconciliation has an inconsistent error');
+      throw new Error('Terminal slot identity changed');
     }
-    const before = await read();
-    const slotAddress = before?.operationId === input.operationId ? before.slotAddress : null;
-    const raw = await client.eval(
-      RECONCILE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
-      [
-        SPONSOR_REFILL_ACCOUNT_KEY,
-        slotAddress === null ? SPONSOR_REFILL_ACCOUNT_KEY : slotKey(slotAddress),
-      ],
-      [input.operationId, String(input.expectedSequence), input.chainResult, input.lastError],
+    if (
+      (input.account.totalBalanceMist !== undefined && !isU64(input.account.totalBalanceMist)) ||
+      (input.slot !== null && !isU64(input.slot.addressBalanceMist))
+    ) {
+      throw new Error('Terminal balance observation is malformed');
+    }
+    if (input.slot !== null)
+      assertSequence(input.slot.expectedWriteSequence, 'slot.expectedWriteSequence');
+    const terminalBase =
+      before.kind === 'refill'
+        ? {
+            network: before.network,
+            operationId: before.operationId,
+            kind: before.kind,
+            sourceAddress: before.sourceAddress,
+            destinationAddress: before.destinationAddress,
+            slotAddress: before.slotAddress,
+            nonceKey: null,
+            amountMist: before.amountMist,
+            sequence: 4,
+          }
+        : {
+            network: before.network,
+            operationId: before.operationId,
+            kind: before.kind,
+            sourceAddress: before.sourceAddress,
+            destinationAddress: before.destinationAddress,
+            slotAddress: null,
+            nonceKey: before.nonceKey,
+            amountMist: before.amountMist,
+            sequence: 4,
+          };
+    const next: TerminalSponsorRefillAccountSpend =
+      input.state === 'succeeded'
+        ? { ...terminalBase, state: 'succeeded', digest: before.digest }
+        : {
+            ...terminalBase,
+            state: 'failed',
+            digest: before.digest,
+            failureKind: 'failed',
+            requiredSourceBalanceMist: null,
+            error: input.lastError,
+          };
+    const receipt = terminalReceipt(
+      before,
+      input.state === 'succeeded'
+        ? { status: 'succeeded', digest: before.digest }
+        : { status: 'failed', digest: before.digest, error: input.lastError },
+      settings,
     );
-    if (firstResult(raw) === 'STALE') return null;
-    if (firstResult(raw) === 'SLOT_MISMATCH') {
-      throw new Error('Sponsor Refill Account reconciliation slot identity changed');
-    }
-    if (firstResult(raw) !== 'RECONCILING') {
-      throw new Error(
-        'Sponsor Refill Account reconciliation transition returned an invalid result',
-      );
-    }
-    return read();
+    const raw = await client.eval(
+      COMPLETE_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+      [
+        SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
+        SPONSOR_REFILL_ACCOUNT_KEY,
+        input.slot === null ? SPONSOR_REFILL_ACCOUNT_SPEND_KEY : slotKey(input.slot.address),
+        before.nonceKey ?? SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
+      ],
+      [
+        ...flattenSpend(before, settings),
+        ...flattenSpend(next, settings),
+        String(input.expectedAccountWriteSequence),
+        input.account.totalBalanceMist ?? '',
+        input.account.lastError ?? '',
+        input.slot === null ? '0' : '1',
+        input.slot === null ? '' : String(input.slot.expectedWriteSequence),
+        input.slot?.addressBalanceMist ?? '',
+        input.slot?.lastError ?? '',
+        receipt,
+        String(settings.withdrawalReceiptTtlMs),
+      ],
+    );
+    const status = firstResult(raw);
+    if (status === 'STALE') return null;
+    if (status === 'MALFORMED')
+      throw new Error('Sponsor Refill Account durable record is malformed');
+    if (status === 'RECEIPT_MISMATCH') throw new Error('Terminal receipt identity changed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'COMPLETED') throw new Error('Terminal transition returned an invalid result');
+    const after = await read();
+    return after !== null && (after.state === 'succeeded' || after.state === 'failed')
+      ? after
+      : null;
   }
 
   async function failReserved(
     input: FailReservedSponsorRefillAccountSpendInput,
   ): Promise<FailedSponsorRefillAccountSpend | null> {
     assertSequence(input.expectedSequence, 'expectedSequence');
-    if (!input.lastError) {
-      throw new Error('Sponsor Refill Account reserved failure requires a non-empty error');
-    }
-    if (input.failureKind !== 'failed' && input.failureKind !== 'runway_blocked') {
-      throw new Error('Sponsor Refill Account reserved failure kind is invalid');
+    if (!input.lastError) throw new Error('Reserved failure requires an error');
+    if (
+      input.requiredSourceBalanceMist !== null &&
+      !isPositiveU64(input.requiredSourceBalanceMist)
+    ) {
+      throw new Error('Required source balance is malformed');
     }
     const before = await read();
     if (
@@ -1214,78 +994,47 @@ export function createSponsorRefillAccountSpendState(
       before.operationId !== input.operationId ||
       before.sequence !== input.expectedSequence ||
       before.state !== 'reserved'
-    ) {
+    )
       return null;
-    }
-    const slotAddress = before.slotAddress;
-    const requiresRefillBalance = slotAddress !== null && input.failureKind === 'runway_blocked';
     if (
-      requiresRefillBalance !== (input.requiredSourceBalanceMist !== null) ||
-      (input.requiredSourceBalanceMist !== null && !isPositiveU64(input.requiredSourceBalanceMist))
+      (input.requiredSourceBalanceMist !== null) !==
+      (before.kind === 'refill' && input.failureKind === 'runway_blocked')
     ) {
-      throw new Error(
-        'Sponsor Refill Account runway-blocked refill requires one source balance threshold',
-      );
+      throw new Error('Required source balance does not match the failure');
     }
-    const terminalReceipt =
-      before.kind === 'withdrawal'
-        ? encodeWithdrawalReceipt({
-            type: 'terminal',
-            network: options.network,
-            result: {
-              status: input.failureKind,
-              operationId: before.operationId,
-              sourceAddress: before.sourceAddress,
-              destinationAddress: before.destinationAddress,
-              amountMist: before.amountMist,
-              digest: null,
-              error: input.lastError,
-            },
-          })
-        : '';
-    const raw = await client.eval(
-      FAIL_RESERVED_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
-      [
-        SPONSOR_REFILL_ACCOUNT_KEY,
-        slotAddress === null ? SPONSOR_REFILL_ACCOUNT_KEY : slotKey(slotAddress),
-        before.nonceKey ?? SPONSOR_REFILL_ACCOUNT_KEY,
-      ],
-      [
-        input.operationId,
-        String(input.expectedSequence),
-        input.lastError,
-        slotAddress === null ? '0' : '1',
-        input.failureKind,
-        input.requiredSourceBalanceMist ?? '',
-        terminalReceipt,
-        String(options.acceptedReceiptTtlMs),
-      ],
-    );
-    if (firstResult(raw) === 'STALE') return null;
-    if (firstResult(raw) === 'RECEIPT_MISMATCH') {
-      throw new Error('Sponsor Refill Account reserved failure receipt identity changed');
-    }
-    if (firstResult(raw) === 'SLOT_MISMATCH') {
-      throw new Error('Sponsor Refill Account reserved failure slot identity changed');
-    }
-    if (firstResult(raw) !== 'FAILED') {
-      throw new Error('Sponsor Refill Account reserved failure returned an invalid result');
-    }
-    return {
-      network: before.network,
-      operationId: before.operationId,
-      sourceAddress: before.sourceAddress,
-      destinationAddress: before.destinationAddress,
-      amountMist: before.amountMist,
-      sequence: before.sequence + 1,
-      ...(before.kind === 'refill'
-        ? { kind: 'refill', slotAddress: before.slotAddress, nonceKey: null }
-        : { kind: 'withdrawal', slotAddress: null, nonceKey: before.nonceKey }),
+    const next: FailedSponsorRefillAccountSpend = {
+      ...before,
       state: 'failed',
       digest: null,
       failureKind: input.failureKind,
+      requiredSourceBalanceMist: input.requiredSourceBalanceMist,
       error: input.lastError,
+      sequence: 2,
     };
+    const receipt = terminalReceipt(
+      before,
+      { status: input.failureKind, digest: null, error: input.lastError },
+      settings,
+    );
+    const raw = await client.eval(
+      FAIL_RESERVED_SPONSOR_REFILL_ACCOUNT_SPEND_LUA,
+      [SPONSOR_REFILL_ACCOUNT_SPEND_KEY, before.nonceKey ?? SPONSOR_REFILL_ACCOUNT_SPEND_KEY],
+      [
+        ...flattenSpend(before, settings),
+        ...flattenSpend(next, settings),
+        receipt,
+        String(settings.withdrawalReceiptTtlMs),
+      ],
+    );
+    const status = firstResult(raw);
+    if (status === 'STALE') return null;
+    if (status === 'MALFORMED')
+      throw new Error('Sponsor Refill Account durable record is malformed');
+    if (status === 'RECEIPT_MISMATCH') throw new Error('Reserved failure receipt identity changed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'FAILED') throw new Error('Reserved failure returned an invalid result');
+    const after = await read();
+    return after?.state === 'failed' ? after : null;
   }
 
   async function updateAccountObservation(
@@ -1294,24 +1043,28 @@ export function createSponsorRefillAccountSpendState(
   ): Promise<boolean> {
     assertSequence(cursor.spendSequence, 'cursor.spendSequence');
     assertSequence(cursor.writeSequence, 'cursor.writeSequence');
-    if (cursor.operationId !== null && cursor.operationId.length === 0) {
-      throw new Error('cursor.operationId must be null or non-empty');
+    if (isActiveSponsorRefillOperationState(cursor.spendState)) return false;
+    const totalBalanceMist = fields.totalBalanceMist ?? '';
+    if (totalBalanceMist !== '' && !isU64(totalBalanceMist)) {
+      throw new Error('Sponsor Refill Account balance is malformed');
     }
     const raw = await client.eval(
       UPDATE_SPONSOR_REFILL_ACCOUNT_OBSERVATION_LUA,
-      [SPONSOR_REFILL_ACCOUNT_KEY],
+      [SPONSOR_REFILL_ACCOUNT_SPEND_KEY, SPONSOR_REFILL_ACCOUNT_KEY],
       [
         cursor.operationId ?? '',
         String(cursor.spendSequence),
         String(cursor.writeSequence),
-        ...accountWriteArgs(fields),
+        totalBalanceMist,
+        fields.lastError ?? '',
       ],
     );
     const status = firstResult(raw);
     if (status === 'STALE') return false;
-    if (status !== 'UPDATED') {
+    if (status === 'MALFORMED') throw new Error('Sponsor Refill Account record is malformed');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'UPDATED')
       throw new Error('Sponsor Refill Account observation returned an invalid result');
-    }
     return true;
   }
 
@@ -1331,5 +1084,5 @@ export function createSponsorRefillAccountSpendState(
 export function isActiveSponsorRefillAccountSpend(
   spend: SponsorRefillAccountSpend | null,
 ): spend is ActiveSponsorRefillAccountSpend {
-  return spend !== null && ACTIVE_SPEND_STATES.has(spend.state);
+  return spend !== null && isActiveSponsorRefillOperationState(spend.state);
 }

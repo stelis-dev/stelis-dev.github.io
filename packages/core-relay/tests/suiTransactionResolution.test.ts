@@ -20,6 +20,7 @@ import {
   getAddressBalanceGasTransactionBytes,
   getAddressBalanceGasTransactionTxBytesHash,
   simulateAddressBalanceGasTransaction,
+  SuiAddressBalanceGasUnavailableError,
   type AddressBalanceGasTransaction,
 } from '../src/sui/suiAddressBalanceGas.js';
 import {
@@ -945,6 +946,23 @@ describe('address-balance gas transaction authority', () => {
     ).snapshot();
     expect(data.gasData.payment).toEqual([]);
     expect(BigInt(data.gasData.price!)).toBe(2_000n);
+  });
+
+  it('classifies Coin fallback as sponsor capacity when no endpoint returns address-balance gas', async () => {
+    const simulate = vi.fn<RawSimulate>(
+      currentAddressBalanceResolution((resolved) => {
+        resolved.gasPayment!.objects = [{ objectId: OBJECT_ID, version: 1n, digest: DIGEST }];
+      }),
+    );
+    const endpoint = addressBalanceEndpoint(simulate, 1_000n);
+
+    await expect(
+      buildAddressBalanceGasTransaction(snapshot(endpoint.client), {
+        transaction: transaction(),
+        sponsorAddress: SPONSOR,
+        gasBudget: GAS_BUDGET,
+      }),
+    ).rejects.toBeInstanceOf(SuiAddressBalanceGasUnavailableError);
   });
 
   it.each([

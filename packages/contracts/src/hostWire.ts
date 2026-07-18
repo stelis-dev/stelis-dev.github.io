@@ -22,6 +22,7 @@ import {
   type HostErrorSubcode,
 } from './hostError.js';
 import {
+  calculateSponsorAvailabilityErrorCode,
   isPositiveU64DecimalString,
   SPONSOR_SLOT_STATES,
   type SponsorOperationsStatus,
@@ -588,7 +589,8 @@ export interface AdminSponsorOperationsResponse {
   settlementPayoutRecipientAddress: string;
   network: SuiNetwork;
   sponsorBalanceWarnMist: string;
-  sponsorBalanceRefillTargetMist: string;
+  sponsorBalanceRefillTargetMist: string | null;
+  sponsorRefillAccountRunwayTargetMist: string;
   refillEnabled: boolean;
   quotedHostFeeMist: string;
   feeConfig: {
@@ -782,15 +784,6 @@ function closedStringField<const Values extends readonly string[]>(
   return field as Values[number];
 }
 
-function optionalDecimalField(
-  value: Record<string, unknown>,
-  key: string,
-  label: string,
-): string | undefined {
-  if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
-  return decimalField(value, key, label);
-}
-
 function optionalU64Field(
   value: Record<string, unknown>,
   key: string,
@@ -828,23 +821,19 @@ function positiveU64DecimalField(
   return field;
 }
 
+function nullablePositiveU64DecimalField(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+): string | null {
+  if (value[key] === null) return null;
+  return positiveU64DecimalField(value, key, label);
+}
+
 function signedDecimalField(value: Record<string, unknown>, key: string, label: string): string {
   const field = stringField(value, key, label);
   if (!SIGNED_DECIMAL_RE.test(field)) {
     throw new HostWireParseError(`${label}.${key} must be a canonical signed decimal string`);
-  }
-  return field;
-}
-
-function signedU64MagnitudeField(
-  value: Record<string, unknown>,
-  key: string,
-  label: string,
-): string {
-  const field = signedDecimalField(value, key, label);
-  const magnitude = field.startsWith('-') ? field.slice(1) : field;
-  if (BigInt(magnitude) > U64_MAX) {
-    throw new HostWireParseError(`${label}.${key} magnitude must fit in u64`);
   }
   return field;
 }
@@ -2157,13 +2146,25 @@ function parseAdminSponsoredExecutionLogEntry(
       storageRebateMist: null,
     };
   }
+  const recoveredGasMist = u64DecimalField(raw, 'recoveredGasMist', label);
+  const hostPaidGasMist = u64DecimalField(raw, 'hostPaidGasMist', label);
+  const hostNetMist = signedDecimalField(raw, 'hostNetMist', label);
+  const hostFeeMist = u64DecimalField(raw, 'hostFeeMist', label);
+  if (
+    BigInt(hostNetMist) !==
+    BigInt(recoveredGasMist) + BigInt(hostFeeMist) - BigInt(hostPaidGasMist)
+  ) {
+    throw new HostWireParseError(
+      `${label}.hostNetMist must equal recoveredGasMist + hostFeeMist - hostPaidGasMist`,
+    );
+  }
   return {
     ...base,
     economicsStatus,
-    recoveredGasMist: u64DecimalField(raw, 'recoveredGasMist', label),
-    hostPaidGasMist: u64DecimalField(raw, 'hostPaidGasMist', label),
-    hostNetMist: signedU64MagnitudeField(raw, 'hostNetMist', label),
-    hostFeeMist: u64DecimalField(raw, 'hostFeeMist', label),
+    recoveredGasMist,
+    hostPaidGasMist,
+    hostNetMist,
+    hostFeeMist,
     protocolFeeMist: nullableU64Field(raw, 'protocolFeeMist', label),
     grossGasMist: nullableU64Field(raw, 'grossGasMist', label),
     storageRebateMist: nullableU64Field(raw, 'storageRebateMist', label),
@@ -2224,7 +2225,11 @@ export function parseSponsorRefillAccountWithdrawalResponse(
   onlyKeys(raw, ['digest', 'amountMist', 'recipient'], 'SponsorRefillAccountWithdrawalResponse');
   return {
     digest: nonEmptyStringField(raw, 'digest', 'SponsorRefillAccountWithdrawalResponse'),
-    amountMist: u64DecimalField(raw, 'amountMist', 'SponsorRefillAccountWithdrawalResponse'),
+    amountMist: positiveU64DecimalField(
+      raw,
+      'amountMist',
+      'SponsorRefillAccountWithdrawalResponse',
+    ),
     recipient: nonEmptyStringField(raw, 'recipient', 'SponsorRefillAccountWithdrawalResponse'),
   };
 }
@@ -2244,6 +2249,7 @@ export function parseAdminSponsorOperationsResponse(
       'network',
       'sponsorBalanceWarnMist',
       'sponsorBalanceRefillTargetMist',
+      'sponsorRefillAccountRunwayTargetMist',
       'refillEnabled',
       'quotedHostFeeMist',
       'feeConfig',
@@ -2261,7 +2267,7 @@ export function parseAdminSponsorOperationsResponse(
     operations,
     [
       'gateErrorCode',
-      'availableSlots',
+      'healthySlots',
       'degradedSlots',
       'slotLeases',
       'slots',
@@ -2269,7 +2275,7 @@ export function parseAdminSponsorOperationsResponse(
     ],
     operationsLabel,
   );
-  const availableSlots = nonNegativeSafeIntegerField(operations, 'availableSlots', operationsLabel);
+  const healthySlots = nonNegativeSafeIntegerField(operations, 'healthySlots', operationsLabel);
   const degradedSlots = nonNegativeSafeIntegerField(operations, 'degradedSlots', operationsLabel);
   const gateErrorCode = operations.gateErrorCode;
   if (
@@ -2286,9 +2292,13 @@ export function parseAdminSponsorOperationsResponse(
   const slots = operations.slots.map((slotValue, index) => {
     const slotLabel = `${operationsLabel}.slots[${index}]`;
     const slot = record(slotValue, slotLabel);
-    onlyKeys(slot, ['address', 'state', 'balanceMist', 'lastObservedAtMs', 'lastError'], slotLabel);
+    onlyKeys(
+      slot,
+      ['address', 'state', 'addressBalanceMist', 'lastObservedAtMs', 'lastError'],
+      slotLabel,
+    );
     const state = slot.state;
-    if (state !== null && !(SPONSOR_SLOT_STATES as readonly unknown[]).includes(state)) {
+    if (!(SPONSOR_SLOT_STATES as readonly unknown[]).includes(state)) {
       throw new HostWireParseError(`${slotLabel}.state is not current`);
     }
     const lastObservedAtMs = nullableSafeIntegerField(slot, 'lastObservedAtMs', slotLabel);
@@ -2297,8 +2307,8 @@ export function parseAdminSponsorOperationsResponse(
     }
     return {
       address: nonEmptyStringField(slot, 'address', slotLabel),
-      state: state as (typeof SPONSOR_SLOT_STATES)[number] | null,
-      balanceMist: nullableU64Field(slot, 'balanceMist', slotLabel),
+      state: state as (typeof SPONSOR_SLOT_STATES)[number],
+      addressBalanceMist: nullableU64Field(slot, 'addressBalanceMist', slotLabel),
       lastObservedAtMs,
       lastError: nullableStringField(slot, 'lastError', slotLabel),
     };
@@ -2322,7 +2332,9 @@ export function parseAdminSponsorOperationsResponse(
     };
   });
   if (
-    availableSlots + degradedSlots !== slots.length ||
+    slots.length === 0 ||
+    healthySlots + degradedSlots !== slots.length ||
+    healthySlots !== slots.filter((slot) => slot.state === 'healthy').length ||
     leasedSlots + freeSlots !== leaseSlots.length ||
     leasedSlots !== leaseSlots.filter((slot) => slot.leased).length ||
     freeSlots !== leaseSlots.filter((slot) => !slot.leased).length ||
@@ -2338,26 +2350,83 @@ export function parseAdminSponsorOperationsResponse(
   const refill = record(operations.sponsorRefillAccount, refillLabel);
   onlyKeys(
     refill,
-    ['address', 'balanceMist', 'healthy', 'refillsRemaining', 'lastObservedAtMs', 'lastError'],
+    ['address', 'totalBalanceMist', 'healthy', 'lastObservedAtMs', 'lastError'],
     refillLabel,
   );
-  const refillsRemaining = nullableSafeIntegerField(refill, 'refillsRemaining', refillLabel);
   const refillObservedAtMs = nullableSafeIntegerField(refill, 'lastObservedAtMs', refillLabel);
   const refillHealthy = booleanField(refill, 'healthy', refillLabel);
-  if (
-    (refillsRemaining !== null && refillsRemaining < 0) ||
-    (refillObservedAtMs !== null && refillObservedAtMs < 0)
-  ) {
+  const refillTotalBalanceMist = nullableU64Field(refill, 'totalBalanceMist', refillLabel);
+  const refillLastError = nullableStringField(refill, 'lastError', refillLabel);
+  if (refillObservedAtMs !== null && refillObservedAtMs < 0) {
     throw new HostWireParseError(`${refillLabel} counters must be non-negative`);
   }
-  const expectedGateErrorCode =
-    availableSlots > 0
-      ? null
-      : refillHealthy
-        ? 'SPONSOR_CAPACITY_UNAVAILABLE'
-        : 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY';
+  const leaseByAddress = new Map(leaseSlots.map((slot) => [slot.address, slot.leased]));
+  const hasFreeHealthySponsorSlot = slots.some(
+    (slot) => slot.state === 'healthy' && leaseByAddress.get(slot.address) === false,
+  );
+  const expectedGateErrorCode = calculateSponsorAvailabilityErrorCode({
+    healthySlots,
+    hasFreeHealthySponsorSlot,
+    sponsorRefillAccountHealthy: refillHealthy,
+  });
   if (gateErrorCode !== expectedGateErrorCode) {
     throw new HostWireParseError(`${operationsLabel}.gateErrorCode contradicts current state`);
+  }
+  for (const [index, slot] of slots.entries()) {
+    if (
+      (slot.state === 'healthy' || slot.state === 'low_balance') &&
+      (slot.addressBalanceMist === null || slot.lastError !== null)
+    ) {
+      throw new HostWireParseError(
+        `${operationsLabel}.slots[${index}] current state contradicts its observation`,
+      );
+    }
+  }
+  if (refillHealthy && (refillTotalBalanceMist === null || refillLastError !== null)) {
+    throw new HostWireParseError(`${refillLabel}.healthy contradicts its current observation`);
+  }
+
+  const sponsorBalanceWarnMist = positiveU64DecimalField(raw, 'sponsorBalanceWarnMist', label);
+  const sponsorBalanceRefillTargetMist = nullablePositiveU64DecimalField(
+    raw,
+    'sponsorBalanceRefillTargetMist',
+    label,
+  );
+  const sponsorRefillAccountRunwayTargetMist = positiveU64DecimalField(
+    raw,
+    'sponsorRefillAccountRunwayTargetMist',
+    label,
+  );
+  const refillEnabled = booleanField(raw, 'refillEnabled', label);
+  if (refillEnabled && sponsorBalanceRefillTargetMist === null) {
+    throw new HostWireParseError(
+      `${label}.sponsorBalanceRefillTargetMist is required when refill is enabled`,
+    );
+  }
+  if (
+    sponsorBalanceRefillTargetMist !== null &&
+    BigInt(sponsorBalanceRefillTargetMist) <= BigInt(sponsorBalanceWarnMist)
+  ) {
+    throw new HostWireParseError(
+      `${label}.sponsorBalanceRefillTargetMist must be greater than sponsorBalanceWarnMist`,
+    );
+  }
+  if (BigInt(sponsorRefillAccountRunwayTargetMist) * BigInt(slots.length) > U64_MAX) {
+    throw new HostWireParseError(
+      `${label}.sponsorRefillAccountRunwayTargetMist multiplied by sponsor slot count must fit in u64`,
+    );
+  }
+  for (const [index, slot] of slots.entries()) {
+    if (slot.addressBalanceMist === null) continue;
+    const meetsWarningThreshold = BigInt(slot.addressBalanceMist) >= BigInt(sponsorBalanceWarnMist);
+    if (
+      (slot.state === 'healthy' && !meetsWarningThreshold) ||
+      (slot.state === 'low_balance' && meetsWarningThreshold)
+    ) {
+      throw new HostWireParseError(
+        `${operationsLabel}.slots[${index}] state contradicts sponsorBalanceWarnMist`,
+      );
+    }
   }
 
   const feeLabel = `${label}.feeConfig`;
@@ -2434,17 +2503,16 @@ export function parseAdminSponsorOperationsResponse(
   return {
     sponsorOperations: {
       gateErrorCode,
-      availableSlots,
+      healthySlots,
       degradedSlots,
       slotLeases: { leasedSlots, freeSlots, slots: leaseSlots },
       slots,
       sponsorRefillAccount: {
         address: nonEmptyStringField(refill, 'address', refillLabel),
-        balanceMist: nullableU64Field(refill, 'balanceMist', refillLabel),
+        totalBalanceMist: refillTotalBalanceMist,
         healthy: refillHealthy,
-        refillsRemaining,
         lastObservedAtMs: refillObservedAtMs,
-        lastError: nullableStringField(refill, 'lastError', refillLabel),
+        lastError: refillLastError,
       },
     },
     primaryAddress: nullableNonEmptyStringField(raw, 'primaryAddress', label),
@@ -2454,9 +2522,10 @@ export function parseAdminSponsorOperationsResponse(
       label,
     ),
     network,
-    sponsorBalanceWarnMist: u64DecimalField(raw, 'sponsorBalanceWarnMist', label),
-    sponsorBalanceRefillTargetMist: u64DecimalField(raw, 'sponsorBalanceRefillTargetMist', label),
-    refillEnabled: booleanField(raw, 'refillEnabled', label),
+    sponsorBalanceWarnMist,
+    sponsorBalanceRefillTargetMist,
+    sponsorRefillAccountRunwayTargetMist,
+    refillEnabled,
     quotedHostFeeMist: u64DecimalField(raw, 'quotedHostFeeMist', label),
     feeConfig:
       fee === null

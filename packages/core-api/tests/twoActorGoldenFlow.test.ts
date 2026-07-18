@@ -6,19 +6,19 @@
  *
  * Cross-request binding under test:
  *   1. handlePrepare / handlePromotionPrepare persists `txBytesHash` =
- *      the prepare runner's validated bytes and hash into a real `MemoryPrepareStore`.
+ *      the prepare runner's validated bytes and hash into a real receipt lifecycle store.
  *   2. The user (Actor 2) signs the `txBytes` returned by /prepare.
- *   3. handleSponsor / handlePromotionSponsor consumes the same receiptId
- *      against the SAME store; `consumeEntry()` recomputes
- *      sha256(submittedTxBytes) and the stored hash MUST match.
+ *   3. handleSponsor / handlePromotionSponsor reads the same receiptId from
+ *      the SAME store, validates sha256(submittedTxBytes), then atomically
+ *      changes the exact prepared record to executing before signing.
  *
  * Failure rows held by this harness:
  *   - Tampered txBytes — Actor 2 swaps in a second valid signed tx with
  *     the same sender / gas-owner identity but different bytes. The
- *     `consume()` hash check fires and both routes classify the result
- *     as `TAMPERING_DETECTED` (per `failures.ts` policy).
- *   - Replayed receiptId — second sponsor call after a successful
- *     consume sees the entry gone and rejects with
+ *     pre-execution hash validation fires and both routes classify the result
+ *     as `TAMPERING_DETECTED` without destroying the legitimate receipt.
+ *   - Replayed receiptId — second sponsor call after a successful execution
+ *     sees the prepared entry gone and rejects with
  *     `PREPARED_TX_NOT_FOUND`.
  *   - Malformed user signature — `verifySenderSignature` throws and the
  *     handler classifies as `SENDER_SIGNATURE_INVALID`.
@@ -124,7 +124,7 @@ import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { handleSponsor, SponsorValidationError } from '../src/handlers/sponsor.js';
 import { computePolicyHash } from '../src/policyHash.js';
 import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import { MemorySponsoredExecutionStore } from '../src/store/memorySponsoredExecutionStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { SponsorPool } from '../src/context.js';
@@ -367,7 +367,7 @@ function genericMockSui(): ChainBoundSuiEndpointSnapshot {
 
 interface GenericHarness {
   ctx: HostContext;
-  prepareStore: MemoryPrepareStore;
+  sponsoredExecutionStore: MemorySponsoredExecutionStore;
   sponsorPool: SponsorPool;
   abuseBlocker: MemoryAbuseBlocker;
   prepareInflight: MemoryPrepareInflight;
@@ -376,9 +376,7 @@ interface GenericHarness {
 
 function makeGenericHarness(): GenericHarness {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
+  const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, undefined);
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);
   const sui = genericMockSui();
@@ -424,7 +422,7 @@ function makeGenericHarness(): GenericHarness {
     deepbookPackageId: extraCfg.deepbookPackageId,
     rateLimiter: {} as HostContext['rateLimiter'],
     abuseBlocker,
-    prepareStore,
+    sponsoredExecutionStore,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
@@ -443,10 +441,18 @@ function makeGenericHarness(): GenericHarness {
     }),
     invalidateConfigCache: vi.fn(),
     dispose: vi.fn(),
-    onSponsorResult: undefined,
+    onSponsorResult: vi.fn().mockResolvedValue(undefined),
+    isSponsorAddressAvailable: async () => true,
   };
 
-  return { ctx, prepareStore, sponsorPool, abuseBlocker, prepareInflight, extraCfg };
+  return {
+    ctx,
+    sponsoredExecutionStore,
+    sponsorPool,
+    abuseBlocker,
+    prepareInflight,
+    extraCfg,
+  };
 }
 
 /**
@@ -551,13 +557,13 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     });
   });
 
-  test('happy path: prepare commits hash → user signs → sponsor consumes successfully', async () => {
+  test('happy path: prepare commits hash → user signs → sponsor executes successfully', async () => {
     const harness = makeGenericHarness();
     const { response, txBytes, txBytesHash } = await drivePrepare(harness);
 
-    // Cross-request binding check #1: prepareStore now holds an entry
+    // Cross-request binding check #1: the receipt lifecycle store now holds an entry
     // keyed by the prepare-issued receiptId, with txBytesHash = sha256(txBytes).
-    const peeked = await harness.prepareStore.peek(response.receiptId);
+    const peeked = await harness.sponsoredExecutionStore.readPreparedReceipt(response.receiptId);
     expect(peeked).not.toBeNull();
     expect(peeked!.txBytesHash).toBe(txBytesHash);
     expect(peeked!.senderAddress).toBe(USER_ADDR);
@@ -574,12 +580,14 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
 
     expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytes));
 
-    // Cross-request binding check #2: consume() ran to completion and
-    // the entry is gone (single-use receipt).
-    expect(await harness.prepareStore.peek(response.receiptId)).toBeNull();
+    // Cross-request binding check #2: the atomic execution transition ran and
+    // the prepared entry is gone (single-use receipt).
+    expect(
+      await harness.sponsoredExecutionStore.readPreparedReceipt(response.receiptId),
+    ).toBeNull();
   });
 
-  test('tamper: prepare commits tx A; sponsor receives tx B → TAMPERING_DETECTED via consume() hash_mismatch', async () => {
+  test('tamper: prepare commits tx A; sponsor receives tx B → TAMPERING_DETECTED before execution', async () => {
     const harness = makeGenericHarness();
     const { response, txBytesHash: hashA } = await drivePrepare(harness);
 
@@ -616,9 +624,11 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     expect(err).toBeInstanceOf(SponsorValidationError);
     expect((err as SponsorValidationError).code).toBe('TAMPERING_DETECTED');
 
-    // The committed entry (tx A's hash) was destroyed by the consume() hash
-    // mismatch path — single-use semantics on hash_mismatch.
-    expect(await harness.prepareStore.peek(response.receiptId)).toBeNull();
+    // Hash mismatch is rejected before the atomic prepared-to-executing
+    // transition, so the legitimate signer can still use the receipt.
+    expect(
+      await harness.sponsoredExecutionStore.readPreparedReceipt(response.receiptId),
+    ).not.toBeNull();
   });
 
   test('replay: same receipt sponsored twice → second call rejects with PREPARED_TX_NOT_FOUND', async () => {
@@ -662,9 +672,11 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     expect(err).toBeInstanceOf(SponsorValidationError);
     expect((err as SponsorValidationError).code).toBe('SENDER_SIGNATURE_INVALID');
 
-    // Pre-consume reject preserves the entry — the legitimate caller can
-    // still consume it on retry without re-prepare.
-    const stillPeeked = await harness.prepareStore.peek(response.receiptId);
+    // A rejection before the execution transition preserves the entry — the
+    // legitimate caller can still execute it without another prepare request.
+    const stillPeeked = await harness.sponsoredExecutionStore.readPreparedReceipt(
+      response.receiptId,
+    );
     expect(stillPeeked).not.toBeNull();
   });
 });
@@ -695,7 +707,7 @@ function studioMockSui(): ChainBoundSuiEndpointSnapshot {
 interface StudioHarness {
   prepareCtx: PromotionPrepareContext;
   sponsorCtx: PromotionSponsorContext;
-  prepareStore: MemoryPrepareStore;
+  sponsoredExecutionStore: MemorySponsoredExecutionStore;
   sponsorPool: SponsorPool;
   abuseBlocker: MemoryAbuseBlocker;
   executionLedger: MemoryPromotionExecutionLedger;
@@ -707,9 +719,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
+  const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, executionLedger);
   const abuseBlocker = new MemoryAbuseBlocker();
   const prepareInflight = new MemoryPrepareInflight(8);
 
@@ -736,7 +746,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     promotionStore,
     executionLedger,
     sponsorPool,
-    prepareStore,
+    sponsoredExecutionStore,
     prepareInflightLimiter: prepareInflight,
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
@@ -758,15 +768,17 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     promotionStore,
     executionLedger,
     sponsorPool,
-    prepareStore,
+    sponsoredExecutionStore,
     abuseBlocker,
     globalAllowedTargets: STUDIO_GLOBAL_ALLOWED_TARGETS,
+    onSponsorResult: vi.fn().mockResolvedValue(undefined),
+    isSponsorAddressAvailable: async () => true,
   };
 
   return {
     prepareCtx,
     sponsorCtx,
-    prepareStore,
+    sponsoredExecutionStore,
     sponsorPool,
     abuseBlocker,
     executionLedger,
@@ -815,7 +827,7 @@ async function buildStudioTamperedTx(): Promise<{
 }
 
 describe('Studio two-actor golden flow (handlePromotionPrepare → user sign → handlePromotionSponsor)', () => {
-  test('happy path: prepare commits hash → user signs → sponsor consumes successfully', async () => {
+  test('happy path: prepare commits hash → user signs → sponsor executes successfully', async () => {
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
@@ -827,9 +839,9 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       clientIp: CLIENT_IP,
     });
 
-    // Cross-request binding check #1: prepareStore + sponsorPool
+    // Cross-request binding check #1: receipt store + sponsorPool
     // both observe the same receiptId → entry hash + committed lease.
-    const peeked = await h.prepareStore.peek(prepareResult.receiptId);
+    const peeked = await h.sponsoredExecutionStore.readPreparedReceipt(prepareResult.receiptId);
     expect(peeked).not.toBeNull();
     expect(peeked!.mode).toBe('promotion');
     const txBytesRaw = Uint8Array.from(Buffer.from(prepareResult.txBytes, 'base64'));
@@ -849,14 +861,14 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
 
     expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytesRaw));
 
-    // Cross-request binding check #2: entry consumed, ledger
-    // reservation cleared by the success path.
-    expect(await h.prepareStore.peek(prepareResult.receiptId)).toBeNull();
+    // Cross-request binding check #2: the prepared entry became a final
+    // execution record and the ledger reservation was cleared.
+    expect(await h.sponsoredExecutionStore.readPreparedReceipt(prepareResult.receiptId)).toBeNull();
     const ent = await h.executionLedger.getEntitlement(h.promoId, STUDIO_USER_ID);
     expect(ent!.activeReservationReceiptId).toBeNull();
   });
 
-  test('tamper: prepare commits tx A; sponsor receives tx B → TAMPERING_DETECTED via consume() hash_mismatch', async () => {
+  test('tamper: prepare commits tx A; sponsor receives tx B → TAMPERING_DETECTED before execution', async () => {
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
@@ -883,11 +895,14 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     expect(err).toBeInstanceOf(PromotionSponsorError);
     expect((err as PromotionSponsorError).code).toBe('TAMPERING_DETECTED');
 
-    // The consume-time stored-hash mismatch is destructive — the entry is gone
-    // and the ledger reservation has been released.
-    expect(await h.prepareStore.peek(prepareResult.receiptId)).toBeNull();
+    // Hash mismatch is rejected before the atomic execution transition. The
+    // prepared receipt and Promotion reservation remain available to the
+    // legitimate signer.
+    expect(
+      await h.sponsoredExecutionStore.readPreparedReceipt(prepareResult.receiptId),
+    ).not.toBeNull();
     const ent = await h.executionLedger.getEntitlement(h.promoId, STUDIO_USER_ID);
-    expect(ent!.activeReservationReceiptId).toBeNull();
+    expect(ent!.activeReservationReceiptId).toBe(prepareResult.receiptId);
   });
 
   test('replay: same receipt sponsored twice → second call rejects with PREPARED_TX_NOT_FOUND', async () => {
@@ -960,9 +975,11 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     // `sponsorPromotionSponsored.test.ts` suite.
     expect((err as PromotionSponsorError).code).toBe('SENDER_SIGNATURE_INVALID');
 
-    // Pre-consume reject preserves the entry + reservation for the
-    // legitimate owner's retry without re-prepare.
-    const stillPeeked = await h.prepareStore.peek(prepareResult.receiptId);
+    // A rejection before the execution transition preserves the entry and
+    // reservation for the legitimate owner without another prepare request.
+    const stillPeeked = await h.sponsoredExecutionStore.readPreparedReceipt(
+      prepareResult.receiptId,
+    );
     expect(stillPeeked).not.toBeNull();
     const ent = await h.executionLedger.getEntitlement(h.promoId, STUDIO_USER_ID);
     expect(ent!.activeReservationReceiptId).toBe(prepareResult.receiptId);

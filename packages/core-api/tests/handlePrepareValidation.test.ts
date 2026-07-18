@@ -16,10 +16,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
+import { createHash } from 'node:crypto';
 import type { PrepareHandlerConfig, PrepareParams } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
-import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
+import {
+  createStaticSettlementSwapPathDescriptorMap,
+  type AddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
 import {
   TEST_PREPARE_AUTH_PACKAGE_ID,
   TEST_PREPARE_AUTH_SENDER,
@@ -29,9 +33,27 @@ import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.j
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
-const { mockPrepareBuildPipeline, mockQueryUserCredit } = vi.hoisted(() => ({
+const {
+  mockPrepareBuildPipeline,
+  mockQueryUserCredit,
+  addressBalanceGasTransactionContents,
+  getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHashMock,
+} = vi.hoisted(() => ({
   mockPrepareBuildPipeline: vi.fn(),
   mockQueryUserCredit: vi.fn(),
+  addressBalanceGasTransactionContents: new WeakMap<
+    object,
+    { readonly bytes: Uint8Array; readonly txBytesHash: string }
+  >(),
+  getAddressBalanceGasTransactionBytesMock: vi.fn(),
+  getAddressBalanceGasTransactionTxBytesHashMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay/server')>()),
+  getAddressBalanceGasTransactionBytes: getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHash: getAddressBalanceGasTransactionTxBytesHashMock,
 }));
 
 vi.mock('../src/prepare/build.js', async (importOriginal) => {
@@ -55,6 +77,30 @@ const DEEPBOOK_PACKAGE_ID = `0x${'66'.repeat(32)}`;
 const POOL_ID = `0x${'77'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 
+function addressBalanceGasTransactionFixture(bytes: Uint8Array): AddressBalanceGasTransaction {
+  const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
+  addressBalanceGasTransactionContents.set(transaction, {
+    bytes: bytes.slice(),
+    txBytesHash: createHash('sha256').update(bytes).digest('hex'),
+  });
+  return transaction;
+}
+
+getAddressBalanceGasTransactionBytesMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.bytes.slice();
+  },
+);
+getAddressBalanceGasTransactionTxBytesHashMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.txBytesHash;
+  },
+);
+
 function makeCtx() {
   const onchainConfig = {
     packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
@@ -75,7 +121,6 @@ function makeCtx() {
       checkout: vi.fn().mockResolvedValue({
         sponsorAddress: SPONSOR_ADDRESS,
       }),
-      commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
@@ -91,13 +136,10 @@ function makeCtx() {
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
-    prepareStore: {
-      store: vi.fn().mockResolvedValue(undefined),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
+    sponsoredExecutionStore: {
+      commitPreparedReceipt: vi.fn(async (draft) => ({ ...draft, issuedAt: 1_741_680_000_000 })),
       reserveNonce: vi.fn().mockResolvedValue(1n),
-      releaseReservation: vi.fn().mockResolvedValue(undefined),
+      releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
     },
     settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     allowedSettlementSwapPaths: [
@@ -229,7 +271,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('L1_PARSE_FAILED: rejects when built TX contains Publish command', async () => {
     const publishBytes = await buildPublishTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: publishBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(publishBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_FORBIDDEN_COMMAND',
+        message: 'PTB contains forbidden command: Publish',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 350_000n,
@@ -259,7 +307,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('L1: rejects when built TX has no settle function', async () => {
     const noSettleBytes = await buildNoSettleTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: noSettleBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(noSettleBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_NO_SETTLE',
+        message: 'PTB does not contain a settle or swap_and_settle call',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
@@ -289,7 +343,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('slot is released when built-transaction validation fails', async () => {
     const noSettleBytes = await buildNoSettleTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: noSettleBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(noSettleBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_NO_SETTLE',
+        message: 'PTB does not contain a settle or swap_and_settle call',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,

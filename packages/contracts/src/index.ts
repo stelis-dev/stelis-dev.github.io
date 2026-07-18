@@ -209,6 +209,8 @@ export {
 
 export {
   MAX_PROMOTION_LEDGER_VALUE_MIST,
+  NODE_TIMER_MAX_DELAY_MS,
+  isNodeTimerDelayMs,
   SETTLEMENT_SWAP_DIRECTION_VECTORS,
   settlementSwapDirectionFromSwapDirections,
   SUI_TYPE,
@@ -230,6 +232,7 @@ export type {
 
 export {
   buildSponsorRefillAccountWithdrawMessage,
+  calculateSponsorAvailabilityErrorCode,
   isPositiveU64DecimalString,
   SPONSOR_SLOT_STATES,
 } from './admin.js';

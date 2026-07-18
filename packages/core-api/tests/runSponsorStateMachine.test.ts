@@ -1,79 +1,49 @@
-/**
- * runSponsorStateMachine.test.ts — sponsor-side `SponsoredExecution` runner.
- *
- * Pins the runner architecture invariants:
- *
- *   - Pre-consume hooks see `PreConsumeSponsorContext` (no reservation handles).
- *   - After consume succeeds, the runner reconstructs `sponsorSlot`
- *     immediately. SharedPostconsumeChecks output mints `nonce`;
- *     PolicyPostconsumeChecks output mints `ledgerReservation`.
- *   - `safeSlotCheckin` fires in `finally` ONLY after consume succeeded.
- *   - Pre-consume failures (consume sub-runner classified errors)
- *     propagate UNCHANGED — the runner does not re-classify.
- *   - Release hook throws are swallowed; primary success/error never
- *     replaced.
- *   - Module API hygiene: directory barrel exposes the runner;
- *     package main barrel does NOT re-export.
- */
-import { describe, test, expect, vi, type Mock } from 'vitest';
 import { createHash } from 'node:crypto';
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { describe, expect, test, vi } from 'vitest';
+import type { SponsorResultMetadata } from '../src/handlers/sponsorResult.js';
 import {
   runSponsorStateMachine,
-  RunnerSponsorReservationHandleMissingError,
-  RunnerSponsorPolicyContractError,
-  type SponsorStateMachineHost,
-  type SponsorStateMachineRequest,
   type SignAndSubmitPort,
-  type SponsorResultSnapshot,
+  type SponsorReceiptPolicyAdapter,
+  type SponsorStateMachineRequest,
 } from '../src/session/sponsoredExecution/sponsorRunner.js';
-import type {
-  SponsoredExecutionPolicy,
-  PreConsumeSponsorContext,
-  PostConsumeSponsorContext,
-  SharedPostconsumeReconstruction,
-  PolicyPostconsumeReconstruction,
-} from '../src/session/sponsoredExecution/executionPolicy.js';
-import type {
-  GenericPreparedTxDraft,
-  PromotionPreparedTxDraft,
-} from '../src/store/prepareTypes.js';
-import type { ExecResult } from '../src/session/sessionTypes.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
-import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
-import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
-import { SponsorPool } from '../src/context.js';
+import type { SponsoredExecutionPolicy } from '../src/session/sponsoredExecution/executionPolicy.js';
 import { SponsorPostSignatureUncertaintyError } from '../src/session/sessionPrimitives.js';
-import { suiExecutionErrorMessage, type SuiExecutionError } from '@stelis/core-relay';
-import type { AddressBalanceGasTransaction } from '@stelis/core-relay/server';
-import {
-  runSponsorConsumePhase,
-  type SponsorConsumePolicyAdapter,
-} from '../src/session/sponsorLifecycle.js';
+import type { ExecResult } from '../src/session/sessionTypes.js';
+import type {
+  GenericPreparedTxEntry,
+  PreparedTxEntry,
+  PromotionPreparedTxEntry,
+} from '../src/store/prepareTypes.js';
+import type {
+  ExecutingSponsoredExecutionRecord,
+  FinalSponsoredExecutionRecord,
+  SponsoredExecutionRecoveryContext,
+} from '../src/store/sponsoredExecutionRecords.js';
+import { storeSponsorResult } from '../src/store/sponsoredExecutionRecords.js';
+import type {
+  BeginSponsoredExecutionInput,
+  BeginSponsoredExecutionResult,
+  DiscardPreparedReceiptInput,
+  DiscardPreparedReceiptResult,
+  FinalizeSponsoredExecutionInput,
+  FinalizeSponsoredExecutionResult,
+  PromotionReceiptFinalization,
+  SponsoredExecutionRecoveryPage,
+  SponsoredExecutionStoreAdapter,
+} from '../src/store/sponsoredExecutionStore.js';
 import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.js';
 
-// Force a single dependency edge on `runSponsorConsumePhase` so the
-// sub-runner contract stays exercised even when the runner under test
-// invokes it indirectly. Re-exporting the import would also satisfy
-// this lint.
-void runSponsorConsumePhase;
+const RECEIPT_ID = `0x${'11'.repeat(32)}`;
+const SPONSOR_ADDRESS = `0x${'22'.repeat(32)}`;
+const SENDER_ADDRESS = `0x${'33'.repeat(32)}`;
+const PROMOTION_ID = '123e4567-e89b-42d3-a456-426614174000';
+const USER_ID = 'runner-user';
+const TX_BYTES = new Uint8Array([1, 2, 3, 4, 5]);
+const TX_BYTES_HASH = createHash('sha256').update(TX_BYTES).digest('hex');
+const USER_SIGNATURE = 'user-signature';
 
-// ─────────────────────────────────────────────
-// Shared fixtures
-// ─────────────────────────────────────────────
-
-const TEST_HMAC_SECRET = 'pr-1-2b-runner-test-hmac-secret-00000';
-const SPONSOR_KP = Ed25519Keypair.generate();
-const TEST_RECEIPT_ID = `0x${'cd'.repeat(32)}`;
-const TEST_SENDER = `0x${'be'.repeat(32)}`;
-const TEST_PROMO = 'pr-1-2b-promo-1';
-const TEST_USER = 'pr-1-2b-user-1';
-const TEST_TX_BYTES = new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05]);
-const TEST_TX_BYTES_HASH = createHash('sha256').update(TEST_TX_BYTES).digest('hex');
-const TEST_USER_SIGNATURE = 'mock-user-sig';
-const TEST_GAS_TRANSACTION = Object.freeze({}) as AddressBalanceGasTransaction;
-
-const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
+const SUCCESS_RESULT: Extract<ExecResult, { success: true }> = {
   success: true,
   executionStage: 'on_chain',
   digest: TEST_SUI_TRANSACTION_DIGEST,
@@ -85,19 +55,11 @@ const SUCCESS_EXEC: Extract<ExecResult, { success: true }> = {
   },
 };
 
-const MOVE_FAILURE: SuiExecutionError = {
-  kind: 'MovePrimitiveRuntimeError',
-};
-
-const CONGESTION_FAILURE: SuiExecutionError = {
-  kind: 'ExecutionCanceledDueToConsensusObjectCongestion',
-};
-
-const FAILED_EXEC_ONCHAIN: ExecResult = {
+const ONCHAIN_FAILURE: Extract<ExecResult, { success: false; isCongestion: false }> = {
   success: false,
   executionStage: 'on_chain',
   digest: TEST_SUI_TRANSACTION_DIGEST,
-  error: MOVE_FAILURE,
+  error: { kind: 'MovePrimitiveRuntimeError' },
   isCongestion: false,
   gasUsed: {
     computationCost: '1000',
@@ -106,790 +68,681 @@ const FAILED_EXEC_ONCHAIN: ExecResult = {
   },
 };
 
-const FAILED_EXEC_CONGESTION: ExecResult = {
+const CONGESTION_RESULT: Extract<ExecResult, { success: false; isCongestion: true }> = {
   success: false,
   executionStage: 'after_sponsor_signature',
-  digest: '',
-  error: CONGESTION_FAILURE,
+  digest: TEST_SUI_TRANSACTION_DIGEST,
+  error: { kind: 'ExecutionCanceledDueToConsensusObjectCongestion' },
   isCongestion: true,
   gasUsed: null,
 };
 
-interface HookCallLog {
-  state: string;
-  ctxKind: 'pre' | 'post';
-  hasNonce: boolean;
-  hasLedger: boolean;
-  args: unknown[];
+const GENERIC_PREPARED: GenericPreparedTxEntry = {
+  mode: 'generic',
+  receiptId: RECEIPT_ID,
+  senderAddress: SENDER_ADDRESS,
+  txBytesHash: TX_BYTES_HASH,
+  sponsorAddress: SPONSOR_ADDRESS,
+  clientIp: '127.0.0.1',
+  executionPathKey: 'generic:test',
+  orderId: null,
+  nonce: 7n,
+  issuedAt: 1_000,
+};
+
+const PROMOTION_PREPARED: PromotionPreparedTxEntry = {
+  mode: 'promotion',
+  receiptId: RECEIPT_ID,
+  senderAddress: SENDER_ADDRESS,
+  txBytesHash: TX_BYTES_HASH,
+  sponsorAddress: SPONSOR_ADDRESS,
+  clientIp: '127.0.0.1',
+  executionPathKey: 'promotion:test',
+  orderId: null,
+  promotionId: PROMOTION_ID,
+  userId: USER_ID,
+  reservedGasMist: 1_400_000n,
+  issuedAt: 1_000,
+};
+
+type StoreState = 'prepared' | 'executing' | 'final';
+
+interface StoreOptions {
+  readonly beginResult?: Exclude<BeginSponsoredExecutionResult, { status: 'executing' }>;
+  readonly discardStateChanged?: boolean;
+  readonly finalizeMode?: 'finalized' | 'already_final' | 'state_changed';
+  readonly alterAlreadyFinalResult?: boolean;
+  readonly markDeliveredError?: Error;
 }
 
-interface MakePolicyOptions {
-  failAtState?: string;
-  releaseThrow?: boolean;
-  emitNonce?: boolean;
-  emitLedger?: boolean;
-  /**
-   * Override ClassifySponsorResult's classification behavior. Default
-   * mirrors the route-policy contract: throw on `result.success ===
-   * false`; no-op on `result.success === true`. `'silent-on-failure'`
-   * makes the hook return without throwing even on a failed result —
-   * exercises the runner's contract-violation gate
-   * (`RunnerSponsorPolicyContractError`).
-   */
-  sponsorResultMode?: 'silent-on-failure';
-}
+/**
+ * Runner-only lifecycle fake. It deliberately implements state changes rather
+ * than returning pre-programmed mocks so the tests can assert which durable
+ * state exists at every policy and signing boundary.
+ */
+class LifecycleStore implements SponsoredExecutionStoreAdapter {
+  state: StoreState = 'prepared';
+  execution: ExecutingSponsoredExecutionRecord | null = null;
+  final: FinalSponsoredExecutionRecord | null = null;
+  readonly events: string[] = [];
+  readonly beginInputs: BeginSponsoredExecutionInput[] = [];
+  readonly discardInputs: DiscardPreparedReceiptInput[] = [];
+  readonly finalizeInputs: FinalizeSponsoredExecutionInput[] = [];
+  readonly promotionFinalizations: PromotionReceiptFinalization[] = [];
+  markDeliveredCalls = 0;
 
-function makeMockHooks(opts: MakePolicyOptions = {}): {
-  hooks: SponsoredExecutionPolicy['hooks'];
-  log: HookCallLog[];
-} {
-  const log: HookCallLog[] = [];
+  constructor(
+    readonly prepared: PreparedTxEntry,
+    private readonly options: StoreOptions = {},
+  ) {}
 
-  const recordPre = (state: string) => (ctx: PreConsumeSponsorContext) => {
-    log.push({ state, ctxKind: 'pre', hasNonce: false, hasLedger: false, args: [ctx] });
-    if (opts.failAtState === state) throw new Error(`policy fault at ${state}`);
-  };
-  const recordPost =
-    (state: string) =>
-    (ctx: PostConsumeSponsorContext, ...rest: unknown[]) => {
-      log.push({
-        state,
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx, ...rest],
-      });
-      if (opts.failAtState === state) throw new Error(`policy fault at ${state}`);
+  async commitPreparedReceipt(): Promise<PreparedTxEntry> {
+    throw new Error('commitPreparedReceipt is outside the sponsor runner test boundary');
+  }
+
+  async readPreparedReceipt(receiptId: string): Promise<PreparedTxEntry | null> {
+    this.events.push('read');
+    return this.state === 'prepared' && receiptId === this.prepared.receiptId
+      ? this.prepared
+      : null;
+  }
+
+  async beginSponsoredExecution(
+    input: BeginSponsoredExecutionInput,
+  ): Promise<BeginSponsoredExecutionResult> {
+    this.events.push('begin');
+    this.beginInputs.push(input);
+    if (this.options.beginResult) return this.options.beginResult;
+    if (this.state !== 'prepared') return { status: 'state_changed' };
+    const execution: ExecutingSponsoredExecutionRecord = {
+      state: 'executing',
+      receiptId: this.prepared.receiptId,
+      sponsorAddress: this.prepared.sponsorAddress,
+      txBytesHash: this.prepared.txBytesHash,
+      transactionDigest: TEST_SUI_TRANSACTION_DIGEST,
+      deadlineMs: this.prepared.issuedAt + input.executionBudgetMs,
+      recovery: input.recovery,
     };
+    this.execution = execution;
+    this.state = 'executing';
+    return { status: 'executing', prepared: this.prepared, execution };
+  }
 
-  const hooks: SponsoredExecutionPolicy['hooks'] = {
-    Intent: () => {},
-    RequestValidation: () => {},
-    InflightAdmission: () => {},
+  async discardPreparedReceipt(
+    input: DiscardPreparedReceiptInput,
+  ): Promise<DiscardPreparedReceiptResult> {
+    this.events.push('discard');
+    this.discardInputs.push(input);
+    if (this.options.discardStateChanged || this.state !== 'prepared') {
+      return { status: 'state_changed' };
+    }
+    const record = this.makeFinal(input.result);
+    this.final = record;
+    this.state = 'final';
+    return { status: 'discarded', record };
+  }
+
+  async finalizeSponsoredExecution(
+    input: FinalizeSponsoredExecutionInput,
+  ): Promise<FinalizeSponsoredExecutionResult> {
+    this.events.push('finalize');
+    this.finalizeInputs.push(input);
+    this.promotionFinalizations.push(input.promotion);
+    if (this.options.finalizeMode === 'state_changed') return { status: 'state_changed' };
+
+    const metadata = this.options.alterAlreadyFinalResult
+      ? { ...input.result, outcome: 'internal_error' as const }
+      : input.result;
+    const record = this.makeFinal(metadata);
+    this.final = record;
+    this.state = 'final';
+    return {
+      status: this.options.finalizeMode === 'already_final' ? 'already_final' : 'finalized',
+      record,
+    };
+  }
+
+  async markCallbackDelivered(expected: FinalSponsoredExecutionRecord): Promise<boolean> {
+    this.events.push('callback-delivered');
+    this.markDeliveredCalls += 1;
+    if (this.options.markDeliveredError) throw this.options.markDeliveredError;
+    if (this.final !== expected || expected.callbackDelivery !== 'pending') return false;
+    this.final = { ...expected, callbackDelivery: 'delivered' };
+    return true;
+  }
+
+  async readExpiredPreparedReceipts(): Promise<SponsoredExecutionRecoveryPage<PreparedTxEntry>> {
+    return { records: [], nextCursor: null };
+  }
+
+  async readDueExecutions(): Promise<
+    SponsoredExecutionRecoveryPage<ExecutingSponsoredExecutionRecord>
+  > {
+    return { records: [], nextCursor: null };
+  }
+
+  async readPendingCallbacks(): Promise<
+    SponsoredExecutionRecoveryPage<FinalSponsoredExecutionRecord>
+  > {
+    return { records: [], nextCursor: null };
+  }
+
+  async checkUserQuota(): Promise<'ok'> {
+    return 'ok';
+  }
+
+  async reserveNonce(): Promise<bigint> {
+    return 1n;
+  }
+
+  async releaseNonceReservation(): Promise<void> {}
+
+  async dispose(): Promise<void> {}
+
+  private makeFinal(metadata: SponsorResultMetadata): FinalSponsoredExecutionRecord {
+    return {
+      state: 'final',
+      receiptId: this.prepared.receiptId,
+      sponsorAddress: this.prepared.sponsorAddress,
+      transactionDigest: metadata.digest ?? null,
+      finalizedAtMs: 2_000,
+      callbackDelivery: 'pending',
+      result: storeSponsorResult(metadata),
+    };
+  }
+}
+
+interface PolicyControl {
+  readonly store: LifecycleStore;
+  readonly failAt?: 'Preflight';
+  classifiedResult: ExecResult | null;
+  readonly classificationError: Error;
+}
+
+function commonPrepareHooks() {
+  return {
+    Intent: () => undefined,
+    RequestValidation: () => undefined,
     ChainSnapshot: () => ({}),
-    ExecutionPolicySelected: () => {},
-    SlotFreePlan: () => {},
-    SponsorSlotReservationAcquired: () => {},
-    RouteReservationBeforeBuild: () => {},
-    GasBoundBuild: () => ({
-      addressBalanceGasTransaction: TEST_GAS_TRANSACTION,
-      measuredGasMist: 0n,
-    }),
-    RouteReservationAfterBuild: () => {},
-    SelfCheck: () => {},
-    SponsorLeaseCommitted: () => {},
-    DecodeSponsorSubmission: recordPre('DecodeSponsorSubmission'),
-    UserSignatureValidation: recordPre('UserSignatureValidation'),
-    Consume: recordPre('Consume'),
-    SharedPostconsumeChecks: (ctx) => {
-      log.push({
-        state: 'SharedPostconsumeChecks',
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx],
-      });
-      if (opts.failAtState === 'SharedPostconsumeChecks') {
-        throw new Error('policy fault at SharedPostconsumeChecks');
-      }
-      const out: SharedPostconsumeReconstruction = opts.emitNonce
-        ? {
-            nonce: {
-              nonce: 42n,
-              senderAddress: TEST_SENDER,
-              receiptId: TEST_RECEIPT_ID,
-              inPtbNonceMatch: true,
-            },
-          }
-        : {};
-      return out;
+    GasBoundBuild: () => {
+      throw new Error('GasBoundBuild is outside the sponsor runner test boundary');
     },
-    PolicyPostconsumeChecks: (ctx) => {
-      log.push({
-        state: 'PolicyPostconsumeChecks',
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx],
-      });
-      if (opts.failAtState === 'PolicyPostconsumeChecks') {
-        throw new Error('policy fault at PolicyPostconsumeChecks');
-      }
-      const out: PolicyPostconsumeReconstruction = opts.emitLedger
-        ? {
-            ledgerReservation: {
-              receiptId: TEST_RECEIPT_ID,
-              promotionId: TEST_PROMO,
-              userId: TEST_USER,
-              reservedGasMist: 1_400_000n,
-              ledgerLookupVerified: true,
-            },
-          }
-        : {};
-      return out;
-    },
-    Preflight: recordPost('Preflight'),
-    PolicyApproval: recordPost('PolicyApproval'),
-    SponsorSign: recordPost('SponsorSign'),
-    Submit: (ctx) => {
-      log.push({
-        state: 'Submit',
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx],
-      });
-      if (opts.failAtState === 'Submit') throw new Error('policy fault at Submit');
-    },
-    ClassifySponsorResult: (ctx, result) => {
-      log.push({
-        state: 'ClassifySponsorResult',
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx, result],
-      });
-      if (opts.sponsorResultMode === 'silent-on-failure') {
-        // Contract-violation knob: stay silent even on failed
-        // ExecResult so the runner's defensive gate fires.
-        return;
-      }
-      if (result.success === false) {
-        throw new Error(
-          `route-classified sponsor result failure: ${suiExecutionErrorMessage(result.error)}`,
-        );
-      }
-    },
-    Release: (ctx) => {
-      log.push({
-        state: 'Release',
-        ctxKind: 'post',
-        hasNonce: !!ctx.nonce,
-        hasLedger: !!ctx.ledgerReservation,
-        args: [ctx],
-      });
-      if (opts.releaseThrow) throw new Error('Release hook fault');
-    },
-  };
-  return { hooks, log };
+  } as const;
 }
 
-function makeGenericPolicy(opts: MakePolicyOptions = {}): {
-  policy: SponsoredExecutionPolicy;
-  log: HookCallLog[];
-} {
-  const { hooks, log } = makeMockHooks(opts);
+function assertPrepared(control: PolicyControl, event: string): void {
+  control.store.events.push(event);
+  expect(control.store.state).toBe('prepared');
+}
+
+function classify(control: PolicyControl, result: ExecResult): void {
+  control.store.events.push('classify');
+  control.classifiedResult = result;
+  if (!result.success) throw control.classificationError;
+}
+
+function makeGenericPolicy(control: PolicyControl): SponsoredExecutionPolicy<'generic'> {
   return {
-    policy: {
-      discriminator: 'generic',
-      handleRequirements: {
-        gasBoundBuild: { nonce: true },
-        preparedCommit: {},
-        sponsorResult: {},
+    discriminator: 'generic',
+    handleRequirements: {
+      gasBoundBuild: { nonce: true },
+      preparedCommit: {},
+      sponsorResult: {},
+    },
+    hooks: {
+      ...commonPrepareHooks(),
+      ChainSnapshot: () => ({ nonceAcquire: { onchainLastNonce: 0n } }),
+      DecodeSponsorSubmission: () => assertPrepared(control, 'decode'),
+      UserSignatureValidation: () => assertPrepared(control, 'signature-validation'),
+      SharedSponsorChecks: () => {
+        assertPrepared(control, 'shared-checks');
+        return {
+          nonce: {
+            nonce: GENERIC_PREPARED.nonce,
+            senderAddress: SENDER_ADDRESS,
+            receiptId: RECEIPT_ID,
+            inPtbNonceMatch: true,
+          },
+        };
       },
-      hooks,
-    },
-    log,
-  };
-}
-
-function makePromotionPolicy(opts: MakePolicyOptions = {}): {
-  policy: SponsoredExecutionPolicy;
-  log: HookCallLog[];
-} {
-  const { hooks, log } = makeMockHooks(opts);
-  return {
-    policy: {
-      discriminator: 'promotion',
-      handleRequirements: {
-        gasBoundBuild: {},
-        preparedCommit: { ledgerReservation: true },
-        sponsorResult: { ledgerReservation: true },
+      PolicySponsorChecks: () => {
+        assertPrepared(control, 'policy-checks');
+        return {};
       },
-      hooks,
+      Preflight: () => {
+        assertPrepared(control, 'preflight');
+        if (control.failAt === 'Preflight') throw new Error('preflight rejected');
+      },
+      ClassifySponsorResult: (_context, result) => classify(control, result),
     },
-    log,
   };
 }
 
-interface HostBuild {
-  host: SponsorStateMachineHost;
-  prepareStore: MemoryPrepareStore;
-  sponsorPool: SponsorPool;
-  ledger: MemoryPromotionExecutionLedger;
-  signAndSubmitMock: Mock<SignAndSubmitPort>;
-}
-
-function makeHost(opts?: { execResult?: ExecResult; signThrows?: unknown }): HostBuild {
-  const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
-  const ledger = new MemoryPromotionExecutionLedger(new MemoryPromotionStore());
-
-  const signAndSubmitMock = vi.fn<SignAndSubmitPort>(async () => {
-    if (opts?.signThrows) throw opts.signThrows;
-    return opts?.execResult ?? SUCCESS_EXEC;
-  });
-
+function makePromotionPolicy(control: PolicyControl): SponsoredExecutionPolicy<'promotion'> {
   return {
-    host: {
-      prepareStore,
-      sponsorPool,
-      executionLedger: ledger,
-      signAndSubmit: signAndSubmitMock,
+    discriminator: 'promotion',
+    handleRequirements: {
+      gasBoundBuild: {},
+      preparedCommit: { ledgerReservation: true },
+      sponsorResult: { ledgerReservation: true },
     },
-    prepareStore,
-    sponsorPool,
-    ledger,
-    signAndSubmitMock,
+    hooks: {
+      ...commonPrepareHooks(),
+      ChainSnapshot: () => ({}),
+      DecodeSponsorSubmission: () => assertPrepared(control, 'decode'),
+      UserSignatureValidation: () => assertPrepared(control, 'signature-validation'),
+      SharedSponsorChecks: () => {
+        assertPrepared(control, 'shared-checks');
+        return {};
+      },
+      PolicySponsorChecks: () => {
+        assertPrepared(control, 'policy-checks');
+        return {
+          ledgerReservation: {
+            receiptId: RECEIPT_ID,
+            promotionId: PROMOTION_ID,
+            userId: USER_ID,
+            reservedGasMist: PROMOTION_PREPARED.reservedGasMist,
+            ledgerLookupVerified: true,
+          },
+        };
+      },
+      Preflight: () => {
+        assertPrepared(control, 'preflight');
+        if (control.failAt === 'Preflight') throw new Error('preflight rejected');
+      },
+      ClassifySponsorResult: (_context, result) => classify(control, result),
+    },
   };
 }
 
-/**
- * Pre-store a generic prepared entry + commit the matching HMAC lease
- * on the sponsor pool so `runSponsorConsumePhase` finds a valid entry
- * keyed to `TEST_TX_BYTES_HASH`. Returns the sponsorAddress chosen by the pool.
- */
-async function pinGenericEntry(host: HostBuild): Promise<string> {
-  const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
-  if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: GenericPreparedTxDraft = {
-    mode: 'generic',
-    receiptId: TEST_RECEIPT_ID,
-    senderAddress: TEST_SENDER,
-    txBytesHash: TEST_TX_BYTES_HASH,
-    sponsorAddress: slot.sponsorAddress,
-    clientIp: '127.0.0.1',
-    executionPathKey: 'credit',
-    orderId: null,
-    nonce: 1n,
-  };
-  await host.prepareStore.store(entry);
-  return slot.sponsorAddress;
-}
-
-async function pinPromotionEntry(host: HostBuild): Promise<string> {
-  const slot = await host.sponsorPool.checkout(TEST_RECEIPT_ID);
-  if (!slot) throw new Error('test setup: pool exhausted');
-  await host.sponsorPool.commit(slot.sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  const entry: PromotionPreparedTxDraft = {
-    mode: 'promotion',
-    receiptId: TEST_RECEIPT_ID,
-    senderAddress: TEST_SENDER,
-    txBytesHash: TEST_TX_BYTES_HASH,
-    sponsorAddress: slot.sponsorAddress,
-    clientIp: '127.0.0.1',
-    executionPathKey: `promotion:${TEST_PROMO}`,
-    orderId: null,
-    nonce: 0n,
-    promotionId: TEST_PROMO,
-    userId: TEST_USER,
-    reservedGasMist: 1_400_000n,
-  };
-  await host.prepareStore.store(entry);
-  return slot.sponsorAddress;
-}
-
-/**
- * Minimal consume-policy adapter that exercises the runner's
- * Q1-confirmed reuse boundary. Production handlers' adapters carry
- * route-specific abuse / ledger / corrupt cleanup; for runner-only
- * unit tests we only need the classified-error contract.
- */
-function makeMockConsumeAdapter(
-  route: 'generic' | 'promotion' = 'generic',
-): SponsorConsumePolicyAdapter {
+function receiptPolicy(route: PreparedTxEntry['mode']): SponsorReceiptPolicyAdapter {
   return {
     route,
-    onNotFound: (rid) => new Error(`not_found:${rid}`),
-    onExpired: (rid) => new Error(`expired:${rid}`),
-    onHashMismatch: (rid) => new Error(`hash_mismatch:${rid}`),
-    onCorrupt: ({ receiptId, stage }) =>
-      Promise.resolve(new Error(`corrupt:${stage}:${receiptId}`)),
-    validateConsumedEntry: () => Promise.resolve(),
+    onNotFound: () => new Error('receipt not found'),
+    onExpired: () => new Error('receipt expired'),
+    onHashMismatch: () => new Error('transaction bytes changed'),
+    onPromotionNotActive: () => new Error('promotion not active'),
+    onSponsorUnavailable: () => new Error('sponsor unavailable'),
+    onStateChanged: () => new Error('receipt state changed'),
+    onCorrupt: () => new Error('receipt corrupt'),
+    validatePreparedEntry: (entry) => {
+      if (entry.mode !== route) throw new Error('receipt mode changed');
+    },
   };
 }
 
-interface GenericResult {
-  digest: string;
-  receiptId: string;
-}
-
-function makeGenericRequest(): SponsorStateMachineRequest<GenericResult> {
-  return {
-    hookContext: { receiptId: TEST_RECEIPT_ID, clientIp: '127.0.0.1' },
-    txBytes: TEST_TX_BYTES,
-    userSignature: TEST_USER_SIGNATURE,
-    projectResult: (snap: SponsorResultSnapshot) => ({
-      digest: snap.execResult.digest,
-      receiptId: snap.receiptId,
-    }),
-  };
-}
-
-interface PromotionResult {
-  digest: string;
-  reservedGasMist: string;
-}
-
-function makePromotionRequest(): SponsorStateMachineRequest<PromotionResult> {
-  return {
-    hookContext: { receiptId: TEST_RECEIPT_ID, clientIp: '127.0.0.1' },
-    txBytes: TEST_TX_BYTES,
-    userSignature: TEST_USER_SIGNATURE,
-    projectResult: (snap: SponsorResultSnapshot) => ({
-      digest: snap.execResult.digest,
-      reservedGasMist: snap.ledgerReservation?.reservedGasMist.toString() ?? '0',
-    }),
-  };
-}
-
-// ─────────────────────────────────────────────
-// Section 1 — Generic happy path (state walk + reservation handle reconstruction timing)
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — generic happy path', () => {
-  test('walks pre-consume → consume → post-consume → sponsor result in order; pre-consume hooks see PreConsumeSponsorContext with no reservation handles', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
-    expect(out.receiptId).toBe(TEST_RECEIPT_ID);
-
-    // Order check (state-walk parity).
-    const states = log.map((e) => e.state);
-    expect(states).toEqual([
-      'DecodeSponsorSubmission',
-      'UserSignatureValidation',
-      'Consume',
-      'SharedPostconsumeChecks',
-      'PolicyPostconsumeChecks',
-      'Preflight',
-      'PolicyApproval',
-      'SponsorSign',
-      'Submit',
-      'ClassifySponsorResult',
-      'Release',
-    ]);
-
-    // Pre-consume hooks see PreConsumeSponsorContext: ctxKind = 'pre',
-    // no nonce/ledger.
-    const preConsume = log.filter((e) =>
-      ['DecodeSponsorSubmission', 'UserSignatureValidation', 'Consume'].includes(e.state),
-    );
-    for (const e of preConsume) {
-      expect(e.ctxKind).toBe('pre');
-      expect(e.hasNonce).toBe(false);
-      expect(e.hasLedger).toBe(false);
-    }
-  });
-
-  test('SharedPostconsumeChecks output mints NonceReservationHandle; Preflight onwards see ctx.nonce', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    // SharedPostconsumeChecks itself sees ctx WITHOUT nonce (it's
-    // about to mint it).
-    const shared = log.find((e) => e.state === 'SharedPostconsumeChecks');
-    expect(shared?.hasNonce).toBe(false);
-
-    // Preflight, PolicyApproval, SponsorSign, Submit, ClassifySponsorResult,
-    // Release all fire AFTER the runner minted nonce — they see
-    // ctx.nonce as live.
-    const afterMint = log.filter((e) =>
-      [
-        'Preflight',
-        'PolicyApproval',
-        'SponsorSign',
-        'Submit',
-        'ClassifySponsorResult',
-        'Release',
-      ].includes(e.state),
-    );
-    for (const e of afterMint) {
-      expect(e.hasNonce).toBe(true);
-    }
-  });
-
-  test('host.signAndSubmit uses consumed sponsor identity and the unchanged request bytes and signature', async () => {
-    const host = makeHost();
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    expect(host.signAndSubmitMock).toHaveBeenCalledTimes(1);
-    expect(host.signAndSubmitMock).toHaveBeenCalledWith(
-      sponsorAddress,
-      TEST_RECEIPT_ID,
-      TEST_TX_BYTES,
-      TEST_USER_SIGNATURE,
-    );
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 2 — Studio happy path
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — Studio happy path', () => {
-  test('PolicyPostconsumeChecks output mints LedgerReservationHandle; ClassifySponsorResult sees ctx.ledgerReservation', async () => {
-    const host = makeHost();
-    await pinPromotionEntry(host);
-    const { policy, log } = makePromotionPolicy({ emitLedger: true });
-    const adapter = makeMockConsumeAdapter('promotion');
-
-    const out = await runSponsorStateMachine(host.host, makePromotionRequest(), policy, adapter);
-
-    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
-    expect(out.reservedGasMist).toBe('1400000');
-
-    // PolicyPostconsumeChecks sees ctx WITHOUT ledger (about to mint).
-    const policyPostconsume = log.find((e) => e.state === 'PolicyPostconsumeChecks');
-    expect(policyPostconsume?.hasLedger).toBe(false);
-    expect(policyPostconsume?.hasNonce).toBe(false); // promotion has no nonce
-
-    // After mint: Preflight onwards see ctx.ledgerReservation.
-    const afterMint = log.filter((e) =>
-      [
-        'Preflight',
-        'PolicyApproval',
-        'SponsorSign',
-        'Submit',
-        'ClassifySponsorResult',
-        'Release',
-      ].includes(e.state),
-    );
-    for (const e of afterMint) {
-      expect(e.hasLedger).toBe(true);
-      expect(e.hasNonce).toBe(false);
-    }
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 3 — Consume failure pass-through
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — consume failures', () => {
-  test('not_found classified error propagates UNCHANGED from sub-runner', async () => {
-    const host = makeHost();
-    // No entry stored — consume returns not_found.
-    const { policy } = makeGenericPolicy();
-    const adapter = makeMockConsumeAdapter('generic');
-
-    await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow(`not_found:${TEST_RECEIPT_ID}`);
-
-    // Pre-consume failure: signAndSubmit was NEVER called.
-    expect(host.signAndSubmitMock).toHaveBeenCalledTimes(0);
-  });
-
-  test('hash_mismatch propagates UNCHANGED; runner does not check in slot in finally (pool retains stage info)', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy();
-    // Submit different bytes than the ones the entry was stored with.
-    const tamperedReq: SponsorStateMachineRequest<GenericResult> = {
-      ...makeGenericRequest(),
-      txBytes: new Uint8Array([0xff, 0xff, 0xff]),
+function metadataBuilder(
+  prepared: PreparedTxEntry,
+  control: PolicyControl,
+): SponsorStateMachineRequest<{ digest: string }>['buildResultMetadata'] {
+  return (executionStage) => {
+    const result = control.classifiedResult;
+    const outcome = result
+      ? result.success
+        ? 'success'
+        : result.isCongestion
+          ? 'congestion'
+          : 'onchain_revert'
+      : control.failAt === 'Preflight'
+        ? 'preflight_failure'
+        : 'validation_failure';
+    const known = result !== null && (result.success || !result.isCongestion);
+    return {
+      sponsorAddress: prepared.sponsorAddress,
+      outcome,
+      executionStage,
+      route: prepared.mode,
+      ...(result?.digest ? { digest: result.digest } : {}),
+      receiptId: prepared.receiptId,
+      senderAddress: prepared.senderAddress,
+      executionPathKey: prepared.executionPathKey,
+      orderIdHash: null,
+      promotionId: prepared.mode === 'promotion' ? prepared.promotionId : null,
+      userId: prepared.mode === 'promotion' ? prepared.userId : null,
+      economics: known
+        ? {
+            economicsStatus: 'known',
+            recoveredGasMist: '0',
+            hostPaidGasMist: '1000',
+            hostFeeMist: '0',
+            hostNetMist: '-1000',
+            grossGasMist: '1000',
+            storageRebateMist: '0',
+            protocolFeeMist: null,
+            failureReason: result?.success ? null : 'on-chain failure',
+          }
+        : {
+            economicsStatus: 'unknown',
+            failureReason: outcome,
+          },
     };
-    const adapter = makeMockConsumeAdapter('generic');
+  };
+}
 
-    await expect(runSponsorStateMachine(host.host, tamperedReq, policy, adapter)).rejects.toThrow(
-      `hash_mismatch:${TEST_RECEIPT_ID}`,
+function recoveryContext(prepared: PreparedTxEntry): SponsoredExecutionRecoveryContext {
+  if (prepared.mode === 'promotion') {
+    return {
+      route: 'promotion',
+      senderAddress: prepared.senderAddress,
+      executionPathKey: prepared.executionPathKey,
+      promotionId: prepared.promotionId,
+      userId: prepared.userId,
+      reservedGasMist: prepared.reservedGasMist.toString(),
+    };
+  }
+  return {
+    route: 'generic',
+    senderAddress: prepared.senderAddress,
+    executionPathKey: prepared.executionPathKey,
+    orderIdHash: null,
+    recoveredGasMist: '0',
+    hostFeeMist: '0',
+    protocolFeeMist: '0',
+  };
+}
+
+function requestFor(
+  prepared: PreparedTxEntry,
+  control: PolicyControl,
+  stateChangedError = new Error('durable receipt state changed'),
+): SponsorStateMachineRequest<{ digest: string }> {
+  return {
+    hookContext: { receiptId: prepared.receiptId, clientIp: prepared.clientIp },
+    txBytes: TX_BYTES,
+    userSignature: USER_SIGNATURE,
+    buildRecoveryContext: () => recoveryContext(prepared),
+    buildResultMetadata: metadataBuilder(prepared, control),
+    stateChangedError: () => stateChangedError,
+    projectResult: (snapshot) => ({ digest: snapshot.execResult.digest }),
+  };
+}
+
+function buildHarness(
+  prepared: PreparedTxEntry,
+  options: StoreOptions & {
+    readonly result?: ExecResult;
+    readonly signError?: unknown;
+    readonly callbackError?: Error;
+    readonly failAt?: PolicyControl['failAt'];
+    readonly sponsorAvailable?: boolean;
+  } = {},
+) {
+  const store = new LifecycleStore(prepared, options);
+  const control: PolicyControl = {
+    store,
+    failAt: options.failAt,
+    classifiedResult: null,
+    classificationError: new Error('route classified execution failure'),
+  };
+  const signAndSubmit = vi.fn<SignAndSubmitPort>(
+    async (_sponsor, _receipt, bytes, _signature, expectedDigest) => {
+      store.events.push('sign-and-submit');
+      expect(store.state).toBe('executing');
+      expect(bytes).toBe(TX_BYTES);
+      expect(expectedDigest).toBe(TEST_SUI_TRANSACTION_DIGEST);
+      if (options.signError) throw options.signError;
+      return options.result ?? SUCCESS_RESULT;
+    },
+  );
+  const onSponsorResult = vi.fn(async () => {
+    store.events.push('callback');
+    if (options.callbackError) throw options.callbackError;
+  });
+  return {
+    store,
+    control,
+    signAndSubmit,
+    onSponsorResult,
+    host: {
+      store,
+      signAndSubmit,
+      endpointCount: 2,
+      onSponsorResult,
+      isSponsorAddressAvailable: vi.fn().mockResolvedValue(options.sponsorAvailable ?? true),
+    },
+    policy: prepared.mode === 'generic' ? makeGenericPolicy(control) : makePromotionPolicy(control),
+    receiptPolicy: receiptPolicy(prepared.mode),
+    request: requestFor(prepared, control),
+  };
+}
+
+describe('runSponsorStateMachine durable lifecycle', () => {
+  test('keeps the prepared record through policy checks, then begins once immediately before signing the identical bytes', async () => {
+    const harness = buildHarness(GENERIC_PREPARED);
+
+    await expect(
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
+
+    expect(harness.store.events).toEqual([
+      'read',
+      'decode',
+      'signature-validation',
+      'shared-checks',
+      'policy-checks',
+      'preflight',
+      'begin',
+      'sign-and-submit',
+      'classify',
+      'finalize',
+      'callback',
+      'callback-delivered',
+    ]);
+    expect(harness.store.beginInputs).toHaveLength(1);
+    expect(harness.store.beginInputs[0]?.txBytes).toBe(TX_BYTES);
+    expect(harness.signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(harness.signAndSubmit.mock.calls[0]?.[2]).toBe(TX_BYTES);
+    expect(harness.signAndSubmit.mock.calls[0]?.[4]).toBe(TEST_SUI_TRANSACTION_DIGEST);
+    expect(harness.store.finalizeInputs).toHaveLength(1);
+  });
+
+  test('keeps the prepared receipt intact when its assigned sponsor is unavailable', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, { sponsorAvailable: false });
+
+    await expect(
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).rejects.toThrow('sponsor unavailable');
+
+    expect(harness.store.state).toBe('prepared');
+    expect(harness.host.isSponsorAddressAvailable).toHaveBeenCalledOnce();
+    expect(harness.host.isSponsorAddressAvailable).toHaveBeenCalledWith(
+      GENERIC_PREPARED.sponsorAddress,
     );
-
-    expect(host.signAndSubmitMock).toHaveBeenCalledTimes(0);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 4 — Post-consume + sponsor result failures still run finally checkin
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — finally slot checkin parity', () => {
-  test('SharedPostconsumeChecks throws → finally runs safeSlotCheckin', async () => {
-    const host = makeHost();
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ failAtState: 'SharedPostconsumeChecks' });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
-
-    await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow('policy fault at SharedPostconsumeChecks');
-
-    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(harness.store.beginInputs).toHaveLength(0);
+    expect(harness.store.discardInputs).toHaveLength(0);
+    expect(harness.signAndSubmit).not.toHaveBeenCalled();
   });
 
-  test('Preflight throws → finally runs safeSlotCheckin', async () => {
-    const host = makeHost();
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ failAtState: 'Preflight', emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
+  test('atomically discards a prepared receipt rejected by preflight and delivers the durable final callback without signing', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, { failAt: 'Preflight' });
 
     await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow('policy fault at Preflight');
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).rejects.toThrow('preflight rejected');
 
-    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(harness.store.events).toEqual([
+      'read',
+      'decode',
+      'signature-validation',
+      'shared-checks',
+      'policy-checks',
+      'preflight',
+      'discard',
+      'callback',
+      'callback-delivered',
+    ]);
+    expect(harness.store.discardInputs).toHaveLength(1);
+    expect(harness.store.beginInputs).toHaveLength(0);
+    expect(harness.store.finalizeInputs).toHaveLength(0);
+    expect(harness.signAndSubmit).not.toHaveBeenCalled();
+    expect(harness.store.final?.result.outcome).toBe('preflight_failure');
+    expect(harness.store.final?.callbackDelivery).toBe('delivered');
   });
 
-  test('signAndSubmit throws → finally runs safeSlotCheckin (pre-sign and post-sign branches both reach finally)', async () => {
-    const preSignErr = new Error('SponsorLeaseExpired-equivalent');
-    const host = makeHost({ signThrows: preSignErr });
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
-
-    await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toBe(preSignErr);
-
-    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-    const release = log.find((entry) => entry.state === 'Release');
-    expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
-      'before_sponsor_signature',
+  test('leaves the receipt executing after a typed post-signature uncertainty and never submits a second time', async () => {
+    const uncertainty = new SponsorPostSignatureUncertaintyError(
+      TEST_SUI_TRANSACTION_DIGEST,
+      new Error('transport response lost'),
     );
-  });
-
-  test('typed post-signature uncertainty updates Release metadata without losing the submitted digest', async () => {
-    const cause = new Error('rpc transport error');
-    const expectedDigest = 'expected-sui-transaction-digest';
-    const uncertainty = new SponsorPostSignatureUncertaintyError(expectedDigest, cause);
-    const host = makeHost({
-      signThrows: uncertainty,
-    });
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
+    const harness = buildHarness(GENERIC_PREPARED, { signError: uncertainty });
 
     await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
     ).rejects.toBe(uncertainty);
 
-    expect(uncertainty.cause).toBe(cause);
-    expect(uncertainty.expectedDigest).toBe(expectedDigest);
+    expect(harness.store.state).toBe('executing');
+    expect(harness.store.execution).not.toBeNull();
+    expect(harness.signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(harness.store.finalizeInputs).toHaveLength(0);
+    expect(harness.store.discardInputs).toHaveLength(0);
+    expect(harness.onSponsorResult).not.toHaveBeenCalled();
+  });
 
-    const release = log.find((entry) => entry.state === 'Release');
-    expect((release?.args[0] as PostConsumeSponsorContext).executionStage).toBe(
-      'after_sponsor_signature',
+  test.each([
+    {
+      name: 'success consumes exact paid gas',
+      result: SUCCESS_RESULT,
+      expected: { operation: 'consume', chargedMist: 1000n },
+      rejects: false,
+    },
+    {
+      name: 'on-chain revert consumes exact paid gas',
+      result: ONCHAIN_FAILURE,
+      expected: { operation: 'consume', chargedMist: 1000n },
+      rejects: true,
+    },
+    {
+      name: 'congestion releases the reservation',
+      result: CONGESTION_RESULT,
+      expected: { operation: 'release' },
+      rejects: true,
+    },
+  ] as const)('$name', async ({ result, expected, rejects }) => {
+    const harness = buildHarness(PROMOTION_PREPARED, { result });
+    const run = runSponsorStateMachine(
+      harness.host,
+      harness.request,
+      harness.policy,
+      harness.receiptPolicy,
     );
+
+    if (rejects) await expect(run).rejects.toBe(harness.control.classificationError);
+    else await expect(run).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
+
+    expect(harness.store.promotionFinalizations).toEqual([expected]);
+    expect(harness.store.finalizeInputs).toHaveLength(1);
+    expect(harness.signAndSubmit).toHaveBeenCalledTimes(1);
   });
 
-  test('execResult.success === false → ClassifySponsorResult throws (route classification); finally still runs safeSlotCheckin', async () => {
-    const host = makeHost({ execResult: FAILED_EXEC_ONCHAIN });
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
+  test('keeps callback delivery pending when the host callback throws', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, {
+      callbackError: new Error('callback unavailable'),
+    });
 
     await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow(/route-classified sponsor result failure/);
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
 
-    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
+    expect(harness.onSponsorResult).toHaveBeenCalledTimes(1);
+    expect(harness.store.markDeliveredCalls).toBe(0);
+    expect(harness.store.final?.callbackDelivery).toBe('pending');
   });
 
-  test('congestion path: ClassifySponsorResult classifies failed execResult.isCongestion → throws; finally still runs safeSlotCheckin', async () => {
-    const host = makeHost({ execResult: FAILED_EXEC_CONGESTION });
-    const sponsorAddress = await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const checkinSpy = vi.spyOn(host.sponsorPool, 'checkin');
+  test('keeps the primary result successful when the delivery marker write fails', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, {
+      markDeliveredError: new Error('callback marker Redis unavailable'),
+    });
 
     await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow(/route-classified sponsor result failure/);
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
 
-    expect(checkinSpy).toHaveBeenCalledWith(sponsorAddress, TEST_RECEIPT_ID, TEST_TX_BYTES_HASH);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 5 — Observability-hook (Submit, Release) failure does NOT mask
-// primary classification or the original error
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — Submit hook non-masking', () => {
-  test('Submit receives only post-consume context; ClassifySponsorResult remains the result owner', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({ emitNonce: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    const submit = log.find((e) => e.state === 'Submit');
-    const sponsorResult = log.find((e) => e.state === 'ClassifySponsorResult');
-    expect(submit?.args).toHaveLength(1);
-    expect(sponsorResult?.args).toHaveLength(2);
-    expect(sponsorResult?.args[1]).toBe(SUCCESS_EXEC);
-    expect((sponsorResult?.args[0] as PostConsumeSponsorContext).executionStage).toBe('on_chain');
+    expect(harness.onSponsorResult).toHaveBeenCalledTimes(1);
+    expect(harness.store.markDeliveredCalls).toBe(1);
+    expect(harness.store.final?.callbackDelivery).toBe('pending');
   });
 
-  test('Submit throws on success path → ClassifySponsorResult still fires (success branch); primary success result still returned', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({
-      emitNonce: true,
-      failAtState: 'Submit',
-    });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    // Primary success path preserved — Submit's throw was swallowed.
-    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
-    expect(out.receiptId).toBe(TEST_RECEIPT_ID);
-
-    // ClassifySponsorResult fired AFTER Submit's throw was swallowed.
-    const states = log.map((e) => e.state);
-    const submitIdx = states.indexOf('Submit');
-    const sponsorResultIdx = states.indexOf('ClassifySponsorResult');
-    expect(submitIdx).toBeGreaterThanOrEqual(0);
-    expect(sponsorResultIdx).toBeGreaterThan(submitIdx);
-  });
-
-  test('failure result path: Submit fault is swallowed; ClassifySponsorResult still classifies', async () => {
-    const host = makeHost({ execResult: FAILED_EXEC_ONCHAIN });
-    await pinGenericEntry(host);
-    const { policy, log } = makeGenericPolicy({
-      emitNonce: true,
-      failAtState: 'Submit',
-    });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    let caught: unknown;
-    try {
-      await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-      expect.fail('expected throw');
-    } catch (err) {
-      caught = err;
-    }
-
-    // Caller sees ClassifySponsorResult's classified error, NOT Submit's fault.
-    expect((caught as Error).message).toMatch(/route-classified sponsor result failure/);
-    expect((caught as Error).message).not.toMatch(/policy fault at Submit/);
-
-    // Both Submit and ClassifySponsorResult fired in order — Submit's throw
-    // did not truncate the state walk.
-    const states = log.map((e) => e.state);
-    expect(states).toContain('Submit');
-    expect(states).toContain('ClassifySponsorResult');
-  });
-});
-
-describe('runSponsorStateMachine — Release hook non-masking', () => {
-  test('Release hook throws on success path → primary success result still returned', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({ emitNonce: true, releaseThrow: true });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    const out = await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-
-    expect(out.digest).toBe(TEST_SUI_TRANSACTION_DIGEST);
-    expect(out.receiptId).toBe(TEST_RECEIPT_ID);
-  });
-
-  test('Release hook throws on failure path → original error still propagates (not replaced by Release fault)', async () => {
-    const host = makeHost();
-    await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({
-      failAtState: 'Preflight',
-      emitNonce: true,
-      releaseThrow: true,
-    });
-    const adapter = makeMockConsumeAdapter('generic');
+  test('accepts a matching already-final CAS result without a second submission', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, { finalizeMode: 'already_final' });
 
     await expect(
-      runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter),
-    ).rejects.toThrow('policy fault at Preflight');
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
+
+    expect(harness.store.finalizeInputs).toHaveLength(1);
+    expect(harness.signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(harness.onSponsorResult).toHaveBeenCalledTimes(1);
   });
-});
 
-// ─────────────────────────────────────────────
-// Section 6 — Handle-requirement gate (Q5)
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — RunnerSponsorReservationHandleMissingError', () => {
-  test('Studio policy declares sponsorResult.ledgerReservation but PolicyPostconsumeChecks does not return inputs → RunnerSponsorReservationHandleMissingError', async () => {
-    const host = makeHost();
-    await pinPromotionEntry(host);
-    // emitLedger=false: policy postconsume returns no reconstruction inputs.
-    const { policy } = makePromotionPolicy({ emitLedger: false });
-    const adapter = makeMockConsumeAdapter('promotion');
+  test('fails closed when an already-final CAS result belongs to a different outcome', async () => {
+    const stateChanged = new Error('state changed sentinel');
+    const store = new LifecycleStore(GENERIC_PREPARED, {
+      finalizeMode: 'already_final',
+      alterAlreadyFinalResult: true,
+    });
+    const control: PolicyControl = {
+      store,
+      classifiedResult: null,
+      classificationError: new Error('route classified execution failure'),
+    };
+    const signAndSubmit = vi.fn<SignAndSubmitPort>(async () => SUCCESS_RESULT);
+    const request = requestFor(GENERIC_PREPARED, control, stateChanged);
 
     await expect(
-      runSponsorStateMachine(host.host, makePromotionRequest(), policy, adapter),
-    ).rejects.toBeInstanceOf(RunnerSponsorReservationHandleMissingError);
-
-    // Misconfiguration is detected BEFORE signAndSubmit fires.
-    expect(host.signAndSubmitMock).toHaveBeenCalledTimes(0);
-  });
-
-  test('ClassifySponsorResult violates contract by NOT throwing on failed ExecResult → RunnerSponsorPolicyContractError (distinct from HandleMissing)', async () => {
-    const host = makeHost({ execResult: FAILED_EXEC_ONCHAIN });
-    await pinGenericEntry(host);
-    const { policy } = makeGenericPolicy({
-      emitNonce: true,
-      // sponsorResultMode='silent-on-failure' makes the hook return without
-      // throwing on a failed ExecResult — the runner must catch that
-      // contract violation.
-      sponsorResultMode: 'silent-on-failure',
-    });
-    const adapter = makeMockConsumeAdapter('generic');
-
-    let caught: unknown;
-    try {
-      await runSponsorStateMachine(host.host, makeGenericRequest(), policy, adapter);
-      expect.fail('expected throw');
-    } catch (err) {
-      caught = err;
-    }
-
-    expect(caught).toBeInstanceOf(RunnerSponsorPolicyContractError);
-    // Distinct from the handle-missing class — the two classes
-    // signal different conditions and route handlers may map them
-    // to different public errors.
-    expect(caught).not.toBeInstanceOf(RunnerSponsorReservationHandleMissingError);
-  });
-});
-
-// ─────────────────────────────────────────────
-// Section 7 — Module API
-// ─────────────────────────────────────────────
-
-describe('runSponsorStateMachine — module API', () => {
-  test('package main barrel does NOT re-export sponsor runner symbols', async () => {
-    const mainBarrel = await import('../src/index.js');
-    expect(Object.prototype.hasOwnProperty.call(mainBarrel, 'runSponsorStateMachine')).toBe(false);
-    expect(
-      Object.prototype.hasOwnProperty.call(
-        mainBarrel,
-        'RunnerSponsorReservationHandleMissingError',
+      runSponsorStateMachine(
+        {
+          store,
+          signAndSubmit,
+          endpointCount: 1,
+          onSponsorResult: async () => {},
+          isSponsorAddressAvailable: async () => true,
+        },
+        request,
+        makeGenericPolicy(control),
+        receiptPolicy('generic'),
       ),
-    ).toBe(false);
+    ).rejects.toBe(stateChanged);
+
+    expect(signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(store.markDeliveredCalls).toBe(0);
+  });
+
+  test.each([
+    { status: 'mode_mismatch', actualMode: 'promotion' } as const,
+    { status: 'state_changed' } as const,
+  ])('fails closed when begin reports $status', async (beginResult) => {
+    const stateChanged = new Error('state changed sentinel');
+    const store = new LifecycleStore(GENERIC_PREPARED, {
+      beginResult,
+      discardStateChanged: beginResult.status === 'state_changed',
+    });
+    const control: PolicyControl = {
+      store,
+      classifiedResult: null,
+      classificationError: new Error('route classified execution failure'),
+    };
+    const signAndSubmit = vi.fn<SignAndSubmitPort>(async () => SUCCESS_RESULT);
+
+    const run = runSponsorStateMachine(
+      {
+        store,
+        signAndSubmit,
+        endpointCount: 1,
+        onSponsorResult: async () => {},
+        isSponsorAddressAvailable: async () => true,
+      },
+      requestFor(GENERIC_PREPARED, control, stateChanged),
+      makeGenericPolicy(control),
+      receiptPolicy('generic'),
+    );
+    if (beginResult.status === 'state_changed') {
+      await expect(run).rejects.toBe(stateChanged);
+    } else {
+      await expect(run).rejects.toThrow('receipt state changed');
+    }
+
+    expect(signAndSubmit).not.toHaveBeenCalled();
+    expect(store.finalizeInputs).toHaveLength(0);
   });
 });

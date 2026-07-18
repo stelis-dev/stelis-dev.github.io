@@ -261,6 +261,7 @@ describe('current Sui transaction gateways', () => {
     expect(() =>
       executeSuiTransaction(snapshot, {
         transaction: new Uint8Array([1, 2, 3]),
+        expectedDigest: DIGEST,
         signatures: ['not-reached'],
       }),
     ).toThrow('current full TransactionData BCS');
@@ -635,7 +636,7 @@ describe('current Sui transaction gateways', () => {
         client({ transactionExecutionService: { executeTransaction: primaryExecute } }),
         client({ transactionExecutionService: { executeTransaction: secondaryExecute } }),
       ]),
-      { transaction: BYTES, signatures: [validSerializedSignature] },
+      { transaction: BYTES, expectedDigest: DIGEST, signatures: [validSerializedSignature] },
     );
 
     expect(result).toMatchObject({ outcome: 'success', digest: DIGEST, events: [] });
@@ -662,6 +663,25 @@ describe('current Sui transaction gateways', () => {
     expect(executeRequest.transaction.bcs?.value).toEqual(BYTES);
     expect(executeRequest.readMask.paths).not.toContain('transaction.effects.status');
     expect(executeRequest.signatures[0]?.bcs?.value).toEqual(fromBase64(validSerializedSignature));
+  });
+
+  it('rejects a digest that does not identify the signed bytes before execution', async () => {
+    const validSerializedSignature = (await SIGNER.signTransaction(BYTES)).signature;
+    const execute = vi.fn();
+
+    expect(() =>
+      executeSuiTransaction(
+        createSuiEndpointSnapshot([
+          client({ transactionExecutionService: { executeTransaction: execute } }),
+        ]),
+        {
+          transaction: BYTES,
+          expectedDigest: EVENT_DIGEST,
+          signatures: [validSerializedSignature],
+        },
+      ),
+    ).toThrow('digest does not match its transaction bytes');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('binds the event envelope digest to effects while allowing nested event type identity', async () => {
@@ -818,7 +838,7 @@ describe('current Sui transaction gateways', () => {
         createSuiEndpointSnapshot([
           client({ transactionExecutionService: { executeTransaction: execute } }),
         ]),
-        { transaction: BYTES, signatures: [validSerializedSignature] },
+        { transaction: BYTES, expectedDigest: DIGEST, signatures: [validSerializedSignature] },
       ),
     ).resolves.toMatchObject({ outcome: 'success', events: [] });
     expect(execute).toHaveBeenCalledTimes(1);
@@ -831,7 +851,7 @@ describe('current Sui transaction gateways', () => {
         createSuiEndpointSnapshot([
           client({ transactionExecutionService: { executeTransaction: execute } }),
         ]),
-        { transaction: BYTES, signatures: ['AQ=='] },
+        { transaction: BYTES, expectedDigest: DIGEST, signatures: ['AQ=='] },
       ),
     ).toThrow('current serialized signature format');
     expect(execute).not.toHaveBeenCalled();
@@ -844,7 +864,7 @@ describe('current Sui transaction gateways', () => {
         createSuiEndpointSnapshot([
           client({ transactionExecutionService: { executeTransaction: execute } }),
         ]),
-        { transaction: BYTES, signatures: new Array<string>(1) },
+        { transaction: BYTES, expectedDigest: DIGEST, signatures: new Array<string>(1) },
       ),
     ).toThrow('signatures: expected a dense array');
     expect(execute).not.toHaveBeenCalled();

@@ -8,8 +8,7 @@
  * remains internal. Current Sui responses reach these helpers only after the
  * core-relay operation gateways validate their exact SDK unions.
  */
-import { createHash } from 'node:crypto';
-import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
+import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { verifyTransactionSignature } from '@mysten/sui/verify';
 import {
@@ -18,11 +17,11 @@ import {
   type SuiEndpointSnapshot,
   type SuiExecutionErrorKind,
 } from '@stelis/core-relay';
+import { assertSuiTransactionDigest } from '@stelis/core-relay/server';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_CHECKIN_FAILED } from '../observability/events.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
-import type { PreflightResult, ExecResult, ConsumeOutcome } from './sessionTypes.js';
+import type { PreflightResult, ExecResult } from './sessionTypes.js';
 // ─────────────────────────────────────────────
 // txBytes decode
 // ─────────────────────────────────────────────
@@ -44,15 +43,6 @@ export class SessionDecodeError extends Error {
     super(message);
     this.name = 'SessionDecodeError';
   }
-}
-
-// ─────────────────────────────────────────────
-// txBytes hash
-// ─────────────────────────────────────────────
-
-/** Compute SHA-256 hex digest of raw txBytes. File-local — only used by consumeEntry. */
-function computeTxHash(txBytes: Uint8Array): string {
-  return createHash('sha256').update(txBytes).digest('hex');
 }
 
 // ─────────────────────────────────────────────
@@ -111,29 +101,6 @@ export class SenderSignatureError extends Error {
     super(message);
     this.name = 'SenderSignatureError';
   }
-}
-
-// ─────────────────────────────────────────────
-// Consume
-// ─────────────────────────────────────────────
-
-/**
- * Atomically consume a prepared entry from the store.
- * Returns a normalized ConsumeOutcome — callers map to mode-specific errors.
- */
-export async function consumeEntry(
-  store: PrepareStoreAdapter,
-  receiptId: string,
-  txBytes: Uint8Array,
-): Promise<ConsumeOutcome> {
-  const txHash = computeTxHash(txBytes);
-  const result = await store.consume(receiptId, txHash);
-
-  if (result === 'not_found') return { status: 'not_found' };
-  if (result === 'expired') return { status: 'expired' };
-  if (result === 'hash_mismatch') return { status: 'hash_mismatch' };
-
-  return { status: 'ok', entry: result, txHash };
 }
 
 // ─────────────────────────────────────────────
@@ -229,12 +196,10 @@ export async function runPreflight(
  * `SponsorPostSignatureUncertaintyError`. Only a validated terminal result can
  * establish congestion or on-chain execution.
  *
- * The pool `sign(sponsorAddress, receiptId, txBytes)` signature pins lease
- * verification to `HMAC(secret, receiptId || sponsorAddress || hash(txBytes))`,
- * compared against the committed proof the prepare runner installed at
- * `sponsorPool.commit(sponsorAddress, receiptId, txBytesHash)`.
- * `sponsorAddress` is the lease identity; `receiptId` and the committed hash
- * bind that lease to one prepared transaction. A
+ * The pool `sign(sponsorAddress, receiptId, txBytes)` call verifies the
+ * stage-separated executing lease proof installed atomically immediately
+ * before signing. The proof binds the stage, receipt, sponsor, validated
+ * transaction-bytes hash, and expected Sui transaction digest. A
  * Redis-only attacker cannot produce a matching proof for any other
  * `txBytes` because the HMAC secret stays in process env.
  */
@@ -272,17 +237,18 @@ export async function signAndSubmit(
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
+  expectedDigest: string,
 ): Promise<ExecResult> {
-  // Derive the Sui transaction identity before issuing the sponsor signature.
-  // Every terminal response and every post-signature uncertainty record below
-  // is bound to this exact signed transaction identity.
-  const expectedDigest = TransactionDataBuilder.getDigestFromBytes(txBytes);
+  // The receipt store authored this durable identity while atomically entering
+  // execution. Verify that it still matches these exact bytes before issuing
+  // either the sponsor signature or the irreversible execution RPC.
+  assertSuiTransactionDigest(txBytes, expectedDigest);
 
-  // Pool throws SponsorLeaseExpiredError directly if the committed HMAC
+  // Pool throws SponsorLeaseExpiredError directly if the executing lease HMAC
   // lease proof for (receiptId, sponsorAddress, hash(txBytes)) does not match
   // the Redis value — including the case where `entry.txBytesHash` was
-  // overwritten under a live committed lease, because the committed
-  // Redis proof still references the original commit digest. Pre-sign
+  // overwritten under a live executing lease, because the stored
+  // Redis proof still references the original transaction-bytes hash. Pre-sign
   // failures rethrow unchanged: the sponsor signature was NOT issued
   // for them, so post-signature uncertainty policies (entitlement consume
   // and sponsored-execution recording) must not apply.
@@ -291,6 +257,7 @@ export async function signAndSubmit(
   try {
     const result = await executeSuiTransaction(sui, {
       transaction: txBytes,
+      expectedDigest,
       signatures: [userSignature, sponsorSig.signature],
     });
 
@@ -338,11 +305,9 @@ export async function signAndSubmit(
  * Best-effort slot checkin with structured error logging.
  * Safe to call in finally blocks — never throws.
  *
- * The pool `checkin` signature is `(sponsorAddress, receiptId, txBytesHash | null)`.
- * Callers pass the prepare commit hash (`txBytesHash`) when releasing a
- * committed lease, and `null` when releasing a lease that only reached the
- * reservation window (for example build/commit failure before
- * `prepareStore.store()`).
+ * This path releases only a lease that remains in the reservation window
+ * (for example build failure before `commitPreparedReceipt()`). Committed and
+ * executing leases are removed only by the receipt store's atomic mutation.
  *
  * The pool verifies the appropriate stage-specific HMAC proof before
  * deleting the slot; a forged receipt or hash silently no-ops rather
@@ -352,10 +317,9 @@ export async function safeSlotCheckin(
   pool: SponsorPoolAdapter,
   sponsorAddress: string,
   receiptId: string,
-  txBytesHash: string | null,
 ): Promise<void> {
   try {
-    await pool.checkin(sponsorAddress, receiptId, txBytesHash);
+    await pool.checkin(sponsorAddress, receiptId);
   } catch (checkinErr) {
     logStructuredEvent(
       SPONSOR_POOL_CHECKIN_FAILED,

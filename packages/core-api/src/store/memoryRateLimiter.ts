@@ -7,7 +7,7 @@
  * (`redisFixedWindowCounter.ts`: `INCR + PEXPIRE on current==1`) so both
  * adapters share the same fixed-window semantics.
  *
- * Follows the same pattern as MemoryPrepareStore:
+ * Uses an in-process map and an injected clock:
  *   - MAX_KEYS for memory DoS prevention
  *   - Periodic eviction of expired entries
  *

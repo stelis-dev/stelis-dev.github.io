@@ -270,10 +270,7 @@ export function createStudioRoutes(
         ctx.sponsorOperations.readState(),
         ctx.host.sponsorPool.leaseStatus(),
       ]);
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, {
-        requireFreeSponsorSlot: true,
-        slotLeases,
-      });
+      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
         return respondMapped(
@@ -299,7 +296,7 @@ export function createStudioRoutes(
         promotionStore: ctx.promotionStore,
         executionLedger: ctx.executionLedger,
         sponsorPool: ctx.host.sponsorPool,
-        prepareStore: ctx.host.prepareStore,
+        sponsoredExecutionStore: ctx.host.sponsoredExecutionStore,
         prepareInflightLimiter: ctx.host.prepareInflightLimiter,
         getConfig: ctx.host.getConfig.bind(ctx.host),
         globalAllowedTargets: ctx.studioGlobalAllowedTargets,
@@ -353,16 +350,6 @@ export function createStudioRoutes(
         );
       }
 
-      const sponsorOperationsState = await ctx.sponsorOperations.readState();
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState);
-      if (blocked) {
-        for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return respondMapped(
-          c,
-          codedHostError(blocked.errorCode, PROMOTION_SPONSOR_ERROR_CODES, {}, blocked.headers),
-        );
-      }
-
       const auth = await runStudioAuth(c, ctx, resolveClientIp, {
         rateLimitPrefix: 'promo_sponsor',
         allowedErrorCodes: PROMOTION_SPONSOR_ERROR_CODES,
@@ -386,7 +373,8 @@ export function createStudioRoutes(
         promotionStore: ctx.promotionStore,
         executionLedger: ctx.executionLedger,
         sponsorPool: ctx.host.sponsorPool,
-        prepareStore: ctx.host.prepareStore,
+        isSponsorAddressAvailable: ctx.host.isSponsorAddressAvailable,
+        sponsoredExecutionStore: ctx.host.sponsoredExecutionStore,
         abuseBlocker: ctx.host.abuseBlocker,
         globalAllowedTargets: ctx.studioGlobalAllowedTargets,
         onSponsorResult: ctx.host.onSponsorResult,

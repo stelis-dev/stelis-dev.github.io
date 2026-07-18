@@ -20,7 +20,7 @@ Current `gasVarianceFixedMist` is `100000`.
 
 Before signing, the sponsor checks:
 
-1. the prepared transaction can still be found and consumed once;
+1. the prepared receipt is current and can atomically enter execution once;
 2. the submitted transaction bytes match the prepared record;
 3. settlement arguments still match current config and Host policy;
 4. preflight simulation succeeds;
@@ -69,9 +69,6 @@ generic user `TransactionKind` gate. It is not the source for SDK
 returned-transaction integrity verification, promotion policy, or prefix value
 and funding resolution.
 
-The SDK returned-transaction integrity layer deliberately reuses core-relay
-primitives while keeping its own rule assembly. Its job is to check the bytes
-returned by the Host before the SDK asks the user to sign them. Refactoring this
-layer into a shared validator is a separate refactor task, not current behavior;
-the current behavior is documented here without adding a compatibility path or
-alternate validation name.
+The SDK returned-transaction integrity layer reuses core-relay primitives while
+keeping the SDK-owned rule assembly that checks Host-returned bytes before the
+SDK asks the user to sign them.

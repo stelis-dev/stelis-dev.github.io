@@ -1,67 +1,38 @@
-/**
- * RedisSponsorPool — shared conformance entry.
- *
- * Uses FakeRedisClient which already emulates the Lua CAS scripts
- * for commit (LEASE_COMMIT_CAS_SCRIPT) and checkin (LEASE_CHECKIN_CAS_SCRIPT).
- *
- * Backend-specific tests (cursor rotation, key TTL recovery, Lua script
- * edge cases) remain in redisAdapters.test.ts.
- */
-import { describe, expect, it, vi } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { describe, expect, test, vi } from 'vitest';
 import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { RedisSponsorPool } from '../src/store/redisSponsorPool.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
-import {
-  runSponsorPoolConformanceTests,
-  type SponsorPoolFactory,
-} from './sponsorPool.conformance.js';
 
-const TEST_HMAC_SECRET = 'test-hmac-secret-that-is-long-enough-for-validation';
-const SAMPLE_TX_BYTES = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+const HMAC_SECRET = 'redis-sponsor-pool-test-secret-aaaaaaaaaaaaaaaa';
+const RECEIPT_ID = `0x${'01'.repeat(32)}`;
 
-const redisFactory: SponsorPoolFactory = () => {
-  const redis = new FakeRedisClient();
-  const kp = Ed25519Keypair.generate();
-  const pool = new RedisSponsorPool(redis, [kp], {
-    hmacSecret: TEST_HMAC_SECRET,
-    leaseTtlMs: 10_000,
-  });
-  return {
-    pool,
-    sampleTxBytes: SAMPLE_TX_BYTES,
-    dispose: () => {},
-  };
-};
-
-describe('RedisSponsorPool — shared conformance', () => {
-  runSponsorPoolConformanceTests(redisFactory);
-});
-
-describe('RedisSponsorPool — constructor validation', () => {
-  it('derives the default lease TTL from PREPARE_TTL_MS plus sponsor lease grace', async () => {
+describe('RedisSponsorPool lease lifetime', () => {
+  test('uses the prepare lifetime plus the fixed cleanup grace when no override is supplied', async () => {
     const redis = new FakeRedisClient();
     const evalSpy = vi.spyOn(redis, 'eval');
-    const kp = Ed25519Keypair.generate();
-    const pool = new RedisSponsorPool(redis, [kp], { hmacSecret: TEST_HMAC_SECRET });
+    const pool = new RedisSponsorPool(redis, [Ed25519Keypair.generate()], {
+      hmacSecret: HMAC_SECRET,
+    });
 
-    await pool.checkout('receipt-default-ttl');
+    await expect(pool.checkout(RECEIPT_ID)).resolves.not.toBeNull();
 
-    expect(evalSpy).toHaveBeenCalledWith(
-      expect.stringContaining('RedisSponsorPool LEASE_CHECKOUT_SCRIPT'),
-      [expect.stringContaining(kp.toSuiAddress())],
-      [String(PREPARE_TTL_MS + 5_000), kp.toSuiAddress(), expect.any(String)],
+    const checkoutCall = evalSpy.mock.calls.find(([script]) =>
+      script.includes('RedisSponsorPool LEASE_CHECKOUT_SCRIPT'),
     );
+    expect(checkoutCall?.[2][0]).toBe(String(PREPARE_TTL_MS + 5_000));
   });
 
-  it('rejects unsafe lease TTL values', () => {
-    const redis = new FakeRedisClient();
-    const kp = Ed25519Keypair.generate();
-    expect(
-      () => new RedisSponsorPool(redis, [kp], { hmacSecret: TEST_HMAC_SECRET, leaseTtlMs: 0 }),
-    ).toThrow('leaseTtlMs');
-    expect(
-      () => new RedisSponsorPool(redis, [kp], { hmacSecret: TEST_HMAC_SECRET, leaseTtlMs: 1.5 }),
-    ).toThrow('safe integer');
-  });
+  test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects an unsupported lease lifetime before using Redis: %s',
+    (leaseTtlMs) => {
+      expect(
+        () =>
+          new RedisSponsorPool(new FakeRedisClient(), [Ed25519Keypair.generate()], {
+            hmacSecret: HMAC_SECRET,
+            leaseTtlMs,
+          }),
+      ).toThrow('leaseTtlMs must be a positive safe integer');
+    },
+  );
 });

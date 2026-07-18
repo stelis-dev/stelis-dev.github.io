@@ -34,6 +34,9 @@ const {
   SETTLEMENT_TOKEN_TYPE,
   POOL_ID,
   VAULT_ID,
+  addressBalanceGasTransactionContents,
+  getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHashMock,
 } = vi.hoisted(() => ({
   mockQueryUserCredit: vi.fn(),
   mockPrepareBuildPipeline: vi.fn(),
@@ -46,6 +49,18 @@ const {
   SETTLEMENT_TOKEN_TYPE: `0x${'77'.repeat(32)}::deep::DEEP`,
   POOL_ID: `0x${'88'.repeat(32)}`,
   VAULT_ID: `0x${'99'.repeat(32)}`,
+  addressBalanceGasTransactionContents: new WeakMap<
+    object,
+    { readonly bytes: Uint8Array; readonly txBytesHash: string }
+  >(),
+  getAddressBalanceGasTransactionBytesMock: vi.fn(),
+  getAddressBalanceGasTransactionTxBytesHashMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay/server')>()),
+  getAddressBalanceGasTransactionBytes: getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHash: getAddressBalanceGasTransactionTxBytesHashMock,
 }));
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
@@ -63,10 +78,6 @@ vi.mock('../src/prepare/build.js', async (importOriginal) => {
     runGenericPrepareBuildPipeline: mockPrepareBuildPipeline,
   };
 });
-
-// Auto-mock extractSettleArgs to allow dynamic policyHash injection in beforeEach.
-// This avoids hardcoded byte arrays that would silently break when constants change.
-vi.mock('../src/prepare/extractSettleArgs.js');
 
 // Mock Transaction.from to avoid BCS parse of fake txBytes
 // Keep constructor functional (used by makeValidTxKindBytes)
@@ -106,11 +117,11 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
+import type { ExtractedSettleArgs } from '../src/prepare/extractSettleArgs.js';
 import {
-  extractSettleArgsFromBuiltTx,
-  type ExtractedSettleArgs,
-} from '../src/prepare/extractSettleArgs.js';
-import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
+  createStaticSettlementSwapPathDescriptorMap,
+  type AddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
 import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
 
@@ -120,9 +131,39 @@ import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAut
 const FAKE_TX_BYTES = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
 const FAKE_TX_BYTES_HASH = '3cf654795a1c99c8e41f69aaeb3ad9e03f1b64cb14efb3b9b3b46be771e3a5b4'; // sha256 of FAKE_TX_BYTES — will be verified
 
+function addressBalanceGasTransactionFixture(
+  bytes: Uint8Array,
+  txBytesHash: string,
+): AddressBalanceGasTransaction {
+  const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
+  addressBalanceGasTransactionContents.set(transaction, { bytes: bytes.slice(), txBytesHash });
+  return transaction;
+}
+
+getAddressBalanceGasTransactionBytesMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.bytes.slice();
+  },
+);
+getAddressBalanceGasTransactionTxBytesHashMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.txBytesHash;
+  },
+);
+
+const FAKE_ADDRESS_BALANCE_GAS_TRANSACTION = addressBalanceGasTransactionFixture(
+  FAKE_TX_BYTES,
+  FAKE_TX_BYTES_HASH,
+);
+
 const MOCK_BUILD_RESULT = {
-  txBytes: FAKE_TX_BYTES,
-  txBytesHash: FAKE_TX_BYTES_HASH,
+  addressBalanceGasTransaction: FAKE_ADDRESS_BALANCE_GAS_TRANSACTION,
+  l1Validation: { ok: true } as const,
+  settleArgs: null as ExtractedSettleArgs | null,
   executionCostClaim: 1_800_000n, // simGas(1_300_000) + gasVariance(350K) + slippage(150K)
   simGas: 1_300_000n,
   gasVarianceFixedMist: 350_000n, // fixed gas variance buffer
@@ -190,6 +231,10 @@ function makeExtractedSettleArgs(
   };
 }
 
+function setSettleArgs(args: ExtractedSettleArgs): void {
+  MOCK_BUILD_RESULT.settleArgs = args;
+}
+
 function makeMockContext() {
   return {
     network: 'testnet' as const,
@@ -198,7 +243,6 @@ function makeMockContext() {
       checkout: vi.fn().mockResolvedValue({
         sponsorAddress: SPONSOR_ADDRESS,
       }),
-      commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
@@ -214,16 +258,13 @@ function makeMockContext() {
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
-    prepareStore: {
-      store: vi.fn(async (draft: PreparedTxDraft) => ({
+    sponsoredExecutionStore: {
+      commitPreparedReceipt: vi.fn(async (draft: PreparedTxDraft) => ({
         ...draft,
         issuedAt: 1_741_680_000_000,
       })),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
       reserveNonce: vi.fn().mockResolvedValue(1n),
-      releaseReservation: vi.fn().mockResolvedValue(undefined),
+      releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
     },
     settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
@@ -318,7 +359,7 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
 
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+    setSettleArgs(
       makeExtractedSettleArgs({
         configObjectId: CONFIG_ID,
         registryObjectId: REGISTRY_ID,
@@ -359,17 +400,18 @@ describe('handlePrepare — success path', () => {
     });
   });
 
-  it('stores correct values in prepareStore', async () => {
+  it('commits the exact runner-owned draft to the receipt lifecycle store', async () => {
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes, { clientIp: '192.168.1.1' });
 
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
-    // prepareStore.store should have been called exactly once
-    expect(ctx.prepareStore.store).toHaveBeenCalledTimes(1);
+    expect(ctx.sponsoredExecutionStore.commitPreparedReceipt).toHaveBeenCalledTimes(1);
 
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
 
     // The runner owns the receipt and passes one exact draft to the store;
     // the store alone adds issuedAt to the committed entry it returns.
@@ -404,8 +446,10 @@ describe('handlePrepare — success path', () => {
 
     const result = await handlePrepare(ctx, params, makeExtraCfg());
 
-    // Store draft must have same txBytesHash as what runGenericPrepareBuildPipeline returned
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    // The committed draft must carry the hash paired with the opaque validated transaction.
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
 
     // Response txBytes must be base64 of the same bytes fed to hash
@@ -487,7 +531,7 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('test-order-123'));
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+    setSettleArgs(
       makeExtractedSettleArgs({
         configObjectId: CONFIG_ID,
         registryObjectId: REGISTRY_ID,
@@ -537,7 +581,7 @@ describe('handlePrepare — success path', () => {
     });
     const policyHashBytes = Uint8Array.from(Buffer.from(policyHashHex.replace('0x', ''), 'hex'));
     const orderIdHash = await sha256Bytes(new TextEncoder().encode('store-test-order'));
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+    setSettleArgs(
       makeExtractedSettleArgs({
         configObjectId: CONFIG_ID,
         registryObjectId: REGISTRY_ID,
@@ -564,7 +608,9 @@ describe('handlePrepare — success path', () => {
 
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft.orderId).toBe('store-test-order');
   });
 
@@ -575,12 +621,14 @@ describe('handlePrepare — success path', () => {
 
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft.orderId).toBeNull();
   });
 
   it('rejects before store when payment-input trace mismatches the selected source', async () => {
-    vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(
+    setSettleArgs(
       makeExtractedSettleArgs({
         configObjectId: CONFIG_ID,
         registryObjectId: REGISTRY_ID,
@@ -618,12 +666,11 @@ describe('handlePrepare — success path', () => {
       meta: { subcode: 'payment_input_source_mismatch' },
     });
 
-    expect(ctx.prepareStore.store).not.toHaveBeenCalled();
+    expect(ctx.sponsoredExecutionStore.commitPreparedReceipt).not.toHaveBeenCalled();
   });
 
   // ── Lease commit error mapping (handler adapter invariant) ──────────────
-  // `SponsorLeaseCommitError` thrown by `sponsorPool.commit()` (called via
-  // the prepare runner) MUST be re-mapped by the handler to
+  // `SponsorLeaseCommitError` thrown by the atomic receipt commit MUST be re-mapped by the handler to
   // `PrepareValidationError('SPONSOR_LEASE_COMMIT_FAILED')`.
   // The runner owns cleanup, and the handler adapter owns the route-specific
   // domain error classification.
@@ -636,10 +683,12 @@ describe('handlePrepare — success path', () => {
     (ctx.prepareInflightLimiter.tryAcquire as ReturnType<typeof vi.fn>).mockResolvedValue({
       release: inflightRelease,
     });
-    // Force the lease-commit step to throw the typed error the handler must
+    // Force the atomic prepared-receipt commit to report a lease CAS failure.
     // re-map. Any non-SponsorLeaseCommitError throw should propagate as-is —
     // covered indirectly by the existing scope ordering tests.
-    (ctx.sponsorPool.commit as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(
       new SponsorLeaseCommitError('CAS_MISMATCH', 'lease was not in reserved stage'),
     );
 
@@ -662,22 +711,20 @@ describe('handlePrepare — success path', () => {
     expect(caught.message).toContain('lease was not in reserved stage');
 
     // Scope cleanup invariant: nonce reservation must be released, slot
-    // checked back in (reserved stage — commit failed before promotion to
-    // committed), and inflight handle dropped. Order:
+    // checked back in by receipt ID, and inflight handle dropped. Order:
     // reservation → slot checkin → inflight release.
-    expect(ctx.prepareStore.releaseReservation).toHaveBeenCalledWith(
+    expect(ctx.sponsoredExecutionStore.releaseNonceReservation).toHaveBeenCalledWith(
       expect.stringMatching(/^0x[0-9a-f]{64}$/),
       TEST_PREPARE_AUTH_SENDER,
     );
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledWith(
       SPONSOR_ADDRESS,
       expect.stringMatching(/^0x[0-9a-f]{64}$/),
-      null, // commit failed → lease still in reserved stage
     );
     expect(inflightRelease).toHaveBeenCalledTimes(1);
 
-    // Store must NOT receive the entry — commit failure must abort before
-    // the prepared entry is persisted.
-    expect(ctx.prepareStore.store).not.toHaveBeenCalled();
+    // The single atomic commit attempt failed before it could produce a
+    // prepared entry; the runner must not retry that mutation.
+    expect(ctx.sponsoredExecutionStore.commitPreparedReceipt).toHaveBeenCalledTimes(1);
   });
 });

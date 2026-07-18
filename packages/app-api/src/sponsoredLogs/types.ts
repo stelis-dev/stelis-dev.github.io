@@ -6,8 +6,7 @@
  * that metadata into one of these entries before calling the store.
  *
  * Store-shape contract:
- *   - Only the current exact shape is accepted. There is no versioned or
- *     compatibility reader.
+ *   - Only the exact field set below is accepted.
  *   - `receiptId` is the one sponsored-execution identity. Persistent
  *     stores accept an exact replay of the same result but reject a
  *     different result for an already-recorded receipt.
@@ -20,6 +19,13 @@
  *     `hostFeeMist` is `"0"` only on a known row that explicitly
  *     carries a zero fee; otherwise it is the exact MIST decimal string.
  */
+
+import { isValidStudioUserId, parsePromotionId } from '@stelis/contracts';
+import {
+  isValidSuiAddress,
+  isValidTransactionDigest,
+  normalizeSuiAddress,
+} from '@mysten/sui/utils';
 
 export type SponsoredExecutionMode = 'generic' | 'promotion';
 export type SponsoredExecutionLogOutcome = 'success' | 'onchain_revert' | 'internal_error';
@@ -42,11 +48,9 @@ export interface SponsoredExecutionLogEntry {
   /** On-chain or post-signature terminal outcome persisted by the recorder. */
   readonly outcome: SponsoredExecutionLogOutcome;
   /**
-   * Receipt id consumed during sponsor processing. Always present — the
-   * sponsored-execution recorder is invoked from the SponsoredExecutionPolicy `Release`
-   * hook after `consume()`, where `prepared.receiptId` is required by the
-   * sponsor result callback contract (`SponsorResultMetadata.receiptId`).
-   * Store identity relies on this non-null guarantee.
+   * Receipt ID of the durable final sponsored execution. Always present by
+   * `SponsorResultMetadata.receiptId`; the log store uses it as replay and
+   * conflict identity.
    */
   readonly receiptId: string;
   readonly digest: string | null;
@@ -110,10 +114,13 @@ const SPONSORED_EXECUTION_LOG_KEYS = [
 
 const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
 const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
+const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const U64_MAX = (1n << 64n) - 1n;
 
 function requireString(value: unknown, field: string): string {
-  if (typeof value !== 'string') {
-    throw new Error(`sponsoredLogs: ${field} must be a string`);
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`sponsoredLogs: ${field} must be a non-empty string`);
   }
   return value;
 }
@@ -135,9 +142,33 @@ function requireDecimal(value: unknown, field: string, signed: boolean): string 
   return value;
 }
 
-function requireNullableDecimal(value: unknown, field: string, signed: boolean): string | null {
+function requireU64(value: unknown, field: string): string {
+  const parsed = requireDecimal(value, field, false);
+  if (BigInt(parsed) > U64_MAX) {
+    throw new Error(`sponsoredLogs: ${field} must fit u64`);
+  }
+  return parsed;
+}
+
+function requireNullableU64(value: unknown, field: string): string | null {
   if (value === null) return null;
-  return requireDecimal(value, field, signed);
+  return requireU64(value, field);
+}
+
+function requireCanonicalAddress(value: unknown, field: string): string {
+  const address = requireString(value, field);
+  if (!isValidSuiAddress(address) || normalizeSuiAddress(address) !== address) {
+    throw new Error(`sponsoredLogs: ${field} must be a canonical Sui address`);
+  }
+  return address;
+}
+
+function requireCanonicalTimestamp(value: unknown): string {
+  const createdAt = requireString(value, 'createdAt');
+  if (!Number.isFinite(Date.parse(createdAt)) || new Date(createdAt).toISOString() !== createdAt) {
+    throw new Error('sponsoredLogs: createdAt must be a canonical ISO timestamp');
+  }
+  return createdAt;
 }
 
 /** Validate and parse a canonical signed decimal string into a bigint. */
@@ -204,17 +235,20 @@ export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecut
   let grossGasMist: string | null;
   let storageRebateMist: string | null;
   if (economicsStatus === 'known') {
-    recoveredGasMist = requireDecimal(source.recoveredGasMist, 'recoveredGasMist', false);
-    hostPaidGasMist = requireDecimal(source.hostPaidGasMist, 'hostPaidGasMist', false);
+    recoveredGasMist = requireU64(source.recoveredGasMist, 'recoveredGasMist');
+    hostPaidGasMist = requireU64(source.hostPaidGasMist, 'hostPaidGasMist');
     hostNetMist = requireDecimal(source.hostNetMist, 'hostNetMist', true);
-    hostFeeMist = requireDecimal(source.hostFeeMist, 'hostFeeMist', false);
-    protocolFeeMist = requireNullableDecimal(source.protocolFeeMist, 'protocolFeeMist', false);
-    grossGasMist = requireNullableDecimal(source.grossGasMist, 'grossGasMist', false);
-    storageRebateMist = requireNullableDecimal(
-      source.storageRebateMist,
-      'storageRebateMist',
-      false,
-    );
+    hostFeeMist = requireU64(source.hostFeeMist, 'hostFeeMist');
+    protocolFeeMist = requireNullableU64(source.protocolFeeMist, 'protocolFeeMist');
+    grossGasMist = requireNullableU64(source.grossGasMist, 'grossGasMist');
+    storageRebateMist = requireNullableU64(source.storageRebateMist, 'storageRebateMist');
+    const expectedHostNet =
+      BigInt(recoveredGasMist) + BigInt(hostFeeMist) - BigInt(hostPaidGasMist);
+    if (BigInt(hostNetMist) !== expectedHostNet) {
+      throw new Error(
+        'sponsoredLogs: hostNetMist must equal recoveredGasMist + hostFeeMist - hostPaidGasMist',
+      );
+    }
   } else {
     const numericFields = [
       'recoveredGasMist',
@@ -237,14 +271,36 @@ export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecut
     storageRebateMist = null;
   }
 
+  const receiptId = requireString(source.receiptId, 'receiptId');
+  if (!RECEIPT_ID_RE.test(receiptId)) {
+    throw new Error('sponsoredLogs: receiptId must be 0x followed by 64 lowercase hex digits');
+  }
+  const digest = requireNullableString(source.digest, 'digest');
+  if (digest !== null && !isValidTransactionDigest(digest)) {
+    throw new Error('sponsoredLogs: digest must be a current Sui transaction digest');
+  }
+  if (orderIdHash !== null && !SHA256_HEX_RE.test(orderIdHash)) {
+    throw new Error('sponsoredLogs: orderIdHash must be a lowercase SHA-256 digest');
+  }
+  if (promotionId !== null) {
+    try {
+      parsePromotionId(promotionId);
+    } catch {
+      throw new Error('sponsoredLogs: promotionId must be a canonical Promotion ID');
+    }
+  }
+  if (userId !== null && !isValidStudioUserId(userId)) {
+    throw new Error('sponsoredLogs: userId must be a current Studio user ID');
+  }
+
   return {
-    createdAt: requireString(source.createdAt, 'createdAt'),
+    createdAt: requireCanonicalTimestamp(source.createdAt),
     mode,
     outcome,
-    receiptId: requireString(source.receiptId, 'receiptId'),
-    digest: requireNullableString(source.digest, 'digest'),
-    senderAddress: requireString(source.senderAddress, 'senderAddress'),
-    sponsorAddress: requireString(source.sponsorAddress, 'sponsorAddress'),
+    receiptId,
+    digest,
+    senderAddress: requireCanonicalAddress(source.senderAddress, 'senderAddress'),
+    sponsorAddress: requireCanonicalAddress(source.sponsorAddress, 'sponsorAddress'),
     executionPathKey: requireString(source.executionPathKey, 'executionPathKey'),
     orderIdHash,
     promotionId,
@@ -259,6 +315,26 @@ export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecut
     economicsStatus,
     failureReason: requireNullableString(source.failureReason, 'failureReason'),
   };
+}
+
+/** Serialize the one current sponsored-log record in canonical field order. */
+export function serializeSponsoredExecutionLogEntry(entry: SponsoredExecutionLogEntry): string {
+  return JSON.stringify(parseSponsoredExecutionLogEntry(entry));
+}
+
+/** Parse exact stored bytes. Non-canonical JSON is not a second supported record shape. */
+export function parseStoredSponsoredExecutionLogEntry(raw: string): SponsoredExecutionLogEntry {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('sponsoredLogs: stored entry is not valid JSON');
+  }
+  const entry = parseSponsoredExecutionLogEntry(value);
+  if (serializeSponsoredExecutionLogEntry(entry) !== raw) {
+    throw new Error('sponsoredLogs: stored entry is not canonical');
+  }
+  return entry;
 }
 
 /**

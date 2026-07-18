@@ -18,9 +18,10 @@
  * not prove.
  *
  * Failure semantics:
- *   - never throws — primary sponsor response must not be affected.
- *   - store.append rejection emits `SPONSORED_LOGS_RECORDER_FAILED` with
- *     enough context for triage (receipt, digest, mode, outcome, error message).
+ *   - store.append and entry-build failures emit `SPONSORED_LOGS_RECORDER_FAILED`
+ *     with enough context for triage, then reject the callback.
+ *   - rejection keeps the durable final receipt's callback state pending;
+ *     recovery retries the receipt-safe append until it succeeds.
  *   - aggregate-vs-recent atomicity is the store adapter's responsibility
  *     (Lua-atomic in Redis). The recorder does NOT split the write.
  */
@@ -66,6 +67,30 @@ export interface SponsoredLogsRecorderDeps {
   readonly clock?: ClockFn;
 }
 
+function logRecorderFailure(
+  metadata: SponsorResultMetadata,
+  stage: 'build_entry' | 'store_append',
+  error: unknown,
+): void {
+  try {
+    logStructuredEvent(
+      SPONSORED_LOGS_RECORDER_FAILED,
+      {
+        stage,
+        mode: metadata.route,
+        outcome: metadata.outcome,
+        receipt_id: metadata.receiptId,
+        digest: metadata.digest ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'warn',
+    );
+  } catch {
+    // Logging is diagnostic; it must not replace the delivery failure that
+    // keeps the durable receipt pending.
+  }
+}
+
 /**
  * Build the host-side recorder callback. Pass the returned function to
  * the `createHostContext` onSponsorResult callback (alongside other sponsor result
@@ -76,7 +101,11 @@ export function createSponsoredLogsRecorder(
 ): SponsorResultCallback {
   const clock = deps.clock ?? (() => new Date());
 
-  return async function recordSponsoredExecution(metadata: SponsorResultMetadata): Promise<void> {
+  return async function recordSponsoredExecution(
+    metadata: SponsorResultMetadata,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     if (!shouldRecord(metadata)) {
       return;
     }
@@ -85,36 +114,18 @@ export function createSponsoredLogsRecorder(
     try {
       entry = buildLogEntry(metadata, clock);
     } catch (buildErr) {
-      logStructuredEvent(
-        SPONSORED_LOGS_RECORDER_FAILED,
-        {
-          stage: 'build_entry',
-          mode: metadata.route,
-          outcome: metadata.outcome,
-          receipt_id: metadata.receiptId,
-          digest: metadata.digest ?? null,
-          error: buildErr instanceof Error ? buildErr.message : String(buildErr),
-        },
-        'warn',
-      );
-      return;
+      logRecorderFailure(metadata, 'build_entry', buildErr);
+      throw buildErr;
     }
 
     try {
+      signal?.throwIfAborted();
       await deps.store.append(entry);
+      signal?.throwIfAborted();
     } catch (writeErr) {
-      logStructuredEvent(
-        SPONSORED_LOGS_RECORDER_FAILED,
-        {
-          stage: 'store_append',
-          mode: metadata.route,
-          outcome: metadata.outcome,
-          receipt_id: metadata.receiptId,
-          digest: metadata.digest ?? null,
-          error: writeErr instanceof Error ? writeErr.message : String(writeErr),
-        },
-        'warn',
-      );
+      signal?.throwIfAborted();
+      logRecorderFailure(metadata, 'store_append', writeErr);
+      throw writeErr;
     }
   };
 }
@@ -177,16 +188,10 @@ function buildLogEntry(
 }
 
 /**
- * Compose multiple `SponsorResultCallback`s into a single fan-out
- * callback. Each callback runs in sequence; rejections / throws are
- * caught per-callback so one failure cannot suppress the others.
- *
- * Each child callback owns a never-throws contract internally. A throw
- * escaping from a child is a contract violation and is surfaced as a
- * `SPONSOR_RESULT_CALLBACK_FAILED` warn so the operator sees the
- * failure even though the parent Release hook's try/catch never sees it
- * (the fan-out itself returns successfully to keep the never-throws
- * boundary intact for the remaining children and sponsor processing).
+ * Compose required idempotent `SponsorResultCallback`s into one durable
+ * delivery boundary. Every callback runs once per attempt, even when an
+ * earlier callback fails. After all callbacks have been attempted, any
+ * failures are rethrown together so the final receipt remains pending.
  *
  * Used by the host to combine the sponsor operations state callback with the
  * sponsored-execution recorder under the single
@@ -195,31 +200,46 @@ function buildLogEntry(
 export function fanOutSponsorResult(
   ...callbacks: readonly SponsorResultCallback[]
 ): SponsorResultCallback {
-  return async function fannedOut(metadata: SponsorResultMetadata): Promise<void> {
+  return async function fannedOut(
+    metadata: SponsorResultMetadata,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const failures: unknown[] = [];
     for (let i = 0; i < callbacks.length; i++) {
+      signal?.throwIfAborted();
       const cb = callbacks[i];
       try {
-        await cb(metadata);
+        await cb(metadata, signal);
+        signal?.throwIfAborted();
       } catch (cbErr) {
-        logStructuredEvent(
-          SPONSOR_RESULT_CALLBACK_FAILED,
-          {
-            source: 'sponsored_logs_fanout',
-            callback_index: i,
-            route: metadata.route,
-            sponsor_address: metadata.sponsorAddress,
-            receipt_id: metadata.receiptId,
-            // digest is the cross-reference key documented in
-            // `docs/operations.md` (`SPONSOR_RESULT_CALLBACK_FAILED`
-            // → recorder/state failure correlation by digest/sponsor address).
-            // null when the sponsor result path never reached submit.
-            digest: metadata.digest ?? null,
-            outcome: metadata.outcome,
-            error: cbErr instanceof Error ? cbErr.message : String(cbErr),
-          },
-          'warn',
-        );
+        signal?.throwIfAborted();
+        failures.push(cbErr);
+        try {
+          logStructuredEvent(
+            SPONSOR_RESULT_CALLBACK_FAILED,
+            {
+              source: 'sponsored_logs_fanout',
+              callback_index: i,
+              route: metadata.route,
+              sponsor_address: metadata.sponsorAddress,
+              receipt_id: metadata.receiptId,
+              digest: metadata.digest ?? null,
+              outcome: metadata.outcome,
+              error: cbErr instanceof Error ? cbErr.message : String(cbErr),
+            },
+            'warn',
+          );
+        } catch {
+          // All required consumers must still be attempted when the
+          // observability sink itself is unavailable.
+        }
       }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `Sponsor result delivery failed for receipt ${metadata.receiptId}`,
+      );
     }
   };
 }

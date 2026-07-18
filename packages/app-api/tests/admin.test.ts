@@ -78,8 +78,15 @@ import { createAdminRoutes, type AdminRoutesRuntimeInput } from '../src/routes/a
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../src/sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
+import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
 
 const ADMIN_ADDRESS = '0x' + 'a'.repeat(64);
+const SPONSOR_OPERATIONS_SETTINGS = createTestSponsorOperationsSettings({
+  refillEnabled: false,
+  refillTargetMist: null,
+  runwayTargetMist: 10_000_000_000n,
+  warnMist: 5_000_000_000n,
+});
 
 function createAdminRuntime(
   overrides: Partial<AdminRoutesRuntimeInput> = {},
@@ -93,9 +100,6 @@ function createAdminRuntime(
       sessionExpiry: '1h',
       issuer: 'app-api',
     },
-    refillEnabled: false,
-    warnMist: 5_000_000_000n,
-    refillTargetMist: 10_000_000_000n,
     ...overrides,
   };
 }
@@ -191,27 +195,29 @@ function createMockCtx(): AppApiContext {
       // Default returns a healthy single-slot state. Individual tests
       // override via `(ctx.sponsorOperations.readState as Mock).mockResolvedValue(...)`.
       readState: vi.fn().mockResolvedValue({
+        settings: SPONSOR_OPERATIONS_SETTINGS,
         slots: [
           {
             address: '0xslot',
             state: 'healthy',
-            balanceMist: '10000000000',
+            addressBalanceMist: '10000000000',
+            observationFresh: true,
             lastError: null,
             lastObservedAtMs: 1_700_000_000_000,
             writeSeq: 1,
           },
         ],
         sponsorRefillAccount: {
-          balanceMist: '20000000000',
+          totalBalanceMist: '20000000000',
           healthy: true,
-          refillsRemaining: 2,
+          observationFresh: true,
           lastError: null,
           lastObservedAtMs: 1_700_000_000_000,
           writeSeq: 1,
         },
       }),
-      probeSponsorRefillAccount: vi.fn().mockResolvedValue(undefined),
-      requestRefill: vi.fn(),
+      settings: SPONSOR_OPERATIONS_SETTINGS,
+      observeBalances: vi.fn().mockResolvedValue(undefined),
       withdraw: vi.fn().mockResolvedValue({
         status: 'succeeded',
         operationId: 'operation-success',
@@ -476,7 +482,7 @@ describe('admin routes', () => {
         mode: 'all',
         sponsoredExecutions: '2',
         lossCount: '0',
-        cumulativeHostNetMist: '4000',
+        cumulativeHostNetMist: '5000',
         cumulativeLossMist: '0',
       };
       const entries = [
@@ -497,7 +503,7 @@ describe('admin routes', () => {
           hostPaidGasMist: '1000',
           hostFeeMist: '1000',
           protocolFeeMist: '50',
-          hostNetMist: '4000',
+          hostNetMist: '5000',
           grossGasMist: '1050',
           storageRebateMist: '0',
           failureReason: null,
@@ -595,7 +601,7 @@ describe('admin routes', () => {
           hostNetMist: '-12345',
           grossGasMist: '12345',
           storageRebateMist: '0',
-          failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED: budget_unavailable',
+          failureReason: 'recorder_write_failed: storage_unavailable',
         },
       ]);
 
@@ -608,9 +614,7 @@ describe('admin routes', () => {
         'post_signature_uncertainty: Sui RPC transport was unavailable',
       );
       expect(body.entries[1].outcome).toBe('success');
-      expect(body.entries[1].failureReason).toBe(
-        'PROMOTION_LEDGER_CONSUME_FAILED: budget_unavailable',
-      );
+      expect(body.entries[1].failureReason).toBe('recorder_write_failed: storage_unavailable');
 
       // Numeric honesty lock at the API response: an unknown row carries
       // `hostFeeMist: null` (no zero coercion); a known row carries
@@ -2160,26 +2164,26 @@ describe('admin routes', () => {
       }
     });
 
-    it('awaits probeSponsorRefillAccount before serialising /api/sponsor-operations', async () => {
+    it('awaits the retained balance observation before serialising /api/sponsor-operations', async () => {
       // Admin `/api/sponsor-operations` runs a bounded sponsor-refill-account probe before the
       // shared-state read so the returned payload is "fresh at return
       // time" rather than stale-then-next-read.
       const res = await app.request('/api/sponsor-operations');
       expect(res.status).toBe(200);
-      expect(mockCtx.sponsorOperations.probeSponsorRefillAccount).toHaveBeenCalledWith();
+      expect(mockCtx.sponsorOperations.observeBalances).toHaveBeenCalledWith();
     });
 
     it('fails closed when the awaited sponsor-refill-account update cannot be committed', async () => {
-      (
-        mockCtx.sponsorOperations.probeSponsorRefillAccount as ReturnType<typeof vi.fn>
-      ).mockRejectedValueOnce(new Error('redis sponsor refill account write failed'));
+      (mockCtx.sponsorOperations.observeBalances as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('redis sponsor refill account write failed'),
+      );
 
       const res = await app.request('/api/sponsor-operations');
 
       await expectHostError(res, 'INTERNAL_ERROR');
     });
 
-    it('serialises the shared-state sponsor operations payload (no null/stale/generation)', async () => {
+    it('serialises the same freshness- and lease-aware state used by prepare admission', async () => {
       const observedAtMs = 1_700_000_000_000;
       (
         mockCtx.host.sponsorPool.leaseStatus as unknown as ReturnType<typeof vi.fn>
@@ -2192,11 +2196,13 @@ describe('admin routes', () => {
         ],
       });
       (mockCtx.sponsorOperations.readState as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        settings: SPONSOR_OPERATIONS_SETTINGS,
         slots: [
           {
             address: '0xSLOT1',
             state: 'healthy',
-            balanceMist: '5000000000',
+            addressBalanceMist: '5000000000',
+            observationFresh: false,
             lastError: null,
             lastObservedAtMs: observedAtMs,
             writeSeq: 3,
@@ -2204,16 +2210,17 @@ describe('admin routes', () => {
           {
             address: '0xSLOT2',
             state: 'low_balance',
-            balanceMist: '100000000',
+            addressBalanceMist: '100000000',
+            observationFresh: true,
             lastError: null,
             lastObservedAtMs: observedAtMs,
             writeSeq: 3,
           },
         ],
         sponsorRefillAccount: {
-          balanceMist: '10000000000',
+          totalBalanceMist: '10000000000',
           healthy: true,
-          refillsRemaining: 1,
+          observationFresh: true,
           lastError: null,
           lastObservedAtMs: observedAtMs,
           writeSeq: 3,
@@ -2230,11 +2237,13 @@ describe('admin routes', () => {
       expect(body.sponsorOperations.staleAfterMs).toBeUndefined();
       expect(body.sponsorOperations.stale).toBeUndefined();
 
-      // Aggregates derived from the state view.
+      // The stored state says healthy, but the expired observation is published
+      // as unavailable. The only healthy-looking slot is also leased, so the
+      // public gate agrees with prepare admission.
       expect(body.sponsorOperations).toMatchObject({
-        gateErrorCode: null,
-        availableSlots: 1,
-        degradedSlots: 1,
+        gateErrorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+        healthySlots: 0,
+        degradedSlots: 2,
         slotLeases: {
           leasedSlots: 1,
           freeSlots: 1,
@@ -2247,16 +2256,15 @@ describe('admin routes', () => {
       expect(body.sponsorOperations.slots).toHaveLength(2);
       expect(body.sponsorOperations.slots[0]).toEqual({
         address: '0xSLOT1',
-        state: 'healthy',
-        balanceMist: '5000000000',
+        state: 'rpc_unreachable',
+        addressBalanceMist: '5000000000',
         lastObservedAtMs: observedAtMs,
         lastError: null,
       });
       expect(body.sponsorOperations.sponsorRefillAccount).toEqual({
         address: mockCtx.sponsorOperations.sponsorRefillAccountAddress,
-        balanceMist: '10000000000',
+        totalBalanceMist: '10000000000',
         healthy: true,
-        refillsRemaining: 1,
         lastObservedAtMs: observedAtMs,
         lastError: null,
       });
@@ -2273,7 +2281,6 @@ describe('admin routes', () => {
       expect(body.poolSize).toBeUndefined();
       expect(body.sponsorRefillAccountAddress).toBeUndefined();
       expect(body.sponsorRefillAccountBalance).toBeUndefined();
-      expect(body.sponsorRefillAccountRefillsRemaining).toBeUndefined();
       // Settlement payout recipient balance is not part of the response contract.
       expect(body.settlementPayoutRecipientBalance).toBeUndefined();
     });
@@ -2287,7 +2294,8 @@ describe('admin routes', () => {
       expect(body.primaryAddress).toBe('0xslot');
       expect(body.settlementPayoutRecipientAddress).toBe('0xRECIPIENT');
       expect(body.sponsorBalanceWarnMist).toBe('5000000000');
-      expect(body.sponsorBalanceRefillTargetMist).toBe('10000000000');
+      expect(body.sponsorBalanceRefillTargetMist).toBeNull();
+      expect(body.sponsorRefillAccountRunwayTargetMist).toBe('10000000000');
       expect(body.refillEnabled).toBe(false);
       expect(typeof body.quotedHostFeeMist).toBe('string');
       expect(body.feeConfig).toMatchObject({

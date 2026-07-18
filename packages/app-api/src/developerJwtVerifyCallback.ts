@@ -1,3 +1,5 @@
+import { isNodeTimerDelayMs, NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
+
 /**
  * Developer JWT verify URL callback — host/runtime concern.
  *
@@ -21,6 +23,12 @@
  * the developer JWT is rejected.
  */
 export const DEVELOPER_VERIFY_TIMEOUT_MS = 5_000;
+
+if (!isNodeTimerDelayMs(DEVELOPER_VERIFY_TIMEOUT_MS)) {
+  throw new Error(
+    `DEVELOPER_VERIFY_TIMEOUT_MS must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}`,
+  );
+}
 
 export class DeveloperVerifyRejectedError extends Error {
   constructor(message: string) {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { FetchLike, StelisMcpServerConfig } from '../src/config.js';
+import { loadConfig, type FetchLike, type StelisMcpServerConfig } from '../src/config.js';
 import { requestJson, resolveRelayApiUrl, StelisMcpHttpError } from '../src/http.js';
 import {
   claimPromotion,
@@ -9,7 +9,11 @@ import {
   prepareSponsoredTransaction,
   submitPromotionSponsoredTransaction,
 } from '../src/operations.js';
-import { hostErrorPublicMessage, RELAY_CONFIG_ERROR_CODES } from '@stelis/contracts';
+import {
+  hostErrorPublicMessage,
+  NODE_TIMER_MAX_DELAY_MS,
+  RELAY_CONFIG_ERROR_CODES,
+} from '@stelis/contracts';
 
 const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
 
@@ -43,6 +47,24 @@ describe('resolveRelayApiUrl', () => {
       defaultTimeoutMs: 1000,
     };
     expect(() => resolveRelayApiUrl(config)).toThrow(/ending in \/relay/);
+  });
+});
+
+describe('Node timer bounds', () => {
+  it('rejects environment and per-call timeouts that Node would truncate', async () => {
+    expect(() =>
+      loadConfig({ STELIS_REQUEST_TIMEOUT_MS: String(NODE_TIMER_MAX_DELAY_MS + 1) }),
+    ).toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+
+    const fetchFn = vi.fn<FetchLike>();
+    await expect(
+      requestJson(createConfig(fetchFn), {
+        path: '/config',
+        timeoutMs: NODE_TIMER_MAX_DELAY_MS + 1,
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      }),
+    ).rejects.toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });
 

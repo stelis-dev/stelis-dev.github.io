@@ -179,7 +179,7 @@ describe('emitSponsorDriftObserved', () => {
       .filter((ev): ev is Record<string, unknown> => ev?.['event'] === 'SPONSOR_DRIFT_OBSERVED');
   }
 
-  it('emits SPONSOR_DRIFT_OBSERVED at info level for typical post-consume drift', () => {
+  it('emits SPONSOR_DRIFT_OBSERVED at info level for typical post-execution drift', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

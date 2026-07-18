@@ -63,6 +63,12 @@ export interface PromotionReservationRecord {
   readonly deadlineMs: number;
 }
 
+/** Canonical reservation JSON surrounding its one Redis-authored deadline. */
+export interface PromotionReservationRecordParts {
+  readonly prefix: string;
+  readonly suffix: string;
+}
+
 export interface PromotionOperationResultRecord {
   readonly receiptId: string;
   readonly promotionId: string;
@@ -71,6 +77,14 @@ export interface PromotionOperationResultRecord {
   readonly amountMist: string;
   readonly result: 'consumed' | 'released';
   readonly entitlement: PromotionEntitlementRecord;
+}
+
+export interface PromotionOperationResultExpectation {
+  readonly receiptId: string;
+  readonly promotionId: string;
+  readonly userId: string;
+  readonly operation: 'consume' | 'release';
+  readonly amountMist: string;
 }
 
 export function promotionEntitlementFromRecord(record: PromotionEntitlementRecord): Entitlement {
@@ -147,6 +161,39 @@ export function promotionReservationDeadlineIndexKey(): string {
 
 export function promotionReservationDeadlineMember(receiptId: string): string {
   return string(receiptId, 'Promotion reservation receiptId');
+}
+
+export interface PromotionReceiptStorageKeys {
+  readonly promotion: string;
+  readonly accounting: string;
+  readonly entitlement: string;
+  readonly reservation: string;
+  readonly result: string;
+  readonly reservationDeadlineIndex: string;
+  readonly receiptId: string;
+}
+
+/**
+ * Exact key bundle for one Promotion-sponsored receipt transition.
+ * Cross-record coordinators consume this bundle instead of reconstructing
+ * Promotion Redis prefixes.
+ */
+export function promotionReceiptStorageKeys(input: {
+  readonly promotionId: string;
+  readonly userId: string;
+  readonly receiptId: string;
+  readonly promotionRecordKey: string;
+}): PromotionReceiptStorageKeys {
+  const canonicalReceiptId = promotionReservationDeadlineMember(input.receiptId);
+  return Object.freeze({
+    promotion: string(input.promotionRecordKey, 'Promotion record key'),
+    accounting: promotionAccountingKey(input.promotionId),
+    entitlement: promotionEntitlementKey(input.promotionId, input.userId),
+    reservation: promotionReservationKey(canonicalReceiptId),
+    result: promotionOperationResultKey(canonicalReceiptId),
+    reservationDeadlineIndex: promotionReservationDeadlineIndexKey(),
+    receiptId: canonicalReceiptId,
+  });
 }
 
 export function assertPromotionAccountingIdentity(
@@ -971,6 +1018,38 @@ export function serializePromotionReservationRecord(record: PromotionReservation
   );
 }
 
+export function createPromotionReservationRecordParts(
+  record: Omit<PromotionReservationRecord, 'deadlineMs'>,
+): PromotionReservationRecordParts {
+  const serialized = serializePromotionReservationRecord({ ...record, deadlineMs: 1 });
+  const marker = '"deadlineMs":1';
+  const markerStart = serialized.indexOf(marker);
+  if (markerStart < 0 || serialized.indexOf(marker, markerStart + marker.length) >= 0) {
+    throw new PromotionRecordCorruptionError(
+      'Promotion reservation must contain exactly one deadlineMs field',
+    );
+  }
+  const valueStart = markerStart + '"deadlineMs":'.length;
+  return Object.freeze({
+    prefix: serialized.slice(0, valueStart),
+    suffix: serialized.slice(markerStart + marker.length),
+  });
+}
+
+export function materializePromotionReservationRecord(
+  parts: PromotionReservationRecordParts,
+  deadlineMs: number,
+): { readonly raw: string; readonly record: PromotionReservationRecord } {
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0) {
+    throw new PromotionRecordCorruptionError(
+      'Promotion reservation deadlineMs must be a positive safe integer',
+    );
+  }
+  const raw = `${parts.prefix}${deadlineMs}${parts.suffix}`;
+  const record = decodePromotionReservationRecord(raw);
+  return Object.freeze({ raw, record });
+}
+
 export function decodePromotionReservationRecord(serialized: string): PromotionReservationRecord {
   let parsed: unknown;
   try {
@@ -1007,6 +1086,23 @@ export function serializePromotionOperationResultRecord(
   });
   decodePromotionOperationResultRecord(serialized);
   return serialized;
+}
+
+export function promotionOperationResultMatchesExpectation(
+  record: PromotionOperationResultRecord,
+  expectation: PromotionOperationResultExpectation,
+): boolean {
+  const current = decodePromotionOperationResultRecord(
+    serializePromotionOperationResultRecord(record),
+  );
+  return (
+    current.receiptId === expectation.receiptId &&
+    current.promotionId === expectation.promotionId &&
+    current.userId === expectation.userId &&
+    current.operation === expectation.operation &&
+    current.amountMist === expectation.amountMist &&
+    current.result === (expectation.operation === 'consume' ? 'consumed' : 'released')
+  );
 }
 
 export function decodePromotionOperationResultRecord(

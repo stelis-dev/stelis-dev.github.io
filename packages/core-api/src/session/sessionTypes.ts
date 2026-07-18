@@ -4,7 +4,6 @@
  * Internal to core-api. Not exported from the package barrel.
  * Persisted boundary type remains `PreparedTxEntry` in store/prepareTypes.ts.
  */
-import type { PreparedTxEntry } from '../store/prepareTypes.js';
 import type { SuiExecutionError } from '@stelis/core-relay';
 
 // ─────────────────────────────────────────────
@@ -67,14 +66,3 @@ export type ExecResult =
        */
       gasUsed: GasUsedFields;
     };
-
-// ─────────────────────────────────────────────
-// Consume result
-// ─────────────────────────────────────────────
-
-/** Normalized result from prepareStore.consume(). */
-export type ConsumeOutcome =
-  | { status: 'ok'; entry: PreparedTxEntry; txHash: string }
-  | { status: 'not_found' }
-  | { status: 'expired' }
-  | { status: 'hash_mismatch' };

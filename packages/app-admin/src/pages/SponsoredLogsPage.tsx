@@ -198,12 +198,9 @@ function SponsoredLogsTable({
 function SponsoredLogsRow({ entry }: { readonly entry: AdminSponsoredExecutionLogEntry }) {
   const isUnknown = entry.economicsStatus === 'unknown';
   const negativeNet = !isUnknown && entry.hostNetMist?.startsWith('-');
-  // Post-submit accounting failures (for example,
-  // PROMOTION_LEDGER_CONSUME_FAILED) keep `outcome === 'success'` because
-  // the TX actually submitted on-chain, but they carry a non-null
-  // `failureReason` describing the recorder-visible deviation. Surface
-  // that reason so the operator does not read "success" alone and miss
-  // the accounting failure.
+  // A successful on-chain execution can still carry a diagnostic
+  // `failureReason` from later recording. Surface it so an operator does not
+  // read "success" alone and miss the recorded deviation.
   const hasFailureReason = entry.failureReason !== null && entry.failureReason !== '';
   const reasonHighlights = hasFailureReason && (entry.outcome === 'success' || isUnknown);
 

@@ -3,6 +3,7 @@ import type { SuiEndpointSnapshot } from '@stelis/core-relay';
 import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
 import type { SponsorRefillAccountWriteFields } from '../../src/sponsor-operations/redisState.js';
 import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+import { createTestSponsorOperationsSettings } from './settingsFixture.js';
 
 const gateway = vi.hoisted(() => ({ getSuiBalance: vi.fn() }));
 
@@ -14,6 +15,12 @@ vi.mock('@stelis/core-relay', async () => {
 import { probeAndWriteSponsorRefillAccountState } from '../../src/sponsor-operations/sponsorRefillAccountProbe.js';
 
 const ACCOUNT = `0x${'55'.repeat(32)}`;
+const SETTINGS = createTestSponsorOperationsSettings({
+  sponsorRefillAccountAddress: ACCOUNT,
+  warnMist: 10n,
+  refillTargetMist: 100n,
+  runwayTargetMist: 100n,
+});
 
 const balanceResults = new WeakMap<SuiEndpointSnapshot, string | Error>();
 
@@ -31,13 +38,19 @@ function suiBalance(result: string | Error): SuiEndpointSnapshot {
 }
 
 function spendState(options?: {
-  cursor?: { operationId: string | null; spendSequence: number; writeSequence: number };
+  cursor?: {
+    operationId: string | null;
+    spendState: 'reserved' | 'ready' | 'reconciling' | 'succeeded' | 'failed' | null;
+    spendSequence: number;
+    writeSequence: number;
+  };
   failWrite?: boolean;
   stale?: boolean;
 }) {
   const writes: SponsorRefillAccountWriteFields[] = [];
   const cursor = options?.cursor ?? {
     operationId: 'operation-7',
+    spendState: 'succeeded' as const,
     spendSequence: 7,
     writeSequence: 11,
   };
@@ -69,127 +82,89 @@ describe('Sponsor Refill Account observation', () => {
 
   it('writes a sampled healthy balance against the unchanged spend sequence', async () => {
     const stub = spendState();
-    const observed = await probeAndWriteSponsorRefillAccountState(
-      {
+    const observed = await probeAndWriteSponsorRefillAccountState({
+      sui: suiBalance('250'),
+      spendState: stub.state,
+      settings: SETTINGS,
+    });
+    expect(stub.writes).toEqual([{ totalBalanceMist: '250', lastError: '' }]);
+    expect(observed).toBe(250n);
+  });
+
+  it('does not probe or write while an active spend owns the account observation', async () => {
+    const stub = spendState({
+      cursor: {
+        operationId: 'operation-active',
+        spendState: 'ready',
+        spendSequence: 2,
+        writeSequence: 11,
+      },
+    });
+    const callsBefore = gateway.getSuiBalance.mock.calls.length;
+    await expect(
+      probeAndWriteSponsorRefillAccountState({
         sui: suiBalance('250'),
         spendState: stub.state,
-        sponsorRefillAccountAddress: ACCOUNT,
-        refillTargetMist: 100n,
-        sponsorRefillAccountBalanceTimeoutMs: 100,
-      },
-      {
-        operation: 'test.probe',
-        source: 'admin_sponsor_operations_sponsor_refill_account_update',
-        writeFailureMode: 'throw',
-      },
-    );
-    expect(stub.writes).toEqual([
-      { balanceMist: '250', healthy: '1', refillsRemaining: '2', lastError: '' },
-    ]);
-    expect(observed).toBe(250n);
+        settings: SETTINGS,
+      }),
+    ).resolves.toBeNull();
+    expect(gateway.getSuiBalance.mock.calls).toHaveLength(callsBefore);
+    expect(stub.writes).toEqual([]);
   });
 
   it('writes a degraded observation for an RPC or balance-shape failure', async () => {
     const stub = spendState();
-    await probeAndWriteSponsorRefillAccountState(
-      {
-        sui: suiBalance(new Error('rpc unavailable')),
-        spendState: stub.state,
-        sponsorRefillAccountAddress: ACCOUNT,
-        refillTargetMist: 100n,
-        sponsorRefillAccountBalanceTimeoutMs: 100,
-      },
-      {
-        operation: 'test.probe',
-        source: 'admin_sponsor_operations_sponsor_refill_account_update',
-        writeFailureMode: 'throw',
-      },
-    );
+    await probeAndWriteSponsorRefillAccountState({
+      sui: suiBalance(new Error('rpc unavailable')),
+      spendState: stub.state,
+      settings: SETTINGS,
+    });
     expect(stub.writes).toEqual([
       {
-        balanceMist: '',
-        healthy: '0',
-        refillsRemaining: '',
+        totalBalanceMist: '',
         lastError: 'rpc unavailable',
       },
     ]);
   });
 
-  it('fails an admin freshness read but silently discards a stale callback sample', async () => {
+  it('rejects a stale observation instead of reporting it as delivered', async () => {
     const stub = spendState({ stale: true });
     await expect(
-      probeAndWriteSponsorRefillAccountState(
-        {
-          sui: suiBalance('250'),
-          spendState: stub.state,
-          sponsorRefillAccountAddress: ACCOUNT,
-          refillTargetMist: 100n,
-          sponsorRefillAccountBalanceTimeoutMs: 100,
-        },
-        {
-          operation: 'test.probe',
-          source: 'admin_sponsor_operations_sponsor_refill_account_update',
-          writeFailureMode: 'throw',
-        },
-      ),
+      probeAndWriteSponsorRefillAccountState({
+        sui: suiBalance('250'),
+        spendState: stub.state,
+        settings: SETTINGS,
+      }),
     ).rejects.toThrow('Sponsor Refill Account changed during the balance probe');
-
-    await expect(
-      probeAndWriteSponsorRefillAccountState(
-        {
-          sui: suiBalance('250'),
-          spendState: stub.state,
-          sponsorRefillAccountAddress: ACCOUNT,
-          refillTargetMist: 100n,
-          sponsorRefillAccountBalanceTimeoutMs: 100,
-        },
-        {
-          operation: 'test.probe',
-          source: 'sponsor_result_state_update_sponsor_refill_account_update',
-          writeFailureMode: 'swallow',
-        },
-      ),
-    ).resolves.toBeNull();
     expect(stub.writes).toEqual([]);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves throw and swallow contracts for actual Redis write failures', async () => {
+  it('reports and propagates an actual Redis write failure', async () => {
     const throwing = spendState({ failWrite: true });
     await expect(
-      probeAndWriteSponsorRefillAccountState(
-        {
-          sui: suiBalance('250'),
-          spendState: throwing.state,
-          sponsorRefillAccountAddress: ACCOUNT,
-          refillTargetMist: 100n,
-          sponsorRefillAccountBalanceTimeoutMs: 100,
-        },
-        {
-          operation: 'test.probe',
-          source: 'admin_sponsor_operations_sponsor_refill_account_update',
-          writeFailureMode: 'throw',
-        },
-      ),
+      probeAndWriteSponsorRefillAccountState({
+        sui: suiBalance('250'),
+        spendState: throwing.state,
+        settings: SETTINGS,
+      }),
     ).rejects.toThrow('redis rejected observation');
-
-    const swallowing = spendState({ failWrite: true });
-    await expect(
-      probeAndWriteSponsorRefillAccountState(
-        {
-          sui: suiBalance('250'),
-          spendState: swallowing.state,
-          sponsorRefillAccountAddress: ACCOUNT,
-          refillTargetMist: 100n,
-          sponsorRefillAccountBalanceTimeoutMs: 100,
-        },
-        {
-          operation: 'test.probe',
-          source: 'sponsor_result_state_update_sponsor_refill_account_update',
-          writeFailureMode: 'swallow',
-        },
-      ),
-    ).resolves.toBeNull();
     expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('does not turn caller cancellation into a degraded observation', async () => {
+    const stub = spendState();
+    const controller = new AbortController();
+    controller.abort(new Error('scheduler disposed'));
+
+    await expect(
+      probeAndWriteSponsorRefillAccountState({
+        sui: suiBalance('250'),
+        spendState: stub.state,
+        settings: SETTINGS,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('scheduler disposed');
+    expect(stub.writes).toEqual([]);
   });
 });

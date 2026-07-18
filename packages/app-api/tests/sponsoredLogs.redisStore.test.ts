@@ -3,6 +3,16 @@ import type { RedisClientLike } from '@stelis/core-api';
 import { RedisSponsoredLogsStore } from '../src/sponsoredLogs/redisStore.js';
 import type { SponsoredExecutionLogEntry } from '../src/sponsoredLogs/types.js';
 
+const DIGEST = '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD';
+const SENDER = `0x${'1'.repeat(64)}`;
+const SPONSOR = `0x${'2'.repeat(64)}`;
+const ORDER_ID_HASH = 'a'.repeat(64);
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+
+function canonicalReceiptId(label: string): string {
+  return `0x${Buffer.from(label).toString('hex').padEnd(64, '0').slice(0, 64)}`;
+}
+
 function makeKnownEntry(
   overrides: Partial<SponsoredExecutionLogEntry> & {
     receiptId: string;
@@ -10,22 +20,25 @@ function makeKnownEntry(
 ): SponsoredExecutionLogEntry {
   const mode = overrides.mode ?? 'generic';
   const promotion = mode === 'promotion';
+  const requestedNet =
+    typeof overrides.hostNetMist === 'string' ? overrides.hostNetMist : undefined;
+  const net = requestedNet === undefined ? 5_000n : BigInt(requestedNet);
   return {
     createdAt: overrides.createdAt ?? '2026-04-26T16:00:00.000Z',
     mode,
     outcome: overrides.outcome ?? 'success',
-    receiptId: overrides.receiptId,
-    digest: '0xdigest',
-    senderAddress: '0xsender',
-    sponsorAddress: '0xsponsor',
+    receiptId: canonicalReceiptId(overrides.receiptId),
+    digest: DIGEST,
+    senderAddress: SENDER,
+    sponsorAddress: SPONSOR,
     executionPathKey: 'rk',
-    orderIdHash: null,
-    promotionId: promotion ? 'promo-1' : null,
+    orderIdHash: promotion ? null : ORDER_ID_HASH,
+    promotionId: promotion ? PROMOTION_ID : null,
     userId: promotion ? 'user-1' : null,
-    recoveredGasMist: '12000',
-    hostPaidGasMist: '8000',
+    recoveredGasMist: requestedNet === undefined ? '12000' : net >= 0n ? net.toString() : '0',
+    hostPaidGasMist: requestedNet === undefined ? '8000' : net < 0n ? (-net).toString() : '0',
     hostNetMist: overrides.hostNetMist ?? '5000',
-    hostFeeMist: overrides.hostFeeMist ?? '1000',
+    hostFeeMist: overrides.hostFeeMist ?? (requestedNet === undefined ? '1000' : '0'),
     protocolFeeMist: overrides.protocolFeeMist ?? '50',
     grossGasMist: '9500',
     storageRebateMist: '1500',
@@ -39,10 +52,10 @@ function makeUnknownEntry(receiptId: string): SponsoredExecutionLogEntry {
     createdAt: '2026-04-26T16:00:00.000Z',
     mode: 'generic',
     outcome: 'internal_error',
-    receiptId,
+    receiptId: canonicalReceiptId(receiptId),
     digest: null,
-    senderAddress: '0xsender',
-    sponsorAddress: '0xsponsor',
+    senderAddress: SENDER,
+    sponsorAddress: SPONSOR,
     executionPathKey: 'rk',
     orderIdHash: null,
     promotionId: null,
@@ -84,7 +97,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     expect(evalSpy).toHaveBeenCalledTimes(1);
     const [, keys, args] = evalSpy.mock.calls[0];
     expect(keys).toHaveLength(4);
-    expect(keys[0]).toBe('stelis:sponsored_logs:idem:r1');
+    expect(keys[0]).toBe(`stelis:sponsored_logs:idem:${canonicalReceiptId('r1')}`);
     expect(keys[1]).toBe('stelis:sponsored_logs:agg:all');
     expect(keys[2]).toBe('stelis:sponsored_logs:agg:generic');
     expect(keys[3]).toBe('stelis:sponsored_logs:recent');
@@ -132,7 +145,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
     await store.append(entry);
     const [, , args] = evalSpy.mock.calls[0];
     const parsed = JSON.parse(args[0]);
-    expect(parsed.receiptId).toBe('r-json');
+    expect(parsed.receiptId).toBe(canonicalReceiptId('r-json'));
     expect(parsed.economicsStatus).toBe('known');
   });
 
@@ -151,7 +164,7 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
       new RedisSponsoredLogsStore(conflict.client).append(
         makeKnownEntry({ receiptId: 'r-conflict' }),
       ),
-    ).rejects.toThrow(/conflicting result for receiptId r-conflict/);
+    ).rejects.toThrow(/conflicting result for receiptId/);
   });
 
   it('rejects an unexpected append script result', async () => {
@@ -183,6 +196,17 @@ describe('RedisSponsoredLogsStore — append script wiring', () => {
       hostNetMist: 'abc',
     };
     await expect(store.append(bad)).rejects.toThrow();
+    expect(evalSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an internally inconsistent economics row before Redis mutation', async () => {
+    const { client, evalSpy } = makeMockRedis();
+    const store = new RedisSponsoredLogsStore(client);
+    const bad = {
+      ...makeKnownEntry({ receiptId: 'r-bad-equation' }),
+      hostNetMist: '4999',
+    };
+    await expect(store.append(bad)).rejects.toThrow(/hostNetMist must equal/);
     expect(evalSpy).not.toHaveBeenCalled();
   });
 });
@@ -239,18 +263,18 @@ describe('RedisSponsoredLogsStore — getSummary script wiring', () => {
 });
 
 describe('RedisSponsoredLogsStore — getRecent script wiring', () => {
-  it('parses JSON entries newest-first up to limit', async () => {
+  it('preserves the accepted append order up to limit', async () => {
     const { client, evalSpy } = makeMockRedis();
     evalSpy.mockResolvedValueOnce([
-      JSON.stringify(makeKnownEntry({ receiptId: 'r1', createdAt: '2026-04-26T15:00:00Z' })),
-      JSON.stringify(makeKnownEntry({ receiptId: 'r3', createdAt: '2026-04-26T15:00:02Z' })),
-      JSON.stringify(makeKnownEntry({ receiptId: 'r2', createdAt: '2026-04-26T15:00:01Z' })),
+      JSON.stringify(makeKnownEntry({ receiptId: 'r1', createdAt: '2026-04-26T15:00:00.000Z' })),
+      JSON.stringify(makeKnownEntry({ receiptId: 'r3', createdAt: '2026-04-26T15:00:02.000Z' })),
+      JSON.stringify(makeKnownEntry({ receiptId: 'r2', createdAt: '2026-04-26T15:00:01.000Z' })),
     ]);
     const store = new RedisSponsoredLogsStore(client);
     const entries = await store.getRecent('all', 2);
     expect(entries).toHaveLength(2);
-    expect(entries[0].receiptId).toBe('r3');
-    expect(entries[1].receiptId).toBe('r2');
+    expect(entries[0].receiptId).toBe(canonicalReceiptId('r1'));
+    expect(entries[1].receiptId).toBe(canonicalReceiptId('r3'));
   });
 
   it('filters by mode (skips non-matching JSON rows)', async () => {
@@ -260,23 +284,30 @@ describe('RedisSponsoredLogsStore — getRecent script wiring', () => {
         makeKnownEntry({
           receiptId: 'p-old',
           mode: 'promotion',
-          createdAt: '2026-04-26T15:00:01Z',
+          createdAt: '2026-04-26T15:00:01.000Z',
         }),
       ),
       JSON.stringify(
-        makeKnownEntry({ receiptId: 'g1', mode: 'generic', createdAt: '2026-04-26T15:00:03Z' }),
+        makeKnownEntry({
+          receiptId: 'g1',
+          mode: 'generic',
+          createdAt: '2026-04-26T15:00:03.000Z',
+        }),
       ),
       JSON.stringify(
         makeKnownEntry({
           receiptId: 'p-new',
           mode: 'promotion',
-          createdAt: '2026-04-26T15:00:02Z',
+          createdAt: '2026-04-26T15:00:02.000Z',
         }),
       ),
     ]);
     const store = new RedisSponsoredLogsStore(client);
     const entries = await store.getRecent('promotion', 5);
-    expect(entries.map((e) => e.receiptId)).toEqual(['p-new', 'p-old']);
+    expect(entries.map((e) => e.receiptId)).toEqual([
+      canonicalReceiptId('p-old'),
+      canonicalReceiptId('p-new'),
+    ]);
   });
 
   it('mode-filter requests the full retained list (no limit*k truncation)', async () => {
@@ -301,29 +332,27 @@ describe('RedisSponsoredLogsStore — getRecent script wiring', () => {
     expect(args[0]).toBe('10');
   });
 
-  it('skips malformed JSON rather than throwing', async () => {
+  it('rejects malformed stored JSON instead of hiding it', async () => {
     const { client, evalSpy } = makeMockRedis();
     evalSpy.mockResolvedValueOnce([
       '{not valid json',
       JSON.stringify(makeKnownEntry({ receiptId: 'r1' })),
     ]);
     const store = new RedisSponsoredLogsStore(client);
-    const entries = await store.getRecent('all', 5);
-    expect(entries.map((e) => e.receiptId)).toEqual(['r1']);
+    await expect(store.getRecent('all', 5)).rejects.toThrow(/not valid JSON/);
   });
 
-  it('skips entries failing shape check', async () => {
+  it('rejects a stored entry that does not have the current shape', async () => {
     const { client, evalSpy } = makeMockRedis();
     evalSpy.mockResolvedValueOnce([
       JSON.stringify({ ...makeKnownEntry({ receiptId: 'extra-field' }), unexpected: true }),
       JSON.stringify(makeKnownEntry({ receiptId: 'ok' })),
     ]);
     const store = new RedisSponsoredLogsStore(client);
-    const entries = await store.getRecent('all', 5);
-    expect(entries.map((e) => e.receiptId)).toEqual(['ok']);
+    await expect(store.getRecent('all', 5)).rejects.toThrow(/exact current shape/);
   });
 
-  it('skips current-shape rows with wrong fields or non-canonical decimal strings', async () => {
+  it('rejects the first current-shape row with invalid field semantics', async () => {
     const { client, evalSpy } = makeMockRedis();
     const valid = makeKnownEntry({ receiptId: 'ok' });
     const { sponsorAddress: _missing, ...missingField } = valid;
@@ -338,8 +367,7 @@ describe('RedisSponsoredLogsStore — getRecent script wiring', () => {
       JSON.stringify(valid),
     ]);
     const store = new RedisSponsoredLogsStore(client);
-    const entries = await store.getRecent('all', 10);
-    expect(entries.map((entry) => entry.receiptId)).toEqual(['ok']);
+    await expect(store.getRecent('all', 10)).rejects.toThrow();
   });
 
   it('limit <= 0 returns empty without calling eval', async () => {

@@ -1,5 +1,5 @@
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
 import {
   buildSuiTransaction,
@@ -36,6 +36,7 @@ export async function signAndExecuteLocalTransaction({
   const { signature } = await signer.signTransaction({ transaction: txBytesBase64 });
   const result = await executeSuiTransaction(endpoints, {
     transaction: txBytes,
+    expectedDigest: TransactionDataBuilder.getDigestFromBytes(txBytes),
     signatures: [signature],
   });
   if (result.outcome === 'failure') {

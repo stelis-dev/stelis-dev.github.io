@@ -1,5 +1,10 @@
-import type { SuiNetwork, SuiRpcFleetStatus } from '@stelis/contracts';
-import { SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
+import {
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
+  SUI_CHAIN_IDENTIFIERS,
+  type SuiNetwork,
+  type SuiRpcFleetStatus,
+} from '@stelis/contracts';
 import { redactEndpointUrl } from '@stelis/core-api/observability';
 import {
   SUI_OPERATION_ATTEMPT_TIMEOUT_MS,
@@ -15,6 +20,12 @@ import {
   createSuiRpcEndpointClient,
   type SuiRpcEndpointConfig,
 } from './endpointClient.js';
+
+if (!isNodeTimerDelayMs(SUI_OPERATION_ATTEMPT_TIMEOUT_MS)) {
+  throw new Error(
+    `SUI_OPERATION_ATTEMPT_TIMEOUT_MS must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}`,
+  );
+}
 
 export type SuiRpcEndpointRejectionKind =
   | 'chain_identifier_failed'

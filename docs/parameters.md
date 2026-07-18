@@ -39,14 +39,14 @@ These values are written by `packages/contracts/move/sources/config.move` at pac
 | Name | Value | Source |
 | --- | ---: | --- |
 | `PREPARE_TTL_MS` | `60000` | `packages/core-api/src/preparePolicy.ts` |
-| `MAX_CONCURRENT_PER_IP` | `2` | `packages/core-api/src/store/memoryPrepareStore.ts` |
-| `MAX_OUTSTANDING_PER_STUDIO_USER` | `3` | `packages/core-api/src/store/memoryPrepareStore.ts` |
-| `MAX_OUTSTANDING_PER_SENDER` | `3` | `packages/core-api/src/store/memoryPrepareStore.ts` |
+| `MAX_CONCURRENT_PREPARED_PER_IP` | `2` | `packages/core-api/src/store/sponsoredExecutionStore.ts` |
+| `MAX_OUTSTANDING_PREPARED_PER_STUDIO_USER` | `3` | `packages/core-api/src/store/sponsoredExecutionStore.ts` |
+| `MAX_OUTSTANDING_PREPARED_PER_SENDER` | `3` | `packages/core-api/src/store/sponsoredExecutionStore.ts` |
 | `PREPARE_AUTHORIZATION_TTL_MS` | `300000` | `packages/core-api/src/prepare/prepareAuthorization.ts` |
 | `PREPARE_AUTHORIZATION_CLOCK_SKEW_MS` | `30000` | `packages/core-api/src/prepare/prepareAuthorization.ts` |
 | `MAX_PREPARE_REQUEST_NONCE_BYTES` | `128` | `packages/core-api/src/prepare/prepareAuthorization.ts` |
 | Sponsor balance warning default | `5000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
-| Sponsor refill target and disabled-worker withdrawal-runway default | `10000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
+| Sponsor refill target and refill-disabled withdrawal-runway default | `10000000000` | `packages/app-api/src/sponsor-operations/defaults.ts` |
 
 <a id="ttl-constants"></a>
 
@@ -115,6 +115,7 @@ Sponsor operation timeouts are also required:
 - `SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS`
 - `SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS`
 - `SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS`
+- `SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS`
 
 Optional Host configuration:
 

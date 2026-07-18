@@ -5,8 +5,7 @@
  *   1. client.prepare() is called with correct params
  *   2. RelayPrepareResponse fields are passed through correctly
  *   3. onGasEstimate callback receives totalCost (MIST) with 'SUI' symbol
- *   4. queryUserCredit is called and vaultId is returned
- *   5. Optional params (slippageBps, gasMarginBps) are forwarded
+ *   4. Optional params (slippageBps, gasMarginBps) are forwarded
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
@@ -15,18 +14,18 @@ import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
-import { makeCreditResult } from './helpers/currentFixtures.js';
 
-const { mockExtractSettleFields, mockValidateSettleFields, mockValidateGenericUserTx } = vi.hoisted(
-  () => ({
-    mockExtractSettleFields: vi.fn(),
-    mockValidateSettleFields: vi.fn(),
-    mockValidateGenericUserTx: vi.fn(),
-  }),
-);
-
-// ── Module-level mock: queryUserCredit ─────────────────────────────────────────
-let _creditResult = makeCreditResult();
+const {
+  mockExtractSettleFields,
+  mockValidateSettleFields,
+  mockValidateGenericUserTx,
+  mockQueryUserCredit,
+} = vi.hoisted(() => ({
+  mockExtractSettleFields: vi.fn(),
+  mockValidateSettleFields: vi.fn(),
+  mockValidateGenericUserTx: vi.fn(),
+  mockQueryUserCredit: vi.fn(),
+}));
 
 // ── Module-level mock: integrity (S-16) ────────────────────────────────────────
 // prepareSponsored tests verify prepare delegation, not PTB integrity.
@@ -44,7 +43,7 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
-    queryUserCredit: vi.fn(async () => ({ ..._creditResult })),
+    queryUserCredit: mockQueryUserCredit,
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
     validateGenericUserTransactionKind: mockValidateGenericUserTx,
@@ -164,8 +163,8 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     mockValidateSettleFields.mockReturnValue({ ok: true });
     mockValidateGenericUserTx.mockReset();
     mockValidateGenericUserTx.mockReturnValue({ ok: true });
+    mockQueryUserCredit.mockReset();
     prepareAuthorizationSigner.mockClear();
-    _creditResult = makeCreditResult();
     mockGetConfig.mockReset();
   });
 
@@ -244,6 +243,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
 
     expect(result.txBytes).toBe('base64MockTxBytes');
     expect(result.policyHash).toBe(MOCK_PREPARE_RESPONSE.policyHash);
+    expect(mockQueryUserCredit).not.toHaveBeenCalled();
   });
 
   // ── 3: Returns receiptId from prepare response ──────────────────────
@@ -329,39 +329,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(args['gasMarginBps']).toBe(500);
   });
 
-  // ── 9: Returns vaultId from queryUserCredit ─────────────────────────
-
-  it('returns vaultId from queryUserCredit', async () => {
-    _creditResult = makeCreditResult({ vaultObjectId: '0xVaultObj', credit: '1000' });
-    const sdk = await createSDK();
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient(),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    expect(result.vaultId).toBe('0xVaultObj');
-  });
-
-  // ── 10: Returns null vaultId when no vault ──────────────────────────
-
-  it('returns null vaultId for new user', async () => {
-    _creditResult = makeCreditResult({ needsCreate: true });
-    const sdk = await createSDK();
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient(),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    expect(result.vaultId).toBeNull();
-  });
-
-  // ── 11: Throws on unknown settlementToken type ─────────────────────────────
+  // ── 9: Throws on unknown settlementToken type ──────────────────────────────
 
   it('throws when settlementToken type is not in supported settlement swap paths', async () => {
     const sdk = await createSDK();
@@ -376,7 +344,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     ).rejects.toThrow();
   });
 
-  // ── 12: Forwards orderId to client.prepare ──────────────────────────
+  // ── 10: Forwards orderId to client.prepare ─────────────────────────
 
   it('forwards orderId to client.prepare()', async () => {
     const sdk = await createSDK();
@@ -394,7 +362,7 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(args['orderId']).toBe('sponsored-order-42');
   });
 
-  // ── 13: Echoes orderId from prepare response ────────────────────────
+  // ── 11: Echoes orderId from prepare response ───────────────────────
 
   it('echoes orderId from prepare response', async () => {
     mockPrepare.mockResolvedValueOnce({
@@ -412,40 +380,5 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     });
 
     expect(result.orderId).toBe('echoed-order-42');
-  });
-});
-
-describe('StelisSDK.prepareSponsored — post-prepare information', () => {
-  beforeEach(() => {
-    mockPrepare.mockReset();
-    mockPrepare.mockResolvedValue(MOCK_PREPARE_RESPONSE);
-    mockExtractSettleFields.mockReset();
-    mockExtractSettleFields.mockReturnValue({});
-    mockValidateSettleFields.mockReset();
-    mockValidateSettleFields.mockReturnValue({ ok: true });
-    mockValidateGenericUserTx.mockReset();
-    mockValidateGenericUserTx.mockReturnValue({ ok: true });
-    _creditResult = makeCreditResult();
-    mockGetConfig.mockReset();
-  });
-
-  it('returns vaultId=null when post-prepare queryUserCredit fails', async () => {
-    const { queryUserCredit: mockQueryCredit } = await import('@stelis/core-relay/browser');
-    const sdk = await createSDK();
-
-    (mockQueryCredit as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error('unexpected local failure'),
-    );
-
-    const result = await sdk.prepareSponsored(new Transaction(), {
-      client: makeMockSuiClient(),
-      addr: ADDR,
-      settlementToken: { type: DEEP_TYPE },
-      prepareAuthorizationSigner,
-    });
-
-    // /prepare succeeded — result should be returned with vaultId=null
-    expect(result.txBytes).toBe('base64MockTxBytes');
-    expect(result.vaultId).toBeNull();
   });
 });

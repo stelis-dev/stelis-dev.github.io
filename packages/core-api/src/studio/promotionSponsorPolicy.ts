@@ -7,13 +7,6 @@ import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import { recordPromotionAbuseEvent, PROMOTION_ABUSE_CODES } from './promotionAbusePolicy.js';
-import { logStructuredEvent } from '../structuredEventLog.js';
-import {
-  LEDGER_RELEASE_FAILED_IN_HANDLER,
-  LEDGER_RELEASE_THREW_IN_HANDLER,
-  LEDGER_CONSUME_FAILED_IN_HANDLER,
-  LEDGER_CONSUME_THREW_IN_HANDLER,
-} from '../observability/events.js';
 import {
   validatePromotionCommandCount,
   validatePromotionPtbStructure,
@@ -47,133 +40,14 @@ interface PromotionPolicyInput {
   verifiedIdentity: VerifiedDeveloperIdentity;
 }
 
-export async function releaseLedgerReservationWithLog(
-  ledger: PromotionExecutionLedger,
-  receiptId: string,
-  triggerReason: string,
-): Promise<void> {
-  try {
-    const result = await ledger.release(receiptId);
-    if (!result.ok) {
-      logStructuredEvent(
-        LEDGER_RELEASE_FAILED_IN_HANDLER,
-        {
-          receiptId,
-          triggerReason,
-          releaseFailureReason: result.reason,
-        },
-        'error',
-      );
-    }
-  } catch (err) {
-    logStructuredEvent(
-      LEDGER_RELEASE_THREW_IN_HANDLER,
-      {
-        receiptId,
-        triggerReason,
-        error: err instanceof Error ? err.message : String(err),
-      },
-      'error',
-    );
-  }
-}
-
 /**
- * Result envelope for the failure-path consume helper.
+ * Validate Promotion-specific policy before durable execution begins.
  *
- * Mirrors the underlying `ConsumeResult` discriminated union but adds an
- * explicit `'threw'` variant so call sites can distinguish an adapter
- * throw from a `ConsumeResult.ok === false` outcome without re-parsing
- * caught errors.
- */
-export type ConsumeLedgerOutcome =
-  | { ok: true }
-  | { ok: false; kind: 'failed'; reason: string }
-  | { ok: false; kind: 'threw'; error: string };
-
-/**
- * Post-signature ledger consume helper.
- *
- * Used by post-signature/post-submit promotion ledger updates
- * (post-signature uncertainty, on-chain revert, and success-side entitlement
- * consumption). Behavior contract:
- *
- *   - On `ConsumeResult.ok === true` returns `{ ok: true }`.
- *   - On `ConsumeResult.ok === false` emits
- *     `LEDGER_CONSUME_FAILED_IN_HANDLER` with attempted amount + branch
- *     context and returns `{ ok: false, kind: 'failed', reason }`.
- *   - On adapter throw emits `LEDGER_CONSUME_THREW_IN_HANDLER` with the
- *     same context and returns `{ ok: false, kind: 'threw', error }`.
- *
- * The helper does NOT throw and does NOT fall back to `release()`. A
- * consume failure leaves the reservation eligible for the
- * ExecutionLedger reservation reaper release path, which is documented
- * operator follow-up. Callers derive economic certainty from on-chain gas
- * evidence, never from whether this entitlement update succeeded.
- *
- * Branch-specific failure reasons stay at the call site (they go into the
- * operator execution logs); this helper only logs ledger-call outcome.
- */
-export async function consumeLedgerReservationWithLog(
-  ledger: PromotionExecutionLedger,
-  receiptId: string,
-  amountMist: bigint,
-  triggerReason: string,
-  context: {
-    promotionId: string;
-    userId: string;
-    senderAddress: string;
-    txDigest: string | null;
-  },
-): Promise<ConsumeLedgerOutcome> {
-  try {
-    const result = await ledger.consume(receiptId, amountMist);
-    if (!result.ok) {
-      logStructuredEvent(
-        LEDGER_CONSUME_FAILED_IN_HANDLER,
-        {
-          receiptId,
-          triggerReason,
-          attemptedAmountMist: amountMist.toString(),
-          consumeFailureReason: result.reason,
-          promotionId: context.promotionId,
-          userId: context.userId,
-          senderAddress: context.senderAddress,
-          txDigest: context.txDigest,
-        },
-        'error',
-      );
-      return { ok: false, kind: 'failed', reason: result.reason };
-    }
-    return { ok: true };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    logStructuredEvent(
-      LEDGER_CONSUME_THREW_IN_HANDLER,
-      {
-        receiptId,
-        triggerReason,
-        attemptedAmountMist: amountMist.toString(),
-        error,
-        promotionId: context.promotionId,
-        userId: context.userId,
-        senderAddress: context.senderAddress,
-        txDigest: context.txDigest,
-      },
-      'error',
-    );
-    return { ok: false, kind: 'threw', error };
-  }
-}
-
-/**
- * Validate promotion-specific policy BEFORE consume.
- *
- * Caller (Studio SponsoredExecutionPolicy) owns route-level discrimination: mode guard and
+ * Caller (Promotion SponsoredExecutionPolicy) owns route-level discrimination: mode guard and
  * promotionId match happen before this function is called. This function receives
  * an already-narrowed PromotionPreparedTxEntry.
  */
-export async function validatePromotionPreconsumePolicy(
+export async function validatePromotionPreparedPolicy(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
   peeked: PromotionPreparedTxEntry,
@@ -194,11 +68,12 @@ export async function validatePromotionPreconsumePolicy(
 
   // Parse the submitted `txBytes` into a Transaction. `decodeTxBytes` at the
   // route boundary already validated base64; BCS deserialization can still
-  // fail on malformed TransactionData. The later atomic `consume()` binds
-  // these bytes to the prepared-entry hash. Classify this parse failure as
+  // fail on malformed TransactionData. The sponsor runner separately binds
+  // these bytes to the prepared-record hash before durable execution begins.
+  // Classify this parse failure as
   // `BAD_REQUEST` / 400 so route-level 500 `SPONSOR_FAILED` cannot mask a
-  // client-visible input error. The rejection happens before `consume()`, so
-  // the prepared entry remains unconsumed.
+  // client-visible input error. The rejection happens before the durable
+  // prepared-to-executing transition, so the prepared receipt remains current.
   let builtTx: Transaction;
   try {
     builtTx = Transaction.from(txBytes);
@@ -211,7 +86,7 @@ export async function validatePromotionPreconsumePolicy(
   const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
 
   // S1 — PTB structure. Sponsor path does NOT repeat the sponsor-withdrawal
-  // check; the later consume hash gate must prove these bytes are the exact
+  // check; the runner's hash gate must prove these bytes are the exact
   // prepare-time transaction before signing can occur.
   const ptbFailure = validatePromotionPtbStructure(normalizedCommands);
   if (ptbFailure) {

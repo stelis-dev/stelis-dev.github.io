@@ -150,7 +150,7 @@ Minimal JSON body:
 
 The route validates the prepared record, checks the transaction again, adds the sponsor signature, and submits.
 
-The submitted `txBytes` SHA-256 must match the prepared hash bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, consumes the prepared record once, and then re-parses settlement fields from the stored-hash-verified transaction bytes.
+The submitted `txBytes` SHA-256 must match the prepared hash bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, re-parses settlement fields from the hash-matched transaction bytes, and atomically changes the receipt from `prepared` to `executing` immediately before the sponsor signature.
 The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call and at most `MAX_FINAL_COMMANDS = 16` commands. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
 The `executionCostClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
@@ -201,7 +201,7 @@ Mounted routes:
 - `POST /studio/promotions/:id/prepare`
 - `POST /studio/promotions/:id/sponsor`
 
-Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before consume.
+Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before the atomic `prepared` to `executing` transition.
 
 Promotion IDs and list cursors are canonical lowercase UUID-v4 strings. List
 queries default to 50 records and return at most 100. Results are ordered by

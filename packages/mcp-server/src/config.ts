@@ -1,3 +1,5 @@
+import { isNodeTimerDelayMs, NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
+
 export interface StelisMcpServerConfig {
   defaultRelayApiUrl?: string;
   defaultTimeoutMs: number;
@@ -24,8 +26,10 @@ function parseTimeoutMs(raw: string | undefined): number {
   const value = normalizeOptionalEnv(raw);
   if (!value) return DEFAULT_TIMEOUT_MS;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error('STELIS_REQUEST_TIMEOUT_MS must be a positive integer.');
+  if (!isNodeTimerDelayMs(parsed)) {
+    throw new Error(
+      `STELIS_REQUEST_TIMEOUT_MS must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}.`,
+    );
   }
   return parsed;
 }

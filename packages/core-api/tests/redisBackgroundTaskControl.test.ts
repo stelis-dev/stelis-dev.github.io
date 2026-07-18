@@ -1,4 +1,5 @@
 import { setImmediate as scheduleImmediate } from 'node:timers';
+import { NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import type { RedisClientLike } from '../src/store/redisClient.js';
 import {
@@ -56,6 +57,12 @@ describe('Redis background task control flow', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('rejects a Promotion sweep interval that Node would truncate', () => {
+    expect(() => createLedger(NODE_TIMER_MAX_DELAY_MS + 1)).toThrow(
+      String(NODE_TIMER_MAX_DELAY_MS),
+    );
   });
 
   it('yields before draining the next full Promotion reservation batch', async () => {

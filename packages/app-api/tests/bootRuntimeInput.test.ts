@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { DEEPBOOK_IDS, STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { DEEPBOOK_IDS, NODE_TIMER_MAX_DELAY_MS, STELIS_CONTRACT_IDS } from '@stelis/contracts';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { HostChainState } from '@stelis/core-api';
 import { createSuiEndpointSnapshot } from '@stelis/core-relay';
@@ -108,6 +108,7 @@ function setRequiredEnvironment(): void {
   vi.stubEnv('SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS', '5000');
   vi.stubEnv('SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS', '30000');
   vi.stubEnv('SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS', '15000');
+  vi.stubEnv('SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS', '15000');
 }
 
 function setStudioEnvironment(allowedTargets: string): void {
@@ -199,7 +200,9 @@ describe('runBootValidation runtime input', () => {
     expect(result.runtimeInput.corsAllowedOrigins).toEqual(['https://admin.before.example']);
     expect(result.runtimeInput.context.quotedHostFeeMist).toBe(7n);
     expect(result.runtimeInput.context.prepareInflightCapacity).toBe(5);
-    expect(result.runtimeInput.context.sponsorOperations.withdrawalReceiptTtlMs).toBe(3_600_000);
+    expect(result.runtimeInput.context.sponsorOperations.settings.withdrawalReceiptTtlMs).toBe(
+      3_600_000,
+    );
     expect(result.runtimeInput.context.studio).toBeNull();
     expect(result.runtimeInput.context.sui).toBe(QUALIFICATION_SNAPSHOT);
     expect(result.runtimeInput.context.initialHostChainState).toBe(INITIAL_HOST_CHAIN_STATE);
@@ -229,6 +232,23 @@ describe('runBootValidation runtime input', () => {
 
     await expect(runBootValidation()).rejects.toThrow(
       'SPONSOR_BALANCE_REFILL_TARGET_MIST is required',
+    );
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it('rejects SponsorOperations timer values that Node would truncate', async () => {
+    vi.stubEnv('SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS', String(NODE_TIMER_MAX_DELAY_MS + 1));
+
+    await expect(runBootValidation()).rejects.toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it('rejects inconsistent SponsorOperations settings before external services', async () => {
+    vi.stubEnv('SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS', '15001');
+    vi.stubEnv('SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS', '15000');
+
+    await expect(runBootValidation()).rejects.toThrow(
+      'balance timeouts must not exceed reconciliationIntervalMs',
     );
     expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });

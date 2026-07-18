@@ -80,7 +80,7 @@ import {
   writeAdminAuditLog,
 } from '../adminAuditLog.js';
 import { redactSensitiveText, safeErrorSummary } from '@stelis/core-api/observability';
-import { deriveSponsorAvailabilitySummary } from '../sponsor-operations/gate.js';
+import { calculateSponsorAvailability } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
 import type { AppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
@@ -182,9 +182,6 @@ export interface AdminRoutesRuntimeInput {
   readonly network: SuiNetwork;
   readonly adminAddress: string | null;
   readonly adminJwt: AdminJwtConfig | null;
-  readonly refillEnabled: boolean;
-  readonly warnMist: bigint;
-  readonly refillTargetMist: bigint;
 }
 
 export function createAdminRoutes(
@@ -301,11 +298,9 @@ export function createAdminRoutes(
 
   // ── GET /api/sponsor-operations ─────────────────────────────────────────────────
   // Admin view. Sponsor operations fields are read from the shared Redis state
-  // store. An awaited bounded sponsor refill account probe runs before the read so the
-  // returned sponsor refill account balance is "fresh at return time" rather than
-  // last-known-cache.
-  // If that awaited sponsor refill account update cannot be committed, this route fails
-  // closed instead of serialising stale sponsor refill account data as if it were fresh.
+  // store. The route requests one retained, bounded balance observation before
+  // the read. An active account spend owns the source-account observation and
+  // can skip it; current health is always derived from Redis-time freshness.
   // `feeConfig` uses `host.getConfig()` which is already TTL-cached in
   // core-api. Other fields are boot-derived constants.
   app.get('/sponsor-operations', async (c) => {
@@ -313,38 +308,37 @@ export function createAdminRoutes(
       const ctx = await contextPromise;
       const host = ctx.host;
 
-      // Await the bounded sponsor refill account probe here. Admin is not a hot path,
-      // and awaiting keeps the returned sponsor refill account fields honest.
-      await ctx.sponsorOperations.probeSponsorRefillAccount();
+      // Admin is not a hot path, so await the bounded observation before
+      // calculating the current public status.
+      await ctx.sponsorOperations.observeBalances();
 
       const [stateView, slotLeases] = await Promise.all([
         ctx.sponsorOperations.readState(),
         host.sponsorPool.leaseStatus(),
       ]);
-      const aggregates = deriveSponsorAvailabilitySummary(stateView);
+      const availability = calculateSponsorAvailability(stateView, slotLeases);
       const sponsorOperations: SponsorOperationsStatus = {
-        slots: stateView.slots.map((s) => ({
+        slots: availability.slots.map((s) => ({
           address: s.address,
           state: s.state,
-          balanceMist: s.balanceMist,
+          addressBalanceMist: s.addressBalanceMist,
           lastObservedAtMs: s.lastObservedAtMs,
           lastError: s.lastError === null ? null : redactSensitiveText(s.lastError),
         })),
         sponsorRefillAccount: {
           address: ctx.sponsorOperations.sponsorRefillAccountAddress,
-          balanceMist: stateView.sponsorRefillAccount.balanceMist,
-          healthy: stateView.sponsorRefillAccount.healthy ?? false,
-          refillsRemaining: stateView.sponsorRefillAccount.refillsRemaining,
-          lastObservedAtMs: stateView.sponsorRefillAccount.lastObservedAtMs,
+          totalBalanceMist: availability.sponsorRefillAccount.totalBalanceMist,
+          healthy: availability.sponsorRefillAccount.healthy,
+          lastObservedAtMs: availability.sponsorRefillAccount.lastObservedAtMs,
           lastError:
-            stateView.sponsorRefillAccount.lastError === null
+            availability.sponsorRefillAccount.lastError === null
               ? null
-              : redactSensitiveText(stateView.sponsorRefillAccount.lastError),
+              : redactSensitiveText(availability.sponsorRefillAccount.lastError),
         },
-        availableSlots: aggregates.availableSlots,
-        degradedSlots: aggregates.degradedSlots,
+        healthySlots: availability.healthySlots,
+        degradedSlots: availability.degradedSlots,
         slotLeases,
-        gateErrorCode: aggregates.gateErrorCode,
+        gateErrorCode: availability.gateErrorCode,
       };
 
       // On-chain fee config (core-api TTL cache; see getConfig() in
@@ -377,9 +371,12 @@ export function createAdminRoutes(
         primaryAddress: host.sponsorPool.primaryAddress,
         settlementPayoutRecipientAddress: host.settlementPayoutRecipientAddress,
         network: host.network,
-        sponsorBalanceWarnMist: runtime.warnMist.toString(),
-        sponsorBalanceRefillTargetMist: runtime.refillTargetMist.toString(),
-        refillEnabled: runtime.refillEnabled,
+        sponsorBalanceWarnMist: ctx.sponsorOperations.settings.warnMist.toString(),
+        sponsorBalanceRefillTargetMist:
+          ctx.sponsorOperations.settings.refillTargetMist?.toString() ?? null,
+        sponsorRefillAccountRunwayTargetMist:
+          ctx.sponsorOperations.settings.runwayTargetMist.toString(),
+        refillEnabled: ctx.sponsorOperations.settings.refillEnabled,
         quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         feeConfig,
         supportedSettlementSwapPaths,

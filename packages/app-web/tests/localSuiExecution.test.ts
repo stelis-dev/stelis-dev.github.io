@@ -71,7 +71,11 @@ describe('local SUI execution', () => {
 
     expect(executeSuiTransactionMock).toHaveBeenCalledWith(
       expect.objectContaining({ endpointCount: 1, network: 'testnet' }),
-      { transaction: TRANSACTION_BYTES, signatures: ['c2lnbmF0dXJl'] },
+      {
+        transaction: TRANSACTION_BYTES,
+        expectedDigest: TRANSACTION_DIGEST,
+        signatures: ['c2lnbmF0dXJl'],
+      },
     );
     expect(buildSuiTransactionMock).toHaveBeenCalledWith(
       expect.objectContaining({ endpointCount: 1, network: 'testnet' }),

@@ -12,7 +12,7 @@ import {
   buildStudioPreparedDraftFields,
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
-  createStudioSponsorConsumeAdapter,
+  createStudioSponsorReceiptPolicy,
   projectStudioSponsorResult,
   type StudioExecutionPolicyDependencies,
   type StudioExecutionPolicyOptions,
@@ -23,8 +23,8 @@ import {
 } from '../src/session/sponsoredExecution/studioExecutionPolicy.js';
 import type { GasBoundBuildInput } from '../src/session/sponsoredExecution/reservationHandles.js';
 import type {
-  PostConsumeSponsorContext,
-  PreConsumeSponsorContext,
+  SponsorSubmissionContext,
+  SponsorValidatedContext,
 } from '../src/session/sponsoredExecution/executionPolicy.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
 import {
@@ -36,6 +36,7 @@ import type { PreparedTxEntry, PromotionPreparedTxEntry } from '../src/store/pre
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
 import type { Entitlement, Promotion } from '../src/studio/domain.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
+import { SponsorLeaseExpiredError } from '../src/store/sponsorPoolErrors.js';
 import type { OnchainConfig, SuiExecutionError } from '@stelis/core-relay';
 import type { AddressBalanceGasTransaction } from '@stelis/core-relay/server';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
@@ -151,7 +152,6 @@ function makePromotionEntry(
     sponsorAddress: SPONSOR,
     executionPathKey: `promotion:${PROMOTION_ID}`,
     orderId: null,
-    nonce: 0n,
     promotionId: PROMOTION_ID,
     userId: USER_ID,
     reservedGasMist: RESERVED_GAS,
@@ -234,9 +234,7 @@ function makeContext(overrides: Partial<StudioPolicyContext> = {}): StudioPolicy
       checkin: vi.fn(),
       sign: vi.fn(),
     } as unknown as SponsorPoolAdapter,
-    prepareStore: {
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn(),
+    sponsoredExecutionStore: {
       checkUserQuota: vi.fn(async () => 'ok' as const),
     },
     abuseBlocker: {} as StudioPolicyContext['abuseBlocker'],
@@ -294,18 +292,20 @@ function makePrepareOptions(input: {
   };
 }
 
-function makePreCtx(): PreConsumeSponsorContext {
+function makeSubmissionCtx(): SponsorSubmissionContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
   };
 }
 
-function makePostCtx(): PostConsumeSponsorContext {
+function makeValidatedCtx(
+  executionStage: SponsorValidatedContext['executionStage'] = 'before_sponsor_signature',
+): SponsorValidatedContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
-    executionStage: 'on_chain',
+    executionStage,
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
@@ -326,7 +326,6 @@ function seedSponsorState(
 ): void {
   state.sponsor = {
     txSender: SENDER,
-    peeked: makePromotionEntry(),
     peekedPromotion: makePromotionEntry(),
     builtTxForValidation: new Transaction(),
     prepared: makePromotionEntry(),
@@ -386,7 +385,7 @@ describe('createStudioExecutionPolicy', () => {
       false,
     );
     expect(
-      Object.prototype.hasOwnProperty.call(mainBarrel, 'createStudioSponsorConsumeAdapter'),
+      Object.prototype.hasOwnProperty.call(mainBarrel, 'createStudioSponsorReceiptPolicy'),
     ).toBe(false);
   });
 });
@@ -396,9 +395,7 @@ describe('studio prepare hooks', () => {
     const txKindBytes = await buildTxKindBytes();
     const checkUserQuota = vi.fn(async () => 'ok' as const);
     const ctx = makeContext({
-      prepareStore: {
-        peek: vi.fn(),
-        evictPreparedEntry: vi.fn(),
+      sponsoredExecutionStore: {
         checkUserQuota,
       },
     });
@@ -536,55 +533,31 @@ describe('studio prepare hooks', () => {
   });
 });
 
-describe('studio sponsor preconsume', () => {
-  test('DecodeSponsorSubmission rejects generic-mode peek non-destructively', async () => {
-    const release = vi.fn();
-    const ctx = makeContext({
-      prepareStore: {
-        peek: vi.fn(async () => makeGenericEntry()),
-        evictPreparedEntry: vi.fn(),
-        checkUserQuota: vi.fn(async () => 'ok' as const),
-      },
-      executionLedger: {
-        ...makeContext().executionLedger,
-        release,
-      } as unknown as PromotionExecutionLedger,
-    });
-    const { policy } = createStudioExecutionPolicy(makeSponsorOptions({ ctx }));
-
-    await expect(policy.hooks.DecodeSponsorSubmission(makePreCtx())).rejects.toMatchObject({
-      code: 'MODE_MISMATCH',
-    });
-    expect(release).not.toHaveBeenCalled();
-    expect(ctx.prepareStore.evictPreparedEntry).not.toHaveBeenCalled();
-  });
-
+describe('studio sponsor validation', () => {
   test('UserSignatureValidation records studio-user abuse on canonical sender mismatch', async () => {
     const recordPromotionAbuseEvent = vi.fn();
     const txBytes = await buildTxBytes(OTHER_SENDER);
-    const ctx = makeContext({
-      prepareStore: {
-        peek: vi.fn(async () => makePromotionEntry()),
-        evictPreparedEntry: vi.fn(),
-        checkUserQuota: vi.fn(async () => 'ok' as const),
+    const options = makeSponsorOptions({
+      txBytes,
+      deps: {
+        validatePromotionPreparedPolicy: vi.fn(async () => ({
+          builtTx: Transaction.from(txBytes),
+        })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreparedPolicy'],
+        recordPromotionAbuseEvent:
+          recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
       },
     });
-    const { policy } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        ctx,
-        txBytes,
-        deps: {
-          validatePromotionPreconsumePolicy: vi.fn(async () => ({
-            builtTx: Transaction.from(txBytes),
-          })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreconsumePolicy'],
-          recordPromotionAbuseEvent:
-            recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
-        },
-      }),
-    );
+    const { policy, state } = createStudioExecutionPolicy(options);
+    await createStudioSponsorReceiptPolicy({
+      context: options.context,
+      params: options.sponsor!.params,
+      state,
+      errors: sponsorErrors,
+      deps: options.deps,
+    }).validatePreparedEntry(makePromotionEntry());
 
-    await policy.hooks.DecodeSponsorSubmission(makePreCtx());
-    await expect(policy.hooks.UserSignatureValidation(makePreCtx())).rejects.toMatchObject({
+    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
       code: 'SENDER_SIGNATURE_INVALID',
     });
     expect(recordPromotionAbuseEvent).toHaveBeenCalledWith(
@@ -599,31 +572,30 @@ describe('studio sponsor preconsume', () => {
   test('UserSignatureValidation records studio-user abuse on signature failure', async () => {
     const recordPromotionAbuseEvent = vi.fn();
     const txBytes = await buildTxBytes(SENDER);
-    const { policy } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        txBytes,
-        ctx: makeContext({
-          prepareStore: {
-            peek: vi.fn(async () => makePromotionEntry()),
-            evictPreparedEntry: vi.fn(),
-            checkUserQuota: vi.fn(async () => 'ok' as const),
-          },
-        }),
-        deps: {
-          validatePromotionPreconsumePolicy: vi.fn(async () => ({
-            builtTx: Transaction.from(txBytes),
-          })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreconsumePolicy'],
-          verifySenderSignature: vi.fn(async () => {
-            throw new SenderSignatureError('bad signature');
-          }) as unknown as StudioExecutionPolicyDependencies['verifySenderSignature'],
-          recordPromotionAbuseEvent:
-            recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
-        },
-      }),
-    );
+    const options = makeSponsorOptions({
+      txBytes,
+      deps: {
+        validatePromotionPreparedPolicy: vi.fn(async () => ({
+          builtTx: Transaction.from(txBytes),
+        })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreparedPolicy'],
+        verifySenderSignature: vi.fn(async () => {
+          throw new SenderSignatureError('bad signature');
+        }) as unknown as StudioExecutionPolicyDependencies['verifySenderSignature'],
+        recordPromotionAbuseEvent:
+          recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
+      },
+    });
+    const { policy, state } = createStudioExecutionPolicy(options);
+    await createStudioSponsorReceiptPolicy({
+      context: options.context,
+      params: options.sponsor!.params,
+      state,
+      errors: sponsorErrors,
+      deps: options.deps,
+    }).validatePreparedEntry(makePromotionEntry());
 
-    await policy.hooks.DecodeSponsorSubmission(makePreCtx());
-    await expect(policy.hooks.UserSignatureValidation(makePreCtx())).rejects.toMatchObject({
+    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
       code: 'SENDER_SIGNATURE_INVALID',
     });
     expect(recordPromotionAbuseEvent).toHaveBeenCalledWith(
@@ -636,14 +608,14 @@ describe('studio sponsor preconsume', () => {
   });
 });
 
-describe('createStudioSponsorConsumeAdapter', () => {
-  test('hash mismatch releases ledger and records studio-user tampering', async () => {
-    const releaseLedgerReservationWithLog = vi.fn();
+describe('createStudioSponsorReceiptPolicy', () => {
+  test('hash mismatch records studio-user tampering without mutating the ledger', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const state: StudioExecutionPolicyState = {};
     seedSponsorState(state);
-    const adapter = createStudioSponsorConsumeAdapter({
-      context: makeContext(),
+    const context = makeContext();
+    const adapter = createStudioSponsorReceiptPolicy({
+      context,
       params: {
         promotionId: PROMOTION_ID,
         receiptId: RECEIPT_ID,
@@ -653,8 +625,6 @@ describe('createStudioSponsorConsumeAdapter', () => {
       state,
       errors: sponsorErrors,
       deps: {
-        releaseLedgerReservationWithLog:
-          releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
         recordSponsorFailureForAbuse:
           recordSponsorFailureForAbuse as unknown as StudioExecutionPolicyDependencies['recordSponsorFailureForAbuse'],
       },
@@ -663,11 +633,8 @@ describe('createStudioSponsorConsumeAdapter', () => {
     const err = await adapter.onHashMismatch(RECEIPT_ID);
 
     expect(err).toMatchObject({ code: 'TAMPERING_DETECTED' });
-    expect(releaseLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      'hash_mismatch',
-    );
+    expect(context.executionLedger.consume).not.toHaveBeenCalled();
+    expect(context.executionLedger.release).not.toHaveBeenCalled();
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '203.0.113.10',
@@ -677,11 +644,11 @@ describe('createStudioSponsorConsumeAdapter', () => {
     );
   });
 
-  test('validateConsumedEntry captures promotion entries and checkins non-promotion race results', async () => {
+  test('captures promotion entries and rejects generic entries without lifecycle mutation', async () => {
     const checkin = vi.fn();
     const state: StudioExecutionPolicyState = {};
     seedSponsorState(state, { prepared: undefined });
-    const adapter = createStudioSponsorConsumeAdapter({
+    const adapter = createStudioSponsorReceiptPolicy({
       context: makeContext({
         sponsorPool: {
           checkin,
@@ -699,22 +666,26 @@ describe('createStudioSponsorConsumeAdapter', () => {
     });
 
     const promotion = makePromotionEntry();
-    await adapter.validateConsumedEntry?.(promotion);
+    await adapter.validatePreparedEntry(promotion);
     expect(state.sponsor?.prepared).toBe(promotion);
 
-    await expect(adapter.validateConsumedEntry?.(makeGenericEntry())).rejects.toMatchObject({
-      code: 'SPONSOR_FAILED',
-    });
-    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, TX_HASH);
+    let error: unknown;
+    try {
+      await adapter.validatePreparedEntry(makeGenericEntry());
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ code: 'MODE_MISMATCH' });
+    expect(checkin).not.toHaveBeenCalled();
   });
 });
 
-describe('studio sponsor postconsume hooks', () => {
-  test('PolicyPostconsumeChecks verifies active ledger reservation and returns reconstruction inputs', async () => {
+describe('studio sponsor read-only checks', () => {
+  test('PolicySponsorChecks verifies active ledger reservation and returns reconstruction inputs', async () => {
     const { policy, state } = createStudioExecutionPolicy(makeSponsorOptions());
     seedSponsorState(state);
 
-    const out = await policy.hooks.PolicyPostconsumeChecks(makePostCtx());
+    const out = await policy.hooks.PolicySponsorChecks(makeValidatedCtx());
 
     expect(out?.ledgerReservation).toEqual({
       receiptId: RECEIPT_ID,
@@ -725,32 +696,23 @@ describe('studio sponsor postconsume hooks', () => {
     });
   });
 
-  test('SharedPostconsumeChecks maps gas-budget drift to REPREPARE_REQUIRED and releases ledger', async () => {
-    const releaseLedgerReservationWithLog = vi.fn();
+  test('SharedSponsorChecks maps gas-budget drift to REPREPARE_REQUIRED without lifecycle mutation', async () => {
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
         deps: {
           verifyGasOwner: vi.fn(() => ({ owner: SPONSOR, budget: RESERVED_GAS + 1n })),
-          releaseLedgerReservationWithLog:
-            releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
         },
       }),
     );
     seedSponsorState(state);
 
-    await expect(policy.hooks.SharedPostconsumeChecks(makePostCtx())).rejects.toMatchObject({
+    await expect(policy.hooks.SharedSponsorChecks(makeValidatedCtx())).rejects.toMatchObject({
       code: 'REPREPARE_REQUIRED',
     });
-    expect(releaseLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      'gas_budget_parity_mismatch',
-    );
     expect(state.sponsor?.sponsorResultOutcome).toBe('validation_failure');
   });
 
-  test('Preflight releases ledger and records studio-user abuse', async () => {
-    const releaseLedgerReservationWithLog = vi.fn();
+  test('Preflight classifies and records studio-user abuse without lifecycle mutation', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
@@ -759,8 +721,6 @@ describe('studio sponsor postconsume hooks', () => {
             success: false as const,
             error: MOVE_FAILURE,
           })),
-          releaseLedgerReservationWithLog:
-            releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as StudioExecutionPolicyDependencies['recordSponsorFailureForAbuse'],
         },
@@ -768,14 +728,9 @@ describe('studio sponsor postconsume hooks', () => {
     );
     seedSponsorState(state);
 
-    await expect(policy.hooks.Preflight(makePostCtx())).rejects.toMatchObject({
+    await expect(policy.hooks.Preflight(makeValidatedCtx())).rejects.toMatchObject({
       code: 'PREFLIGHT_FAILED',
     });
-    expect(releaseLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      'preflight_simulation_failed',
-    );
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',
@@ -787,21 +742,10 @@ describe('studio sponsor postconsume hooks', () => {
   });
 });
 
-describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
-  test('ClassifySponsorResult consumes actual gas on success, projects result, and Release invokes callback', async () => {
-    const onSponsorResult = vi.fn();
-    const consume = vi.fn(async () => ({ ok: true, entitlement: makeEntitlement() }));
-    const { policy, state } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        ctx: makeContext({
-          executionLedger: {
-            ...makeContext().executionLedger,
-            consume,
-          } as unknown as PromotionExecutionLedger,
-          onSponsorResult,
-        }),
-      }),
-    );
+describe('studio sponsor result classification and sign port', () => {
+  test('ClassifySponsorResult records success economics and projects the route result without lifecycle mutation', async () => {
+    const context = makeContext();
+    const { policy, state } = createStudioExecutionPolicy(makeSponsorOptions({ ctx: context }));
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
@@ -811,27 +755,16 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       gasUsed: GAS_USED,
     };
 
-    await policy.hooks.ClassifySponsorResult(makePostCtx(), success);
-    await policy.hooks.Release(makePostCtx());
+    await policy.hooks.ClassifySponsorResult(makeValidatedCtx('on_chain'), success);
     const projected = projectStudioSponsorResult(makeSponsorOptions(), state);
 
-    expect(consume).toHaveBeenCalledWith(RECEIPT_ID, 1300n);
+    expect(context.executionLedger.consume).not.toHaveBeenCalled();
+    expect(context.executionLedger.release).not.toHaveBeenCalled();
     expect(projected).toEqual({
       digest: TEST_SUI_TRANSACTION_DIGEST,
       effects: { status: 'ok' },
       actualGasMist: '1300',
     });
-    expect(onSponsorResult).toHaveBeenCalledWith(
-      expect.objectContaining({
-        outcome: 'success',
-        executionStage: 'on_chain',
-        route: 'promotion',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        promotionId: PROMOTION_ID,
-        userId: USER_ID,
-        economics: expect.objectContaining({ economicsStatus: 'known' }),
-      }),
-    );
     expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
       economicsStatus: 'known',
       recoveredGasMist: '0',
@@ -841,52 +774,13 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
     });
   });
 
-  test('Release callback failure preserves existing sponsor_handler source', async () => {
-    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    try {
-      const onSponsorResult = vi.fn(async () => {
-        throw new Error('callback exploded');
-      });
-      const { policy, state } = createStudioExecutionPolicy(
-        makeSponsorOptions({
-          onSponsorResult,
-        }),
-      );
-      seedSponsorState(state);
-      const success: Extract<ExecResult, { success: true }> = {
-        success: true,
-        executionStage: 'on_chain',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        effects: { status: 'ok' },
-        gasUsed: GAS_USED,
-      };
-
-      await policy.hooks.ClassifySponsorResult(makePostCtx(), success);
-      await policy.hooks.Release(makePostCtx());
-
-      const callbackFailedLog = consoleWarnSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_RESULT_CALLBACK_FAILED');
-      expect(callbackFailedLog).toMatchObject({
-        source: 'sponsor_handler',
-        route: 'promotion',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        outcome: 'success',
-      });
-    } finally {
-      consoleWarnSpy.mockRestore();
-    }
-  });
-
-  test('ClassifySponsorResult consumes actual gas and records studio-user abuse on on-chain revert', async () => {
-    const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
+  test('ClassifySponsorResult records studio-user abuse and known gas loss on on-chain revert', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
+    const context = makeContext();
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
-        ctx: makeContext(),
+        ctx: context,
         deps: {
-          consumeLedgerReservationWithLog:
-            consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as StudioExecutionPolicyDependencies['recordSponsorFailureForAbuse'],
         },
@@ -902,16 +796,11 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       gasUsed: GAS_USED,
     };
 
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), failed)).rejects.toMatchObject({
-      code: 'ONCHAIN_REVERT',
-    });
-    expect(consumeLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      1300n,
-      'onchain_revert',
-      expect.objectContaining({ txDigest: TEST_SUI_TRANSACTION_DIGEST }),
-    );
+    await expect(
+      policy.hooks.ClassifySponsorResult(makeValidatedCtx('on_chain'), failed),
+    ).rejects.toMatchObject({ code: 'ONCHAIN_REVERT' });
+    expect(context.executionLedger.consume).not.toHaveBeenCalled();
+    expect(context.executionLedger.release).not.toHaveBeenCalled();
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',
@@ -920,16 +809,19 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       expect.objectContaining({ executionPathKey: `promotion:${PROMOTION_ID}` }),
     );
     expect(state.sponsor?.sponsorResultOutcome).toBe('onchain_revert');
+    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
+      economicsStatus: 'known',
+      recoveredGasMist: '0',
+      hostPaidGasMist: '1300',
+      hostNetMist: '-1300',
+    });
   });
 
-  test('ClassifySponsorResult releases ledger on congestion and preserves classified congestion error', async () => {
-    const releaseLedgerReservationWithLog = vi.fn();
+  test('ClassifySponsorResult preserves classified congestion without lifecycle mutation', async () => {
+    const context = makeContext();
     const { policy, state } = createStudioExecutionPolicy(
       makeSponsorOptions({
-        deps: {
-          releaseLedgerReservationWithLog:
-            releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
-        },
+        ctx: context,
       }),
     );
     seedSponsorState(state);
@@ -942,180 +834,65 @@ describe('studio sponsor ClassifySponsorResult, sign port, and Release', () => {
       gasUsed: null,
     };
 
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), failed)).rejects.toMatchObject({
-      code: 'SPONSOR_CONGESTION',
-    });
-    expect(releaseLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      'congestion',
-    );
+    await expect(
+      policy.hooks.ClassifySponsorResult(makeValidatedCtx('after_sponsor_signature'), failed),
+    ).rejects.toMatchObject({ code: 'SPONSOR_CONGESTION' });
+    expect(context.executionLedger.consume).not.toHaveBeenCalled();
+    expect(context.executionLedger.release).not.toHaveBeenCalled();
     expect(state.sponsor?.sponsorResultOutcome).toBe('congestion');
   });
 
-  test('ClassifySponsorResult maps post-success ledger consume failure to CONSUME_FAILED known loss', async () => {
-    const consume = vi.fn(async () => ({ ok: false, reason: 'reservation_not_found' as const }));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const { policy, state } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        ctx: makeContext({
-          executionLedger: {
-            ...makeContext().executionLedger,
-            consume,
-          } as unknown as PromotionExecutionLedger,
-        }),
-      }),
-    );
-    seedSponsorState(state);
-    const success: Extract<ExecResult, { success: true }> = {
-      success: true,
-      executionStage: 'on_chain',
-      digest: TEST_SUI_TRANSACTION_DIGEST,
-      effects: { status: 'ok' },
-      gasUsed: GAS_USED,
-    };
-
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), success)).rejects.toMatchObject({
-      code: 'CONSUME_FAILED',
-    });
-    expect(consume).toHaveBeenCalledWith(RECEIPT_ID, 1300n);
-    expect(state.sponsor?.sponsorResultOutcome).toBe('success');
-    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
-      economicsStatus: 'known',
-      recoveredGasMist: '0',
-      hostPaidGasMist: '1300',
-      hostNetMist: '-1300',
-      failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED: reservation_not_found',
-    });
-    const events = consoleErrorSpy.mock.calls.flatMap((args: unknown[]) => {
-      try {
-        return [JSON.parse(args[0] as string) as Record<string, unknown>];
-      } catch {
-        return [];
-      }
-    });
-    expect(
-      events.filter((entry) => entry.event === 'LEDGER_CONSUME_FAILED_IN_HANDLER'),
-    ).toHaveLength(1);
-    expect(events.some((entry) => entry.event === 'PROMOTION_LEDGER_CONSUME_FAILED')).toBe(false);
-    consoleErrorSpy.mockRestore();
-  });
-
-  test('post-success ledger consume throw keeps known gas loss and maps to CONSUME_FAILED', async () => {
-    const consume = vi.fn(async () => {
-      throw new Error('redis transport down');
-    });
-    const { policy, state } = createStudioExecutionPolicy(
-      makeSponsorOptions({
-        ctx: makeContext({
-          executionLedger: {
-            ...makeContext().executionLedger,
-            consume,
-          } as unknown as PromotionExecutionLedger,
-        }),
-      }),
-    );
-    seedSponsorState(state);
-    const success: Extract<ExecResult, { success: true }> = {
-      success: true,
-      executionStage: 'on_chain',
-      digest: TEST_SUI_TRANSACTION_DIGEST,
-      effects: { status: 'ok' },
-      gasUsed: GAS_USED,
-    };
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), success)).rejects.toMatchObject({
-      code: 'CONSUME_FAILED',
-    });
-    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
-      economicsStatus: 'known',
-      recoveredGasMist: '0',
-      hostPaidGasMist: '1300',
-      hostNetMist: '-1300',
-      failureReason: 'PROMOTION_LEDGER_CONSUME_THREW: redis transport down',
-    });
-
-    const events = consoleErrorSpy.mock.calls.flatMap((args: unknown[]) => {
-      try {
-        return [JSON.parse(args[0] as string) as Record<string, unknown>];
-      } catch {
-        return [];
-      }
-    });
-    expect(
-      events.filter((entry) => entry.event === 'LEDGER_CONSUME_THREW_IN_HANDLER'),
-    ).toHaveLength(1);
-    expect(events.some((entry) => entry.event === 'PROMOTION_LEDGER_CONSUME_FAILED')).toBe(false);
-
-    consoleErrorSpy.mockRestore();
-  });
-
-  test('signAndSubmit port handles post-signature cleanup and preserves typed stage for runner', async () => {
-    const consumeLedgerReservationWithLog = vi.fn(async () => ({ ok: true }));
+  test('signAndSubmit port preserves post-signature uncertainty for runner recovery', async () => {
     const rawCause = new Error('rpc transport error');
     const expectedDigest = 'expected-sui-transaction-digest';
+    const signAndSubmit = vi.fn(
+      async (..._args: Parameters<StudioExecutionPolicyDependencies['signAndSubmit']>) => {
+        throw new SponsorPostSignatureUncertaintyError(expectedDigest, rawCause);
+      },
+    );
     const options = makeSponsorOptions({
       ctx: makeContext(),
       deps: {
-        signAndSubmit: vi.fn(async () => {
-          throw new SponsorPostSignatureUncertaintyError(expectedDigest, rawCause);
-        }) as unknown as StudioExecutionPolicyDependencies['signAndSubmit'],
-        consumeLedgerReservationWithLog:
-          consumeLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['consumeLedgerReservationWithLog'],
+        signAndSubmit:
+          signAndSubmit as unknown as StudioExecutionPolicyDependencies['signAndSubmit'],
       },
     });
     const { state } = createStudioExecutionPolicy(options);
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    const thrown = await port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig').catch(
+    const submittedBytes = new Uint8Array([1, 2, 3]);
+    const thrown = await port(SPONSOR, RECEIPT_ID, submittedBytes, 'sig', expectedDigest).catch(
       (err: unknown) => err,
     );
     expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
     expect((thrown as SponsorPostSignatureUncertaintyError).cause).toBe(rawCause);
     expect((thrown as SponsorPostSignatureUncertaintyError).expectedDigest).toBe(expectedDigest);
 
-    expect(consumeLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      RESERVED_GAS,
-      'post_signature_uncertainty',
-      expect.objectContaining({ txDigest: expectedDigest }),
-    );
-    expect(state.sponsor?.sponsorResultOutcome).toBe('internal_error');
-    expect(state.sponsor?.sponsorResultDigest).toBe(expectedDigest);
-    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
-      economicsStatus: 'unknown',
-      failureReason: expect.stringContaining('post_signature_uncertainty'),
-    });
+    expect(signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(signAndSubmit.mock.calls[0]?.[4]).toBe(submittedBytes);
   });
 
-  test('signAndSubmit port releases ledger on pre-sign lease failures', async () => {
-    const releaseLedgerReservationWithLog = vi.fn();
-    const leaseErr = new Error('lease expired');
+  test('signAndSubmit port maps a strict lease failure without mutating the ledger', async () => {
+    const leaseErr = new SponsorLeaseExpiredError(SPONSOR);
+    const context = makeContext();
     const options = makeSponsorOptions({
+      ctx: context,
       deps: {
         signAndSubmit: vi.fn(async () => {
           throw leaseErr;
         }) as unknown as StudioExecutionPolicyDependencies['signAndSubmit'],
-        releaseLedgerReservationWithLog:
-          releaseLedgerReservationWithLog as unknown as StudioExecutionPolicyDependencies['releaseLedgerReservationWithLog'],
       },
     });
     const { state } = createStudioExecutionPolicy(options);
     seedSponsorState(state);
     const port = createStudioSignAndSubmitPort(options, state);
 
-    await expect(port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig')).rejects.toBe(
-      leaseErr,
-    );
-
-    expect(releaseLedgerReservationWithLog).toHaveBeenCalledWith(
-      expect.anything(),
-      RECEIPT_ID,
-      'sign_lease_expired',
-    );
+    await expect(
+      port(SPONSOR, RECEIPT_ID, new Uint8Array([1, 2, 3]), 'sig', TEST_SUI_TRANSACTION_DIGEST),
+    ).rejects.toMatchObject({ code: 'LEASE_EXPIRED' });
+    expect(context.executionLedger.consume).not.toHaveBeenCalled();
+    expect(context.executionLedger.release).not.toHaveBeenCalled();
     expect(state.sponsor?.sponsorResultOutcome).toBe('validation_failure');
   });
 });

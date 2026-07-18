@@ -4,9 +4,10 @@
  * Reservation handles:
  *   - are issued only by their owning reservation's `acquire()`,
  *   - guard their consumers at compile time via brand,
- *   - fail closed at runtime after release/consume,
- *   - can be reconstructed during sponsor processing from durable state
- *     (sponsor-address lease identity, txBytesHash, receiptId, ledger reservation key).
+ *   - fail closed at runtime after release,
+ *   - can be reconstructed during sponsor processing from the validated
+ *     prepared receipt (sponsor address, receipt ID, nonce, and Promotion
+ *     reservation identity).
  *
  * Mint paths (issuing authority):
  *   - `internalReservationHandleFactory` — the ONLY in-process mint authority for
@@ -14,11 +15,9 @@
  *     key is not re-exported from the directory barrel. Tests under
  *     `packages/*\/tests/**` import it directly for coverage of the
  *     brand/guard contracts the runtime fan-out depends on.
- *   - `reconstructReservationHandles` — public sponsor-phase reconstruction helper.
- *     Lifts already-verified durable inputs back into live handles after
- *     consume(); does not bypass any reservation contract because the
- *     prepare-side reservations have already released by the time the
- *     sponsor processing runs.
+ *   - `reconstructReservationHandles` — sponsor-phase reconstruction helper.
+ *     Lifts validated durable identity into live typed handles before the
+ *     atomic prepared-to-executing transition.
  *
  * Internal module. The internal `index.ts` barrel re-exports public types,
  * `reconstructReservationHandles`, and `createGasBoundBuildInput` only — never the raw
@@ -39,8 +38,8 @@ export interface ReservationHandleBrand<TBrand extends string> {
 /**
  * Module-private factory key. Reservation handle classes accept this only when invoked
  * by `internalReservationHandleFactory` (used by `reservations.ts`) or by
- * `reconstructReservationHandles` (used during sponsor processing after durable-state
- * verification). Foreign-module construction is rejected at runtime by the
+ * `reconstructReservationHandles` (used during sponsor processing after prepared-record
+ * validation). Foreign-module construction is rejected at runtime by the
  * constructor's identity check on this symbol.
  *
  * NOT re-exported from the directory's `index.ts` barrel. Production source
@@ -54,13 +53,13 @@ type ReservationHandleFactoryKey = typeof RESERVATION_HANDLE_FACTORY_KEY;
 
 /**
  * Thrown when a consumer reads from a handle after the issuing
- * reservation has been released or consumed. Fail-closed: the runner must
+ * reservation has been released. Fail-closed: the runner must
  * not silently fall through to a partially valid input.
  */
 export class ReservationHandleClosedError extends Error {
   constructor(
     public readonly reservationKind: string,
-    public readonly reason: 'released' | 'consumed',
+    public readonly reason: 'released',
   ) {
     super(
       `${reservationKind} reservation handle already ${reason}; cannot be read by a downstream consumer`,
@@ -89,7 +88,7 @@ export class ReservationHandleConstructionError extends Error {
 
 /**
  * Shared base for all reservation handle kinds. Owns:
- *   - the runtime `released`/`consumed` flag,
+ *   - the runtime released flag,
  *   - the `requireValid()` getter that consumers MUST call before reading
  *     payload fields,
  *   - the factory-key check that enforces module ownership at construction.
@@ -103,7 +102,7 @@ abstract class ReservationHandleBase<
   TBrand extends string,
 > implements ReservationHandleBrand<TBrand> {
   abstract readonly reservationKind: TBrand;
-  private _state: 'live' | 'released' | 'consumed' = 'live';
+  private _state: 'live' | 'released' = 'live';
 
   protected constructor(factoryKey: ReservationHandleFactoryKey, kindForError: string) {
     if (factoryKey !== RESERVATION_HANDLE_FACTORY_KEY) {
@@ -122,34 +121,16 @@ abstract class ReservationHandleBase<
     }
   }
 
-  /** True iff the handle has not yet been released or consumed. */
+  /** True iff the handle has not yet been released. */
   isLive(): boolean {
     return this._state === 'live';
   }
 
   /**
-   * Mark the handle as released. Idempotent for repeated `release()` calls
-   * (which can legitimately happen on a finally-cleanup path), but disallows
-   * release after consume (which would mean the lifecycle ran its
-   * commit/consume path and a reverse-cleanup would double-count).
+   * Mark the handle as released. Repeated calls are idempotent.
    */
   release(): void {
-    if (this._state === 'consumed') {
-      throw new ReservationHandleClosedError(this.reservationKind, 'consumed');
-    }
     this._state = 'released';
-  }
-
-  /**
-   * Mark the handle as consumed (e.g. ledger reservation consume by
-   * sponsor result policy). Throws on second consume so the runner cannot
-   * accidentally double-spend an entitlement.
-   */
-  consume(): void {
-    if (this._state !== 'live') {
-      throw new ReservationHandleClosedError(this.reservationKind, this._state);
-    }
-    this._state = 'consumed';
   }
 }
 
@@ -199,8 +180,8 @@ class SponsorSlotReservationHandleImpl
 /**
  * Issued by `NonceReservation.acquire()`. Required by the generic gas-bound
  * settlement build (the nonce is embedded in the settle PTB). The handle is
- * released on prepare-side failure or transferred to the prepared-store
- * entry on success.
+ * released on prepare-side failure or transferred to the durable prepared
+ * receipt on success.
  */
 export interface NonceReservationHandle extends ReservationHandleBrand<'Nonce'> {
   readonly nonce: bigint;
@@ -244,10 +225,10 @@ class NonceReservationHandleImpl
 
 /**
  * Issued by `LedgerBudgetReservation.acquire()` AFTER `GasBoundBuild`
- * because the reservation amount equals the measured gas. Required by Studio
- * prepared commit and sponsor result policy. The sponsor result policy consumes/releases via this handle; the
- * runtime guard distinguishes consume (entitlement debit) from release
- * (entitlement refund) so a misordered sponsor result hook fails closed.
+ * because the reservation amount equals the measured gas. Required by
+ * Promotion prepared commit and sponsor result classification. The handle
+ * carries the reservation identity; the sponsored execution store performs
+ * durable entitlement debit or release during receipt transitions.
  *
  * NOT carried in `GasBoundBuildReservationHandles` — the ledger reservation does not
  * exist before measured gas exists, and the gas-bound build cannot depend
@@ -313,7 +294,7 @@ export const internalReservationHandleFactory = {
   newSponsorSlot(
     sponsorAddress: string,
     receiptId: string,
-  ): SponsorSlotReservationHandle & { release(): void; consume(): void } {
+  ): SponsorSlotReservationHandle & { release(): void } {
     return new SponsorSlotReservationHandleImpl(
       RESERVATION_HANDLE_FACTORY_KEY,
       sponsorAddress,
@@ -324,7 +305,7 @@ export const internalReservationHandleFactory = {
     nonce: bigint,
     senderAddress: string,
     receiptId: string,
-  ): NonceReservationHandle & { release(): void; consume(): void } {
+  ): NonceReservationHandle & { release(): void } {
     return new NonceReservationHandleImpl(
       RESERVATION_HANDLE_FACTORY_KEY,
       nonce,
@@ -337,7 +318,7 @@ export const internalReservationHandleFactory = {
     promotionId: string,
     userId: string,
     reservedGasMist: bigint,
-  ): LedgerReservationHandle & { release(): void; consume(): void } {
+  ): LedgerReservationHandle & { release(): void } {
     return new LedgerReservationHandleImpl(
       RESERVATION_HANDLE_FACTORY_KEY,
       receiptId,
@@ -372,10 +353,10 @@ export const __testingReservationHandleInternals = {
 // ─────────────────────────────────────────────
 
 /**
- * Inputs needed to reconstruct `SponsorSlotReservationHandle` after the
- * prepared entry is atomically consumed. This handle carries lifecycle
- * identity only. The sponsor pool's later `sign()` call is the sole authority
- * that verifies the committed HMAC against the submitted transaction bytes.
+ * Inputs needed to reconstruct `SponsorSlotReservationHandle` from the
+ * validated prepared receipt. This handle carries lifecycle identity only.
+ * The sponsor pool's later `sign()` call verifies the executing lease record's
+ * transaction-bound HMAC against the submitted transaction bytes.
  */
 export interface SponsorSlotReconstructionInputs {
   readonly sponsorAddress: string;
@@ -411,11 +392,11 @@ export interface LedgerReservationReconstructionInputs {
 }
 
 /**
- * Reconstruct sponsor-phase reservation handles from consumed durable inputs.
+ * Reconstruct sponsor-phase reservation handles from validated durable inputs.
  * Nonce and ledger inputs are returned only after their owning checks; sponsor
  * lease HMAC verification remains at the later pool `sign()` boundary. Returns
- * fresh handles in the `live` state — the sponsor lifecycle owns their
- * release/consume just like the prepare lifecycle.
+ * fresh handles in the `live` state for policy type checks and result
+ * projection. Durable release and accounting remain store transitions.
  *
  * The nonce and ledger verified-flag fields document — at the type level and
  * in the input shape — that those reconstructions are gated on their prior
@@ -424,12 +405,10 @@ export interface LedgerReservationReconstructionInputs {
 export const reconstructReservationHandles = {
   sponsorSlot(
     inputs: SponsorSlotReconstructionInputs,
-  ): SponsorSlotReservationHandle & { release(): void; consume(): void } {
+  ): SponsorSlotReservationHandle & { release(): void } {
     return internalReservationHandleFactory.newSponsorSlot(inputs.sponsorAddress, inputs.receiptId);
   },
-  nonce(
-    inputs: NonceReconstructionInputs,
-  ): NonceReservationHandle & { release(): void; consume(): void } {
+  nonce(inputs: NonceReconstructionInputs): NonceReservationHandle & { release(): void } {
     return internalReservationHandleFactory.newNonce(
       inputs.nonce,
       inputs.senderAddress,
@@ -438,7 +417,7 @@ export const reconstructReservationHandles = {
   },
   ledgerReservation(
     inputs: LedgerReservationReconstructionInputs,
-  ): LedgerReservationHandle & { release(): void; consume(): void } {
+  ): LedgerReservationHandle & { release(): void } {
     return internalReservationHandleFactory.newLedgerReservation(
       inputs.receiptId,
       inputs.promotionId,
@@ -454,9 +433,8 @@ export const reconstructReservationHandles = {
 
 /**
  * Required reservation handles at the `GasBoundBuild` boundary. `GasBoundBuild`
- * runs before `RouteReservationAfterBuild` (`LedgerBudgetReservation.acquire`),
- * so ledger reservation handle is intentionally absent here — the ledger reservation
- * does not yet exist.
+ * runs before the runner acquires a Studio ledger reservation, so the ledger
+ * reservation handle is intentionally absent here — it does not yet exist.
  *
  *   - generic: { sponsorSlot, nonce } (nonce reserved before build)
  *   - studio:  { sponsorSlot } (no route reservation before build)
@@ -467,12 +445,12 @@ export interface GasBoundBuildReservationHandles {
 }
 
 /**
- * Required reservation handles at the `ClassifySponsorResult` boundary (post-submit; runs
- * during sponsor processing after consume). Sponsor slot is required for
- * checkin; ledger reservation is required for Studio entitlement
- * consume/release. Nonce is NOT required here — the in-PTB nonce match
- * already happened during `SharedPostconsumeChecks` and the nonce handle
- * has no sponsor result verb.
+ * Required reservation handles at the `ClassifySponsorResult` boundary after
+ * submission. Sponsor slot identity is required for result projection;
+ * Promotion reservation identity is required for Promotion classification.
+ * Nonce is not required because its in-transaction match already happened in
+ * `SharedSponsorChecks`. Durable release and accounting are performed by
+ * `finalizeSponsoredExecution()`.
  */
 export interface SponsorResultReservationHandles {
   readonly sponsorSlot: SponsorSlotReservationHandle;
@@ -510,8 +488,8 @@ function requireHandleLive(handle: { isLive(): boolean; reservationKind: string 
  * Result returned by the `GasBoundBuild` policy hook. The runner consumes:
  *   - `addressBalanceGasTransaction` — opaque validated transaction. Only the
  *     runner obtains its user-signable bytes and `txBytesHash`.
- *   - `measuredGasMist` — forwarded to `RouteReservationAfterBuild` so
- *     the Studio runner can reserve the matching ledger amount. Generic
+ *   - `measuredGasMist` — used by the runner to reserve the matching Studio
+ *     ledger amount after the build. Generic
  *     policies that do not reserve ledger may set this to `0n` (the
  *     value is unused on the generic path).
  *

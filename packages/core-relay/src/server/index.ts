@@ -9,8 +9,11 @@ export {
   getAddressBalanceGasTransactionBytes,
   getAddressBalanceGasTransactionTxBytesHash,
   simulateAddressBalanceGasTransaction,
+  SuiAddressBalanceGasUnavailableError,
 } from '../sui/suiAddressBalanceGas.js';
 export type { AddressBalanceGasTransaction } from '../sui/suiAddressBalanceGas.js';
+// Host signing verifies durable transaction identity before issuing a sponsor signature.
+export { assertSuiTransactionDigest } from '../sui/suiTransactionGateways.js';
 // Host prepare classification may inspect only authority-created resolution
 // failures; browser/public errors never expose the retained structured value.
 export { getSuiRejectedExecutionError } from '../sui/suiOperation.js';

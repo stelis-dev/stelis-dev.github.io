@@ -96,7 +96,7 @@ export type FailureCode = RelayAndStudioFailureCode | PromotionAbuseCode;
  *   time. Treated like `ignored` for abuse counters (the subject did
  *   not cause the drift), but additionally emits
  *   `SPONSOR_DRIFT_OBSERVED` for operator visibility when the drift
- *   was stored-hash-verified (post-consume). `abuseImpact` is `SKIP_BOTH`.
+ *   was prepared-hash-verified. `abuseImpact` is `SKIP_BOTH`.
  * - `infra`: 5xx-class infrastructure outcomes (Redis outages, pool
  *   manager unhealthy, sponsor lease commit failures, internal errors).
  *   Counters skip; the call site typically maps to HTTP 503/500.
@@ -721,12 +721,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     notes:
       'Shared sponsor recorder code for both routes; market subcodes increment the subject revert family.',
   },
-  CONSUME_FAILED: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Promotion-route prepare-store consume infra failure.',
-  },
-
   // ── Promotion-specific abuse codes (not public HTTP codes) ───────
   // These never appear in HTTP response bodies; they are recorded
   // against the abuse blocker via `recordPromotionAbuseEvent`.

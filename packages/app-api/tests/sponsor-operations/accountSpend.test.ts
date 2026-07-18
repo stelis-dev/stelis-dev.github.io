@@ -12,12 +12,15 @@ import type {
   SponsorRefillAccountSpend,
   SponsorRefillAccountSpendStateStore,
   SponsorRefillAccountWithdrawalReceipt,
+  TerminalSponsorRefillAccountSpend,
 } from '../../src/sponsor-operations/accountSpendState.js';
 import type {
   RedisSponsorOperationsState,
-  SlotRead,
+  SponsorSlotRecord,
 } from '../../src/sponsor-operations/redisState.js';
 import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+import { createTestSponsorOperationsSettings } from './settingsFixture.js';
+import type { SponsorOperationsSettingsInput } from '../../src/sponsor-operations/settings.js';
 
 const gateways = vi.hoisted(() => ({
   buildSuiTransaction: vi.fn(),
@@ -105,6 +108,7 @@ function createMemorySpendState(nonces: Set<string>) {
     async readAccountObservationCursor() {
       return {
         operationId: current?.operationId ?? null,
+        spendState: current?.state ?? null,
         spendSequence,
         writeSequence,
       };
@@ -213,7 +217,7 @@ function createMemorySpendState(nonces: Set<string>) {
           ? { kind: 'refill' as const, slotAddress: current.slotAddress, nonceKey: null }
           : { kind: 'withdrawal' as const, slotAddress: null, nonceKey: current.nonceKey }),
       } as const;
-      const completed = save(
+      const completed: TerminalSponsorRefillAccountSpend = save(
         input.state === 'succeeded'
           ? { ...common, state: 'succeeded', digest: current.digest }
           : {
@@ -221,6 +225,7 @@ function createMemorySpendState(nonces: Set<string>) {
               state: 'failed',
               digest: current.digest,
               failureKind: 'failed',
+              requiredSourceBalanceMist: null,
               error: input.lastError,
             },
       );
@@ -273,6 +278,7 @@ function createMemorySpendState(nonces: Set<string>) {
         state: 'failed',
         digest: null,
         failureKind: input.failureKind,
+        requiredSourceBalanceMist: input.requiredSourceBalanceMist,
         error: input.lastError,
       });
       if (failed.nonceKey !== null) {
@@ -320,24 +326,28 @@ function requireReadySpend(
 function createOperationsState(
   slotBalanceMist = '0',
   automatic?: {
-    readonly slotState?: SlotRead['state'];
+    readonly slotState?: SponsorSlotRecord['state'];
     readonly requiredSourceBalanceMist?: string | null;
     readonly sourceBalanceMist?: string | null;
     readonly sourceHealthy?: boolean | null;
   },
 ): RedisSponsorOperationsState {
   let writeSeq = 1;
-  let slot: SlotRead = {
+  const settings = createTestSponsorOperationsSettings({
+    sponsorAddresses: [SLOT],
+    sponsorRefillAccountAddress: SOURCE,
+    settlementPayoutRecipientAddress: ADMIN,
+    warnMist: 50n,
+    refillTargetMist: 100n,
+    runwayTargetMist: 100n,
+  });
+  let slot: SponsorSlotRecord = {
     address: SLOT,
     state: automatic?.slotState ?? 'low_balance',
-    balanceMist: slotBalanceMist,
+    addressBalanceMist: slotBalanceMist,
     lastError: null,
     lastObservedAtMs: 1,
     writeSeq,
-    pendingRefillDigest: null,
-    refillAttemptedAmountMist: null,
-    refillObservedBalanceMist: null,
-    refillReconciliationResult: null,
     refillOperationId: null,
     refillOperationSequence: null,
     refillOperationState: null,
@@ -349,54 +359,22 @@ function createOperationsState(
       writeSeq += 1;
       slot = {
         ...slot,
-        ...fields,
+        addressBalanceMist: fields.addressBalanceMist ?? slot.addressBalanceMist,
         lastError: fields.lastError === '' ? null : (fields.lastError ?? slot.lastError),
-        pendingRefillDigest:
-          fields.pendingRefillDigest === ''
-            ? null
-            : (fields.pendingRefillDigest ?? slot.pendingRefillDigest),
-        refillAttemptedAmountMist:
-          fields.refillAttemptedAmountMist === ''
-            ? null
-            : (fields.refillAttemptedAmountMist ?? slot.refillAttemptedAmountMist),
-        refillObservedBalanceMist:
-          fields.refillObservedBalanceMist === ''
-            ? null
-            : (fields.refillObservedBalanceMist ?? slot.refillObservedBalanceMist),
-        refillReconciliationResult:
-          fields.refillReconciliationResult === ''
-            ? null
-            : (fields.refillReconciliationResult ?? slot.refillReconciliationResult),
-        refillOperationId:
-          fields.refillOperationId === ''
-            ? null
-            : (fields.refillOperationId ?? slot.refillOperationId),
-        refillOperationSequence:
-          fields.refillOperationSequence === ''
-            ? null
-            : fields.refillOperationSequence === undefined
-              ? slot.refillOperationSequence
-              : Number(fields.refillOperationSequence),
-        refillOperationState:
-          fields.refillOperationState === ''
-            ? null
-            : (fields.refillOperationState ?? slot.refillOperationState),
-        refillRequiredSourceBalanceMist:
-          fields.refillRequiredSourceBalanceMist === ''
-            ? null
-            : (fields.refillRequiredSourceBalanceMist ?? slot.refillRequiredSourceBalanceMist),
         writeSeq,
-      } as SlotRead;
+      } as SponsorSlotRecord;
       return true;
     },
     async readSlot(address) {
       return address === SLOT ? slot : null;
     },
+    async readSlotAvailability(address) {
+      return address === SLOT ? { ...slot, observationFresh: true } : null;
+    },
     async readSponsorRefillAccount() {
       return {
-        balanceMist: automatic?.sourceBalanceMist ?? null,
-        healthy: automatic?.sourceHealthy ?? null,
-        refillsRemaining: null,
+        totalBalanceMist: automatic?.sourceBalanceMist ?? null,
+        healthy: automatic?.sourceHealthy ?? false,
         lastError: null,
         lastObservedAtMs: 1,
         writeSeq: 1,
@@ -404,14 +382,15 @@ function createOperationsState(
     },
     async readAll() {
       return {
-        slots: [slot],
+        settings,
+        slots: [{ ...slot, observationFresh: true }],
         sponsorRefillAccount: {
-          balanceMist: automatic?.sourceBalanceMist ?? null,
-          healthy: automatic?.sourceHealthy ?? null,
-          refillsRemaining: null,
+          totalBalanceMist: automatic?.sourceBalanceMist ?? null,
+          healthy: automatic?.sourceHealthy ?? false,
           lastError: null,
-          lastObservedAtMs: null,
-          writeSeq: null,
+          lastObservedAtMs: 1,
+          writeSeq: 1,
+          observationFresh: true,
         },
       };
     },
@@ -461,6 +440,21 @@ function createBoundary(options?: {
   const submissions: SubmittedIdentity[] = [];
   const lookupDigests: string[] = [];
 
+  async function awaitAbortableGate(
+    gate: Promise<void> | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (gate === undefined) return;
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => reject(signal?.reason);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      void gate.then(resolve, reject).finally(() => {
+        signal?.removeEventListener('abort', onAbort);
+      });
+    });
+  }
+
   function assertIdentity(input: {
     readonly sourceAddress: string;
     readonly destinationAddress: string;
@@ -490,9 +484,9 @@ function createBoundary(options?: {
   }
 
   const boundary: SponsorRefillAccountSpendBoundary = {
-    async buildAndSign(destinationAddress, amountMist) {
+    async buildAndSign(destinationAddress, amountMist, signal) {
       buildCount += 1;
-      await options?.buildGate;
+      await awaitAbortableGate(options?.buildGate, signal);
       const gasBudgetMist = options?.gasBudget ?? 37n;
       const amountBytes = new Uint8Array(8);
       new DataView(amountBytes.buffer).setBigUint64(0, amountMist, true);
@@ -522,8 +516,8 @@ function createBoundary(options?: {
       validateCount += 1;
       assertIdentity(input);
     },
-    async simulate() {
-      await options?.simulateGate;
+    async simulate(_bytes, signal) {
+      await awaitAbortableGate(options?.simulateGate, signal);
       return { success: true, error: null };
     },
     async lookup(digest) {
@@ -556,7 +550,11 @@ function createBoundary(options?: {
       visibleDigests.add(digest);
       return { digest, success: true, error: null };
     },
-    async getBalance(address) {
+    async getTotalBalance(address) {
+      if (options?.getBalance) return options.getBalance(address);
+      return address === SOURCE ? sourceBalance : slotBalance;
+    },
+    async getAddressBalance(address) {
       if (options?.getBalance) return options.getBalance(address);
       return address === SOURCE ? sourceBalance : slotBalance;
     },
@@ -582,7 +580,12 @@ function coordinator(input: {
   sourceBalance?: bigint;
   target?: bigint;
   count?: number;
-  dispatchTimeoutMs?: number;
+  timeoutOverrides?: Partial<
+    Pick<
+      SponsorOperationsSettingsInput,
+      'refillTimeoutMs' | 'sponsorRefillAccountBalanceTimeoutMs' | 'confirmationTimeoutMs'
+    >
+  >;
   dispatchLock?: SponsorRefillAccountDispatchLock;
 }) {
   return createSponsorRefillAccountSpendCoordinator({
@@ -590,16 +593,21 @@ function coordinator(input: {
     operationsState: input.operationsState ?? createOperationsState(),
     dispatchLock: input.dispatchLock ?? createMemoryLock(),
     boundary: input.boundary,
-    network: 'testnet',
-    sourceAddress: SOURCE,
-    sponsorSlotCount: input.count ?? 2,
-    refillEnabled: true,
-    refillTargetMist: input.target ?? 100n,
-    runwayTargetMist: input.target ?? 100n,
-    warnThresholdMist: 50n,
-    dispatchTimeoutMs: input.dispatchTimeoutMs ?? 20,
-    balanceTimeoutMs: 20,
-    confirmationTimeoutMs: 20,
+    settings: createTestSponsorOperationsSettings({
+      sponsorAddresses: Array.from({ length: input.count ?? 2 }, (_, index) =>
+        index === 0 ? SLOT : `0x${String(index + 4).repeat(64)}`,
+      ),
+      sponsorRefillAccountAddress: SOURCE,
+      settlementPayoutRecipientAddress: ADMIN,
+      refillEnabled: true,
+      refillTargetMist: input.target ?? 100n,
+      runwayTargetMist: input.target ?? 100n,
+      warnMist: 50n,
+      refillTimeoutMs: 20,
+      sponsorRefillAccountBalanceTimeoutMs: 20,
+      confirmationTimeoutMs: 20,
+      ...input.timeoutOverrides,
+    }),
   });
 }
 
@@ -664,7 +672,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
           ...snapshot,
           sponsorRefillAccount: {
             ...snapshot.sponsorRefillAccount,
-            balanceMist: currentSourceBalanceMist,
+            totalBalanceMist: currentSourceBalanceMist,
           },
         };
       },
@@ -752,7 +760,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
       target: 100n,
     });
 
-    const result = await spend.refill(SLOT, 'explicit');
+    const result = await spend.refill(SLOT, 'slot_observed');
 
     expect(result).toMatchObject({ status: 'succeeded', amountMist: '100' });
     expect(memory.current()).toMatchObject({ state: 'succeeded', amountMist: '100' });
@@ -811,8 +819,48 @@ describe('Sponsor Refill Account spend coordinator', () => {
     const recovered = await coordinator({
       state: memory.state,
       boundary: chain.boundary,
-    }).recoverActiveSpend();
+    }).recoverActiveSpend(new AbortController().signal);
     expect(recovered?.status).toBe('succeeded');
+    expect(chain.submitCount()).toBe(0);
+  });
+
+  it('propagates recovery cancellation into the active Sui lookup without changing durable state', async () => {
+    const nonce = 'nonce:abort-recovery';
+    const memory = createMemorySpendState(new Set([nonce]));
+    const chain = createBoundary({ lookup: 'unknown' });
+    await coordinator({ state: memory.state, boundary: chain.boundary }).withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonce,
+    });
+    expect(memory.current()).toMatchObject({ state: 'ready' });
+
+    const lookupStarted = deferred<AbortSignal>();
+    const recoveryBoundary: SponsorRefillAccountSpendBoundary = {
+      ...chain.boundary,
+      async lookup(_digest, signal) {
+        if (signal === undefined) throw new Error('recovery lookup requires an abort signal');
+        signal.throwIfAborted();
+        lookupStarted.resolve(signal);
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const abortController = new AbortController();
+    const recovery = coordinator({
+      state: memory.state,
+      boundary: recoveryBoundary,
+    }).recoverActiveSpend(abortController.signal);
+    const rejected = expect(recovery).rejects.toMatchObject({ name: 'AbortError' });
+
+    const operationSignal = await lookupStarted.promise;
+    expect(operationSignal).not.toBe(abortController.signal);
+    expect(operationSignal.aborted).toBe(false);
+    abortController.abort();
+    await rejected;
+    expect(operationSignal.aborted).toBe(true);
+    expect(memory.current()).toMatchObject({ state: 'ready' });
     expect(chain.submitCount()).toBe(0);
   });
 
@@ -830,7 +878,9 @@ describe('Sponsor Refill Account spend coordinator', () => {
     chain.setLookup('found');
 
     await expect(
-      coordinator({ state: memory.state, boundary: chain.boundary }).recoverActiveSpend(),
+      coordinator({ state: memory.state, boundary: chain.boundary }).recoverActiveSpend(
+        new AbortController().signal,
+      ),
     ).rejects.toThrow('different from the built transaction');
     expect(chain.lookupCount()).toBe(1);
     expect(chain.submitCount()).toBe(0);
@@ -1080,43 +1130,37 @@ describe('Sponsor Refill Account spend coordinator', () => {
     expect(chain.lookupDigests().slice(lookupStart)).not.toContain(first.digest);
   });
 
-  it('recovers timeout-late-success by the same digest without rebuilding or resubmitting', async () => {
+  it('reconciles timeout-late-success by the same digest without rebuilding or resubmitting', async () => {
     const nonce = 'nonce:timeout-late-success';
     const memory = createMemorySpendState(new Set([nonce]));
     const submitGate = deferred<void>();
     const chain = createBoundary({ submitGate: submitGate.promise });
 
-    const pending = await coordinator({
+    const pendingPromise = coordinator({
       state: memory.state,
       boundary: chain.boundary,
-      dispatchTimeoutMs: 10,
+      timeoutOverrides: {
+        refillTimeoutMs: 10,
+        sponsorRefillAccountBalanceTimeoutMs: 10,
+        confirmationTimeoutMs: 10,
+      },
     }).withdraw({
       destinationAddress: ADMIN,
       amountMist: '100',
       nonceKey: nonce,
     });
 
-    expect(pending.status).toBe('pending');
-    expect(chain.buildCount()).toBe(1);
-    expect(chain.submitCount()).toBe(1);
-    expect(chain.lookupCount()).toBe(2);
-    expect(chain.validateCount()).toBe(1);
-    const ready = structuredClone(requireReadySpend(memory.current()));
-
+    await new Promise((resolve) => setTimeout(resolve, 20));
     submitGate.resolve();
-    await Promise.resolve();
-    chain.setLookup('found');
-    const recovered = await coordinator({
-      state: memory.state,
-      boundary: chain.boundary,
-      dispatchTimeoutMs: 10,
-    }).recoverActiveSpend();
+    const pending = await pendingPromise;
 
-    expect(recovered?.status).toBe('succeeded');
+    expect(pending.status).toBe('succeeded');
     expect(chain.buildCount()).toBe(1);
     expect(chain.submitCount()).toBe(1);
-    expect(chain.lookupCount()).toBe(4);
-    expect(chain.validateCount()).toBe(2);
+    expect(chain.lookupCount()).toBe(3);
+    expect(chain.validateCount()).toBe(1);
+    const ready = memory.snapshots.find((snapshot) => snapshot.state === 'ready');
+    if (ready?.state !== 'ready') throw new Error('ready identity was not stored');
     const [submission] = chain.submissions();
     expect(toBase64(submission!.bytes)).toBe(ready.transactionBytesBase64);
     expect(submission?.signature).toBe(ready.signature);
@@ -1137,7 +1181,11 @@ describe('Sponsor Refill Account spend coordinator', () => {
       const result = await coordinator({
         state: memory.state,
         boundary: chain.boundary,
-        dispatchTimeoutMs: 10,
+        timeoutOverrides: {
+          refillTimeoutMs: 10,
+          sponsorRefillAccountBalanceTimeoutMs: 10,
+          confirmationTimeoutMs: 10,
+        },
       }).withdraw({ destinationAddress: ADMIN, amountMist: '100', nonceKey: nonce });
 
       expect(result.status).toBe('pending');
@@ -1146,7 +1194,7 @@ describe('Sponsor Refill Account spend coordinator', () => {
     },
   );
 
-  it('follows the durable winner when a late local preparation failure loses its CAS', async () => {
+  it('never lets recovery sign a reserved spend while a foreground preparation is stalled', async () => {
     const nonce = 'nonce:late-preparation-failure';
     const memory = createMemorySpendState(new Set([nonce]));
     const firstBuildGate = deferred<void>();
@@ -1186,31 +1234,44 @@ describe('Sponsor Refill Account spend coordinator', () => {
         submittedDigest = digest;
         return { digest, success: true, error: null };
       },
-      async getBalance() {
+      async getTotalBalance() {
+        return 10_000n;
+      },
+      async getAddressBalance() {
         return 10_000n;
       },
     };
-    const first = coordinator({ state: memory.state, boundary, dispatchTimeoutMs: 1_000 }).withdraw(
-      {
-        destinationAddress: ADMIN,
-        amountMist: '100',
-        nonceKey: nonce,
+    const first = coordinator({
+      state: memory.state,
+      boundary,
+      timeoutOverrides: {
+        refillTimeoutMs: 1_000,
+        sponsorRefillAccountBalanceTimeoutMs: 1_000,
+        confirmationTimeoutMs: 1_000,
       },
-    );
+    }).withdraw({
+      destinationAddress: ADMIN,
+      amountMist: '100',
+      nonceKey: nonce,
+    });
     await vi.waitFor(() => expect(buildCount).toBe(1));
 
     const winner = await coordinator({
       state: memory.state,
       boundary,
-      dispatchTimeoutMs: 1_000,
-    }).recoverActiveSpend();
-    expect(winner?.status).toBe('succeeded');
+      timeoutOverrides: {
+        refillTimeoutMs: 1_000,
+        sponsorRefillAccountBalanceTimeoutMs: 1_000,
+        confirmationTimeoutMs: 1_000,
+      },
+    }).recoverActiveSpend(new AbortController().signal);
+    expect(winner?.status).toBe('failed');
     firstBuildGate.resolve();
 
-    await expect(first).resolves.toMatchObject({ status: 'succeeded' });
-    expect(buildCount).toBe(2);
-    expect(submitCount).toBe(1);
-    expect(memory.current()).toMatchObject({ state: 'succeeded' });
+    await expect(first).resolves.toMatchObject({ status: 'failed' });
+    expect(buildCount).toBe(1);
+    expect(submitCount).toBe(0);
+    expect(memory.current()).toMatchObject({ state: 'failed' });
   });
 
   it.each([37n, 113n])(
@@ -1297,8 +1358,9 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
       signer,
       sourceAddress,
     });
+    const signal = new AbortController().signal;
 
-    const built = await boundary.buildAndSign(ADMIN, 123n);
+    const built = await boundary.buildAndSign(ADMIN, 123n, signal);
     const decoded = TransactionDataBuilder.fromBytes(built.transactionBytes).snapshot();
 
     expect(decoded.sender).toBe(sourceAddress);
@@ -1322,15 +1384,22 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
         },
       },
       {
-        $kind: 'TransferObjects',
-        TransferObjects: {
-          objects: [{ $kind: 'NestedResult', NestedResult: [0, 0] }],
-          address: { $kind: 'Input', Input: 1 },
+        $kind: 'MoveCall',
+        MoveCall: {
+          package: `0x${'0'.repeat(63)}2`,
+          module: 'coin',
+          function: 'send_funds',
+          typeArguments: [`0x${'0'.repeat(63)}2::sui::SUI`],
+          arguments: [
+            { $kind: 'NestedResult', NestedResult: [0, 0] },
+            { $kind: 'Input', Input: 1 },
+          ],
         },
       },
     ]);
     expect(gateways.buildSuiTransaction).toHaveBeenCalledWith(sui, {
       transaction: expect.anything(),
+      signal,
     });
     await expect(
       boundary.validateSignedIdentity({
@@ -1343,6 +1412,37 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
         digest: built.digest,
       }),
     ).resolves.toBeUndefined();
+
+    const directCoinTransferTransaction = new Transaction();
+    const [directCoin] = directCoinTransferTransaction.splitCoins(
+      directCoinTransferTransaction.gas,
+      [directCoinTransferTransaction.pure.u64(123n)],
+    );
+    directCoinTransferTransaction.transferObjects([directCoin], ADMIN);
+    directCoinTransferTransaction.setSender(sourceAddress);
+    directCoinTransferTransaction.setGasBudget(77);
+    directCoinTransferTransaction.setGasOwner(sourceAddress);
+    directCoinTransferTransaction.setGasPrice(1);
+    directCoinTransferTransaction.setGasPayment([
+      {
+        objectId: `0x${'44'.repeat(32)}`,
+        version: '1',
+        digest: '11111111111111111111111111111111',
+      },
+    ]);
+    const directCoinTransferBytes = await directCoinTransferTransaction.build();
+    const directCoinTransferSigned = await signer.signTransaction(directCoinTransferBytes);
+    await expect(
+      boundary.validateSignedIdentity({
+        sourceAddress,
+        destinationAddress: ADMIN,
+        amountMist: 123n,
+        gasBudgetMist: 77n,
+        transactionBytes: directCoinTransferBytes,
+        signature: directCoinTransferSigned.signature,
+        digest: TransactionDataBuilder.getDigestFromBytes(directCoinTransferBytes),
+      }),
+    ).rejects.toThrow('unexpected send-funds command');
 
     await expect(
       boundary.validateSignedIdentity({
@@ -1408,26 +1508,33 @@ describe('Sui Sponsor Refill Account spend boundary', () => {
       error: { kind: 'InvariantViolation' },
       effects: {},
     });
-    gateways.getSuiBalance.mockResolvedValue({ balance: '250' });
+    gateways.getSuiBalance.mockResolvedValue({ balance: '250', addressBalance: '125' });
+    const signal = new AbortController().signal;
 
-    await expect(boundary.simulate(bytes)).resolves.toEqual({ success: true, error: null });
-    await expect(boundary.lookup(digest)).resolves.toEqual({
+    await expect(boundary.simulate(bytes, signal)).resolves.toEqual({ success: true, error: null });
+    await expect(boundary.lookup(digest, signal)).resolves.toEqual({
       status: 'found',
       result: { digest, success: true, error: null },
     });
-    await expect(boundary.submit(bytes, 'signature', digest)).resolves.toEqual({
+    await expect(boundary.submit(bytes, 'signature', digest, signal)).resolves.toEqual({
       digest,
       success: false,
       error: 'Sui execution failed (InvariantViolation)',
     });
-    await expect(boundary.getBalance(ADMIN)).resolves.toBe(250n);
-    expect(gateways.simulateSuiTransaction).toHaveBeenCalledWith(sui, { transaction: bytes });
-    expect(gateways.getSuiTransactionEffects).toHaveBeenCalledWith(sui, { digest });
+    await expect(boundary.getTotalBalance(ADMIN, signal)).resolves.toBe(250n);
+    await expect(boundary.getAddressBalance(ADMIN, signal)).resolves.toBe(125n);
+    expect(gateways.simulateSuiTransaction).toHaveBeenCalledWith(sui, {
+      transaction: bytes,
+      signal,
+    });
+    expect(gateways.getSuiTransactionEffects).toHaveBeenCalledWith(sui, { digest, signal });
     expect(gateways.executeSuiTransaction).toHaveBeenCalledWith(sui, {
       transaction: bytes,
+      expectedDigest: digest,
       signatures: ['signature'],
+      signal,
     });
-    expect(gateways.getSuiBalance).toHaveBeenCalledWith(sui, { owner: ADMIN });
+    expect(gateways.getSuiBalance).toHaveBeenCalledWith(sui, { owner: ADMIN, signal });
 
     gateways.executeSuiTransaction.mockClear();
     await expect(boundary.submit(bytes, 'signature', `${digest}-corrupt`)).rejects.toThrow(

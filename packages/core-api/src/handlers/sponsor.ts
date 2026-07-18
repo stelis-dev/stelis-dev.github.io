@@ -1,8 +1,8 @@
 /**
  * POST /sponsor — public adapter over the SponsoredExecution sponsor runner.
  *
- * The runner owns consume ordering, reservation handle reconstruction, submit dispatch,
- * sponsor result policy, and finally slot checkin. This module keeps the stable
+ * The runner owns the prepared-to-executing transition, reservation reconstruction,
+ * one submit, final accounting, and callback delivery. This module keeps the stable
  * public handler signature and error carrier classes consumed by app-api.
  */
 import type { HostContext } from '../context.js';
@@ -16,7 +16,9 @@ import type { GasUsedFields } from '../session/sessionTypes.js';
 import {
   createGenericExecutionPolicy,
   createGenericSignAndSubmitPort,
-  createGenericSponsorConsumeAdapter,
+  createGenericSponsorReceiptPolicy,
+  buildGenericExecutionRecoveryContext,
+  buildGenericSponsorResultMetadata,
   projectGenericSponsorResult,
   type GenericSponsorErrorFactory,
 } from '../session/sponsoredExecution/genericExecutionPolicy.js';
@@ -180,9 +182,11 @@ export async function handleSponsor(
   try {
     return await runSponsorStateMachine(
       {
-        prepareStore: ctx.prepareStore,
-        sponsorPool: ctx.sponsorPool,
+        store: ctx.sponsoredExecutionStore,
         signAndSubmit: createGenericSignAndSubmitPort(options, state),
+        endpointCount: ctx.sui.endpointCount,
+        onSponsorResult: ctx.onSponsorResult,
+        isSponsorAddressAvailable: ctx.isSponsorAddressAvailable,
       },
       {
         hookContext: {
@@ -191,10 +195,17 @@ export async function handleSponsor(
         },
         txBytes,
         userSignature: params.userSignature,
+        buildRecoveryContext: () => buildGenericExecutionRecoveryContext(state),
+        buildResultMetadata: (stage) => buildGenericSponsorResultMetadata(state, stage),
+        stateChangedError: () =>
+          new SponsorValidationError(
+            'REPREPARE_REQUIRED',
+            'Prepared receipt state changed — retry /prepare',
+          ),
         projectResult: () => projectGenericSponsorResult(options, state),
       },
       policy,
-      createGenericSponsorConsumeAdapter({
+      createGenericSponsorReceiptPolicy({
         hostContext: ctx,
         clientIp,
         state,

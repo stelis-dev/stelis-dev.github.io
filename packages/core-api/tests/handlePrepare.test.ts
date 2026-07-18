@@ -108,7 +108,6 @@ function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string
               ? overrides.checkoutResult
               : { sponsorAddress: SPONSOR_ADDRESS },
           ),
-        commit: vi.fn().mockResolvedValue(undefined),
         checkin: vi.fn().mockResolvedValue(undefined),
         sign: vi.fn(),
       },
@@ -126,13 +125,10 @@ function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string
       prepareRequestNonceStore: {
         claim: vi.fn().mockResolvedValue('ok'),
       },
-      prepareStore: {
-        store: vi.fn().mockResolvedValue(undefined),
-        consume: vi.fn(),
-        peek: vi.fn(),
-        evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
+      sponsoredExecutionStore: {
+        commitPreparedReceipt: vi.fn(async (draft) => ({ ...draft, issuedAt: 1_741_680_000_000 })),
         reserveNonce: vi.fn().mockResolvedValue(1n),
-        releaseReservation: vi.fn().mockResolvedValue(undefined),
+        releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
       },
       prepareInflightLimiter: {
         tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
@@ -293,9 +289,9 @@ describe('handlePrepare', () => {
     expect(ctx.getConfig).not.toHaveBeenCalled();
     expect(ctx.sponsorPool.checkout).not.toHaveBeenCalled();
     expect(ctx.sponsorPool.checkin).not.toHaveBeenCalled();
-    expect(ctx.prepareStore.reserveNonce).not.toHaveBeenCalled();
-    expect(ctx.prepareStore.releaseReservation).not.toHaveBeenCalled();
-    expect(ctx.prepareStore.store).not.toHaveBeenCalled();
+    expect(ctx.sponsoredExecutionStore.reserveNonce).not.toHaveBeenCalled();
+    expect(ctx.sponsoredExecutionStore.releaseNonceReservation).not.toHaveBeenCalled();
+    expect(ctx.sponsoredExecutionStore.commitPreparedReceipt).not.toHaveBeenCalled();
   });
 
   // ── Unsupported settlement token ────────────────────────────────────────────────
@@ -332,9 +328,11 @@ describe('handlePrepare', () => {
 
   it('releases slot on post-checkout failure (await checkin)', async () => {
     const { ctx } = makeMockContext();
-    // prepareStore.reserveNonce runs after checkout — make it throw to
+    // sponsoredExecutionStore.reserveNonce runs after checkout — make it throw to
     // simulate a post-checkout failure.
-    ctx.prepareStore.reserveNonce = vi.fn().mockRejectedValue(new Error('nonce store error'));
+    ctx.sponsoredExecutionStore.reserveNonce = vi
+      .fn()
+      .mockRejectedValue(new Error('nonce store error'));
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
@@ -354,17 +352,17 @@ describe('handlePrepare', () => {
   it('releases pending nonce reservation on post-checkout failure', async () => {
     const { ctx } = makeMockContext();
     // reserveNonce succeeds — a pending reservation is created
-    ctx.prepareStore.reserveNonce = vi.fn().mockResolvedValue(5n);
+    ctx.sponsoredExecutionStore.reserveNonce = vi.fn().mockResolvedValue(5n);
     // runGenericPrepareBuildPipeline fails (mid-price query) — triggers catch block after reserveNonce
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
     await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow();
 
-    // Verify releaseReservation was called with the receiptId and sender
-    expect(ctx.prepareStore.releaseReservation).toHaveBeenCalledTimes(1);
+    // Verify releaseNonceReservation was called with the receiptId and sender.
+    expect(ctx.sponsoredExecutionStore.releaseNonceReservation).toHaveBeenCalledTimes(1);
     const [reservationId, sender] = (
-      ctx.prepareStore.releaseReservation as ReturnType<typeof vi.fn>
+      ctx.sponsoredExecutionStore.releaseNonceReservation as ReturnType<typeof vi.fn>
     ).mock.calls[0];
     expect(reservationId).toMatch(/^0x[0-9a-f]{64}$/); // receiptIdHex format
     expect(sender).toBe(TEST_SENDER_ADDR);
@@ -389,7 +387,9 @@ describe('handlePrepare', () => {
 
   it('checkin called exactly once — no double-release on post-checkout failure', async () => {
     const { ctx } = makeMockContext();
-    ctx.prepareStore.reserveNonce = vi.fn().mockRejectedValue(new Error('nonce store error'));
+    ctx.sponsoredExecutionStore.reserveNonce = vi
+      .fn()
+      .mockRejectedValue(new Error('nonce store error'));
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
@@ -483,12 +483,12 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes });
 
-    ctx.prepareStore.checkUserQuota = vi.fn();
+    ctx.sponsoredExecutionStore.checkUserQuota = vi.fn();
 
     // The call will fail in later build work. The key assertion is that the
     // generic handler never invokes the promotion-only user quota.
     await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow();
-    expect(ctx.prepareStore.checkUserQuota).not.toHaveBeenCalled();
+    expect(ctx.sponsoredExecutionStore.checkUserQuota).not.toHaveBeenCalled();
   });
 
   // ── In-flight limiter rejection ───────────────────────────────────────

@@ -49,10 +49,11 @@ export {
 export type { RedisClientLike, RawRedisClient } from './store/redisClient.js';
 export { wrapRedisClient } from './store/redisClient.js';
 
-export type { PreparedTxEntry } from './store/prepareTypes.js';
-// Prepare-store production adapter. Memory adapter and store interfaces remain
-// package-internal implementation boundaries.
-export { RedisPrepareStore } from './store/redisPrepareStore.js';
+// Production receipt lifecycle and recovery. Memory implementations remain
+// package-internal test boundaries.
+export { RedisSponsoredExecutionStore } from './store/redisSponsoredExecutionStore.js';
+export { SponsoredExecutionRecovery } from './store/sponsoredExecutionRecovery.js';
+export { sponsoredExecutionPreparedRecordKeyPrefix } from './store/sponsoredExecutionRecords.js';
 export { RedisPrepareRequestNonceStore } from './store/prepareRequestNonceStore.js';
 export {
   PrepareSenderQuotaError,

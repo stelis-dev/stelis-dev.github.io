@@ -1,5 +1,11 @@
 import type { FetchLike, StelisMcpServerConfig } from './config.js';
-import { parseHostErrorResponse, type HostErrorCode, type HostErrorMeta } from '@stelis/contracts';
+import {
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
+  parseHostErrorResponse,
+  type HostErrorCode,
+  type HostErrorMeta,
+} from '@stelis/contracts';
 
 export class StelisMcpHttpError extends Error {
   constructor(
@@ -96,8 +102,8 @@ function resolveFetch(fetchFn: FetchLike | undefined): FetchLike {
 
 function resolveTimeoutMs(input: number | undefined, fallback: number): number {
   const value = input ?? fallback;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error('timeoutMs must be a positive integer.');
+  if (!isNodeTimerDelayMs(value)) {
+    throw new Error(`timeoutMs must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}.`);
   }
   return value;
 }

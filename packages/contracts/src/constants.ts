@@ -10,6 +10,22 @@ import { DEEPBOOK_MIN_OUT_ABORT } from './settlementContract.js';
 /** Largest exact integer that every current JSON/Redis Promotion consumer can represent. */
 export const MAX_PROMOTION_LEDGER_VALUE_MIST = BigInt(Number.MAX_SAFE_INTEGER);
 
+/**
+ * Largest delay accepted by Node.js timers without being truncated to a
+ * one-millisecond delay.
+ */
+export const NODE_TIMER_MAX_DELAY_MS = 2_147_483_647;
+
+/** True when `value` can be passed to a Node.js timer without coercion. */
+export function isNodeTimerDelayMs(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= NODE_TIMER_MAX_DELAY_MS
+  );
+}
+
 /** Original/runtime DeepBook ModuleId generated from the locked Pool bytecode. */
 export const DEEPBOOK_RUNTIME_PACKAGE_ID = DEEPBOOK_MIN_OUT_ABORT.runtimePackageId;
 

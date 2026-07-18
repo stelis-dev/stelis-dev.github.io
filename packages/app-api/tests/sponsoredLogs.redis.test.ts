@@ -3,33 +3,45 @@ import { startRealRedis, type RealRedisHandle } from '@stelis/core-api/testing/r
 import { RedisSponsoredLogsStore } from '../src/sponsoredLogs/redisStore.js';
 import type { SponsoredExecutionLogEntry } from '../src/sponsoredLogs/types.js';
 
+const DIGEST = '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD';
+const SENDER = `0x${'1'.repeat(64)}`;
+const SPONSOR = `0x${'2'.repeat(64)}`;
+const ORDER_ID_HASH = 'a'.repeat(64);
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+
+function canonicalReceiptId(label: string): string {
+  return `0x${Buffer.from(label).toString('hex').padEnd(64, '0').slice(0, 64)}`;
+}
+
 function knownEntry(
   overrides: Partial<SponsoredExecutionLogEntry> = {},
 ): SponsoredExecutionLogEntry {
   const mode = overrides.mode ?? 'generic';
   const promotion = mode === 'promotion';
+  const requestedNet =
+    typeof overrides.hostNetMist === 'string' ? overrides.hostNetMist : undefined;
+  const net = requestedNet === undefined ? 5_000n : BigInt(requestedNet);
   return {
-    createdAt: '2026-07-14T00:00:00.000Z',
+    createdAt: overrides.createdAt ?? '2026-07-14T00:00:00.000Z',
     mode,
-    outcome: 'success',
-    receiptId: 'receipt-1',
-    digest: '0xdigest',
-    senderAddress: '0xsender',
-    sponsorAddress: '0xsponsor',
-    executionPathKey: 'generic-execution-path',
-    orderIdHash: promotion ? null : 'order-hash',
-    promotionId: promotion ? 'promotion-1' : null,
+    outcome: overrides.outcome ?? 'success',
+    digest: DIGEST,
+    senderAddress: SENDER,
+    sponsorAddress: SPONSOR,
+    executionPathKey: overrides.executionPathKey ?? 'generic-execution-path',
+    orderIdHash: promotion ? null : ORDER_ID_HASH,
+    promotionId: promotion ? PROMOTION_ID : null,
     userId: promotion ? 'user-1' : null,
-    recoveredGasMist: '12000',
-    hostPaidGasMist: '8000',
-    hostNetMist: '5000',
-    hostFeeMist: '1000',
-    protocolFeeMist: '50',
-    grossGasMist: '9500',
-    storageRebateMist: '1500',
+    recoveredGasMist: requestedNet === undefined ? '12000' : net >= 0n ? net.toString() : '0',
+    hostPaidGasMist: requestedNet === undefined ? '8000' : net < 0n ? (-net).toString() : '0',
+    hostNetMist: requestedNet ?? '5000',
+    hostFeeMist: requestedNet === undefined ? '1000' : '0',
+    protocolFeeMist: overrides.protocolFeeMist ?? '50',
+    grossGasMist: overrides.grossGasMist ?? '9500',
+    storageRebateMist: overrides.storageRebateMist ?? '1500',
     economicsStatus: 'known',
-    failureReason: null,
-    ...overrides,
+    failureReason: overrides.failureReason ?? null,
+    receiptId: canonicalReceiptId(overrides.receiptId ?? 'receipt-1'),
   };
 }
 
@@ -86,11 +98,11 @@ describe('RedisSponsoredLogsStore — receipt identity', () => {
     await store.append(entry);
 
     await expect(store.append({ ...entry, outcome: 'onchain_revert' })).rejects.toThrow(
-      /conflicting result for receiptId receipt-1/,
+      /conflicting result for receiptId/,
     );
-    await expect(store.append({ ...entry, hostNetMist: '4999' })).rejects.toThrow(
-      /conflicting result for receiptId receipt-1/,
-    );
+    await expect(
+      store.append({ ...entry, hostFeeMist: '999', hostNetMist: '4999' }),
+    ).rejects.toThrow(/conflicting result for receiptId/);
 
     expect(await store.getSummary('all')).toMatchObject({
       sponsoredExecutions: '1',
@@ -135,11 +147,31 @@ describe('RedisSponsoredLogsStore — receipt identity', () => {
       cumulativeLossMist: '-7000',
     });
     expect((await store.getRecent('promotion', 10)).map((entry) => entry.receiptId)).toEqual([
-      'promotion-loss',
+      canonicalReceiptId('promotion-loss'),
     ]);
   });
 
-  it('sorts the retained projection, enforces its cap, and keeps replay identity beyond the cap', async () => {
+  it('keeps lifetime MIST totals exact beyond Redis signed-int64 arithmetic', async () => {
+    const store = new RedisSponsoredLogsStore(redis!.client);
+    await store.append(
+      knownEntry({ receiptId: 'positive-int64-edge', hostNetMist: '9223372036854775807' }),
+    );
+    await store.append(knownEntry({ receiptId: 'positive-over-int64', hostNetMist: '1' }));
+    await store.append(
+      knownEntry({ receiptId: 'negative-int64-edge', hostNetMist: '-9223372036854775808' }),
+    );
+    await store.append(knownEntry({ receiptId: 'negative-over-int64', hostNetMist: '-1' }));
+
+    expect(await store.getSummary('all')).toEqual({
+      mode: 'all',
+      sponsoredExecutions: '4',
+      lossCount: '2',
+      cumulativeHostNetMist: '-1',
+      cumulativeLossMist: '-9223372036854775809',
+    });
+  });
+
+  it('keeps accepted append order, enforces its cap, and keeps replay identity beyond the cap', async () => {
     const store = new RedisSponsoredLogsStore(redis!.client, { recentCap: 3 });
     const early = knownEntry({
       receiptId: 'early',
@@ -152,9 +184,9 @@ describe('RedisSponsoredLogsStore — receipt identity', () => {
     await store.append({ ...early, createdAt: '2099-01-01T00:00:00.000Z' });
 
     expect((await store.getRecent('all', 10)).map((entry) => entry.receiptId)).toEqual([
-      'latest',
-      'middle',
-      'older',
+      canonicalReceiptId('older'),
+      canonicalReceiptId('middle'),
+      canonicalReceiptId('latest'),
     ]);
     expect(await store.getSummary('all')).toMatchObject({
       sponsoredExecutions: '4',

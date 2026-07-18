@@ -21,6 +21,103 @@ import type {
   ConsumeResult,
   ReleaseResult,
 } from './domain.js';
+import type {
+  PromotionAccountingRecord,
+  PromotionEntitlementRecord,
+  PromotionOperationResultRecord,
+  PromotionReceiptStorageKeys,
+  PromotionReservationRecord,
+  PromotionReservationRecordParts,
+} from './promotionRecords.js';
+
+export interface PromotionExecutionStartPlan {
+  readonly keys: PromotionReceiptStorageKeys;
+  readonly promotionRaw: string;
+  readonly expectedReservation: PromotionReservationRecord;
+  readonly expectedReservationRaw: string;
+  readonly expectedDeadlineMs: number;
+  readonly nextReservationParts: PromotionReservationRecordParts;
+}
+
+export interface PromotionPreparedReceiptCommitPlan {
+  readonly keys: PromotionReceiptStorageKeys;
+  readonly promotionRaw: string;
+  readonly expectedReservation: PromotionReservationRecord;
+  readonly expectedReservationRaw: string;
+  readonly expectedDeadlineMs: number;
+}
+
+export interface PromotionFinalizationPlan {
+  readonly keys: PromotionReceiptStorageKeys;
+  readonly expectedReservation: PromotionReservationRecord;
+  readonly expectedReservationRaw: string;
+  /**
+   * Prepared reservations are still members of the Unit 2 deadline index.
+   * Executing reservations have transferred deadline ownership to the
+   * sponsored-execution index and therefore require this member to be absent.
+   */
+  readonly expectedDeadlineMs: number | null;
+  readonly expectedAccounting: PromotionAccountingRecord;
+  readonly expectedEntitlement: PromotionEntitlementRecord;
+  readonly nextAccounting: PromotionAccountingRecord;
+  readonly nextEntitlement: PromotionEntitlementRecord;
+  readonly result: PromotionOperationResultRecord;
+  readonly resultRaw: string;
+}
+
+export type PromotionExecutionStartPreparation =
+  | { readonly status: 'ready'; readonly plan: PromotionExecutionStartPlan }
+  | { readonly status: 'promotion_not_active' }
+  | { readonly status: 'state_changed' };
+
+export type PromotionPreparedReceiptCommitPreparation =
+  | { readonly status: 'ready'; readonly plan: PromotionPreparedReceiptCommitPlan }
+  | { readonly status: 'promotion_not_active' }
+  | { readonly status: 'state_changed' };
+
+export type PromotionFinalizationPreparation =
+  | { readonly status: 'ready'; readonly plan: PromotionFinalizationPlan }
+  | { readonly status: 'already_final'; readonly result: PromotionOperationResultRecord }
+  | { readonly status: 'state_changed' };
+
+/**
+ * Narrow record-owner boundary used by the sponsored receipt coordinator.
+ * It returns owner-built keys and exact current/next values; the coordinator
+ * supplies only the cross-record atomic mutation.
+ */
+export interface PromotionReceiptTransitionAccess {
+  preparePreparedReceiptCommit(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionPreparedReceiptCommitPreparation>;
+  prepareExecutionStart(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionExecutionStartPreparation>;
+  prepareFinalization(input: {
+    readonly receiptId: string;
+    readonly operation: 'consume' | 'release';
+    readonly chargedMist: bigint;
+    readonly usedAtMs: number;
+    readonly reservationStage: 'prepared' | 'executing';
+  }): Promise<PromotionFinalizationPreparation>;
+}
+
+/**
+ * In-memory exact-CAS operations used by the in-memory receipt coordinator.
+ * Redis performs the same plans inside the coordinator's cross-record Lua
+ * mutation and does not implement this surface.
+ */
+export interface MemoryPromotionReceiptTransitionAccess extends PromotionReceiptTransitionAccess {
+  matchesPreparedReceiptCommitPlan(plan: PromotionPreparedReceiptCommitPlan): boolean;
+  applyPreparedReceiptCommitPlan(plan: PromotionPreparedReceiptCommitPlan): boolean;
+  matchesExecutionStartPlan(plan: PromotionExecutionStartPlan): boolean;
+  applyExecutionStartPlan(plan: PromotionExecutionStartPlan, deadlineMs: number): boolean;
+  matchesFinalizationPlan(plan: PromotionFinalizationPlan): boolean;
+  applyFinalizationPlan(plan: PromotionFinalizationPlan): boolean;
+}
 
 /** Ledger fields required to project one Studio Promotion page item. */
 export interface PromotionListLedgerStatus {

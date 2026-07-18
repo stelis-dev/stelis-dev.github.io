@@ -46,7 +46,7 @@ Tools also accept `relayApiUrl`, which overrides `STELIS_RELAY_API_URL` for that
 | Variable                    | Required | Description                                                |
 | --------------------------- | -------- | ---------------------------------------------------------- |
 | `STELIS_RELAY_API_URL`      | optional | Default Relay API endpoint, ending in `/relay`.            |
-| `STELIS_REQUEST_TIMEOUT_MS` | optional | Default HTTP timeout in milliseconds. Defaults to `20000`. |
+| `STELIS_REQUEST_TIMEOUT_MS` | optional | Default HTTP timeout from `1` through `2147483647` milliseconds. Defaults to `20000`. |
 
 ## Tool Model
 

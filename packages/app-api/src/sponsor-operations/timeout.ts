@@ -1,10 +1,4 @@
-/**
- * [app-api] Sponsor operations bounded-probe helper.
- *
- * Timeout budget names, units, and required-env semantics live in
- * `docs/parameters.md` under sponsor operation environment variables. There are no code-side
- * numeric defaults for these budgets.
- */
+import { isNodeTimerDelayMs, NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
 
 export class SponsorOperationsTimeoutError extends Error {
   readonly operation: string;
@@ -19,43 +13,68 @@ export class SponsorOperationsTimeoutError extends Error {
 }
 
 /**
- * Run `task` with a bounded time budget. Rejects with `SponsorOperationsTimeoutError`
- * when the budget elapses before `task` settles; otherwise propagates the
- * task's resolved value or its rejection unchanged.
+ * Run one SponsorOperations task within a Node.js timer budget.
  *
- * Contract lock:
- * - `budgetMs` must be a finite positive number; non-conforming input throws
- *   synchronously-via-promise with a descriptive `Error`, never returns a
- *   resolved value.
- * - The internal timer is always cleared on settlement (resolve, reject, or
- *   timeout) so no dangling handle survives the call.
- * - The timer is unref'd so it never keeps the Node event loop alive.
+ * The task receives the signal owned by this boundary. A timeout or caller
+ * cancellation records the boundary reason and aborts that signal. This
+ * function waits for the task Promise to settle before reporting the recorded
+ * reason, so its returned Promise is also the task owner's completion Promise.
  */
 export async function withTimeout<T>(
   operation: string,
   budgetMs: number,
-  task: () => Promise<T>,
+  task: (signal: AbortSignal) => Promise<T>,
+  callerSignal?: AbortSignal,
 ): Promise<T> {
-  if (!Number.isSafeInteger(budgetMs) || budgetMs <= 0) {
+  if (!isNodeTimerDelayMs(budgetMs)) {
     throw new Error(
-      `withTimeout: budgetMs must be a positive safe integer, got ${String(budgetMs)}`,
+      `withTimeout: budgetMs must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}, got ${String(budgetMs)}`,
     );
   }
+  callerSignal?.throwIfAborted();
 
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let onCallerAbort: (() => void) | null = null;
+  let boundaryEnded = false;
+  let boundaryReason: unknown;
+
+  const endBoundary = (reason: unknown): void => {
+    if (boundaryEnded) return;
+    boundaryEnded = true;
+    boundaryReason = reason;
+    controller.abort(reason);
+  };
+
   try {
-    return await new Promise<T>((resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new SponsorOperationsTimeoutError(operation, budgetMs));
-      }, budgetMs);
-      if (typeof (timer as { unref?: () => void }).unref === 'function') {
-        (timer as { unref: () => void }).unref();
-      }
-      task().then(resolve, reject);
-    });
+    onCallerAbort = () => {
+      endBoundary(callerSignal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    if (callerSignal?.aborted) onCallerAbort();
+
+    timer = setTimeout(() => {
+      endBoundary(new SponsorOperationsTimeoutError(operation, budgetMs));
+    }, budgetMs);
+    timer.unref?.();
+
+    const outcome = await Promise.resolve()
+      .then(() => {
+        controller.signal.throwIfAborted();
+        return task(controller.signal);
+      })
+      .then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      );
+
+    if (boundaryEnded) throw boundaryReason;
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
   } finally {
-    if (timer !== null) {
-      clearTimeout(timer);
+    if (timer !== null) clearTimeout(timer);
+    if (onCallerAbort !== null) {
+      callerSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
 }

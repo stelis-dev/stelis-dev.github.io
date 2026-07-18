@@ -90,6 +90,7 @@ describe('current Sui gateway results at the sponsor-session boundary', () => {
       'receipt',
       TX_BYTES,
       'user-signature',
+      EXPECTED_DIGEST,
     ).catch((error: unknown) => error);
 
     expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
@@ -97,12 +98,31 @@ describe('current Sui gateway results at the sponsor-session boundary', () => {
     expect(pool.sign).toHaveBeenCalledTimes(1);
   });
 
+  test('a mismatched durable digest cannot obtain a sponsor signature', async () => {
+    const pool = sponsorPool();
+    executeSuiTransactionMock.mockClear();
+
+    await expect(
+      signAndSubmit(
+        pool,
+        SUI,
+        '0x1',
+        'receipt',
+        TX_BYTES,
+        'user-signature',
+        TransactionDataBuilder.getDigestFromBytes(new Uint8Array([9, 9, 9])),
+      ),
+    ).rejects.toThrow('digest does not match its transaction bytes');
+    expect(pool.sign).not.toHaveBeenCalled();
+    expect(executeSuiTransactionMock).not.toHaveBeenCalled();
+  });
+
   test('submission consumes one validated execution success result', async () => {
     const pool = sponsorPool();
     executeSuiTransactionMock.mockResolvedValueOnce(suiExecutionSuccess(EXPECTED_DIGEST));
 
     await expect(
-      signAndSubmit(pool, SUI, '0x1', 'receipt', TX_BYTES, 'user-signature'),
+      signAndSubmit(pool, SUI, '0x1', 'receipt', TX_BYTES, 'user-signature', EXPECTED_DIGEST),
     ).resolves.toMatchObject({
       success: true,
       executionStage: 'on_chain',
@@ -111,6 +131,7 @@ describe('current Sui gateway results at the sponsor-session boundary', () => {
     expect(pool.sign).toHaveBeenCalledWith('0x1', 'receipt', TX_BYTES);
     expect(executeSuiTransactionMock).toHaveBeenCalledWith(SUI, {
       transaction: TX_BYTES,
+      expectedDigest: EXPECTED_DIGEST,
       signatures: ['user-signature', 'sponsor-signature'],
     });
   });

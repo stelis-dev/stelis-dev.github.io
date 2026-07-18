@@ -8,6 +8,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
 import { parsePromotionPrepareResponse, parsePromotionSponsorResponse } from '@stelis/contracts';
+import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
+
+const SPONSOR_OPERATIONS_SETTINGS = createTestSponsorOperationsSettings();
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────
 const {
@@ -233,7 +236,6 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
           slots: [{ address: '0xslot', leased: false }],
         }),
       } as never,
-      prepareStore: {} as never,
       prepareInflightLimiter: {
         tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
         inflight: 0,
@@ -256,27 +258,29 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
     abuseStore: {} as never,
     sponsorOperations: {
       readState: vi.fn().mockResolvedValue({
+        settings: SPONSOR_OPERATIONS_SETTINGS,
         slots: [
           {
             address: '0xslot',
             state: 'healthy',
-            balanceMist: '10000000000',
+            addressBalanceMist: '10000000000',
+            observationFresh: true,
             lastError: null,
             lastObservedAtMs: 1_700_000_000_000,
             writeSeq: 1,
           },
         ],
         sponsorRefillAccount: {
-          balanceMist: '20000000000',
+          totalBalanceMist: '20000000000',
           healthy: true,
-          refillsRemaining: 2,
+          observationFresh: true,
           lastError: null,
           lastObservedAtMs: 1_700_000_000_000,
           writeSeq: 1,
         },
       }),
-      probeSponsorRefillAccount: vi.fn().mockResolvedValue(undefined),
-      requestRefill: vi.fn(),
+      settings: SPONSOR_OPERATIONS_SETTINGS,
+      observeBalances: vi.fn().mockResolvedValue(undefined),
       slotAddresses: ['0xslot'],
       sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
       dispose: vi.fn(),
@@ -521,7 +525,7 @@ describe('studio routes', () => {
       expect(ctx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(mockBuildSponsorOperationsBlockedResponse).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ requireFreeSponsorSlot: true }),
+        expect.objectContaining({ freeSlots: 1 }),
       );
     });
 
@@ -685,22 +689,6 @@ describe('studio routes', () => {
       const res = await app.request('/studio/promotions/promo-1/sponsor', {
         method: 'POST',
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
-    });
-
-    it('returns 503 (not 401) when sponsor operations gate is closed AND Authorization is missing', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        headers: {},
-        errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
-      });
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(503);
@@ -896,23 +884,6 @@ describe('studio routes', () => {
       const body = await res.json();
       expect(body.code).toBe('PREFLIGHT_FAILED');
       expect(body.subcode).toBeUndefined();
-    });
-
-    it('returns 503 when the sponsor operations gate is closed', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
-        headers: {},
-      });
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
-      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
     });
 
     it('returns 401 AUTH_JWT_INVALID when local developer JWT verification fails', async () => {

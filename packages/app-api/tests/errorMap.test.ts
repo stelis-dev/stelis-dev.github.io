@@ -79,6 +79,13 @@ describe('contracts-owned Host error projection', () => {
     ).toBeNull();
   });
 
+  it('keeps aggregate refill-account health errors on prepare routes only', () => {
+    expect(RELAY_PREPARE_ERROR_CODES).toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(PROMOTION_PREPARE_ERROR_CODES).toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(RELAY_SPONSOR_ERROR_CODES).not.toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(PROMOTION_SPONSOR_ERROR_CODES).not.toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+  });
+
   it('projects the bounded Coin object read rejection through the Relay prepare boundary', () => {
     expect(
       mapRelayPrepare(
@@ -197,13 +204,6 @@ describe('code-bound metadata', () => {
     ).toMatchObject({ code: 'SPONSOR_CONGESTION', digest: '0xpromotion-congestion' });
     expect(
       mapPromotionSponsor(
-        new PromotionSponsorError('consume failed', 'CONSUME_FAILED', {
-          digest: '0xpromotion-consume',
-        }),
-      )?.body,
-    ).toMatchObject({ code: 'CONSUME_FAILED', digest: '0xpromotion-consume' });
-    expect(
-      mapPromotionSponsor(
         new PromotionSponsorError('submission uncertain', 'SPONSOR_SUBMISSION_UNCERTAIN', {
           digest: '0xpromotion-unknown',
         }),
@@ -214,14 +214,12 @@ describe('code-bound metadata', () => {
     });
   });
 
-  it.each([
-    'ONCHAIN_REVERT',
-    'SPONSOR_CONGESTION',
-    'SPONSOR_SUBMISSION_UNCERTAIN',
-    'CONSUME_FAILED',
-  ] as const)('rejects %s without its required digest', (code) => {
-    expect(mapPromotionSponsor(new PromotionSponsorError('terminal failure', code))).toBeNull();
-  });
+  it.each(['ONCHAIN_REVERT', 'SPONSOR_CONGESTION', 'SPONSOR_SUBMISSION_UNCERTAIN'] as const)(
+    'rejects %s without its required digest',
+    (code) => {
+      expect(mapPromotionSponsor(new PromotionSponsorError('terminal failure', code))).toBeNull();
+    },
+  );
 });
 
 describe('direct Host response serializer', () => {

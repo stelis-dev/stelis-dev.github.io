@@ -92,7 +92,7 @@ export interface ArgIndexMap {
  * Derive ArgIndexMap from one compiled production settlement function.
  * Covers every field in SETTLE_FIELD_SCHEMA so
  * that sponsor-side logic can derive all execution-critical values from the
- * submitted `txBytes` instead of the off-chain prepare store.
+ * submitted `txBytes` instead of a separately stored interpretation.
  */
 function deriveArgIndexMap(functionName: string): ArgIndexMap {
   const entry = (

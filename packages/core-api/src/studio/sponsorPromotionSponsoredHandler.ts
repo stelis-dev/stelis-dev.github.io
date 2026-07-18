@@ -13,7 +13,7 @@ import {
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../store/sponsoredExecutionStore.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
 import type {
@@ -25,7 +25,9 @@ import type {
 import {
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
-  createStudioSponsorConsumeAdapter,
+  createStudioSponsorReceiptPolicy,
+  buildStudioExecutionRecoveryContext,
+  buildStudioSponsorResultMetadata,
   projectStudioSponsorResult,
 } from '../session/sponsoredExecution/studioExecutionPolicy.js';
 import { runSponsorStateMachine } from '../session/sponsoredExecution/sponsorRunner.js';
@@ -54,14 +56,16 @@ export interface PromotionSponsorContext {
   executionLedger: PromotionExecutionLedger;
   /** Sponsor pool — sign TX + checkin. */
   sponsorPool: SponsorPoolAdapter;
-  /** Prepare store — consume receipt. */
-  prepareStore: PrepareStoreAdapter;
+  /** Fresh availability check for the sponsor already assigned to the receipt. */
+  isSponsorAddressAvailable(sponsorAddress: string): Promise<boolean>;
+  /** Receipt store — owns prepared, executing, and final state. */
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /** Abuse blocker — for recording sponsor failures. */
   abuseBlocker: AbuseBlockerAdapter;
   /** Canonical STUDIO_ALLOWED_TARGETS entries for Host-level MoveCall enforcement. */
   globalAllowedTargets: ReadonlySet<string>;
-  /** Optional host-provided sponsor result callback. */
-  onSponsorResult?: SponsorResultCallback;
+  /** Host-provided sponsor result callback. */
+  onSponsorResult: SponsorResultCallback;
 }
 
 /** Request parameters for promotion sponsor. */
@@ -135,10 +139,11 @@ export async function handlePromotionSponsor(
   try {
     return await runSponsorStateMachine(
       {
-        prepareStore: ctx.prepareStore,
-        sponsorPool: ctx.sponsorPool,
-        executionLedger: ctx.executionLedger,
+        store: ctx.sponsoredExecutionStore,
         signAndSubmit: createStudioSignAndSubmitPort(options, state),
+        endpointCount: ctx.sui.endpointCount,
+        onSponsorResult: ctx.onSponsorResult,
+        isSponsorAddressAvailable: ctx.isSponsorAddressAvailable,
       },
       {
         hookContext: {
@@ -147,10 +152,17 @@ export async function handlePromotionSponsor(
         },
         txBytes,
         userSignature: params.userSignature,
+        buildRecoveryContext: () => buildStudioExecutionRecoveryContext(state),
+        buildResultMetadata: (stage) => buildStudioSponsorResultMetadata(state, stage),
+        stateChangedError: () =>
+          new PromotionSponsorError(
+            'Prepared receipt state changed - retry promotion prepare',
+            'REPREPARE_REQUIRED',
+          ),
         projectResult: () => projectStudioSponsorResult(options, state),
       },
       policy,
-      createStudioSponsorConsumeAdapter({
+      createStudioSponsorReceiptPolicy({
         context: ctx,
         params,
         state,

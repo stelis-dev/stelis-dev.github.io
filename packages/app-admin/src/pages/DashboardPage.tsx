@@ -28,10 +28,10 @@ import type { AuthContext } from '../components/AuthGuard';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function formatOptionalMistToSui(balanceMist: string | null | undefined): string | null {
-  if (balanceMist == null) return null;
+function formatOptionalMistToSui(amountMist: string | null | undefined): string | null {
+  if (amountMist == null) return null;
   try {
-    return formatMistToSui(balanceMist);
+    return formatMistToSui(amountMist);
   } catch {
     return null;
   }
@@ -477,11 +477,9 @@ export function DashboardPage() {
   const sponsorOperations = data.sponsorOperations;
   const sponsorRefillAccountAddress = sponsorOperations.sponsorRefillAccount.address;
   const sponsorRefillAccountBalanceSui = formatOptionalMistToSui(
-    sponsorOperations.sponsorRefillAccount.balanceMist,
+    sponsorOperations.sponsorRefillAccount.totalBalanceMist,
   );
-  const sponsorRefillAccountRefillsRemaining =
-    sponsorOperations.sponsorRefillAccount.refillsRemaining;
-  const healthySlots = sponsorOperations.availableSlots;
+  const healthySlots = sponsorOperations.healthySlots;
   const degradedSlots = sponsorOperations.degradedSlots;
   const leasedSlots = sponsorOperations.slotLeases.leasedSlots;
   const freeSlots = sponsorOperations.slotLeases.freeSlots;
@@ -582,7 +580,7 @@ export function DashboardPage() {
               fontWeight: 700,
               marginTop: 6,
             }}
-            title="Sponsor operations gate closes /prepare + /sponsor with 503 when no healthy sponsor slot is available."
+            title="The aggregate sponsor operations gate closes /prepare with 503 when no healthy, free sponsor slot is available. /sponsor checks the exact slot already leased to its receipt."
           >
             {gatePaused ? `Closed — ${gateReason ?? 'unknown'}` : 'Open'}
           </div>
@@ -642,17 +640,10 @@ export function DashboardPage() {
               <td
                 style={{
                   fontWeight: 600,
-                  color:
-                    (sponsorRefillAccountRefillsRemaining ?? 0) > 2
-                      ? '#22c55e'
-                      : (sponsorRefillAccountRefillsRemaining ?? 0) > 0
-                        ? '#f59e0b'
-                        : '#ef4444',
+                  color: sponsorOperations.sponsorRefillAccount.healthy ? '#22c55e' : '#ef4444',
                 }}
               >
-                {sponsorRefillAccountRefillsRemaining != null
-                  ? `${sponsorRefillAccountRefillsRemaining} refills`
-                  : '—'}
+                {sponsorOperations.sponsorRefillAccount.healthy ? 'Healthy' : 'Unavailable'}
               </td>
             </tr>
             {sponsorOperations?.slots.map((slot) => {
@@ -663,7 +654,7 @@ export function DashboardPage() {
                   <td style={{ fontFamily: 'monospace', fontSize: 13 }} title={slot.address}>
                     {truncateAddress(slot.address)} <CopyButton value={slot.address} />
                   </td>
-                  <td>{formatOptionalMistToSui(slot.balanceMist) ?? '—'}</td>
+                  <td>{formatOptionalMistToSui(slot.addressBalanceMist) ?? '—'}</td>
                   <td
                     style={{
                       color: leased === undefined ? '#64748b' : leased ? '#f59e0b' : '#22c55e',
@@ -674,11 +665,11 @@ export function DashboardPage() {
                   </td>
                   <td
                     style={{
-                      color: slot.state !== null ? SLOT_STATE_COLOR[slot.state] : '#64748b',
+                      color: SLOT_STATE_COLOR[slot.state],
                       fontWeight: 600,
                     }}
                   >
-                    {slot.state !== null ? SLOT_STATE_LABEL[slot.state] : '—'}
+                    {SLOT_STATE_LABEL[slot.state]}
                   </td>
                 </tr>
               );

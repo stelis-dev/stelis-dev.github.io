@@ -1,7 +1,14 @@
 import type {
   PromotionExecutionLedger,
+  PromotionExecutionStartPlan,
+  PromotionExecutionStartPreparation,
+  PromotionPreparedReceiptCommitPlan,
+  PromotionPreparedReceiptCommitPreparation,
+  PromotionFinalizationPlan,
+  PromotionFinalizationPreparation,
   PromotionLedgerStatus,
   PromotionListLedgerStatus,
+  MemoryPromotionReceiptTransitionAccess,
 } from './executionLedger.js';
 import {
   assertPromotionListLedgerBatchBound,
@@ -28,6 +35,7 @@ import {
   assertPromotionOperationResultIdentity,
   assertPromotionReservationAccountingState,
   assertPromotionReservationIdentity,
+  createPromotionReservationRecordParts,
   createPromotionClaimTransition,
   createPromotionFinalizeTransition,
   createPromotionReserveTransition,
@@ -37,6 +45,8 @@ import {
   decodePromotionReservationRecord,
   promotionEntitlementFromRecord,
   promotionEntitlementKey,
+  promotionReceiptStorageKeys,
+  materializePromotionReservationRecord,
   serializePromotionAccountingRecord,
   serializePromotionEntitlementRecord,
   serializePromotionOperationResultRecord,
@@ -67,10 +77,13 @@ function cloneResult(record: PromotionOperationResultRecord): PromotionOperation
   return decodePromotionOperationResultRecord(serializePromotionOperationResultRecord(record));
 }
 
-export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger {
+export class MemoryPromotionExecutionLedger
+  implements PromotionExecutionLedger, MemoryPromotionReceiptTransitionAccess
+{
   private readonly accounting = new Map<string, PromotionAccountingRecord>();
   private readonly entitlements = new Map<string, PromotionEntitlementRecord>();
   private readonly reservations = new Map<string, PromotionReservationRecord>();
+  private readonly sponsoredReceiptReservations = new Set<string>();
   private readonly operationResults = new Map<string, PromotionOperationResultRecord>();
   private runningSweepBatch: Promise<number> | null = null;
 
@@ -91,6 +104,259 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     const current = this.promotionStore.readCurrentSync(promotionId);
     if (current === null || current.promotion.status !== 'active') return 'not_active';
     return current;
+  }
+
+  async preparePreparedReceiptCommit(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionPreparedReceiptCommitPreparation> {
+    const current = this.promotionStore.readCurrentSync(input.promotionId);
+    if (current === null || current.promotion.status !== 'active') {
+      return { status: 'promotion_not_active' };
+    }
+    const stored = this.reservations.get(input.receiptId);
+    if (!stored) return { status: 'state_changed' };
+    const reservation = cloneReservation(stored);
+    if (
+      reservation.promotionId !== input.promotionId ||
+      reservation.userId !== input.userId ||
+      this.sponsoredReceiptReservations.has(input.receiptId)
+    ) {
+      return { status: 'state_changed' };
+    }
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(
+      input.promotionId,
+      input.userId,
+      current,
+    );
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionReservationAccountingState(accounting, entitlement, reservation);
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: input.promotionId,
+          userId: input.userId,
+          receiptId: input.receiptId,
+          promotionRecordKey: `memory:promotion:${input.promotionId}`,
+        }),
+        promotionRaw: current.serialized,
+        expectedReservation: reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(reservation),
+        expectedDeadlineMs: reservation.deadlineMs,
+      },
+    };
+  }
+
+  matchesPreparedReceiptCommitPlan(plan: PromotionPreparedReceiptCommitPlan): boolean {
+    const current = this.reservations.get(plan.expectedReservation.receiptId);
+    const promotion = this.promotionStore.readCurrentSync(plan.expectedReservation.promotionId);
+    return Boolean(
+      current &&
+      promotion?.serialized === plan.promotionRaw &&
+      !this.sponsoredReceiptReservations.has(plan.expectedReservation.receiptId) &&
+      serializePromotionReservationRecord(current) === plan.expectedReservationRaw &&
+      current.deadlineMs === plan.expectedDeadlineMs,
+    );
+  }
+
+  applyPreparedReceiptCommitPlan(plan: PromotionPreparedReceiptCommitPlan): boolean {
+    if (!this.matchesPreparedReceiptCommitPlan(plan)) return false;
+    this.sponsoredReceiptReservations.add(plan.expectedReservation.receiptId);
+    return true;
+  }
+
+  async prepareExecutionStart(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionExecutionStartPreparation> {
+    const current = this.promotionStore.readCurrentSync(input.promotionId);
+    if (current === null || current.promotion.status !== 'active') {
+      return { status: 'promotion_not_active' };
+    }
+    const stored = this.reservations.get(input.receiptId);
+    if (!stored) return { status: 'state_changed' };
+    const reservation = cloneReservation(stored);
+    if (reservation.promotionId !== input.promotionId || reservation.userId !== input.userId) {
+      return { status: 'state_changed' };
+    }
+    const { accounting, entitlement } = this.readLedgerStateSnapshot(
+      input.promotionId,
+      input.userId,
+      current,
+    );
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation is missing accounting or entitlement state',
+      );
+    }
+    assertPromotionReservationAccountingState(accounting, entitlement, reservation);
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: input.promotionId,
+          userId: input.userId,
+          receiptId: input.receiptId,
+          promotionRecordKey: `memory:promotion:${input.promotionId}`,
+        }),
+        promotionRaw: current.serialized,
+        expectedReservation: reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(reservation),
+        expectedDeadlineMs: reservation.deadlineMs,
+        nextReservationParts: createPromotionReservationRecordParts({
+          receiptId: reservation.receiptId,
+          promotionId: reservation.promotionId,
+          userId: reservation.userId,
+          amountMist: reservation.amountMist,
+        }),
+      },
+    };
+  }
+
+  async prepareFinalization(input: {
+    readonly receiptId: string;
+    readonly operation: 'consume' | 'release';
+    readonly chargedMist: bigint;
+    readonly usedAtMs: number;
+    readonly reservationStage: 'prepared' | 'executing';
+  }): Promise<PromotionFinalizationPreparation> {
+    assertNonNegativeMist(input.chargedMist, 'chargedMist');
+    assertWithinLedgerBound(input.chargedMist, 'chargedMist');
+    if (input.operation === 'release' && input.chargedMist !== 0n) {
+      throw new Error('Promotion release chargedMist must be zero');
+    }
+    if (!Number.isSafeInteger(input.usedAtMs) || input.usedAtMs <= 0) {
+      throw new Error('Promotion finalization usedAtMs must be a positive safe integer');
+    }
+    const existingResult = this.operationResults.get(input.receiptId);
+    const stored = this.reservations.get(input.receiptId);
+    if (existingResult && stored) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion receipt has both a reservation and a final operation result',
+      );
+    }
+    if (existingResult) {
+      const currentResult = await this.validateOperationResult(existingResult, input.receiptId);
+      return { status: 'already_final', result: cloneResult(currentResult) };
+    }
+    if (!stored) return { status: 'state_changed' };
+    const reservation = cloneReservation(stored);
+    const key = promotionEntitlementKey(reservation.promotionId, reservation.userId);
+    const accounting = this.accounting.get(reservation.promotionId);
+    const entitlement = this.entitlements.get(key);
+    if (!accounting || !entitlement) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion reservation is missing accounting or entitlement state',
+      );
+    }
+    const expectedAccounting = cloneAccounting(accounting);
+    const expectedEntitlement = cloneEntitlement(entitlement);
+    assertPromotionReservationAccountingState(expectedAccounting, expectedEntitlement, reservation);
+    const transition = createPromotionFinalizeTransition({
+      accounting: expectedAccounting,
+      entitlement: expectedEntitlement,
+      reservation,
+      operation: input.operation,
+      chargedMist: input.operation === 'consume' ? input.chargedMist : 0n,
+      usedAt: input.operation === 'consume' ? new Date(input.usedAtMs).toISOString() : null,
+    });
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: reservation.promotionId,
+          userId: reservation.userId,
+          receiptId: reservation.receiptId,
+          promotionRecordKey: `memory:promotion:${reservation.promotionId}`,
+        }),
+        expectedReservation: reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(reservation),
+        expectedDeadlineMs: input.reservationStage === 'prepared' ? reservation.deadlineMs : null,
+        expectedAccounting,
+        expectedEntitlement,
+        nextAccounting: transition.accounting,
+        nextEntitlement: transition.entitlement,
+        result: transition.result,
+        resultRaw: serializePromotionOperationResultRecord(transition.result),
+      },
+    };
+  }
+
+  /** Internal synchronous exact comparison used before a cross-record mutation. */
+  matchesExecutionStartPlan(plan: PromotionExecutionStartPlan): boolean {
+    const current = this.reservations.get(plan.expectedReservation.receiptId);
+    if (
+      !current ||
+      !this.sponsoredReceiptReservations.has(plan.expectedReservation.receiptId) ||
+      serializePromotionReservationRecord(current) !== plan.expectedReservationRaw
+    ) {
+      return false;
+    }
+    const promotion = this.promotionStore.readCurrentSync(current.promotionId);
+    return Boolean(promotion && promotion.serialized === plan.promotionRaw);
+  }
+
+  /** Internal synchronous exact-CAS used by MemorySponsoredExecutionStore. */
+  applyExecutionStartPlan(plan: PromotionExecutionStartPlan, deadlineMs: number): boolean {
+    if (!this.matchesExecutionStartPlan(plan)) return false;
+    const current = this.reservations.get(plan.expectedReservation.receiptId)!;
+    const next = materializePromotionReservationRecord(plan.nextReservationParts, deadlineMs);
+    this.reservations.set(current.receiptId, cloneReservation(next.record));
+    return true;
+  }
+
+  /** Internal synchronous exact comparison used before a cross-record mutation. */
+  matchesFinalizationPlan(plan: PromotionFinalizationPlan): boolean {
+    const reservation = this.reservations.get(plan.expectedReservation.receiptId);
+    const accounting = this.accounting.get(plan.expectedReservation.promotionId);
+    const entitlementKey = promotionEntitlementKey(
+      plan.expectedReservation.promotionId,
+      plan.expectedReservation.userId,
+    );
+    const entitlement = this.entitlements.get(entitlementKey);
+    if (
+      !reservation ||
+      !accounting ||
+      !entitlement ||
+      serializePromotionReservationRecord(reservation) !== plan.expectedReservationRaw
+    ) {
+      return false;
+    }
+    const actualAccounting = serializePromotionAccountingRecord(accounting);
+    const expectedAccounting = serializePromotionAccountingRecord(plan.expectedAccounting);
+    const actualEntitlement = serializePromotionEntitlementRecord(entitlement);
+    const expectedEntitlement = serializePromotionEntitlementRecord(plan.expectedEntitlement);
+    return (
+      Object.keys(expectedAccounting).every(
+        (field) => actualAccounting[field] === expectedAccounting[field],
+      ) &&
+      Object.keys(expectedEntitlement).every(
+        (field) => actualEntitlement[field] === expectedEntitlement[field],
+      )
+    );
+  }
+
+  /** Internal synchronous exact-CAS used by MemorySponsoredExecutionStore. */
+  applyFinalizationPlan(plan: PromotionFinalizationPlan): boolean {
+    if (!this.matchesFinalizationPlan(plan)) return false;
+    const reservation = this.reservations.get(plan.expectedReservation.receiptId)!;
+    const entitlementKey = promotionEntitlementKey(
+      plan.expectedReservation.promotionId,
+      plan.expectedReservation.userId,
+    );
+    this.accounting.set(reservation.promotionId, cloneAccounting(plan.nextAccounting));
+    this.entitlements.set(entitlementKey, cloneEntitlement(plan.nextEntitlement));
+    this.reservations.delete(reservation.receiptId);
+    this.sponsoredReceiptReservations.delete(reservation.receiptId);
+    this.operationResults.set(reservation.receiptId, cloneResult(plan.result));
+    return true;
   }
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
@@ -256,6 +522,7 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     this.entitlements.set(key, transition.entitlement);
     this.accounting.set(reservation.promotionId, transition.accounting);
     this.reservations.delete(reservation.receiptId);
+    this.sponsoredReceiptReservations.delete(reservation.receiptId);
     this.operationResults.set(reservation.receiptId, transition.result);
     return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
   }
@@ -276,6 +543,9 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
       return { ok: true, entitlement: promotionEntitlementFromRecord(currentResult.entitlement) };
     }
     if (!reservation) return { ok: false, reason: 'reservation_not_found' };
+    if (this.sponsoredReceiptReservations.has(receiptId)) {
+      return { ok: false, reason: 'record_changed' };
+    }
     const currentReservation = cloneReservation(reservation);
     assertPromotionReservationIdentity(currentReservation, receiptId);
     return this.applyRelease(currentReservation);
@@ -304,6 +574,7 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
     this.entitlements.set(key, transition.entitlement);
     this.accounting.set(reservation.promotionId, transition.accounting);
     this.reservations.delete(reservation.receiptId);
+    this.sponsoredReceiptReservations.delete(reservation.receiptId);
     this.operationResults.set(reservation.receiptId, transition.result);
     return { ok: true, entitlement: promotionEntitlementFromRecord(transition.entitlement) };
   }
@@ -442,6 +713,7 @@ export class MemoryPromotionExecutionLedger implements PromotionExecutionLedger 
         return current;
       })
       .filter((record) => record.deadlineMs <= now)
+      .filter((record) => !this.sponsoredReceiptReservations.has(record.receiptId))
       .sort(
         (left, right) =>
           left.deadlineMs - right.deadlineMs ||

@@ -116,7 +116,7 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Sponsor slots with balance below this value are classified `low_balance` in the shared sponsor operations state and become refill candidates (env: SPONSOR_BALANCE_WARN_MIST)"
+                  title="Sponsor addresses with a fresh balance observation below this value are classified `low_balance` when SponsorOperations status is calculated and become refill candidates (env: SPONSOR_BALANCE_WARN_MIST)"
                 >
                   Low-balance Threshold
                 </td>
@@ -132,7 +132,22 @@ export function ConfigPage() {
                   Refill Target
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.sponsorBalanceRefillTargetMist} />
+                  {data.sponsorBalanceRefillTargetMist === null ? (
+                    <span style={{ color: '#64748b' }}>Not configured</span>
+                  ) : (
+                    <SuiAmount mist={data.sponsorBalanceRefillTargetMist} />
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style={{ cursor: 'help' }}
+                  title="Minimum Sponsor Refill Account balance retained per configured sponsor address after a refill or withdrawal"
+                >
+                  Minimum Balance per Sponsor
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <SuiAmount mist={data.sponsorRefillAccountRunwayTargetMist} />
                 </td>
               </tr>
             </tbody>

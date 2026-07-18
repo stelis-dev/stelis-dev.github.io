@@ -8,7 +8,7 @@
  * Contract addresses (configId, vaultRegistryId, deepbookPackageId, deepType) are resolved
  * from SDK built-in constants in @stelis/contracts — not from the Relay API response.
  */
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { toBase64, toHex } from '@mysten/sui/utils';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
@@ -16,7 +16,6 @@ import { buildWithdrawPtb } from './ptb.js';
 import { StelisClient, StelisApiException } from './client.js';
 import {
   queryUserCredit as queryUserCreditThroughGateway,
-  CreditQueryInconsistentStateError,
   type CreditResult,
 } from '@stelis/core-relay/browser';
 import { verifyPtbIntegrity, verifyPromotionPtbIntegrity } from './integrity.js';
@@ -636,34 +635,11 @@ export class StelisSDK {
     const totalCostSui = formatSmallestUnitDecimal(totalCost, SUI_DECIMALS, 9);
     opts.onGasEstimate?.(totalCost, totalCostSui, 'SUI');
 
-    // Query vault for vaultId (informational only — must never abort after successful /prepare).
-    // Policy: all errors are tolerated because receiptId and txBytes are already issued.
-    // Rethrowing here would waste the prepared slot and force the user to re-prepare.
-    // Unexpected errors are logged so they are visible in dev without breaking the flow.
-    let vaultId: string | null = null;
-    try {
-      const credit = await queryUserCreditThroughGateway(
-        endpoints,
-        this._packageId,
-        this._vaultRegistryId,
-        opts.addr,
-      );
-      vaultId = credit.vaultObjectId;
-    } catch (err) {
-      const expected =
-        err instanceof CreditQueryInconsistentStateError || err instanceof SuiOperationError;
-      if (!expected) {
-        // eslint-disable-next-line no-console
-        console.warn('[StelisSDK] post-prepare vault query failed with an unexpected local error');
-      }
-    }
-
     return {
       txBytes: prepareRes.txBytes,
       receiptId: prepareRes.receiptId,
       cost: prepareRes.cost,
       profile: prepareRes.profile,
-      vaultId,
       totalCostMist: totalCost,
       totalCostSui,
       orderId: prepareRes.orderId,
@@ -735,7 +711,6 @@ export class StelisSDK {
         digest: sponsorRes.digest,
         effects: sponsorRes.effects,
         cost: prepared.cost,
-        vaultId: prepared.vaultId,
         totalCostMist: prepared.totalCostMist,
         totalCostSui: prepared.totalCostSui,
         orderId: sponsorRes.orderId,
@@ -820,9 +795,11 @@ export class StelisSDK {
       const directTx = Transaction.from(tx); // clone — do not mutate original
       directTx.setGasBudget(gasBudget);
       const builtBytes = await buildSuiTransaction(endpoints, { transaction: directTx });
+      const expectedDigest = TransactionDataBuilder.getDigestFromBytes(builtBytes);
       const signature = await opts.signer(toBase64(builtBytes));
       const res = await executeSuiTransaction(endpoints, {
         transaction: builtBytes, // Uint8Array
+        expectedDigest,
         signatures: [signature],
       });
       if (res.outcome === 'failure') {

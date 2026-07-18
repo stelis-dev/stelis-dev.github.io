@@ -1,5 +1,5 @@
 /**
- * Shared error classes for the prepare store layer.
+ * Shared error classes for prepared receipt admission and commit.
  *
  * Kept in the store layer so that both store adapters (memory, Redis) and
  * the prepare runner / public handler adapter and host routes can import from a single
@@ -12,14 +12,14 @@
  */
 
 /**
- * Thrown by `PrepareStoreAdapter.store()` when the verified developer
+ * Thrown when the sponsored execution store commits a prepared receipt and the verified developer
  * JWT `userId` has reached the maximum number of outstanding
  * promotion-mode prepared transactions. Studio promotion is the only
- * route family that enforces outstanding-prepare quota; generic
- * `/relay/prepare` skips quota because no pre-verified principal exists.
+ * route family that enforces a developer-user quota. Generic
+ * `/relay/prepare` separately enforces a quota on the verified sender.
  *
- * The slot is NOT released inside `store()` — the prepare runner is the
- * single owner of slot cleanup to avoid double-checkin.
+ * The store does not release a provisional sponsor slot when commit fails.
+ * The prepare runner owns reverse-order cleanup until commit succeeds.
  */
 export class PrepareStudioUserQuotaError extends Error {
   readonly code = 'PREPARE_STUDIO_USER_QUOTA_EXCEEDED';
@@ -33,7 +33,7 @@ export class PrepareStudioUserQuotaError extends Error {
 }
 
 /**
- * Thrown by `PrepareStoreAdapter.reserveNonce()` when a verified wallet
+ * Thrown by the sponsored execution store when a verified wallet
  * sender already has too many live or pending generic prepare entries.
  *
  * This quota is enforced only after prepare authorization proves control

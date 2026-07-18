@@ -10,7 +10,7 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { ChainBoundSuiEndpointSnapshot } from '@stelis/core-relay';
 import { createHostContext, SponsorPool, type HostContext } from '../src/context.js';
 import type { HostChainState } from '../src/hostChainState.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import { MemorySponsoredExecutionStore } from '../src/store/memorySponsoredExecutionStore.js';
 import { MemoryPrepareRequestNonceStore } from '../src/store/prepareRequestNonceStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryRateLimiter } from '../src/store/memoryRateLimiter.js';
@@ -76,11 +76,12 @@ function makeContext(
     readonly configCacheTtlMs?: number;
   } = {},
 ): HostContext {
+  const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   return createHostContext({
     network: 'testnet',
     sui: options.sui ?? makeSuiSnapshot(),
-    sponsorPool: new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET }),
-    prepareStore: new MemoryPrepareStore(() => Promise.resolve()),
+    sponsorPool,
+    sponsoredExecutionStore: new MemorySponsoredExecutionStore(sponsorPool, undefined),
     prepareRequestNonceStore: new MemoryPrepareRequestNonceStore(),
     prepareInflightLimiter: new MemoryPrepareInflight(2),
     rateLimiter: new MemoryRateLimiter({ windowMs: 60_000, maxRequests: 20 }),
@@ -92,14 +93,16 @@ function makeContext(
     settlementPayoutRecipientAddress: RECIPIENT_ADDRESS,
     initialChainState: options.initialChainState ?? makeInitialChainState(),
     configCacheTtlMs: options.configCacheTtlMs,
+    onSponsorResult: async () => {},
+    isSponsorAddressAvailable: async () => true,
   });
 }
 
 describe('getConfig singleflight', () => {
   let context: HostContext | undefined;
 
-  afterEach(() => {
-    context?.dispose();
+  afterEach(async () => {
+    await context?.dispose();
     gateway.getSuiObject.mockReset();
   });
 
@@ -143,8 +146,8 @@ describe('getConfig singleflight', () => {
 describe('boot-qualified Host inputs', () => {
   let context: HostContext | undefined;
 
-  afterEach(() => {
-    context?.dispose();
+  afterEach(async () => {
+    await context?.dispose();
     gateway.getSuiObject.mockReset();
   });
 

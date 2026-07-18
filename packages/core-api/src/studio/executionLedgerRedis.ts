@@ -1,10 +1,15 @@
+import { isNodeTimerDelayMs, NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
 import type { RedisClientLike } from '../store/redisClient.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PROMOTION_EXECUTION_LEDGER_REAPER_ERROR } from '../observability/events.js';
 import type {
   PromotionExecutionLedger,
+  PromotionFinalizationPreparation,
   PromotionLedgerStatus,
   PromotionListLedgerStatus,
+  PromotionReceiptTransitionAccess,
+  PromotionExecutionStartPreparation,
+  PromotionPreparedReceiptCommitPreparation,
 } from './executionLedger.js';
 import {
   assertPromotionListLedgerBatchBound,
@@ -38,6 +43,7 @@ import {
   assertPromotionReservationIdentity,
   createPromotionClaimTransition,
   createPromotionFinalizeTransition,
+  createPromotionReservationRecordParts,
   createPromotionReserveStateChange,
   createPromotionReserveTransition,
   decodePromotionAccountingRecord,
@@ -54,6 +60,7 @@ import {
   promotionReservationDeadlineMember,
   promotionReservationKey,
   promotionReservationKeyPrefix,
+  promotionReceiptStorageKeys,
   PROMOTION_ACCOUNTING_RECORD_FIELD_COUNT,
   PROMOTION_ENTITLEMENT_RECORD_FIELD_COUNT,
   samePromotionAccountingRecord,
@@ -373,7 +380,14 @@ function reserveRecord(value: unknown): {
   return { ...record, score: null };
 }
 
-type FinalizeRecordTag = 'STATE_CHANGED' | 'APPLIED' | 'RESULT' | 'MISSING' | 'CHANGED' | 'CORRUPT';
+type FinalizeRecordTag =
+  | 'STATE_CHANGED'
+  | 'APPLIED'
+  | 'RESULT'
+  | 'MISSING'
+  | 'CHANGED'
+  | 'PROTECTED'
+  | 'CORRUPT';
 
 function finalizeRecord(value: unknown): {
   tag: FinalizeRecordTag;
@@ -384,7 +398,7 @@ function finalizeRecord(value: unknown): {
   return ledgerStateRecord(
     value,
     ['STATE_CHANGED', 'APPLIED'],
-    ['RESULT', 'MISSING', 'CHANGED', 'CORRUPT'],
+    ['RESULT', 'MISSING', 'CHANGED', 'PROTECTED', 'CORRUPT'],
     'Promotion final operation',
   );
 }
@@ -645,6 +659,18 @@ local now = redis.call('TIME')
 return string.format(
   '%.0f',
   tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000))
+`;
+
+/**
+ * Read a receipt whose reservation deadline has transferred to the sponsored
+ * execution store. A remaining Unit 2 deadline member is corruption in this
+ * state; the cross-record mutation later exact-compares the returned raw value.
+ */
+const LUA_READ_EXECUTING_RECEIPT_STATE = `
+local reservation = redis.call('GET', KEYS[1])
+local result = redis.call('GET', KEYS[2])
+local score = redis.call('ZSCORE', KEYS[3], ARGV[1])
+return {reservation or '', result or '', score or ''}
 `;
 
 const LUA_READ_LEDGER_STATE = `
@@ -965,6 +991,7 @@ if not currentReservation then
   if deadlineScore then return {'CORRUPT', ''} end
   return {'MISSING', ''}
 end
+if redis.call('EXISTS', KEYS[6]) == 1 then return {'PROTECTED', ''} end
 if currentReservation ~= ARGV[1] then return {'CHANGED', ''} end
 if not deadlineScore or deadlineScore ~= ARGV[${FINALIZE_DEADLINE_INDEX}] then
   return {'CORRUPT', ''}
@@ -1070,7 +1097,9 @@ end
 return result
 `;
 
-export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
+export class RedisPromotionExecutionLedger
+  implements PromotionExecutionLedger, PromotionReceiptTransitionAccess
+{
   private timer: ReturnType<typeof setInterval> | null = null;
   private runningSweep: Promise<void> | null = null;
   private runningBatch: Promise<SweepBatchResult> | null = null;
@@ -1081,13 +1110,19 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     private readonly promotionStore: RedisPromotionRecordAccess,
     private readonly ttlMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_RESERVATION_TTL_MS,
     reaperIntervalMs: number = PROMOTION_EXECUTION_LEDGER_DEFAULT_REAPER_INTERVAL_MS,
+    private readonly protectedReceiptKeyPrefix: string | null = null,
   ) {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 0) {
       throw new Error('RedisPromotionExecutionLedger: ttlMs must be a non-negative safe integer');
     }
-    if (!Number.isSafeInteger(reaperIntervalMs) || reaperIntervalMs < 0) {
+    if (reaperIntervalMs !== 0 && !isNodeTimerDelayMs(reaperIntervalMs)) {
       throw new Error(
-        'RedisPromotionExecutionLedger: reaperIntervalMs must be a non-negative safe integer',
+        `RedisPromotionExecutionLedger: reaperIntervalMs must be 0 or an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}`,
+      );
+    }
+    if (protectedReceiptKeyPrefix !== null && protectedReceiptKeyPrefix.length === 0) {
+      throw new Error(
+        'RedisPromotionExecutionLedger: protectedReceiptKeyPrefix must be null or non-empty',
       );
     }
     if (reaperIntervalMs !== 0) {
@@ -1118,6 +1153,43 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     );
   }
 
+  private async readExecutingReceiptState(receiptId: string): Promise<ReceiptState> {
+    const raw = await this.redis.eval(
+      LUA_READ_EXECUTING_RECEIPT_STATE,
+      [
+        promotionReservationKey(receiptId),
+        promotionOperationResultKey(receiptId),
+        promotionReservationDeadlineIndexKey(),
+      ],
+      [promotionReservationDeadlineMember(receiptId)],
+    );
+    if (!Array.isArray(raw) || raw.length !== 3 || raw.some((item) => typeof item !== 'string')) {
+      throw new PromotionRecordCorruptionError(
+        'Promotion executing receipt read returned an invalid result',
+      );
+    }
+    const [reservationRaw, resultRaw, scoreRaw] = raw as [string, string, string];
+    if (scoreRaw !== '') {
+      throw new PromotionRecordCorruptionError(
+        'Executing Promotion reservation remains in the prepared deadline index',
+      );
+    }
+    if (reservationRaw !== '' && resultRaw !== '') {
+      throw new PromotionRecordCorruptionError(
+        'Promotion receipt has both a reservation and a final operation result',
+      );
+    }
+    if (resultRaw !== '') {
+      const result = decodePromotionOperationResultRecord(resultRaw);
+      assertPromotionOperationResultIdentity(result, receiptId);
+      return { status: 'finalized', result };
+    }
+    if (reservationRaw === '') return { status: 'missing' };
+    const reservation = decodePromotionReservationRecord(reservationRaw);
+    assertPromotionReservationIdentity(reservation, receiptId);
+    return { status: 'reserved', reservation, score: reservation.deadlineMs };
+  }
+
   private async readRedisTimeMs(): Promise<number> {
     return nonNegativeSafeInteger(
       await this.redis.eval(LUA_READ_REDIS_TIME, [], []),
@@ -1125,18 +1197,25 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     );
   }
 
-  private async validateFinalResultState(result: PromotionOperationResultRecord): Promise<void> {
-    const { accounting, entitlement } = await this.readLedgerState(
-      result.promotionId,
-      result.userId,
-    );
+  private async validateFinalResultOwnerState(
+    result: PromotionOperationResultRecord,
+  ): Promise<void> {
+    const [current, { accounting, entitlement }] = await Promise.all([
+      this.promotionStore.readCurrent(result.promotionId),
+      this.readLedgerState(result.promotionId, result.userId),
+    ]);
     if (!accounting || !entitlement) {
       throw new PromotionRecordCorruptionError(
         'Promotion final result is missing accounting or entitlement state',
       );
     }
-    assertPromotionEntitlementIdentity(entitlement, result.promotionId, result.userId);
-    assertPromotionEntitlementAccountingState(accounting, entitlement);
+    assertPromotionLedgerReadState(
+      current,
+      result.promotionId,
+      result.userId,
+      accounting,
+      entitlement,
+    );
   }
 
   private async validateReservedReceiptState(state: Extract<ReceiptState, { status: 'reserved' }>) {
@@ -1151,6 +1230,137 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     }
     assertPromotionReservationAccountingState(accounting, entitlement, state.reservation);
     return { accounting, entitlement };
+  }
+
+  async preparePreparedReceiptCommit(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionPreparedReceiptCommitPreparation> {
+    const current = await this.promotionStore.readCurrent(input.promotionId);
+    if (current === null || current.promotion.status !== 'active') {
+      return { status: 'promotion_not_active' };
+    }
+    const state = await this.readReceiptState(input.receiptId);
+    if (state.status !== 'reserved') return { status: 'state_changed' };
+    if (
+      state.reservation.promotionId !== input.promotionId ||
+      state.reservation.userId !== input.userId
+    ) {
+      return { status: 'state_changed' };
+    }
+    await this.validateReservedReceiptState(state);
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: input.promotionId,
+          userId: input.userId,
+          receiptId: input.receiptId,
+          promotionRecordKey: this.promotionStore.recordKey(input.promotionId),
+        }),
+        promotionRaw: current.serialized,
+        expectedReservation: state.reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(state.reservation),
+        expectedDeadlineMs: state.score,
+      },
+    };
+  }
+
+  async prepareExecutionStart(input: {
+    readonly receiptId: string;
+    readonly promotionId: string;
+    readonly userId: string;
+  }): Promise<PromotionExecutionStartPreparation> {
+    const current = await this.promotionStore.readCurrent(input.promotionId);
+    if (current === null || current.promotion.status !== 'active') {
+      return { status: 'promotion_not_active' };
+    }
+    const state = await this.readReceiptState(input.receiptId);
+    if (state.status !== 'reserved') return { status: 'state_changed' };
+    if (
+      state.reservation.promotionId !== input.promotionId ||
+      state.reservation.userId !== input.userId
+    ) {
+      return { status: 'state_changed' };
+    }
+    await this.validateReservedReceiptState(state);
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: input.promotionId,
+          userId: input.userId,
+          receiptId: input.receiptId,
+          promotionRecordKey: this.promotionStore.recordKey(input.promotionId),
+        }),
+        promotionRaw: current.serialized,
+        expectedReservation: state.reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(state.reservation),
+        expectedDeadlineMs: state.score,
+        nextReservationParts: createPromotionReservationRecordParts({
+          receiptId: state.reservation.receiptId,
+          promotionId: state.reservation.promotionId,
+          userId: state.reservation.userId,
+          amountMist: state.reservation.amountMist,
+        }),
+      },
+    };
+  }
+
+  async prepareFinalization(input: {
+    readonly receiptId: string;
+    readonly operation: 'consume' | 'release';
+    readonly chargedMist: bigint;
+    readonly usedAtMs: number;
+    readonly reservationStage: 'prepared' | 'executing';
+  }): Promise<PromotionFinalizationPreparation> {
+    assertNonNegativeMist(input.chargedMist, 'chargedMist');
+    assertWithinLedgerBound(input.chargedMist, 'chargedMist');
+    if (input.operation === 'release' && input.chargedMist !== 0n) {
+      throw new Error('Promotion release chargedMist must be zero');
+    }
+    if (!Number.isSafeInteger(input.usedAtMs) || input.usedAtMs <= 0) {
+      throw new Error('Promotion finalization usedAtMs must be a positive safe integer');
+    }
+    const state =
+      input.reservationStage === 'prepared'
+        ? await this.readReceiptState(input.receiptId)
+        : await this.readExecutingReceiptState(input.receiptId);
+    if (state.status === 'finalized') {
+      await this.validateFinalResultOwnerState(state.result);
+      return { status: 'already_final', result: state.result };
+    }
+    if (state.status !== 'reserved') return { status: 'state_changed' };
+    const { accounting, entitlement } = await this.validateReservedReceiptState(state);
+    const transition = createPromotionFinalizeTransition({
+      accounting,
+      entitlement,
+      reservation: state.reservation,
+      operation: input.operation,
+      chargedMist: input.operation === 'consume' ? input.chargedMist : 0n,
+      usedAt: input.operation === 'consume' ? new Date(input.usedAtMs).toISOString() : null,
+    });
+    return {
+      status: 'ready',
+      plan: {
+        keys: promotionReceiptStorageKeys({
+          promotionId: state.reservation.promotionId,
+          userId: state.reservation.userId,
+          receiptId: state.reservation.receiptId,
+          promotionRecordKey: this.promotionStore.recordKey(state.reservation.promotionId),
+        }),
+        expectedReservation: state.reservation,
+        expectedReservationRaw: serializePromotionReservationRecord(state.reservation),
+        expectedDeadlineMs: input.reservationStage === 'prepared' ? state.score : null,
+        expectedAccounting: accounting,
+        expectedEntitlement: entitlement,
+        nextAccounting: transition.accounting,
+        nextEntitlement: transition.entitlement,
+        result: transition.result,
+        resultRaw: serializePromotionOperationResultRecord(transition.result),
+      },
+    };
   }
 
   async claim(promotionId: string, userId: string, opts: ClaimOpts): Promise<ClaimResult> {
@@ -1317,7 +1527,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
       this.redis.hgetall(promotionEntitlementKey(promotionId, userId)),
     ]);
     if (receiptState.status === 'finalized') {
-      await this.validateFinalResultState(receiptState.result);
+      await this.validateFinalResultOwnerState(receiptState.result);
       return { ok: false, reason: 'record_changed' };
     }
     const existingReservation =
@@ -1488,7 +1698,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     if (result.tag === 'RESULT') {
       const finalResult = decodePromotionOperationResultRecord(result.serialized);
       assertPromotionOperationResultIdentity(finalResult, receiptId);
-      await this.validateFinalResultState(finalResult);
+      await this.validateFinalResultOwnerState(finalResult);
       return { ok: false, reason: 'record_changed' };
     }
     if (result.tag === 'RESERVATION') {
@@ -1627,7 +1837,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     assertWithinLedgerBound(actualGasMist, 'actualGasMist');
     const state = await this.readReceiptState(receiptId);
     if (state.status === 'finalized') {
-      await this.validateFinalResultState(state.result);
+      await this.validateFinalResultOwnerState(state.result);
       return operationRetryResult(
         serializePromotionOperationResultRecord(state.result),
         receiptId,
@@ -1643,7 +1853,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
   async release(receiptId: string): Promise<ReleaseResult> {
     const state = await this.readReceiptState(receiptId);
     if (state.status === 'finalized') {
-      await this.validateFinalResultState(state.result);
+      await this.validateFinalResultOwnerState(state.result);
       return operationRetryResult(
         serializePromotionOperationResultRecord(state.result),
         receiptId,
@@ -1652,13 +1862,14 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     }
     if (state.status === 'missing') return { ok: false, reason: 'reservation_not_found' };
     await this.validateReservedReceiptState(state);
-    return this.finalize(state.reservation, 'release', 0n);
+    return this.finalize(state.reservation, 'release', 0n, true);
   }
 
   private async finalize(
     reservation: PromotionReservationRecord,
     operation: 'consume' | 'release',
     actualGasMist: bigint,
+    protectSponsoredReceipt = false,
   ): Promise<ConsumeResult | ReleaseResult> {
     const { accounting, entitlement } = await this.readLedgerState(
       reservation.promotionId,
@@ -1674,7 +1885,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
     } catch (error) {
       const latest = await this.readReceiptState(reservation.receiptId);
       if (latest.status === 'finalized') {
-        await this.validateFinalResultState(latest.result);
+        await this.validateFinalResultOwnerState(latest.result);
         return operationRetryResult(
           serializePromotionOperationResultRecord(latest.result),
           reservation.receiptId,
@@ -1704,6 +1915,9 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
           promotionReservationDeadlineIndexKey(),
           promotionAccountingKey(reservation.promotionId),
           promotionEntitlementKey(reservation.promotionId, reservation.userId),
+          protectSponsoredReceipt && this.protectedReceiptKeyPrefix !== null
+            ? `${this.protectedReceiptKeyPrefix}${reservation.receiptId}`
+            : `${promotionReservationKeyPrefix()}unused-protection:${reservation.receiptId}`,
         ],
         [
           serializePromotionReservationRecord({
@@ -1730,7 +1944,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
         operation,
         operation === 'consume' ? actualGasMist : undefined,
       );
-      if (retry) await this.validateFinalResultState(retry);
+      if (retry) await this.validateFinalResultOwnerState(retry);
       return retry
         ? { ok: true, entitlement: promotionEntitlementFromRecord(retry.entitlement) }
         : { ok: false, reason: 'record_changed' };
@@ -1754,6 +1968,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
       return { ok: false, reason: 'record_changed' };
     }
     if (result.tag === 'CHANGED') return { ok: false, reason: 'record_changed' };
+    if (result.tag === 'PROTECTED') return { ok: false, reason: 'record_changed' };
     if (result.tag === 'CORRUPT') {
       throw new PromotionRecordCorruptionError('Promotion final operation found corrupt state');
     }
@@ -1933,7 +2148,7 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
           'Reservation deadline index contradicts its record',
         );
       }
-      const result = await this.finalize(reservation, 'release', 0n);
+      const result = await this.finalize(reservation, 'release', 0n, true);
       if (result.ok) swept += 1;
       else if (result.reason !== 'record_changed') {
         throw new PromotionRecordCorruptionError(
@@ -1961,8 +2176,8 @@ export class RedisPromotionExecutionLedger implements PromotionExecutionLedger {
 
   private async drainExpiredReservations(): Promise<void> {
     while (!this.stopping) {
-      const { examined } = await this.runSweepBatch();
-      if (examined < PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE) return;
+      const { examined, swept } = await this.runSweepBatch();
+      if (examined < PROMOTION_EXECUTION_LEDGER_SWEEP_BATCH_SIZE || swept === 0) return;
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }

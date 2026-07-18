@@ -4,20 +4,16 @@
  * Thin adapter over `evaluateSponsorAvailability`. Returns the current code +
  * headers when the gate denies, or `null` when the gate admits
  * the request. Prepare routes pass a lease snapshot to require one free
- * healthy sponsor slot; sponsor routes do not, because they complete an
- * existing leased prepare receipt.
+ * healthy sponsor address. Sponsor routes use their receipt-bound address and
+ * do not call this aggregate gate.
  *
  * The only sponsor operations gate error codes are:
  *   - `SPONSOR_CAPACITY_UNAVAILABLE`            — no healthy slot, or no free healthy slot for prepare admission
- *   - `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` — `availableSlots === 0` with sponsor refill account unhealthy
+ *   - `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` — `healthySlots === 0` with sponsor refill account unhealthy
  */
 
-import type { SponsorAvailabilityErrorCode } from '@stelis/contracts';
-import {
-  evaluateSponsorAvailability,
-  type SponsorAvailabilityOptions,
-  type SponsorAvailabilityView,
-} from './gate.js';
+import type { SponsorAvailabilityErrorCode, SponsorSlotLeaseSummary } from '@stelis/contracts';
+import { evaluateSponsorAvailability, type SponsorAvailabilityView } from './gate.js';
 
 export interface SponsorOperationsBlockedResponse {
   readonly errorCode: SponsorAvailabilityErrorCode;
@@ -26,9 +22,9 @@ export interface SponsorOperationsBlockedResponse {
 
 export function buildSponsorUnavailableResponse(
   view: SponsorAvailabilityView,
-  options: SponsorAvailabilityOptions = {},
+  slotLeases: SponsorSlotLeaseSummary,
 ): SponsorOperationsBlockedResponse | null {
-  const decision = evaluateSponsorAvailability(view, options);
+  const decision = evaluateSponsorAvailability(view, slotLeases);
   if (decision.allowed) return null;
   return {
     errorCode: decision.errorCode,

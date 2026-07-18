@@ -73,7 +73,7 @@ Only admin can propose or cancel queued config, treasury, and pause updates. Aft
 
 ## Production Store Adapters
 
-`@stelis/app-api` wires Redis-backed adapters for prepare records, prepare in-flight limits, rate limits, abuse blocking, sponsor pool leasing, admin sessions, and Studio state.
+`@stelis/app-api` wires Redis-backed adapters for sponsored execution receipts, prepare in-flight limits, rate limits, abuse blocking, sponsor pool leasing, admin sessions, and Promotion state.
 
 Memory adapters remain test fixtures. They are not runtime defaults for the deployable Host.
 
@@ -81,12 +81,12 @@ Default Redis namespaces are owned by their adapter modules:
 
 | Namespace | Runtime state |
 | --- | --- |
-| `stelis:prepare:` | Prepared transaction records and prepare indexes. |
+| `stelis:{sponsored-execution}:` | Prepared, executing, and final receipt records; deadlines; pending callbacks; prepare indexes; generic nonce reservations. |
 | `stelis:inflight:slots` | Shared prepare in-flight limiter. |
 | `stelis:rate_limit:` | Fixed-window request counters. |
 | `stelis:abuse:` | Abuse counters and temporary blocks. |
 | `stelis:sponsor_lease:` | Sponsor slot leases. |
-| `stelis:app-api:sponsor-operations:` | Sponsor slot health, sponsor refill account health, and sponsor operations locks. |
+| `stelis:app-api:sponsor-operations:` | Sponsor-address and Sponsor Refill Account balance observations, account-spend records, and operation locks. |
 | `stelis:sponsored_logs:` | Sponsored execution aggregate and recent entries read by admin routes. |
 | `stelis:promo:` | Promotion records and promotion indexes. |
 | `stelis:promotion_execution_ledger:` | Promotion accounting, entitlements, reservations, final operation results, and reservation deadlines. |
@@ -94,7 +94,7 @@ Default Redis namespaces are owned by their adapter modules:
 
 ## Redis Deployment Topology
 
-Every `@stelis/app-api` instance in one deployment must use the same logical Redis write authority. Redis is the coordination store for prepare records, prepare in-flight admission, rate limits, abuse blocks, sponsor slot leases, sponsor operation state, refill locks, admin sessions, and Studio state.
+Every `@stelis/app-api` instance in one deployment must use the same logical Redis write authority. Redis is the coordination store for sponsored execution receipts, prepare in-flight admission, rate limits, abuse blocks, sponsor slot leases, sponsor operation state, refill locks, admin sessions, and Promotion state.
 
 Required Redis topology:
 
@@ -111,11 +111,14 @@ Rejected Redis topology:
 
 At boot, `@stelis/app-api` probes `INFO server` through `REDIS_URL`. If Redis does not report `redis_mode:standalone`, or if the topology cannot be probed, the Host fails closed before it accepts requests. The boot flow also writes the admin `not_before` key, so a read-only endpoint fails before startup completes.
 
-This policy matches current Redis key usage. Prepare store consumption uses Lua dynamic key access. Sponsor slot leasing, sponsor operation reads, refill locks, and Studio ledgers rely on one authoritative write path for their keys.
+This policy matches current Redis key usage. Sponsored execution transitions update receipt, lease, deadline, and Promotion records in multi-key Lua scripts. Sponsor operation reads, refill locks, abuse decisions, and Promotion ledgers also rely on one authoritative write path for their keys.
 
 ## Sponsor Operations
 
-Sponsor operation state is checked before prepare and sponsor routes continue.
+Prepare routes use aggregate SponsorOperations state and current lease occupancy
+before beginning expensive transaction construction. Sponsor routes already
+carry a receipt and therefore check the fresh observation for that receipt's
+assigned sponsor address immediately before execution begins.
 
 Sponsor SUI ownership, refill transitions, sponsor slot gas use, and Sponsor Refill Account withdrawal are defined in [`Sponsor Pools`](./architecture/sponsor-pools.md#sponsor-sui-state).
 
@@ -138,7 +141,7 @@ Prepare admission uses these gates in order:
 6. A full in-flight limiter rejects prepare with `PREPARE_OVERLOADED` and `Retry-After: 2`.
 7. Sponsor slot checkout failure after in-flight admission rejects prepare with `NO_SPONSOR_SLOT`.
 
-Sponsor submission does not require a free sponsor slot. Sponsor submission completes an existing prepared receipt and uses the sponsor operation health gate only.
+Sponsor submission does not require a free sponsor address. It completes an existing prepared receipt and checks the fresh balance observation for the sponsor address bound to that receipt.
 
 Capacity-related retry contract:
 
@@ -172,6 +175,7 @@ Required timeout variables:
 - `SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS`
 - `SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS`
 - `SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS`
+- `SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS`
 
 Optional refill variables:
 
@@ -186,9 +190,9 @@ When `SPONSOR_OPERATIONS_REFILL_ENABLED=true`,
 `HOST_FEE_MIST` is optional. When unset, the quoted host fee defaults to zero.
 `PREPARE_INFLIGHT_CAPACITY` is optional. When set, it must be a positive integer and becomes the shared prepare in-flight capacity for one Redis write authority.
 
-Sponsor operation state is shared through Redis. Slot state is keyed as `stelis:app-api:sponsor-operations:slot:<address>` and sponsor refill account state is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`.
+SponsorOperations observations and account-spend records are shared through Redis. A sponsor-address observation is keyed as `stelis:app-api:sponsor-operations:slot:<address>`, the Sponsor Refill Account observation is keyed as `stelis:app-api:sponsor-operations:sponsor-refill-account`, and the current account spend uses the separate `stelis:app-api:sponsor-operations:sponsor-refill-account-spend` key. Public status is calculated from these current records rather than stored as another status record.
 
-Refill and withdrawal share `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` while preparing one Sponsor Refill Account spend. The account HASH stores the current operation intent and, before submission, its exact signed transaction bytes, signature, gas budget, and digest. Signed submission uses the primary endpoint exactly once. Recovery, terminal-digest lookup, and balance observation use the immutable boot-qualified endpoint snapshot in configured order and accept only responses bound to the stored digest or requested account. Once that transaction result is confirmed, the mutable slot balance classifies current health but does not keep the global spend active until a target is observed. Boot recovery does not wait for a dead process's remaining efficiency-lock TTL; durable operation identity and CAS keep every recovery driver on the same signed transaction. The lock TTL only releases abandoned mutex ownership and is not a transaction-safety boundary.
+Refill and withdrawal share `stelis:app-api:sponsor-operations:sponsor-refill-account-dispatch-lock:<address>` while preparing one Sponsor Refill Account spend. The `sponsor-refill-account` HASH stores only the latest total-balance observation. The separate `sponsor-refill-account-spend` HASH stores the current operation intent and, before submission, its exact signed transaction bytes, signature, gas budget, and digest. Signed submission uses the primary endpoint exactly once. Recovery, terminal-digest lookup, and balance observation use the immutable boot-qualified endpoint snapshot in configured order and accept only responses bound to the stored digest or requested account. Once that transaction result is confirmed, the mutable slot balance classifies current health but does not keep the global spend active until a target is observed. Boot recovery does not wait for a dead process's remaining efficiency-lock TTL; durable operation identity and CAS keep every recovery driver on the same signed transaction. The lock TTL only releases abandoned mutex ownership and is not a transaction-safety boundary.
 
 An admin withdrawal `503` with code `WITHDRAWAL_PENDING` is an uncertain outcome, not permission to create another withdrawal intent. The signed message, nonce key, durable spend, and browser retry record are bound to the boot-selected network. app-admin stores the exact signed request in session storage before submission and retries those same fields after a pending response or page reload. Redis retains the accepted request's terminal outcome for the configured admin-session duration after acceptance, so an exact retry remains stable after a later account spend replaces the active account record. A request that encounters a different active spend only recovers that spend; it never chains the incoming withdrawal or refill into the same call. Such an incoming withdrawal receives `409 WITHDRAWAL_NOT_ACCEPTED`, and app-admin discards that unaccepted signed request instead of treating it as recovery work.
 
@@ -265,10 +269,10 @@ Current structured event families:
 | --- | --- |
 | Prepare pipeline | `PREPARE_STAGE`, `PREPARE_BUILD_STAGE`, `PREPARE_INFLIGHT_REJECTED`, `PREPARE_ENTRY_CORRUPT`, `PREPARE_SLOT_EXHAUSTED` |
 | Sponsor runtime | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `SETTLEMENT_ECONOMICS_EXECUTION` |
-| Sponsor pool and sponsor operations | `SPONSOR_POOL_LEASE_CHECKOUT`, `SPONSOR_POOL_LEASE_COMMITTED`, `SPONSOR_POOL_LEASE_RELEASE_FAILED`, `SPONSOR_RESULT_CALLBACK_FAILED`, `SPONSOR_OPERATIONS_STATE_WRITE_FAILED` |
+| Sponsor pool and sponsor operations | `SPONSOR_POOL_LEASE_CHECKOUT`, `SPONSOR_POOL_LEASE_CHECKIN`, `SPONSOR_POOL_SIGN`, `SPONSOR_POOL_CHECKIN_FAILED`, `SPONSOR_RESULT_CALLBACK_FAILED`, `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`, `SPONSOR_OPERATIONS_TASK_FAILED` |
 | Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
-| Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY` |
-| Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `LEDGER_CONSUME_FAILED_IN_HANDLER`, `LEDGER_CONSUME_THREW_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
+| Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_GAS_OVERRUN_WARNING` |
+| Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
 | Abuse blocking | `ABUSE_BLOCK_EXPIRY_TASK_FAILED` |
 
 Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.

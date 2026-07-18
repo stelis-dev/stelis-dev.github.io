@@ -140,7 +140,7 @@ export async function handlePrepare(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
-        prepareStore: ctx.prepareStore,
+        sponsoredExecutionStore: ctx.sponsoredExecutionStore,
       },
       {
         senderAddress: params.senderAddress,

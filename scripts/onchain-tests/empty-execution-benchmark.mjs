@@ -921,7 +921,6 @@ async function runSponsoredPhase(ctx) {
         orderId,
         receiptId: prepared.receiptId,
         executedContractPackageId: ctx.packageId,
-        vaultId: prepared.vaultId,
       };
       await appendBenchmarkRecord(ctx, {
         ...preparationFields,
@@ -1259,6 +1258,7 @@ async function runDirectPhase(ctx) {
       result = await executeSuiTransaction(ctx.endpoints, {
         transaction: prepared.txBytes,
         signatures: [prepared.signature],
+        expectedDigest: prepared.expectedDigest,
       });
     } catch (err) {
       activeAttempt = await ctx.journal.markUncertain(activeAttempt);

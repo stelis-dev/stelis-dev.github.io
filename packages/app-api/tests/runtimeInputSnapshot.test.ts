@@ -12,13 +12,13 @@ import type { HostChainState } from '@stelis/core-api';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { ContextRuntimeInput } from '../src/context.js';
 import { suiEndpointSnapshotFixture } from './suiEndpointSnapshotFixture.js';
+import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
 
 let capturedHostConfig: Record<string, unknown> | null = null;
 let capturedPrepareConfigInput: Record<string, unknown> | null = null;
 let capturedSpendBoundaryInput: Record<string, unknown> | null = null;
 let capturedSpendCoordinatorDeps: Record<string, unknown> | null = null;
 let capturedSpendStateOptions: Record<string, unknown> | null = null;
-let nextRecoveryResult: unknown = null;
 let runtimeEvents: string[] = [];
 
 const mocks = vi.hoisted(() => ({
@@ -44,6 +44,11 @@ vi.mock('@stelis/core-api', async () => {
   const actual = await vi.importActual('@stelis/core-api');
   return {
     ...actual,
+    RedisSponsoredExecutionStore: class {},
+    SponsoredExecutionRecovery: class {
+      readonly start = vi.fn().mockResolvedValue(undefined);
+      readonly dispose = vi.fn().mockResolvedValue(undefined);
+    },
     createHostContext: vi.fn().mockImplementation((config: Record<string, unknown>) => {
       capturedHostConfig = config;
       const initialChainState = config.initialChainState as HostChainState;
@@ -57,7 +62,7 @@ vi.mock('@stelis/core-api', async () => {
         deepbookPackageId: config.deepbookPackageId,
         rateLimiter: config.rateLimiter,
         abuseBlocker: config.abuseBlocker,
-        prepareStore: config.prepareStore,
+        sponsoredExecutionStore: config.sponsoredExecutionStore,
         settlementPayoutRecipientAddress: config.settlementPayoutRecipientAddress,
         allowedSettlementSwapPaths: config.allowedSettlementSwapPaths ?? [],
         vaultsTableId: initialChainState.vaultsTableId,
@@ -75,7 +80,56 @@ vi.mock('../src/redisClient.js', () => ({
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(1),
     hgetall: vi.fn().mockResolvedValue({}),
-    eval: vi.fn().mockResolvedValue(['UPDATED']),
+    eval: vi
+      .fn()
+      .mockImplementation(async (script: string) =>
+        script.includes("local slot = redis.call('HGETALL', KEYS[1])")
+          ? [
+              [
+                'addressBalanceMist',
+                '10000000000',
+                'lastError',
+                '',
+                'lastObservedAtMs',
+                '1700000000000',
+                'writeSeq',
+                '1',
+              ],
+              [],
+              '1700000000000',
+            ]
+          : script.includes('local slotRows = {}')
+            ? [
+                [
+                  [
+                    SPONSOR_ADDRESS,
+                    [
+                      'addressBalanceMist',
+                      '10000000000',
+                      'lastError',
+                      '',
+                      'lastObservedAtMs',
+                      '1700000000000',
+                      'writeSeq',
+                      '1',
+                    ],
+                  ],
+                ],
+                [
+                  'totalBalanceMist',
+                  '10000000000',
+                  'lastError',
+                  '',
+                  'lastObservedAtMs',
+                  '1700000000000',
+                  'writeSeq',
+                  '1',
+                ],
+                [],
+                '1700000000000',
+              ]
+            : ['UPDATED'],
+      ),
     dispose: vi.fn().mockResolvedValue(undefined),
   }),
 }));
@@ -88,6 +142,7 @@ vi.mock('../src/sponsor-operations/accountSpendState.js', () => ({
         read: vi.fn().mockResolvedValue(null),
         readAccountObservationCursor: vi.fn().mockResolvedValue({
           operationId: null,
+          spendState: null,
           spendSequence: 0,
           writeSequence: 0,
         }),
@@ -97,27 +152,31 @@ vi.mock('../src/sponsor-operations/accountSpendState.js', () => ({
   ),
 }));
 
-vi.mock('../src/sponsor-operations/accountSpend.js', () => ({
-  createSuiSponsorRefillAccountSpendBoundary: vi.fn((input: Record<string, unknown>) => {
-    capturedSpendBoundaryInput = input;
-    return {};
-  }),
-  createSponsorRefillAccountSpendCoordinator: vi.fn((deps: Record<string, unknown>) => {
-    capturedSpendCoordinatorDeps = deps;
-    return {
-      recoverActiveSpend: vi.fn(async () => {
-        runtimeEvents.push('recover');
-        return nextRecoveryResult;
-      }),
-      refill: vi.fn().mockResolvedValue({
-        status: 'not_needed',
-        slotAddress: '0xslot',
-        balanceMist: '0',
-      }),
-      withdraw: vi.fn(),
-    };
-  }),
-}));
+vi.mock('../src/sponsor-operations/accountSpend.js', async () => {
+  const actual = await vi.importActual('../src/sponsor-operations/accountSpend.js');
+  return {
+    ...actual,
+    createSuiSponsorRefillAccountSpendBoundary: vi.fn((input: Record<string, unknown>) => {
+      capturedSpendBoundaryInput = input;
+      return {};
+    }),
+    createSponsorRefillAccountSpendCoordinator: vi.fn((deps: Record<string, unknown>) => {
+      capturedSpendCoordinatorDeps = deps;
+      return {
+        recoverActiveSpend: vi.fn(async () => {
+          runtimeEvents.push('recover');
+          return null;
+        }),
+        refill: vi.fn().mockResolvedValue({
+          status: 'not_needed',
+          slotAddress: SPONSOR_ADDRESS,
+          addressBalanceMist: '0',
+        }),
+        withdraw: vi.fn(),
+      };
+    }),
+  };
+});
 
 vi.mock('@stelis/core-api/prepareConfig', () => ({
   resolvePrepareConfig: vi.fn().mockImplementation((input: Record<string, unknown>) => {
@@ -207,16 +266,21 @@ function runtimeInput(options: { prepareInflightCapacity?: number } = {}): Conte
     prepareInflightCapacity: options.prepareInflightCapacity ?? 2,
     sponsorOperations: {
       sponsorRefillAccountKey: keypair(SPONSOR_REFILL_ACCOUNT_ADDRESS),
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      refillEnabled: false,
-      refillTargetMist: null,
-      runwayTargetMist: 10_000_000_000n,
-      warnMist: 5_000_000_000n,
-      slotBalanceTimeoutMs: 5_000,
-      sponsorRefillAccountBalanceTimeoutMs: 5_000,
-      refillTimeoutMs: 30_000,
-      confirmationTimeoutMs: 15_000,
-      withdrawalReceiptTtlMs: 3_600_000,
+      settings: createTestSponsorOperationsSettings({
+        sponsorAddresses: [SPONSOR_ADDRESS],
+        sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
+        settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
+        refillEnabled: false,
+        refillTargetMist: null,
+        runwayTargetMist: 10_000_000_000n,
+        warnMist: 5_000_000_000n,
+        slotBalanceTimeoutMs: 5_000,
+        sponsorRefillAccountBalanceTimeoutMs: 5_000,
+        refillTimeoutMs: 30_000,
+        confirmationTimeoutMs: 15_000,
+        reconciliationIntervalMs: 15_000,
+        withdrawalReceiptTtlMs: 3_600_000,
+      }),
     },
     studio: null,
   };
@@ -228,7 +292,6 @@ beforeEach(() => {
   capturedSpendBoundaryInput = null;
   capturedSpendCoordinatorDeps = null;
   capturedSpendStateOptions = null;
-  nextRecoveryResult = null;
   runtimeEvents = [];
   vi.clearAllMocks();
   mocks.getSettlementSwapPathRegistryPath.mockImplementation(() => {
@@ -239,7 +302,7 @@ beforeEach(() => {
   });
   mocks.getSuiBalance.mockImplementation(async () => {
     runtimeEvents.push('balance');
-    return { balance: '10000000000' };
+    return { balance: '10000000000', addressBalance: '10000000000' };
   });
 });
 
@@ -271,12 +334,8 @@ describe('createContext boot-snapshot wiring', () => {
         network: 'testnet',
         settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
       });
-      expect(capturedSpendCoordinatorDeps?.runwayTargetMist).toBe(10_000_000_000n);
-      expect(capturedSpendCoordinatorDeps?.network).toBe('testnet');
-      expect(capturedSpendStateOptions).toEqual({
-        network: 'testnet',
-        acceptedReceiptTtlMs: 3_600_000,
-      });
+      expect(capturedSpendCoordinatorDeps?.settings).toBe(input.sponsorOperations.settings);
+      expect(capturedSpendStateOptions?.settings).toBe(input.sponsorOperations.settings);
       expect(runtimeEvents[0]).toBe('recover');
       expect(runtimeEvents).toContain('balance');
     } finally {
@@ -297,20 +356,5 @@ describe('createContext boot-snapshot wiring', () => {
     } finally {
       await context.dispose();
     }
-  });
-
-  it('fails context creation before bootstrap when active-spend recovery remains pending', async () => {
-    nextRecoveryResult = {
-      status: 'pending',
-      operationId: 'operation-pending',
-      digest: 'digest-pending',
-      amountMist: '1',
-      error: 'chain lookup unavailable',
-    };
-
-    await expect(createContext(runtimeInput())).rejects.toThrow(
-      'Sponsor Refill Account active spend recovery pending: chain lookup unavailable',
-    );
-    expect(runtimeEvents).toEqual(['recover']);
   });
 });

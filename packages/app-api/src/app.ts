@@ -121,7 +121,6 @@ export async function createApp(
     network: runtimeInput.context.network,
     adminAddress: runtimeInput.adminAddress,
     adminJwt: runtimeInput.adminAuth.jwt,
-    ...runtimeInput.adminSponsorOperations,
   });
   const studioRoutes = createStudioRoutes(contextPromise, resolveClientIp);
 

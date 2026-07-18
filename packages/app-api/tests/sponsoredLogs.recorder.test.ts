@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SponsorResultMetadata } from '@stelis/core-api';
 import { createSponsoredLogsRecorder, fanOutSponsorResult } from '../src/sponsoredLogs/recorder.js';
-import type { SponsoredLogsStoreAdapter } from '../src/sponsoredLogs/store.js';
+import {
+  sponsoredLogReceiptConflict,
+  sponsoredLogReplayFingerprint,
+  type SponsoredLogsStoreAdapter,
+} from '../src/sponsoredLogs/store.js';
 import type {
   SponsoredExecutionAggregate,
   SponsoredExecutionAggregateMode,
@@ -10,10 +14,16 @@ import type {
 
 class CapturingStore implements SponsoredLogsStoreAdapter {
   readonly appended: SponsoredExecutionLogEntry[] = [];
+  readonly fingerprints = new Map<string, string>();
   shouldThrow = false;
 
   async append(entry: SponsoredExecutionLogEntry): Promise<void> {
     if (this.shouldThrow) throw new Error('store boom');
+    const fingerprint = sponsoredLogReplayFingerprint(entry);
+    const existing = this.fingerprints.get(entry.receiptId);
+    if (existing === fingerprint) return;
+    if (existing !== undefined) throw sponsoredLogReceiptConflict(entry.receiptId);
+    this.fingerprints.set(entry.receiptId, fingerprint);
     this.appended.push(entry);
   }
 
@@ -34,18 +44,24 @@ class CapturingStore implements SponsoredLogsStoreAdapter {
 
 const FROZEN_TS = '2026-04-26T16:00:00.000Z';
 const fixedClock = () => new Date(FROZEN_TS);
+const RECEIPT_ID = `0x${'3'.repeat(64)}`;
+const SENDER_ADDRESS = `0x${'1'.repeat(64)}`;
+const SPONSOR_ADDRESS = `0x${'2'.repeat(64)}`;
+const TRANSACTION_DIGEST = '69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD';
+const ORDER_ID_HASH = 'a'.repeat(64);
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
 
 function makeMetadata(overrides: Partial<SponsorResultMetadata> = {}): SponsorResultMetadata {
   const base: SponsorResultMetadata = {
-    sponsorAddress: '0xsponsor',
+    sponsorAddress: SPONSOR_ADDRESS,
     outcome: 'success',
     executionStage: 'on_chain',
     route: 'generic',
-    digest: '0xdigest',
-    receiptId: 'r1',
-    senderAddress: '0xsender',
+    digest: TRANSACTION_DIGEST,
+    receiptId: RECEIPT_ID,
+    senderAddress: SENDER_ADDRESS,
     executionPathKey: 'rk',
-    orderIdHash: 'abcdef',
+    orderIdHash: ORDER_ID_HASH,
     promotionId: null,
     userId: null,
     economics: {
@@ -219,12 +235,12 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       createdAt: FROZEN_TS,
       mode: 'generic',
       outcome: 'success',
-      receiptId: 'r1',
-      digest: '0xdigest',
-      senderAddress: '0xsender',
-      sponsorAddress: '0xsponsor',
+      receiptId: RECEIPT_ID,
+      digest: TRANSACTION_DIGEST,
+      senderAddress: SENDER_ADDRESS,
+      sponsorAddress: SPONSOR_ADDRESS,
       executionPathKey: 'rk',
-      orderIdHash: 'abcdef',
+      orderIdHash: ORDER_ID_HASH,
       promotionId: null,
       userId: null,
       recoveredGasMist: '12000',
@@ -271,7 +287,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
       makeMetadata({
         route: 'promotion',
         orderIdHash: null,
-        promotionId: 'promo-1',
+        promotionId: PROMOTION_ID,
         userId: 'user-1',
         economics: {
           economicsStatus: 'known',
@@ -288,7 +304,7 @@ describe('createSponsoredLogsRecorder — entry fields', () => {
     );
     const e = store.appended[0];
     expect(e.mode).toBe('promotion');
-    expect(e.promotionId).toBe('promo-1');
+    expect(e.promotionId).toBe(PROMOTION_ID);
     expect(e.userId).toBe('user-1');
     expect(e.orderIdHash).toBeNull();
     expect(e.hostNetMist).toBe('-5000');
@@ -304,18 +320,18 @@ describe('createSponsoredLogsRecorder — failure semantics', () => {
     warnSpy.mockRestore();
   });
 
-  it('store rejection emits SPONSORED_LOGS_RECORDER_FAILED and does not throw', async () => {
+  it('store rejection emits SPONSORED_LOGS_RECORDER_FAILED and keeps delivery pending', async () => {
     const store = new CapturingStore();
     store.shouldThrow = true;
     const cb = createSponsoredLogsRecorder({ store, clock: fixedClock });
-    await expect(cb(makeMetadata())).resolves.toBeUndefined();
+    await expect(cb(makeMetadata())).rejects.toThrow('store boom');
     const events = warnSpy.mock.calls
       .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const recorderFailed = events.find((e) => e.event === 'SPONSORED_LOGS_RECORDER_FAILED');
     expect(recorderFailed).toBeDefined();
     expect(recorderFailed?.stage).toBe('store_append');
-    expect(recorderFailed?.receipt_id).toBe('r1');
+    expect(recorderFailed?.receipt_id).toBe(RECEIPT_ID);
     expect(recorderFailed?.error).toBe('store boom');
   });
 
@@ -324,9 +340,7 @@ describe('createSponsoredLogsRecorder — failure semantics', () => {
       store: new CapturingStore(),
       clock: () => new Date(Number.NaN),
     });
-    await expect(
-      cb(withoutDigest(makeMetadata({ receiptId: 'r-build' }))),
-    ).resolves.toBeUndefined();
+    await expect(cb(withoutDigest(makeMetadata({ receiptId: 'r-build' })))).rejects.toThrow();
     const events = warnSpy.mock.calls
       .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
@@ -370,8 +384,58 @@ describe('fanOutSponsorResult', () => {
         order.push(3);
       },
     );
-    await expect(fanned(makeMetadata())).resolves.toBeUndefined();
+    await expect(fanned(makeMetadata())).rejects.toBeInstanceOf(AggregateError);
     expect(order).toEqual([1, 3]);
+    warnSpy.mockRestore();
+  });
+
+  it('stops callback delivery immediately when recovery is cancelled', async () => {
+    const controller = new AbortController();
+    const order: number[] = [];
+    const fanned = fanOutSponsorResult(
+      async () => {
+        order.push(1);
+        controller.abort(new DOMException('Recovery disposed', 'AbortError'));
+      },
+      async () => {
+        order.push(2);
+      },
+    );
+
+    await expect(fanned(makeMetadata(), controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(order).toEqual([1]);
+  });
+
+  it('does not append a sponsored log after recovery is already cancelled', async () => {
+    const store = new CapturingStore();
+    const recorder = createSponsoredLogsRecorder({ store, clock: fixedClock });
+    const controller = new AbortController();
+    controller.abort(new DOMException('Recovery disposed', 'AbortError'));
+
+    await expect(recorder(makeMetadata(), controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(store.appended).toEqual([]);
+  });
+
+  it('retries every required consumer without duplicating a completed receipt append', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = new CapturingStore();
+    const recorder = createSponsoredLogsRecorder({ store, clock: fixedClock });
+    let stateAttempts = 0;
+    const fanned = fanOutSponsorResult(async () => {
+      stateAttempts += 1;
+      if (stateAttempts === 1) throw new Error('temporary state write failure');
+    }, recorder);
+
+    await expect(fanned(makeMetadata())).rejects.toBeInstanceOf(AggregateError);
+    expect(store.appended).toHaveLength(1);
+
+    await expect(fanned(makeMetadata())).resolves.toBeUndefined();
+    expect(stateAttempts).toBe(2);
+    expect(store.appended).toHaveLength(1);
     warnSpy.mockRestore();
   });
 
@@ -388,14 +452,16 @@ describe('fanOutSponsorResult', () => {
         // ok — fan-out continues after a preceding throw
       },
     );
-    await fanned(
-      makeMetadata({
-        outcome: 'success',
-        route: 'generic',
-        digest: '0xfanout_digest',
-        sponsorAddress: '0xsponsor_x',
-      }),
-    );
+    await expect(
+      fanned(
+        makeMetadata({
+          outcome: 'success',
+          route: 'generic',
+          digest: '0xfanout_digest',
+          sponsorAddress: '0xsponsor_x',
+        }),
+      ),
+    ).rejects.toBeInstanceOf(AggregateError);
     const events = warnSpy.mock.calls
       .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
@@ -404,7 +470,7 @@ describe('fanOutSponsorResult', () => {
     expect(fanFailed?.source).toBe('sponsored_logs_fanout');
     expect(fanFailed?.callback_index).toBe(0);
     expect(fanFailed?.route).toBe('generic');
-    expect(fanFailed?.receipt_id).toBe('r1');
+    expect(fanFailed?.receipt_id).toBe(RECEIPT_ID);
     expect(fanFailed?.error).toBe('child boom');
     // digest is the cross-reference key in `docs/operations.md`:
     // operators correlate fanOut failures with `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`
@@ -422,13 +488,15 @@ describe('fanOutSponsorResult', () => {
     const fanned = fanOutSponsorResult(async () => {
       throw new Error('preflight throw');
     });
-    await fanned(withoutDigest(makeMetadata({ outcome: 'preflight_failure' })));
+    await expect(
+      fanned(withoutDigest(makeMetadata({ outcome: 'preflight_failure' }))),
+    ).rejects.toBeInstanceOf(AggregateError);
     const events = warnSpy.mock.calls
       .map((c: unknown[]) => (typeof c[0] === 'string' ? safeParse(c[0]) : null))
       .filter(Boolean) as Record<string, unknown>[];
     const fanFailed = events.find((e) => e.event === 'SPONSOR_RESULT_CALLBACK_FAILED');
     expect(fanFailed).toBeDefined();
-    expect(fanFailed?.receipt_id).toBe('r1');
+    expect(fanFailed?.receipt_id).toBe(RECEIPT_ID);
     expect(fanFailed?.digest).toBeNull();
     warnSpy.mockRestore();
   });

@@ -72,11 +72,6 @@ function bootValidationResult() {
           domain: '.snapshot.example',
         },
       },
-      adminSponsorOperations: {
-        refillEnabled: true,
-        refillTargetMist: 10_000_000_000n,
-        warnMist: 5_000_000_000n,
-      },
     },
     publicSummary: {
       mode: 'generic',
@@ -153,9 +148,6 @@ describe('createApp runtime input boundary', () => {
         sessionExpiry: '1h',
         issuer: 'app-api',
       },
-      refillEnabled: true,
-      refillTargetMist: 10_000_000_000n,
-      warnMist: 5_000_000_000n,
     });
     expect(mocks.createRelayRoutes).toHaveBeenCalledWith(
       authContextPromise,

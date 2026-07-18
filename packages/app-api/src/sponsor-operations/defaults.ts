@@ -5,7 +5,7 @@
  * `routes/admin.ts` threshold fallbacks, and the shared-state
  * slot-state classification.
  *
- * The four `SPONSOR_OPERATIONS_*` timing budgets named in
+ * The five `SPONSOR_OPERATIONS_*` timing values named in
  * `docs/parameters.md` are NOT carried here. They are injected as
  * required env-driven parameters by `boot.ts`. The repository
  * documents them as deployment-defined required env values with no

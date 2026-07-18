@@ -87,7 +87,7 @@ function isReserveMutation(keys: readonly string[]): boolean {
 
 function isFinalizeMutation(keys: readonly string[]): boolean {
   return (
-    keys.length === 5 &&
+    keys.length === 6 &&
     keys[0]?.startsWith(promotionReservationKeyPrefix()) === true &&
     keys[1]?.startsWith(promotionOperationResultKeyPrefix()) === true &&
     keys[2] === promotionReservationDeadlineIndexKey()

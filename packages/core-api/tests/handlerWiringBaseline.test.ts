@@ -2,8 +2,7 @@
  * handlerWiringBaseline.test.ts — wiring snapshot tests for handlePrepare.
  *
  * Scope: this file verifies the observable wiring of the prepare handler.
- * It stubs `runGenericPrepareBuildPipeline()`, `extractSettleArgsFromBuiltTx()`, and
- * `Transaction.from()` so the boundary under test is the handler →
+ * It stubs `runGenericPrepareBuildPipeline()` and `Transaction.from()` so the boundary under test is the handler →
  * compose → store path, NOT the build math or real PTB extraction.
  *
  * What this file CAN catch:
@@ -51,6 +50,9 @@ const {
   POOL_ID,
   VAULT_ONE_ID,
   VAULT_TWO_ID,
+  addressBalanceGasTransactionContents,
+  getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHashMock,
 } = vi.hoisted(() => ({
   mockQueryUserCredit: vi.fn(),
   mockPrepareBuildPipeline: vi.fn(),
@@ -64,6 +66,18 @@ const {
   POOL_ID: `0x${'88'.repeat(32)}`,
   VAULT_ONE_ID: `0x${'91'.repeat(32)}`,
   VAULT_TWO_ID: `0x${'92'.repeat(32)}`,
+  addressBalanceGasTransactionContents: new WeakMap<
+    object,
+    { readonly bytes: Uint8Array; readonly txBytesHash: string }
+  >(),
+  getAddressBalanceGasTransactionBytesMock: vi.fn(),
+  getAddressBalanceGasTransactionTxBytesHashMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay/server')>()),
+  getAddressBalanceGasTransactionBytes: getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHash: getAddressBalanceGasTransactionTxBytesHashMock,
 }));
 
 vi.mock('@stelis/core-relay', async (importOriginal) => {
@@ -75,8 +89,6 @@ vi.mock('../src/prepare/build.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/prepare/build.js')>();
   return { ...original, runGenericPrepareBuildPipeline: mockPrepareBuildPipeline };
 });
-
-vi.mock('../src/prepare/extractSettleArgs.js');
 
 vi.mock('@mysten/sui/transactions', async (importOriginal) => {
   const original = await importOriginal<typeof import('@mysten/sui/transactions')>();
@@ -107,11 +119,11 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
-import { extractSettleArgsFromBuiltTx } from '../src/prepare/extractSettleArgs.js';
 import type { ExtractedSettleArgs } from '../src/prepare/extractSettleArgs.js';
 import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type {
+  AddressBalanceGasTransaction,
   PaymentInputTrace,
   StaticSettlementSwapPathDescriptorMap,
 } from '@stelis/core-relay/server';
@@ -121,6 +133,35 @@ import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAut
 
 const FAKE_TX_BYTES = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
 const FAKE_TX_BYTES_HASH = '3cf654795a1c99c8e41f69aaeb3ad9e03f1b64cb14efb3b9b3b46be771e3a5b4';
+
+function addressBalanceGasTransactionFixture(
+  bytes: Uint8Array,
+  txBytesHash: string,
+): AddressBalanceGasTransaction {
+  const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
+  addressBalanceGasTransactionContents.set(transaction, { bytes: bytes.slice(), txBytesHash });
+  return transaction;
+}
+
+getAddressBalanceGasTransactionBytesMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.bytes.slice();
+  },
+);
+getAddressBalanceGasTransactionTxBytesHashMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.txBytesHash;
+  },
+);
+
+const FAKE_ADDRESS_BALANCE_GAS_TRANSACTION = addressBalanceGasTransactionFixture(
+  FAKE_TX_BYTES,
+  FAKE_TX_BYTES_HASH,
+);
 
 const ONCHAIN_CONFIG = {
   packageId: PACKAGE_ID,
@@ -134,8 +175,9 @@ const ONCHAIN_CONFIG = {
 };
 
 const NEW_USER_BUILD_RESULT = {
-  txBytes: FAKE_TX_BYTES,
-  txBytesHash: FAKE_TX_BYTES_HASH,
+  addressBalanceGasTransaction: FAKE_ADDRESS_BALANCE_GAS_TRANSACTION,
+  l1Validation: { ok: true } as const,
+  settleArgs: null as ExtractedSettleArgs | null,
   executionCostClaim: 1_800_000n,
   simGas: 1_300_000n,
   gasVarianceFixedMist: 350_000n,
@@ -239,7 +281,6 @@ function makeMockContext() {
       checkout: vi.fn().mockResolvedValue({
         sponsorAddress: SPONSOR_ADDRESS,
       }),
-      commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
@@ -255,16 +296,13 @@ function makeMockContext() {
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
-    prepareStore: {
-      store: vi.fn(async (draft: PreparedTxDraft) => ({
+    sponsoredExecutionStore: {
+      commitPreparedReceipt: vi.fn(async (draft: PreparedTxDraft) => ({
         ...draft,
         issuedAt: 1_741_680_000_000,
       })),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
       reserveNonce: vi.fn().mockResolvedValue(7n),
-      releaseReservation: vi.fn().mockResolvedValue(undefined),
+      releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
     },
     settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     getConfig: vi.fn().mockResolvedValue(ONCHAIN_CONFIG),
@@ -338,7 +376,16 @@ function mockSettleArgs(paymentInputTrace: PaymentInputTrace): void {
         },
     paymentInputTrace,
   };
-  vi.mocked(extractSettleArgsFromBuiltTx).mockReturnValue(settleArgs);
+  NEW_USER_BUILD_RESULT.settleArgs = settleArgs;
+  WITH_VAULT_BUILD_RESULT.settleArgs = settleArgs;
+  CREDIT_GENERAL_BUILD_RESULT.settleArgs = settleArgs;
+}
+
+function requirePaymentInputTrace(settleArgs: ExtractedSettleArgs): PaymentInputTrace {
+  if (!settleArgs.paymentInputTrace) {
+    throw new Error('test fixture must include the payment-input trace consumed by self-check');
+  }
+  return settleArgs.paymentInputTrace;
 }
 
 const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>
@@ -383,8 +430,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(result.nonce).toBe('7');
 
     // Settle args: paymentInputTrace consumed by L2 must be coin_object
-    const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
-    expect(settleArgsCall.paymentInputTrace.source).toBe('coin_object');
+    const settleArgsCall = NEW_USER_BUILD_RESULT.settleArgs!;
+    expect(requirePaymentInputTrace(settleArgsCall).source).toBe('coin_object');
 
     // GenericPrepareBuildOutput.paymentInputSource passed to L2 expected check
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
@@ -397,7 +444,9 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     // `parseSettleArgs(txBytes)` at sponsor time, so this test locks
     // `nonce` (a true coordination field) plus the negative shape of
     // the settle copies that must not be persisted.
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft.receiptId).toBe(result.receiptId);
     expect(storedDraft.nonce).toBe(7n);
     expect(storedDraft).not.toHaveProperty('issuedAt');
@@ -431,14 +480,16 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(buildInput.profile).toBe('credit_general');
     expect(buildInput.vaultObjectId).toBe(VAULT_ONE_ID);
 
-    const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
-    expect(settleArgsCall.paymentInputTrace.source).toBe('address_balance');
+    const settleArgsCall = WITH_VAULT_BUILD_RESULT.settleArgs!;
+    expect(requirePaymentInputTrace(settleArgsCall).source).toBe('address_balance');
 
     // Store draft: nonce coordination retained, settle copies not
     // persisted. Result.profile / result.cost.executionCostClaim above already
     // verify the values flow from GenericPrepareBuildOutput through the response; the
     // store draft is not the assertion site for them.
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft.nonce).toBe(7n);
     expect(storedDraft).not.toHaveProperty('issuedAt');
     expect(storedDraft).not.toHaveProperty('profile');
@@ -470,21 +521,24 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     expect(buildInput.profile).toBe('credit_general');
     expect(buildInput.vaultObjectId).toBe(VAULT_TWO_ID);
 
-    const settleArgsCall = vi.mocked(extractSettleArgsFromBuiltTx).mock.results[0].value;
-    expect(settleArgsCall.paymentInputTrace.source).toBe('none_credit_only');
-    expect(settleArgsCall.paymentInputTrace.settleVariantClass).toBe('credit');
+    const settleArgsCall = CREDIT_GENERAL_BUILD_RESULT.settleArgs!;
+    const paymentInputTrace = requirePaymentInputTrace(settleArgsCall);
+    expect(paymentInputTrace.source).toBe('none_credit_only');
+    expect(paymentInputTrace.settleVariantClass).toBe('credit');
 
     // Store draft does not persist settle copies (profile,
     // slippageBufferMist). Result.profile and result.cost.slippageBufferMist
     // above verify the values flow from GenericPrepareBuildOutput through the response.
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
     expect(storedDraft).not.toHaveProperty('profile');
     expect(storedDraft).not.toHaveProperty('slippageBufferMist');
   });
 
-  // ── Case 4: store draft preserves only `txBytesHash` from GenericPrepareBuildOutput ──
+  // ── Case 4: store draft preserves the validated transaction digest ──
 
-  it('store draft projects txBytesHash from GenericPrepareBuildOutput and drops the 9 settle observability copies', async () => {
+  it('store draft projects the opaque transaction hash and drops the 9 settle observability copies', async () => {
     mockQueryUserCredit.mockResolvedValue({
       vaultObjectId: null,
       credit: '0',
@@ -498,10 +552,12 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
     await handlePrepare(ctx, params, makeExtraCfg());
 
-    const [storedDraft] = (ctx.prepareStore.store as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [storedDraft] = (
+      ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
 
-    // Coordination-only projection from GenericPrepareBuildOutput.
-    expect(storedDraft.txBytesHash).toBe(NEW_USER_BUILD_RESULT.txBytesHash);
+    // Coordination-only projection from the validated opaque transaction.
+    expect(storedDraft.txBytesHash).toBe(FAKE_TX_BYTES_HASH);
     expect(storedDraft).not.toHaveProperty('issuedAt');
 
     // The 9 settle observability copies are not persisted. Sponsor reads

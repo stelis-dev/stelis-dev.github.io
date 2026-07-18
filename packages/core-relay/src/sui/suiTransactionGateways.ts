@@ -40,6 +40,8 @@ export interface SuiTransactionBytesOptions {
 
 export interface SuiExecuteTransactionOptions extends SuiTransactionBytesOptions {
   readonly signatures: readonly string[];
+  /** Durable digest carried by the transaction owner and verified against these exact bytes. */
+  readonly expectedDigest: string;
 }
 
 export interface SuiTransactionDigestOptions {
@@ -98,7 +100,16 @@ function requireDigest(value: string): string {
   return value;
 }
 
-function requestDigest(transaction: Uint8Array): string {
+/** Prove that one caller-carried digest identifies these exact transaction bytes. */
+export function assertSuiTransactionDigest(transaction: Uint8Array, expectedDigest: string): void {
+  const bytes = requireTransactionBytes(transaction);
+  const digest = requireDigest(expectedDigest);
+  if (TransactionDataBuilder.getDigestFromBytes(bytes) !== digest) {
+    throw new TypeError('Sui transaction digest does not match its transaction bytes');
+  }
+}
+
+function requireCurrentTransactionBytes(transaction: Uint8Array): Uint8Array {
   const bytes = requireTransactionBytes(transaction);
   let canonical: Uint8Array;
   try {
@@ -112,6 +123,11 @@ function requestDigest(transaction: Uint8Array): string {
   ) {
     throw new TypeError('Sui transaction bytes must use canonical current TransactionData BCS');
   }
+  return bytes;
+}
+
+function requestDigest(transaction: Uint8Array): string {
+  const bytes = requireCurrentTransactionBytes(transaction);
   return TransactionDataBuilder.getDigestFromBytes(bytes);
 }
 
@@ -282,8 +298,9 @@ export function executeSuiTransaction(
   snapshot: SuiEndpointSnapshot,
   options: SuiExecuteTransactionOptions,
 ): Promise<SuiTransactionWithEventsResult> {
-  const transaction = requireTransactionBytes(options.transaction);
-  const expectedDigest = requestDigest(transaction);
+  const transaction = requireCurrentTransactionBytes(options.transaction);
+  const expectedDigest = requireDigest(options.expectedDigest);
+  assertSuiTransactionDigest(transaction, expectedDigest);
   if (!Array.isArray(options.signatures) || options.signatures.length === 0) {
     throw new TypeError('Signed Sui execution requires at least one signature');
   }

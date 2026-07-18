@@ -107,10 +107,7 @@ export function createRelayRoutes(
         ctx.sponsorOperations.readState(),
         host.sponsorPool.leaseStatus(),
       ]);
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, {
-        requireFreeSponsorSlot: true,
-        slotLeases,
-      });
+      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
       if (blocked) {
         for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
         return respondMapped(
@@ -230,19 +227,6 @@ export function createRelayRoutes(
       const ctx = await contextPromise;
       const host = ctx.host;
 
-      // Sponsor operations gate check — shared-state read + pure derivation.
-      // Bootstrap has already populated the state before HTTP listen, so
-      // the decision is synchronous after a single Redis round-trip.
-      const sponsorOperationsState = await ctx.sponsorOperations.readState();
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState);
-      if (blocked) {
-        for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return respondMapped(
-          c,
-          codedHostError(blocked.errorCode, RELAY_SPONSOR_ERROR_CODES, {}, blocked.headers),
-        );
-      }
-
       // IP-level block check
       const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
       if (blockedByIp.blocked) {
@@ -278,8 +262,8 @@ export function createRelayRoutes(
       );
 
       // handleSponsor routes through the sponsor runner:
-      // pre-consume validation → consume stored hash → post-consume checks
-      // → sign/submit → sponsor result policy → finally slot checkin/release hook.
+      // validate prepared receipt and submitted bytes → atomically enter executing
+      // → sign/submit once → atomically finalize → deliver the result callback.
       // The post-terminal host callback writes slot and sponsor refill account state through that
       // runner path, so no separate wake signal is required here.
       const sponsorResult: RelaySponsorResponse = await handleSponsor(

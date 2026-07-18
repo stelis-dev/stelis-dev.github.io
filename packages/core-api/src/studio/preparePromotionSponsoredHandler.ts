@@ -11,7 +11,7 @@ import type { ChainBoundSuiEndpointSnapshot, OnchainConfig } from '@stelis/core-
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../store/sponsoredExecutionStore.js';
 import type { PrepareInflightLimiter } from '../store/prepareInflightTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
 import type { ReserveFailureReason } from './domain.js';
@@ -43,8 +43,8 @@ export interface PromotionPrepareContext {
   executionLedger: PromotionExecutionLedger;
   /** Sponsor pool — slot checkout/checkin/sign. */
   sponsorPool: SponsorPoolAdapter;
-  /** Prepare store — receipt binding. */
-  prepareStore: PrepareStoreAdapter;
+  /** Receipt lifecycle store. */
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /** In-flight gate for expensive prepare work. */
   prepareInflightLimiter: PrepareInflightLimiter;
   /**
@@ -113,7 +113,7 @@ export async function handlePromotionPrepare(
       promotionStore: ctx.promotionStore,
       executionLedger: ctx.executionLedger,
       sponsorPool: ctx.sponsorPool,
-      prepareStore: ctx.prepareStore,
+      sponsoredExecutionStore: ctx.sponsoredExecutionStore,
       globalAllowedTargets: ctx.globalAllowedTargets,
       getConfig: ctx.getConfig,
     },
@@ -132,7 +132,7 @@ export async function handlePromotionPrepare(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
-        prepareStore: ctx.prepareStore,
+        sponsoredExecutionStore: ctx.sponsoredExecutionStore,
         executionLedger: ctx.executionLedger,
       },
       {

@@ -10,7 +10,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { toBase58 } from '@mysten/sui/utils';
 import {
   createGenericExecutionPolicy,
-  createGenericSponsorConsumeAdapter,
+  createGenericSponsorReceiptPolicy,
   projectGenericSponsorResult,
   type GenericExecutionPolicyDependencies,
   type GenericExecutionPolicyOptions,
@@ -23,8 +23,8 @@ import {
   type PrepareStateMachineHost,
 } from '../src/session/sponsoredExecution/runner.js';
 import type {
-  PostConsumeSponsorContext,
-  PreConsumeSponsorContext,
+  SponsorSubmissionContext,
+  SponsorValidatedContext,
 } from '../src/session/sponsoredExecution/executionPolicy.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
 import { SenderSignatureError } from '../src/session/sessionPrimitives.js';
@@ -109,7 +109,6 @@ function makePromotionEntry(): PromotionPreparedTxEntry {
     sponsorAddress: SPONSOR,
     executionPathKey: 'promotion:p1',
     orderId: null,
-    nonce: 0n,
     promotionId: 'promo-1',
     userId: 'user-1',
     reservedGasMist: 1_000n,
@@ -126,10 +125,10 @@ function makeContext(overrides: Partial<HostContext> = {}): HostContext {
     deepbookPackageId: `0x${'77'.repeat(32)}`,
     vaultsTableId: undefined,
     sui: {} as HostContext['sui'],
-    prepareStore: {
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn(),
-    } as unknown as HostContext['prepareStore'],
+    sponsoredExecutionStore: {
+      readPreparedReceipt: vi.fn(),
+      checkUserQuota: vi.fn(async () => 'ok' as const),
+    } as unknown as HostContext['sponsoredExecutionStore'],
     sponsorPool: {
       checkin: vi.fn(),
     } as unknown as HostContext['sponsorPool'],
@@ -247,7 +246,6 @@ function makeUnreachedPrepareHost() {
       size: 1,
       primaryAddress: SPONSOR,
       checkout: vi.fn(),
-      commit: vi.fn(),
       checkin: vi.fn(),
       leaseStatus: vi.fn().mockResolvedValue({
         leasedSlots: 0,
@@ -257,23 +255,31 @@ function makeUnreachedPrepareHost() {
       addresses: vi.fn().mockReturnValue([SPONSOR]),
       sign: vi.fn().mockResolvedValue({ signature: 'unused' }),
     },
-    prepareStore: {
-      store: vi.fn(),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn(),
+    sponsoredExecutionStore: {
+      commitPreparedReceipt: vi.fn(),
+      readPreparedReceipt: vi.fn(),
+      discardPreparedReceipt: vi.fn(),
+      beginSponsoredExecution: vi.fn(),
+      finalizeSponsoredExecution: vi.fn(),
+      readExpiredPreparedReceipts: vi.fn(),
+      readDueExecutions: vi.fn(),
+      readPendingCallbacks: vi.fn(),
+      markCallbackDelivered: vi.fn(),
       checkUserQuota: vi.fn().mockResolvedValue('ok' as const),
       reserveNonce: vi.fn(),
-      releaseReservation: vi.fn(),
+      releaseNonceReservation: vi.fn(),
+      dispose: vi.fn(),
     },
   } satisfies PrepareStateMachineHost;
 }
 
-function makePostCtx(): PostConsumeSponsorContext {
+function makeValidatedCtx(
+  executionStage: SponsorValidatedContext['executionStage'] = 'before_sponsor_signature',
+): SponsorValidatedContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
-    executionStage: 'on_chain',
+    executionStage,
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
       sponsorAddress: SPONSOR,
       receiptId: RECEIPT_ID,
@@ -307,7 +313,7 @@ function makeUnaccountableWithdrawalTx(): Transaction {
   } as unknown as Transaction;
 }
 
-function makePreCtx(): PreConsumeSponsorContext {
+function makeSubmissionCtx(): SponsorSubmissionContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
@@ -338,11 +344,9 @@ function seedSponsorState(
 ): void {
   state.sponsor = {
     txSender: SENDER,
-    peeked: makePrepared(),
     prepared: makePrepared(),
     revalidation: makeRevalidation(7n),
     gasBudget: 10_000n,
-    preflightGasUsed: GAS_USED,
     sponsorResultOutcome: 'internal_error',
     sponsorResultOrderIdHash: null,
     sponsorResultEconomics: {
@@ -363,7 +367,6 @@ describe('createGenericExecutionPolicy', () => {
     });
     expect(policy.handleRequirements.preparedCommit).toEqual({});
     expect(policy.handleRequirements.sponsorResult).toEqual({});
-    expect(policy.hooks.RouteReservationAfterBuild).toBeDefined();
   });
 
   test('generic prepare rejects unaccountable withdrawal in RequestValidation before resource acquisition', async () => {
@@ -409,8 +412,8 @@ describe('createGenericExecutionPolicy', () => {
       expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
       expect(host.inflightLimiter.tryAcquire).not.toHaveBeenCalled();
       expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
-      expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
-      expect(host.prepareStore.store).not.toHaveBeenCalled();
+      expect(host.sponsoredExecutionStore.reserveNonce).not.toHaveBeenCalled();
+      expect(host.sponsoredExecutionStore.commitPreparedReceipt).not.toHaveBeenCalled();
       expect(preparedDraftFields).not.toHaveBeenCalled();
       expect(projectResponse).not.toHaveBeenCalled();
       expect(recordSponsorFailure).not.toHaveBeenCalled();
@@ -465,8 +468,8 @@ describe('createGenericExecutionPolicy', () => {
     expect(deserializeUserTxKind).toHaveBeenCalledTimes(1);
     expect(host.inflightLimiter.tryAcquire).not.toHaveBeenCalled();
     expect(host.sponsorPool.checkout).not.toHaveBeenCalled();
-    expect(host.prepareStore.reserveNonce).not.toHaveBeenCalled();
-    expect(host.prepareStore.store).not.toHaveBeenCalled();
+    expect(host.sponsoredExecutionStore.reserveNonce).not.toHaveBeenCalled();
+    expect(host.sponsoredExecutionStore.commitPreparedReceipt).not.toHaveBeenCalled();
   });
 
   test('does not widen the package main barrel', async () => {
@@ -475,13 +478,13 @@ describe('createGenericExecutionPolicy', () => {
       false,
     );
     expect(
-      Object.prototype.hasOwnProperty.call(mainBarrel, 'createGenericSponsorConsumeAdapter'),
+      Object.prototype.hasOwnProperty.call(mainBarrel, 'createGenericSponsorReceiptPolicy'),
     ).toBe(false);
   });
 });
 
-describe('createGenericSponsorConsumeAdapter', () => {
-  test('captures the consumed generic entry for postconsume hooks', async () => {
+describe('createGenericSponsorReceiptPolicy', () => {
+  test('supplies the current generic prepared entry to policy hooks', async () => {
     const state: GenericExecutionPolicyState = {
       sponsor: {
         sponsorResultOutcome: 'internal_error',
@@ -490,25 +493,24 @@ describe('createGenericSponsorConsumeAdapter', () => {
       },
     };
     const prepared = makePrepared();
-    const adapter = createGenericSponsorConsumeAdapter({
+    const adapter = createGenericSponsorReceiptPolicy({
       hostContext: makeContext(),
       clientIp: '127.0.0.1',
       state,
       errors,
     });
 
-    await adapter.validateConsumedEntry?.(prepared);
+    await adapter.validatePreparedEntry(prepared);
 
     expect(state.sponsor?.prepared).toBe(prepared);
   });
 
-  test('rejects promotion entries and checkins their committed slot', async () => {
+  test('rejects promotion entries without mutating lifecycle state', async () => {
     const checkin = vi.fn();
-    const ctx = makeContext({
-      sponsorPool: { checkin } as unknown as HostContext['sponsorPool'],
-    });
-    const adapter = createGenericSponsorConsumeAdapter({
-      hostContext: ctx,
+    const adapter = createGenericSponsorReceiptPolicy({
+      hostContext: makeContext({
+        sponsorPool: { checkin } as unknown as HostContext['sponsorPool'],
+      }),
       clientIp: '127.0.0.1',
       state: {
         sponsor: {
@@ -520,15 +522,19 @@ describe('createGenericSponsorConsumeAdapter', () => {
       errors,
     });
 
-    await expect(adapter.validateConsumedEntry?.(makePromotionEntry())).rejects.toMatchObject({
-      code: 'MODE_MISMATCH',
-    });
-    expect(checkin).toHaveBeenCalledWith(SPONSOR, RECEIPT_ID, 'a'.repeat(64));
+    let error: unknown;
+    try {
+      await adapter.validatePreparedEntry(makePromotionEntry());
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ code: 'MODE_MISMATCH' });
+    expect(checkin).not.toHaveBeenCalled();
   });
 
   test('hash mismatch records IP-only tampering before returning the classified error', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
-    const adapter = createGenericSponsorConsumeAdapter({
+    const adapter = createGenericSponsorReceiptPolicy({
       hostContext: makeContext(),
       clientIp: '203.0.113.10',
       state: {
@@ -557,49 +563,15 @@ describe('createGenericSponsorConsumeAdapter', () => {
   });
 });
 
-describe('generic sponsor preconsume priority', () => {
-  test('DecodeSponsorSubmission stores promotion-mode peek without MODE_MISMATCH', async () => {
-    const promotionEntry = makePromotionEntry();
-    const peek = vi.fn(async () => promotionEntry);
-    const txBytes = await buildTxBytesWithSender(SENDER);
-    const options = makeSponsorOptions({
-      ctx: makeContext({
-        prepareStore: {
-          peek,
-          evictPreparedEntry: vi.fn(),
-        } as unknown as HostContext['prepareStore'],
-      }),
-      deps: { verifySenderSignature: vi.fn() },
-    });
-    const direct = createGenericExecutionPolicy({
-      ...options,
-      sponsor: {
-        txBytes,
-        userSignature: 'unused',
-        errors,
-      },
-    });
-
-    await expect(
-      direct.policy.hooks.DecodeSponsorSubmission(makePreCtx()),
-    ).resolves.toBeUndefined();
-    expect(direct.state.sponsor?.peeked).toBe(promotionEntry);
-  });
-
-  test('promotion-mode peek preserves signature failure priority before consume', async () => {
+describe('generic sponsor validation', () => {
+  test('records signature failure after the runner supplies the current prepared entry', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const verifySenderSignature = vi.fn(async () => {
       throw new SenderSignatureError('bad signature');
     });
     const txBytes = await buildTxBytesWithSender(SENDER);
-    const { policy } = createGenericExecutionPolicy({
+    const options = {
       ...makeSponsorOptions({
-        ctx: makeContext({
-          prepareStore: {
-            peek: vi.fn(async () => makePromotionEntry()),
-            evictPreparedEntry: vi.fn(),
-          } as unknown as HostContext['prepareStore'],
-        }),
         deps: {
           verifySenderSignature:
             verifySenderSignature as unknown as GenericExecutionPolicyDependencies['verifySenderSignature'],
@@ -612,10 +584,18 @@ describe('generic sponsor preconsume priority', () => {
         userSignature: 'bad-user-signature',
         errors,
       },
-    });
+    } satisfies GenericExecutionPolicyOptions;
+    const { policy, state } = createGenericExecutionPolicy(options);
+    await createGenericSponsorReceiptPolicy({
+      hostContext: options.hostContext,
+      clientIp: '127.0.0.1',
+      state,
+      errors,
+      deps: options.deps,
+    }).validatePreparedEntry(makePrepared());
 
-    await policy.hooks.DecodeSponsorSubmission(makePreCtx());
-    await expect(policy.hooks.UserSignatureValidation(makePreCtx())).rejects.toMatchObject({
+    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
       code: 'SENDER_SIGNATURE_INVALID',
     });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
@@ -626,17 +606,11 @@ describe('generic sponsor preconsume priority', () => {
     );
   });
 
-  test('promotion-mode peek preserves session mismatch priority before consume', async () => {
+  test('records sender mismatch against the exact prepared entry supplied by the runner', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const txBytes = await buildTxBytesWithSender(OTHER_SENDER);
-    const { policy } = createGenericExecutionPolicy({
+    const options = {
       ...makeSponsorOptions({
-        ctx: makeContext({
-          prepareStore: {
-            peek: vi.fn(async () => makePromotionEntry()),
-            evictPreparedEntry: vi.fn(),
-          } as unknown as HostContext['prepareStore'],
-        }),
         deps: {
           verifySenderSignature: vi.fn(async () => undefined),
           recordSponsorFailureForAbuse:
@@ -648,10 +622,18 @@ describe('generic sponsor preconsume priority', () => {
         userSignature: 'valid-for-other-sender',
         errors,
       },
-    });
+    } satisfies GenericExecutionPolicyOptions;
+    const { policy, state } = createGenericExecutionPolicy(options);
+    await createGenericSponsorReceiptPolicy({
+      hostContext: options.hostContext,
+      clientIp: '127.0.0.1',
+      state,
+      errors,
+      deps: options.deps,
+    }).validatePreparedEntry(makePrepared());
 
-    await policy.hooks.DecodeSponsorSubmission(makePreCtx());
-    await expect(policy.hooks.UserSignatureValidation(makePreCtx())).rejects.toMatchObject({
+    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
       code: 'RECEIPT_SESSION_MISMATCH',
     });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
@@ -663,8 +645,8 @@ describe('generic sponsor preconsume priority', () => {
   });
 });
 
-describe('generic sponsor postconsume hooks', () => {
-  test('SharedPostconsumeChecks verifies nonce equality and returns reconstruction inputs', async () => {
+describe('generic sponsor read-only checks', () => {
+  test('SharedSponsorChecks verifies nonce equality and returns reconstruction inputs', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
@@ -679,7 +661,7 @@ describe('generic sponsor postconsume hooks', () => {
     );
     seedSponsorState(state, { revalidation: undefined });
 
-    const out = await policy.hooks.SharedPostconsumeChecks(makePostCtx());
+    const out = await policy.hooks.SharedSponsorChecks(makeValidatedCtx());
 
     expect(out?.nonce).toEqual({
       nonce: 7n,
@@ -690,7 +672,7 @@ describe('generic sponsor postconsume hooks', () => {
     expect(recordSponsorFailureForAbuse).not.toHaveBeenCalled();
   });
 
-  test('SharedPostconsumeChecks maps S-14 nonce mismatch to REPREPARE_REQUIRED without abuse', async () => {
+  test('SharedSponsorChecks maps S-14 nonce mismatch to REPREPARE_REQUIRED without abuse', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
@@ -705,7 +687,7 @@ describe('generic sponsor postconsume hooks', () => {
     );
     seedSponsorState(state, { revalidation: undefined });
 
-    await expect(policy.hooks.SharedPostconsumeChecks(makePostCtx())).rejects.toMatchObject({
+    await expect(policy.hooks.SharedSponsorChecks(makeValidatedCtx())).rejects.toMatchObject({
       code: 'REPREPARE_REQUIRED',
     });
     expect(recordSponsorFailureForAbuse).not.toHaveBeenCalled();
@@ -727,7 +709,7 @@ describe('generic sponsor postconsume hooks', () => {
     );
     seedSponsorState(state);
 
-    await expect(policy.hooks.Preflight(makePostCtx())).rejects.toMatchObject({
+    await expect(policy.hooks.Preflight(makeValidatedCtx())).rejects.toMatchObject({
       code: 'SPONSOR_PREFLIGHT_FAILED',
     });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
@@ -740,7 +722,7 @@ describe('generic sponsor postconsume hooks', () => {
   });
 });
 
-describe('generic sponsor ClassifySponsorResult and Release', () => {
+describe('generic sponsor result classification', () => {
   test('ClassifySponsorResult classifies on-chain revert and records address-level abuse', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const { policy, state } = createGenericExecutionPolicy(
@@ -761,7 +743,9 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       gasUsed: GAS_USED,
     };
 
-    await expect(policy.hooks.ClassifySponsorResult(makePostCtx(), failed)).rejects.toMatchObject({
+    await expect(
+      policy.hooks.ClassifySponsorResult(makeValidatedCtx('on_chain'), failed),
+    ).rejects.toMatchObject({
       code: 'SPONSOR_ONCHAIN_FAILED',
       digest: TEST_SUI_TRANSACTION_DIGEST,
     });
@@ -775,13 +759,8 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
     expect(state.sponsor?.sponsorResultOutcome).toBe('onchain_revert');
   });
 
-  test('success path records economics, projects the generic response, and Release invokes sponsor result callback', async () => {
-    const onSponsorResult = vi.fn();
-    const { policy, state } = createGenericExecutionPolicy(
-      makeSponsorOptions({
-        onSponsorResult,
-      }),
-    );
+  test('success path records economics and projects the generic response without lifecycle mutation', async () => {
+    const { policy, state } = createGenericExecutionPolicy(makeSponsorOptions());
     seedSponsorState(state);
     const success: Extract<ExecResult, { success: true }> = {
       success: true,
@@ -791,8 +770,7 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       gasUsed: GAS_USED,
     };
 
-    await policy.hooks.ClassifySponsorResult(makePostCtx(), success);
-    await policy.hooks.Release(makePostCtx());
+    await policy.hooks.ClassifySponsorResult(makeValidatedCtx('on_chain'), success);
     const projected = projectGenericSponsorResult(makeSponsorOptions(), state);
 
     expect(projected).toEqual({
@@ -801,52 +779,10 @@ describe('generic sponsor ClassifySponsorResult and Release', () => {
       executionCostClaim: '5000',
       orderId: 'order-1',
     });
-    expect(onSponsorResult).toHaveBeenCalledWith(
-      expect.objectContaining({
-        outcome: 'success',
-        route: 'generic',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        receiptId: RECEIPT_ID,
-        senderAddress: SENDER,
-        economics: expect.objectContaining({ economicsStatus: 'known' }),
-      }),
-    );
-  });
-
-  test('Release callback failure preserves existing sponsor_handler source', async () => {
-    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    try {
-      const onSponsorResult = vi.fn(async () => {
-        throw new Error('callback exploded');
-      });
-      const { policy, state } = createGenericExecutionPolicy(
-        makeSponsorOptions({
-          onSponsorResult,
-        }),
-      );
-      seedSponsorState(state);
-      const success: Extract<ExecResult, { success: true }> = {
-        success: true,
-        executionStage: 'on_chain',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        effects: { status: 'ok' },
-        gasUsed: GAS_USED,
-      };
-
-      await policy.hooks.ClassifySponsorResult(makePostCtx(), success);
-      await policy.hooks.Release(makePostCtx());
-
-      const callbackFailedLog = consoleWarnSpy.mock.calls
-        .map((args: unknown[]) => JSON.parse(args[0] as string) as Record<string, unknown>)
-        .find((entry) => entry['event'] === 'SPONSOR_RESULT_CALLBACK_FAILED');
-      expect(callbackFailedLog).toMatchObject({
-        source: 'sponsor_handler',
-        route: 'generic',
-        digest: TEST_SUI_TRANSACTION_DIGEST,
-        outcome: 'success',
-      });
-    } finally {
-      consoleWarnSpy.mockRestore();
-    }
+    expect(state.sponsor?.sponsorResultEconomics).toMatchObject({
+      economicsStatus: 'known',
+      recoveredGasMist: '5000',
+      hostPaidGasMist: '1100',
+    });
   });
 });

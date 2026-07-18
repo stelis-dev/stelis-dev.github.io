@@ -22,7 +22,7 @@ import {
 } from '../src/studio/preparePromotionSponsoredHandler.js';
 import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import { MemorySponsoredExecutionStore } from '../src/store/memorySponsoredExecutionStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { PrepareOverloadError, PrepareStudioUserQuotaError } from '../src/store/prepareErrors.js';
 import { SponsorPool } from '../src/context.js';
@@ -200,9 +200,7 @@ async function setup() {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
+  const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, executionLedger);
 
   // Create and activate a promotion
   const record = await promotionStore.create(BASE_PROMO);
@@ -219,7 +217,7 @@ async function setup() {
     promotionStore,
     executionLedger,
     sponsorPool,
-    prepareStore,
+    sponsoredExecutionStore,
     prepareInflightLimiter: new MemoryPrepareInflight(10),
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
@@ -234,7 +232,7 @@ async function setup() {
     globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
   };
 
-  return { ctx, promotionStore, executionLedger, prepareStore, promoId };
+  return { ctx, promotionStore, executionLedger, sponsoredExecutionStore, promoId };
 }
 
 // ─────────────────────────────────────────────
@@ -361,7 +359,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // 70KB payload: passes the 96KB prepare-request body cap but exceeds the
     // 64KB MAX_TX_KIND_BYTES field cap. P0 size check must fail at the
@@ -396,7 +394,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     try {
       await handlePromotionPrepare(ctx, {
@@ -424,7 +422,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Garbage bytes that decode from base64 but fail Transaction.fromKind().
     const garbageTxKind = toBase64(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
@@ -455,7 +453,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Real SDK build: MoveCall with tx.gas as an argument.
     const tx = new Transaction();
@@ -494,7 +492,7 @@ describe('handlePromotionPrepare', () => {
       const getConfigSpy = vi.spyOn(ctx, 'getConfig');
       const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
       const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-      const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+      const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
       const txKindBytes = await buildCommandCountTxKindBytes(commandCount);
 
       await expect(
@@ -561,7 +559,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Build a Sender withdrawal, patch to Sponsor via BCS
     const seed = new Transaction();
@@ -810,17 +808,13 @@ describe('handlePromotionPrepare', () => {
     const txKind = await buildTestTxKindBytes();
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
 
-    // Override checkUserQuota on the prepareStore to simulate quota exceeded
-    const quotaCtx: PromotionPrepareContext = {
-      ...ctx,
-      prepareStore: {
-        ...ctx.prepareStore,
-        checkUserQuota: async () => ({ exceeded: true as const, limit: 1 }),
-      },
-    };
+    vi.spyOn(ctx.sponsoredExecutionStore, 'checkUserQuota').mockResolvedValue({
+      exceeded: true,
+      limit: 1,
+    });
 
     await expect(
-      handlePromotionPrepare(quotaCtx, {
+      handlePromotionPrepare(ctx, {
         promotionId: promoId,
         senderAddress: USER_ADDR,
         txKindBytes: txKind,

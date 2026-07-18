@@ -32,7 +32,6 @@ import { StelisSDK } from '../src/sdk.js';
 import { StelisSponsoredError } from '../src/errors.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
-import { makeCreditResult } from './helpers/currentFixtures.js';
 
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
   mockExtractSettleFields: vi.fn(),
@@ -54,7 +53,6 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
-    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
   };

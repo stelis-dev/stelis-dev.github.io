@@ -10,11 +10,13 @@ import {
   SPONSOR_FAILURE_SUBCODES,
   parseAdminPromotionListQuery,
   parseAdminPromotionListResponse,
+  parseAdminSponsorOperationsResponse,
   parseAdminSponsoredLogsQuery,
   parseAdminSponsoredLogsResponse,
   parseHostErrorResponse,
   parsePromotionListResponse,
   parsePromotionPageQuery,
+  parseSponsorRefillAccountWithdrawalResponse,
   type HostErrorCode,
 } from '@stelis/contracts';
 
@@ -97,7 +99,89 @@ function currentSponsoredLogsResponse() {
   };
 }
 
+function currentSponsorOperationsResponse() {
+  const sponsorAddress = `0x${'11'.repeat(32)}`;
+  return {
+    sponsorOperations: {
+      gateErrorCode: null,
+      healthySlots: 1,
+      degradedSlots: 0,
+      slotLeases: {
+        leasedSlots: 0,
+        freeSlots: 1,
+        slots: [{ address: sponsorAddress, leased: false }],
+      },
+      slots: [
+        {
+          address: sponsorAddress,
+          state: 'healthy',
+          addressBalanceMist: '100',
+          lastObservedAtMs: 1,
+          lastError: null,
+        },
+      ],
+      sponsorRefillAccount: {
+        address: `0x${'22'.repeat(32)}`,
+        totalBalanceMist: '100',
+        healthy: true,
+        lastObservedAtMs: 1,
+        lastError: null,
+      },
+    },
+    primaryAddress: sponsorAddress,
+    settlementPayoutRecipientAddress: `0x${'33'.repeat(32)}`,
+    network: 'testnet',
+    sponsorBalanceWarnMist: '100',
+    sponsorBalanceRefillTargetMist: '200',
+    sponsorRefillAccountRunwayTargetMist: '100',
+    refillEnabled: true,
+    quotedHostFeeMist: '0',
+    feeConfig: null,
+    supportedSettlementSwapPaths: [],
+    onChainIds: {
+      packageId: null,
+      configId: null,
+      vaultRegistryId: null,
+      deepbookPackageId: null,
+    },
+    studioEnabled: false,
+    rpcFleet: { endpoints: [{ origin: 'https://rpc.test', role: 'primary' }] },
+  };
+}
+
 describe('contracts-owned Host wire authority', () => {
+  test('rejects sponsor-operations responses whose public totals contradict their records', () => {
+    const valid = currentSponsorOperationsResponse();
+    expect(parseAdminSponsorOperationsResponse(valid)).toEqual(valid);
+
+    expect(() =>
+      parseAdminSponsorOperationsResponse({
+        ...currentSponsorOperationsResponse(),
+        sponsorOperations: {
+          ...currentSponsorOperationsResponse().sponsorOperations,
+          healthySlots: 0,
+          degradedSlots: 1,
+        },
+      }),
+    ).toThrow(/counts contradict their slots/);
+
+    expect(() =>
+      parseAdminSponsorOperationsResponse({
+        ...currentSponsorOperationsResponse(),
+        sponsorOperations: {
+          ...currentSponsorOperationsResponse().sponsorOperations,
+          gateErrorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+        },
+      }),
+    ).toThrow(/gateErrorCode contradicts current state/);
+
+    const observedBelowWarning = currentSponsorOperationsResponse();
+    observedBelowWarning.sponsorOperations.slots[0]!.addressBalanceMist = '99';
+    expect(() => parseAdminSponsorOperationsResponse(observedBelowWarning)).toThrow(
+      /state contradicts sponsorBalanceWarnMist/,
+    );
+  });
+
   test('owns one normalized Promotion-page query and its exact boundaries', () => {
     expect(parsePromotionPageQuery({})).toEqual({
       cursor: null,
@@ -229,6 +313,35 @@ describe('contracts-owned Host wire authority', () => {
     expect(() => parseAdminSponsoredLogsResponse(unknownEconomicsWithAmount)).toThrow(
       /unknown economics requires null numeric fields/,
     );
+  });
+
+  test('accepts the full derived host-net range without narrowing it to u64', () => {
+    const response = currentSponsoredLogsResponse();
+    response.entries[0]!.recoveredGasMist = '18446744073709551615';
+    response.entries[0]!.hostFeeMist = '18446744073709551615';
+    response.entries[0]!.hostPaidGasMist = '0';
+    response.entries[0]!.hostNetMist = '36893488147419103230';
+
+    expect(parseAdminSponsoredLogsResponse(response).entries[0]!.hostNetMist).toBe(
+      '36893488147419103230',
+    );
+  });
+
+  test('requires a successful Sponsor Refill Account withdrawal to report a positive amount', () => {
+    expect(
+      parseSponsorRefillAccountWithdrawalResponse({
+        digest: '0xdigest',
+        amountMist: '1',
+        recipient: '0xrecipient',
+      }).amountMist,
+    ).toBe('1');
+    expect(() =>
+      parseSponsorRefillAccountWithdrawalResponse({
+        digest: '0xdigest',
+        amountMist: '0',
+        recipient: '0xrecipient',
+      }),
+    ).toThrow(/positive/);
   });
 
   test('binds every current error code to one status, message, and metadata policy', () => {

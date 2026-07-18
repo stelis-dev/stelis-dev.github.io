@@ -1,24 +1,16 @@
 /**
  * Sponsor result host callback contract.
  *
- * Generic and promotion sponsor sponsored execution policies invoke the host-provided
- * callback from their `Release` hooks, after the sponsor runner's
- * `safeSlotCheckin()` boundary. The callback is the supported API for
+ * The sponsored execution store persists this value with the receipt's final
+ * state before the runner or recovery task invokes the host callback. The callback is the supported API for
  * per-action sponsor operations state update AND for the sponsored-execution
  * recorder.
  *
  * Contract:
- *   - Invoked on every sponsor result path (success and throw), exactly once per
- *     sponsor request that reached the post-consume stage (where
- *     `prepared.sponsorAddress` is known).
- *   - Runs after `safeSlotCheckin()` so slot-release invariants are
- *     independent of callback outcome.
- *   - Must be best-effort: it must catch its own errors internally and
- *     never throw. SponsoredExecutionPolicy Release hooks also wrap the call in
- *     try/catch as defence-in-depth.
- *   - May be awaited by Release hooks so cleanup ordering is deterministic.
- *     Callbacks that need to avoid primary-response latency must return
- *     fast (typical shape: one bounded probe + one Redis write).
+ *   - The durable final record is the delivery source of truth.
+ *   - A callback failure leaves delivery pending for bounded recovery; it never
+ *     changes the primary execution result.
+ *   - Successful delivery is acknowledged by an exact compare-and-set.
  */
 
 /** Final outcome of a sponsor run, matching existing error classification rules. */
@@ -110,9 +102,9 @@ export interface SponsorResultMetadata {
   readonly digest?: string;
 
   // ── Identity block (recorder input) ─────────────────────────────────
-  /** Receipt ID consumed by the sponsor run. */
+  /** Durable receipt ID owned by the sponsor run. */
   readonly receiptId: string;
-  /** Stored-hash-verified sender address after consume succeeds. */
+  /** Sender address bound by the validated prepared transaction record. */
   readonly senderAddress: string;
   /** Canonical execution path key carried through the prepare entry. */
   readonly executionPathKey: string;
@@ -129,9 +121,12 @@ export interface SponsorResultMetadata {
 }
 
 /**
- * Host-provided post-result hook. `void | Promise<void>` so hosts can
- * choose sync or async implementations; SponsoredExecutionPolicy Release hooks always
- * `await` the return.
- * Implementations MUST NOT throw — see contract note above.
+ * Host-provided final-result hook. Recovery passes its lifecycle signal so
+ * callback-owned RPC work stops during disposal. Foreground delivery has no
+ * recovery signal. A throw is retained as pending delivery and retried by
+ * recovery; it never rolls back the durable final state.
  */
-export type SponsorResultCallback = (metadata: SponsorResultMetadata) => void | Promise<void>;
+export type SponsorResultCallback = (
+  metadata: SponsorResultMetadata,
+  signal?: AbortSignal,
+) => void | Promise<void>;

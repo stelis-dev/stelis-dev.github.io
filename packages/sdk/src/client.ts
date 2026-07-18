@@ -40,6 +40,8 @@ import {
   RELAY_STATUS_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
   type HostErrorCode,
   type HostErrorMeta,
   type RelayStatusResponse,
@@ -341,13 +343,13 @@ function resolveRequestTimeouts(overrides?: StelisRequestTimeouts): ResolvedRequ
 }
 
 function resolveTimeoutMs(name: string, value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value <= 0) {
+  const resolved = value ?? fallback;
+  if (!isNodeTimerDelayMs(resolved)) {
     throw new Error(
-      `[StelisClient] requestTimeouts.${name} must be a positive integer within Number.MAX_SAFE_INTEGER, got ${String(value)}`,
+      `[StelisClient] requestTimeouts.${name} must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}, got ${String(resolved)}`,
     );
   }
-  return value;
+  return resolved;
 }
 
 function parseJsonIfPossible(raw: string): unknown | undefined {

@@ -24,7 +24,6 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
-import { makeCreditResult } from './helpers/currentFixtures.js';
 import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import {
   SuiOperationError,
@@ -63,7 +62,6 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
-    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
     getSuiBalance: vi.fn(async () => {

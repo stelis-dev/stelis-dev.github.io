@@ -1,6 +1,10 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { isPromotionId, PROMOTION_PAGE_MAX_LIMIT } from '@stelis/contracts';
+import {
+  isPromotionId,
+  NODE_TIMER_MAX_DELAY_MS,
+  PROMOTION_PAGE_MAX_LIMIT,
+} from '@stelis/contracts';
 import { z } from 'zod';
 import type { StelisMcpServerConfig } from './config.js';
 import { StelisMcpHttpError } from './http.js';
@@ -24,7 +28,8 @@ const RELAY_API_FIELDS = {
   timeoutMs: z
     .number()
     .int()
-    .positive()
+    .min(1)
+    .max(NODE_TIMER_MAX_DELAY_MS)
     .optional()
     .describe('Per-call HTTP timeout in milliseconds.'),
 };

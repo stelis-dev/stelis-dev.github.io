@@ -3,8 +3,8 @@
  *
  * All writes go through a single Lua script so that:
  *   - exact-replay / conflicting-result check by receipt (no TTL),
- *   - per-mode + all-mode aggregate updates (`HINCRBY` on int64 string fields),
- *   - recent-list append + createdAt sort + cap
+ *   - per-mode + all-mode aggregate updates on exact decimal strings,
+ *   - recent-list append + cap
  * are atomic per emit. This mirrors `RedisPromotionExecutionLedger`'s
  * Lua-atomic money update pattern.
  *
@@ -14,9 +14,9 @@
  * Key layout:
  *   stelis:sponsored_logs:agg:{all|generic|promotion}     HASH
  *     fields: sponsoredExecutions, cumulativeHostNetMist,
- *             cumulativeLossMist, lossCount   (int64 string)
+ *             cumulativeLossMist, lossCount   (exact decimal string)
  *   stelis:sponsored_logs:recent                           LIST
- *     createdAt newest-first JSON-serialised SponsoredExecutionLogEntry, capped.
+ *     most recently accepted entries first, capped.
  *   stelis:sponsored_logs:idem:{receiptId}                 STRING fingerprint (no TTL)
  *
  * Replay contract: the receipt key stores the accepted result fingerprint
@@ -24,10 +24,9 @@
  * adapter never expires or clears these keys; clearing them while retaining
  * the aggregate would remove its replay proof.
  *
- * Signed int64 headroom: -9_223_372_036_854_775_808 to
- * 9_223_372_036_854_775_807. Sufficient for lifetime totals at expected
- * sponsored TPS; switch to chunked aggregates or a DB primary if the
- * headroom is exceeded.
+ * Aggregate arithmetic is implemented on decimal strings in Lua. MIST values
+ * and lifetime totals never pass through Lua numbers or Redis's signed-int64
+ * `HINCRBY` boundary.
  */
 
 import type { RedisClientLike } from '@stelis/core-api';
@@ -35,12 +34,13 @@ import type {
   SponsoredExecutionAggregate,
   SponsoredExecutionAggregateMode,
   SponsoredExecutionLogEntry,
-  SponsoredExecutionMode,
 } from './types.js';
 import {
+  parseStoredSponsoredExecutionLogEntry,
   parseSignedDecimalString,
   parseSponsoredExecutionLogEntry,
   parseUnsignedDecimalString,
+  serializeSponsoredExecutionLogEntry,
 } from './types.js';
 import {
   SPONSORED_LOGS_RECENT_DEFAULT_CAP,
@@ -59,13 +59,105 @@ const AGG_PREFIX = `${KEY_PREFIX}:agg`;
  * `DUPLICATE` for an exact replay, and `CONFLICT` when the receipt was
  * already recorded with different result data.
  *
- * Numeric ARGV are signed-decimal strings. HINCRBY accepts signed
- * decimal strings as the increment.
+ * Numeric ARGV are canonical decimal strings. Arithmetic stays on strings so
+ * no MIST total crosses Lua floating point or Redis signed-int64 arithmetic.
  *
  * The receipt fingerprint has no TTL so the aggregate stays honest for
  * the adapter's full lifetime. The script never expires entries.
  */
 const APPEND_SCRIPT = `
+local function stripLeadingZeroes(value)
+  local stripped = string.gsub(value, '^0+', '')
+  if stripped == '' then return '0' end
+  return stripped
+end
+
+local function splitSign(value)
+  if string.sub(value, 1, 1) == '-' then
+    return -1, stripLeadingZeroes(string.sub(value, 2))
+  end
+  return 1, stripLeadingZeroes(value)
+end
+
+local function compareMagnitude(left, right)
+  if string.len(left) ~= string.len(right) then
+    return string.len(left) < string.len(right) and -1 or 1
+  end
+  if left == right then return 0 end
+  return left < right and -1 or 1
+end
+
+local function reverseDigits(digits)
+  local result = {}
+  for index = #digits, 1, -1 do
+    result[#result + 1] = digits[index]
+  end
+  return table.concat(result)
+end
+
+local function addMagnitude(left, right)
+  local digits = {}
+  local leftIndex = string.len(left)
+  local rightIndex = string.len(right)
+  local carry = 0
+  while leftIndex > 0 or rightIndex > 0 or carry > 0 do
+    local leftDigit = leftIndex > 0 and tonumber(string.sub(left, leftIndex, leftIndex)) or 0
+    local rightDigit = rightIndex > 0 and tonumber(string.sub(right, rightIndex, rightIndex)) or 0
+    local sum = leftDigit + rightDigit + carry
+    digits[#digits + 1] = tostring(sum % 10)
+    carry = math.floor(sum / 10)
+    leftIndex = leftIndex - 1
+    rightIndex = rightIndex - 1
+  end
+  return reverseDigits(digits)
+end
+
+local function subtractMagnitude(left, right)
+  local digits = {}
+  local leftIndex = string.len(left)
+  local rightIndex = string.len(right)
+  local borrow = 0
+  while leftIndex > 0 do
+    local leftDigit = tonumber(string.sub(left, leftIndex, leftIndex)) - borrow
+    local rightDigit = rightIndex > 0 and tonumber(string.sub(right, rightIndex, rightIndex)) or 0
+    if leftDigit < rightDigit then
+      leftDigit = leftDigit + 10
+      borrow = 1
+    else
+      borrow = 0
+    end
+    digits[#digits + 1] = tostring(leftDigit - rightDigit)
+    leftIndex = leftIndex - 1
+    rightIndex = rightIndex - 1
+  end
+  return stripLeadingZeroes(reverseDigits(digits))
+end
+
+local function addDecimal(left, right)
+  local leftSign, leftMagnitude = splitSign(left)
+  local rightSign, rightMagnitude = splitSign(right)
+  if leftSign == rightSign then
+    local magnitude = addMagnitude(leftMagnitude, rightMagnitude)
+    if leftSign < 0 and magnitude ~= '0' then return '-' .. magnitude end
+    return magnitude
+  end
+  local comparison = compareMagnitude(leftMagnitude, rightMagnitude)
+  if comparison == 0 then return '0' end
+  if comparison > 0 then
+    local magnitude = subtractMagnitude(leftMagnitude, rightMagnitude)
+    if leftSign < 0 then return '-' .. magnitude end
+    return magnitude
+  end
+  local magnitude = subtractMagnitude(rightMagnitude, leftMagnitude)
+  if rightSign < 0 then return '-' .. magnitude end
+  return magnitude
+end
+
+local function addAggregate(key, field, delta)
+  local current = redis.call('HGET', key, field) or '0'
+  redis.call('HSET', key, field, addDecimal(current, delta))
+end
+
 local idempotencyKey = KEYS[1]
 local aggAllKey = KEYS[2]
 local aggModeKey = KEYS[3]
@@ -87,43 +179,24 @@ if recordedFingerprint then
   end
   return 'CONFLICT'
 end
-redis.call('SET', idempotencyKey, fingerprint)
-
-redis.call('HINCRBY', aggAllKey, 'sponsoredExecutions', execDelta)
-redis.call('HINCRBY', aggModeKey, 'sponsoredExecutions', execDelta)
+addAggregate(aggAllKey, 'sponsoredExecutions', execDelta)
+addAggregate(aggModeKey, 'sponsoredExecutions', execDelta)
 
 if isKnown == '1' then
-  redis.call('HINCRBY', aggAllKey, 'cumulativeHostNetMist', netDelta)
-  redis.call('HINCRBY', aggModeKey, 'cumulativeHostNetMist', netDelta)
-  redis.call('HINCRBY', aggAllKey, 'cumulativeLossMist', lossAmountDelta)
-  redis.call('HINCRBY', aggModeKey, 'cumulativeLossMist', lossAmountDelta)
-  if tonumber(lossDelta) > 0 then
-    redis.call('HINCRBY', aggAllKey, 'lossCount', lossDelta)
-    redis.call('HINCRBY', aggModeKey, 'lossCount', lossDelta)
+  addAggregate(aggAllKey, 'cumulativeHostNetMist', netDelta)
+  addAggregate(aggModeKey, 'cumulativeHostNetMist', netDelta)
+  addAggregate(aggAllKey, 'cumulativeLossMist', lossAmountDelta)
+  addAggregate(aggModeKey, 'cumulativeLossMist', lossAmountDelta)
+  if lossDelta == '1' then
+    addAggregate(aggAllKey, 'lossCount', lossDelta)
+    addAggregate(aggModeKey, 'lossCount', lossDelta)
   end
 end
 
 redis.call('LPUSH', recentKey, entryJson)
-local rows = redis.call('LRANGE', recentKey, 0, -1)
-table.sort(rows, function(a, b)
-  local okA, entryA = pcall(cjson.decode, a)
-  local okB, entryB = pcall(cjson.decode, b)
-  local createdA = ''
-  local createdB = ''
-  if okA and type(entryA) == 'table' and type(entryA.createdAt) == 'string' then
-    createdA = entryA.createdAt
-  end
-  if okB and type(entryB) == 'table' and type(entryB.createdAt) == 'string' then
-    createdB = entryB.createdAt
-  end
-  return createdA > createdB
-end)
-redis.call('DEL', recentKey)
-local keep = math.min(#rows, recentCap)
-for i = 1, keep do
-  redis.call('RPUSH', recentKey, rows[i])
-end
+redis.call('LTRIM', recentKey, 0, recentCap - 1)
 
+redis.call('SET', idempotencyKey, fingerprint)
 return 'APPENDED'
 `.trim();
 
@@ -160,13 +233,6 @@ function idemKey(receiptId: string): string {
   return `${IDEM_PREFIX}:${receiptId}`;
 }
 
-function compareCreatedAtDesc(
-  a: SponsoredExecutionLogEntry,
-  b: SponsoredExecutionLogEntry,
-): number {
-  return b.createdAt.localeCompare(a.createdAt);
-}
-
 export interface RedisSponsoredLogsStoreOptions {
   readonly recentCap?: number;
 }
@@ -178,7 +244,11 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     private readonly client: RedisClientLike,
     options: RedisSponsoredLogsStoreOptions = {},
   ) {
-    this.recentCap = options.recentCap ?? SPONSORED_LOGS_RECENT_DEFAULT_CAP;
+    const recentCap = options.recentCap ?? SPONSORED_LOGS_RECENT_DEFAULT_CAP;
+    if (!Number.isSafeInteger(recentCap) || recentCap <= 0) {
+      throw new Error('sponsoredLogs.redisStore: recentCap must be a positive safe integer');
+    }
+    this.recentCap = recentCap;
   }
 
   async append(entry: SponsoredExecutionLogEntry): Promise<void> {
@@ -188,9 +258,8 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
     let lossAmountDelta = '0';
     let lossDelta = '0';
     if (currentEntry.economicsStatus === 'known') {
-      // Validate the signed-decimal shape so HINCRBY does not receive a
-      // malformed argument; primary error preserved at the recorder's
-      // try/catch boundary.
+      // Validate and normalize the signed decimal before passing it to the
+      // string-arithmetic script; the recorder preserves the primary error.
       const hostNet = parseSignedDecimalString(currentEntry.hostNetMist!, 'hostNetMist');
       isKnown = true;
       netDelta = hostNet.toString();
@@ -204,7 +273,7 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       RECENT_KEY,
     ];
     const args = [
-      JSON.stringify(currentEntry),
+      serializeSponsoredExecutionLogEntry(currentEntry),
       sponsoredLogReplayFingerprint(currentEntry),
       '1',
       isKnown ? '1' : '0',
@@ -231,15 +300,22 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
       );
     }
     const [exec, cumulativeNet, loss, cumulativeLoss] = result as readonly unknown[];
+    const sponsoredExecutions = parseUnsignedDecimalString(exec, 'sponsoredExecutions');
+    const lossCount = parseUnsignedDecimalString(loss, 'lossCount');
+    const cumulativeHostNetMist = parseSignedDecimalString(cumulativeNet, 'cumulativeHostNetMist');
+    const cumulativeLossMist = parseSignedDecimalString(cumulativeLoss, 'cumulativeLossMist');
+    if (lossCount > sponsoredExecutions) {
+      throw new Error('sponsoredLogs.redisStore: lossCount cannot exceed sponsoredExecutions');
+    }
+    if (cumulativeLossMist > 0n) {
+      throw new Error('sponsoredLogs.redisStore: cumulativeLossMist cannot be positive');
+    }
     return {
       mode,
-      sponsoredExecutions: parseUnsignedDecimalString(exec, 'sponsoredExecutions').toString(),
-      lossCount: parseUnsignedDecimalString(loss, 'lossCount').toString(),
-      cumulativeHostNetMist: parseSignedDecimalString(
-        cumulativeNet,
-        'cumulativeHostNetMist',
-      ).toString(),
-      cumulativeLossMist: parseSignedDecimalString(cumulativeLoss, 'cumulativeLossMist').toString(),
+      sponsoredExecutions: sponsoredExecutions.toString(),
+      lossCount: lossCount.toString(),
+      cumulativeHostNetMist: cumulativeHostNetMist.toString(),
+      cumulativeLossMist: cumulativeLossMist.toString(),
     };
   }
 
@@ -259,23 +335,15 @@ export class RedisSponsoredLogsStore implements SponsoredLogsStoreAdapter {
         `sponsoredLogs.redisStore: unexpected lrange script return: ${JSON.stringify(result)}`,
       );
     }
-    const entries: SponsoredExecutionLogEntry[] = [];
-    for (const raw of result as readonly unknown[]) {
-      if (typeof raw !== 'string') continue;
-      try {
-        entries.push(parseSponsoredExecutionLogEntry(JSON.parse(raw)));
-      } catch {
-        // Recent rows are best-effort. Malformed JSON and non-current
-        // shapes are skipped rather than weakening the current decoder.
-        continue;
+    const entries = (result as readonly unknown[]).map((raw) => {
+      if (typeof raw !== 'string') {
+        throw new Error('sponsoredLogs.redisStore: recent entry must be stored JSON');
       }
-    }
-    entries.sort(compareCreatedAtDesc);
+      return parseStoredSponsoredExecutionLogEntry(raw);
+    });
     if (mode === 'all') {
       return entries.slice(0, limit);
     }
-    return entries
-      .filter((entry) => entry.mode === (mode as SponsoredExecutionMode))
-      .slice(0, limit);
+    return entries.filter((entry) => entry.mode === mode).slice(0, limit);
   }
 }

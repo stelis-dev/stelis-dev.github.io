@@ -17,6 +17,7 @@ import {
   type SuiExecutionError,
   type SuiSimulationResult,
 } from '@stelis/core-relay';
+import { SuiAddressBalanceGasUnavailableError } from '@stelis/core-relay/server';
 import {
   DEEPBOOK_IDS,
   DEEPBOOK_MIN_OUT_ABORT,
@@ -432,15 +433,13 @@ function makeExecutableQuote(
 function resetBuildMocks(): void {
   vi.clearAllMocks();
   mockSimulateSuiTransaction.mockReset();
-  mockSimulateSuiTransaction.mockImplementation(
-    async (transaction: object) => {
-      const snapshot = mockGasTransactionSnapshots.get(transaction);
-      if (!snapshot) throw new Error('test gas transaction has no originating Sui snapshot');
-      const result = simulationResultBySnapshot.get(snapshot);
-      if (!result) throw new Error('test Sui snapshot has no gateway result');
-      return result;
-    },
-  );
+  mockSimulateSuiTransaction.mockImplementation(async (transaction: object) => {
+    const snapshot = mockGasTransactionSnapshots.get(transaction);
+    if (!snapshot) throw new Error('test gas transaction has no originating Sui snapshot');
+    const result = simulationResultBySnapshot.get(snapshot);
+    if (!result) throw new Error('test Sui snapshot has no gateway result');
+    return result;
+  });
   mockBuild.mockReset();
   mockBuild.mockImplementation(mockBuildImplementation);
   mockComputeExecutionCostClaim.mockReset();
@@ -3360,5 +3359,20 @@ describe('runGenericPrepareBuildPipeline — lifecycle failure observability', (
     // pass1/pass2 compiled emits happened before final safeBuild.
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeDefined();
     expect(events.find((e) => e.stage === 'pass2_compiled')).toBeDefined();
+  });
+
+  it('reports resolver Coin fallback as sponsor capacity instead of malformed RPC data', async () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      profile: 'new_user',
+      vaultObjectId: undefined,
+      credit: '0',
+    });
+    mockBuild.mockRejectedValueOnce(new SuiAddressBalanceGasUnavailableError());
+
+    const error = await runGenericPrepareBuildPipeline(ctx, input).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toEqual(expect.objectContaining({ code: 'SPONSOR_CAPACITY_UNAVAILABLE' }));
   });
 });

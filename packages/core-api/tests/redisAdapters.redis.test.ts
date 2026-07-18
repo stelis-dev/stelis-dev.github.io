@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
+import { SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 import { RedisAbuseBlocker } from '../src/store/redisAbuseBlocker.js';
 import {
   ABUSE_BLOCK_DEADLINE_INDEX_KEY,
@@ -10,13 +12,46 @@ import {
   serializeAbuseBlockRecord,
 } from '../src/store/abuseBlockStore.js';
 import { RedisPrepareInflight } from '../src/store/redisPrepareInflight.js';
-import { RedisPrepareStore } from '../src/store/redisPrepareStore.js';
+import type { RedisClientLike } from '../src/store/redisClient.js';
 import { RedisRateLimiter } from '../src/store/redisRateLimiter.js';
+import { RedisSponsoredExecutionStore } from '../src/store/redisSponsoredExecutionStore.js';
+import { SponsoredExecutionRecovery } from '../src/store/sponsoredExecutionRecovery.js';
+import {
+  decodeSponsoredExecutionRecord,
+  serializeSponsoredExecutionRecord,
+  sponsoredExecutionPreparedRecordKeyPrefix,
+  storeSponsorResult,
+} from '../src/store/sponsoredExecutionRecords.js';
 import { RedisSponsorPool } from '../src/store/redisSponsorPool.js';
 import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
+import {
+  serializePreparedTxEntry,
+  type GenericPreparedTxDraft,
+  type PromotionPreparedTxDraft,
+} from '../src/store/prepareTypes.js';
+import type { SponsorResultMetadata } from '../src/handlers/sponsorResult.js';
+import { PrepareSenderQuotaError } from '../src/store/prepareErrors.js';
+import {
+  decodePromotionOperationResultRecord,
+  promotionReceiptStorageKeys,
+  promotionReservationDeadlineIndexKey,
+  promotionReservationKey,
+} from '../src/studio/promotionRecords.js';
+import { RedisPromotionExecutionLedger } from '../src/studio/executionLedgerRedis.js';
+import {
+  createRedisPromotionLedgerStore,
+  PROMO_ID,
+  PROMO_X,
+} from './helpers/promotionLedgerFixture.js';
+import {
+  addressBalanceGasTransactionBytesFixture,
+  suiEndpointSnapshotFixture,
+} from './helpers/suiGatewayResultFixtures.js';
 
 const TEST_HMAC_SECRET = 'real-redis-adapter-test-hmac-secret-v1-aaaaaaaa';
-const SAMPLE_TX_BYTES = new Uint8Array([0xc0, 0xde, 0x01]);
+const SENDER = `0x${'31'.repeat(32)}`;
+const USER = 'redis-sponsored-execution-user';
+const U64_MAX = (1n << 64n) - 1n;
 
 function sha256Hex(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
@@ -25,6 +60,44 @@ function sha256Hex(data: Uint8Array): string {
 async function readRedisTimeMs(redis: RealRedisHandle): Promise<number> {
   const result = (await redis.rawClient.sendCommand(['TIME'])) as [string, string];
   return Number(result[0]) * 1_000 + Math.floor(Number(result[1]) / 1_000);
+}
+
+function receipt(index: number): string {
+  return `0x${index.toString(16).padStart(64, '0')}`;
+}
+
+async function transactionBytes(sponsorAddress: string): Promise<Uint8Array> {
+  const transaction = new Transaction();
+  transaction.setSender(SENDER);
+  return addressBalanceGasTransactionBytesFixture({
+    transaction,
+    sponsorAddress,
+    gasBudget: 1_000_000n,
+    gasPrice: 1_000n,
+    chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+  });
+}
+
+function genericResult(input: {
+  receiptId: string;
+  sponsorAddress: string;
+  digest?: string;
+  outcome?: SponsorResultMetadata['outcome'];
+}): SponsorResultMetadata {
+  return {
+    sponsorAddress: input.sponsorAddress,
+    outcome: input.outcome ?? 'success',
+    executionStage: input.digest === undefined ? 'before_sponsor_signature' : 'on_chain',
+    route: 'generic',
+    ...(input.digest === undefined ? {} : { digest: input.digest }),
+    receiptId: input.receiptId,
+    senderAddress: SENDER,
+    executionPathKey: 'generic:redis-test',
+    orderIdHash: null,
+    promotionId: null,
+    userId: null,
+    economics: { economicsStatus: 'unknown', failureReason: null },
+  };
 }
 
 describe('Redis-backed adapters — real Redis conformance', () => {
@@ -435,513 +508,1039 @@ describe('Redis-backed adapters — real Redis conformance', () => {
     await expect(instanceB.tryAcquire('prepare')).resolves.not.toBeNull();
   });
 
-  it('RedisSponsorPool — completes checkout, commit, sign, checkin with real Redis Lua', async () => {
+  it('RedisSponsoredExecutionStore — performs the exact prepared, executing, final, and callback CAS lifecycle', async () => {
+    const prefix = `test:{sponsored-${randomUUID()}}:`;
     const keypair = Ed25519Keypair.generate();
-    const pool = new RedisSponsorPool(redis!.client, [keypair], {
+    const sponsorPool = new RedisSponsorPool(redis!.client, [keypair], {
       hmacSecret: TEST_HMAC_SECRET,
-      keyPrefix: `test:sponsor:${randomUUID()}:`,
+      keyPrefix: `${prefix}lease:`,
       leaseTtlMs: 60_000,
     });
-
-    const receiptId = `receipt-${randomUUID()}`;
-    const lease = await pool.checkout(receiptId);
-    expect(lease).not.toBeNull();
-    expect(lease!.sponsorAddress).toBe(keypair.toSuiAddress());
-
-    await pool.commit(lease!.sponsorAddress, receiptId, sha256Hex(SAMPLE_TX_BYTES));
-    const signature = await pool.sign(lease!.sponsorAddress, receiptId, SAMPLE_TX_BYTES);
-    expect(signature.signature.length).toBeGreaterThan(0);
-
-    await pool.checkin(lease!.sponsorAddress, receiptId, sha256Hex(SAMPLE_TX_BYTES));
-    await expect(pool.leaseStatus()).resolves.toMatchObject({
-      leasedSlots: 0,
-      freeSlots: 1,
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      prepareTtlMs: 60_000,
     });
-  });
+    const receiptId = receipt(100);
+    const lease = await sponsorPool.checkout(receiptId);
+    if (!lease) throw new Error('Expected the real-Redis sponsor lease');
+    const bytes = await transactionBytes(lease.sponsorAddress);
+    const nonce = await store.reserveNonce(SENDER, 0n, receiptId);
+    const draft: GenericPreparedTxDraft = {
+      mode: 'generic',
+      receiptId,
+      senderAddress: SENDER,
+      nonce,
+      txBytesHash: sha256Hex(bytes),
+      sponsorAddress: lease.sponsorAddress,
+      clientIp: '127.0.0.1',
+      executionPathKey: 'generic:redis-test',
+      orderId: null,
+    };
 
-  it('RedisPrepareStore — store → consume happy path with BigInt', async () => {
-    const released: string[] = [];
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const store = new RedisPrepareStore(
-      redis!.client,
-      (sponsorAddress) => {
-        released.push(sponsorAddress);
+    const prepared = await store.commitPreparedReceipt(draft);
+    await expect(store.readPreparedReceipt(receiptId)).resolves.toEqual(prepared);
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'committed', receiptId, txBytesHash: draft.txBytesHash },
+    });
+
+    const preparedDeadlineScore = await redis!.rawClient.sendCommand([
+      'ZSCORE',
+      `${prefix}prepared:deadlines`,
+      receiptId,
+    ]);
+    await expect(
+      store.beginSponsoredExecution({
+        receiptId,
+        txBytes: bytes,
+        expectedMode: 'promotion',
+        executionBudgetMs: 3_000,
+        recovery: {
+          route: 'generic',
+          senderAddress: SENDER,
+          executionPathKey: 'generic:redis-test',
+          orderIdHash: null,
+          recoveredGasMist: '0',
+          hostFeeMist: '0',
+          protocolFeeMist: '0',
+        },
+      }),
+    ).resolves.toEqual({ status: 'mode_mismatch', actualMode: 'generic' });
+    await expect(store.readPreparedReceipt(receiptId)).resolves.toEqual(prepared);
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'committed', receiptId, txBytesHash: draft.txBytesHash },
+    });
+    await expect(
+      redis!.rawClient.sendCommand(['ZSCORE', `${prefix}prepared:deadlines`, receiptId]),
+    ).resolves.toBe(preparedDeadlineScore);
+    await expect(redis!.client.get(`${prefix}executing:${receiptId}`)).resolves.toBeNull();
+
+    const unusedUserKey = `${prefix}unused:user`;
+    await redis!.client.set(unusedUserKey, 'generic-user-index-must-not-be-read-or-written');
+    const beforeBegin = await readRedisTimeMs(redis!);
+    const begun = await store.beginSponsoredExecution({
+      receiptId,
+      txBytes: bytes,
+      expectedMode: 'generic',
+      executionBudgetMs: 3_000,
+      recovery: {
+        route: 'generic',
+        senderAddress: SENDER,
+        executionPathKey: 'generic:redis-test',
+        orderIdHash: null,
+        recoveredGasMist: '0',
+        hostFeeMist: '0',
+        protocolFeeMist: '0',
       },
-      { keyPrefix, ttlMs: 60_000 },
+    });
+    const afterBegin = await readRedisTimeMs(redis!);
+    expect(begun.status).toBe('executing');
+    if (begun.status !== 'executing') return;
+    await expect(redis!.client.get(unusedUserKey)).resolves.toBe(
+      'generic-user-index-must-not-be-read-or-written',
     );
+    expect(begun.execution.deadlineMs).toBeGreaterThanOrEqual(beforeBegin + 3_000);
+    expect(begun.execution.deadlineMs).toBeLessThanOrEqual(afterBegin + 3_000);
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'executing', deadlineMs: begun.execution.deadlineMs },
+    });
+    await expect(
+      redis!.rawClient.sendCommand(['ZSCORE', `${prefix}executing:deadlines`, receiptId]),
+    ).resolves.toBe(String(begun.execution.deadlineMs));
+    await expect(store.readPreparedReceipt(receiptId)).resolves.toBeNull();
+    await expect(sponsorPool.sign(lease.sponsorAddress, receiptId, bytes)).resolves.toMatchObject({
+      signature: expect.any(String),
+    });
 
-    const entry = {
-      receiptId: 'integ-pay-001',
-      senderAddress: '0xINTEG_SENDER',
-      nonce: 1n,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-integ',
-      sponsorAddress: '0xSP',
-      clientIp: '10.0.0.99',
-      orderId: null,
-      mode: 'generic' as const,
+    const finalInput = {
+      expected: begun.execution,
+      result: genericResult({
+        receiptId,
+        sponsorAddress: lease.sponsorAddress,
+        digest: begun.execution.transactionDigest,
+      }),
+      promotion: { operation: 'none' as const },
     };
+    await redis!.client.set(`${prefix}callback:pending`, 'wrong-type');
+    await expect(store.finalizeSponsoredExecution(finalInput)).rejects.toThrow(/wrong Redis type/);
+    await expect(redis!.client.get(`${prefix}executing:${receiptId}`)).resolves.not.toBeNull();
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'executing', receiptId },
+    });
+    await redis!.client.del(`${prefix}callback:pending`);
 
-    const beforeStore = await readRedisTimeMs(redis!);
-    const committed = await store.store(entry);
-    const afterStore = await readRedisTimeMs(redis!);
-    expect(committed.issuedAt).toBeGreaterThanOrEqual(beforeStore);
-    expect(committed.issuedAt).toBeLessThanOrEqual(afterStore);
-    const rawCommitted = JSON.parse((await redis!.client.get(`${keyPrefix}${entry.receiptId}`))!);
-    expect(rawCommitted.issuedAt).toBe(committed.issuedAt);
-    const result = await store.consume('integ-pay-001', 'hash-integ');
-    expect(result).not.toBe('not_found');
-    expect(result).not.toBe('expired');
-    expect(result).not.toBe('hash_mismatch');
-    const consumed = result as typeof entry;
-    // Coordination-only round-trip: settle observability copies
-    // (executionCostClaim, simGas, ...) are never persisted.
-    expect(consumed.txBytesHash).toBe('hash-integ');
-    expect(consumed.nonce).toBe(1n);
-    expect(consumed.mode).toBe('generic');
-    expect(released).toHaveLength(0);
+    const finalized = await store.finalizeSponsoredExecution(finalInput);
+    expect(finalized.status).toBe('finalized');
+    if (finalized.status !== 'finalized') return;
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toBeNull();
+    await expect(store.readDueExecutions(100, null)).resolves.toEqual({
+      records: [],
+      nextCursor: null,
+    });
+    await expect(store.readPendingCallbacks(100, null)).resolves.toEqual({
+      records: [finalized.record],
+      nextCursor: null,
+    });
+    await redis!.rawClient.sendCommand([
+      'ZADD',
+      `${prefix}callback:pending`,
+      String(finalized.record.finalizedAtMs + 1),
+      receiptId,
+    ]);
+    await expect(store.markCallbackDelivered(finalized.record)).resolves.toBe(false);
+    await redis!.rawClient.sendCommand([
+      'ZADD',
+      `${prefix}callback:pending`,
+      String(finalized.record.finalizedAtMs),
+      receiptId,
+    ]);
+    await expect(store.markCallbackDelivered(finalized.record)).resolves.toBe(true);
+    await expect(store.markCallbackDelivered(finalized.record)).resolves.toBe(false);
+    await expect(store.readPendingCallbacks(100, null)).resolves.toEqual({
+      records: [],
+      nextCursor: null,
+    });
   });
 
-  it('RedisPrepareStore — STORE and peek use Redis time rather than the Host JS clock', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix,
-      ttlMs: 60_000,
+  it('RedisSponsoredExecutionStore — pages past 100 pending callbacks with the same score', async () => {
+    const prefix = `test:{callback-page-${randomUUID()}}:`;
+    const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+      hmacSecret: TEST_HMAC_SECRET,
+      keyPrefix: `${prefix}lease:`,
+      leaseTtlMs: 60_000,
     });
-    const draft = {
-      receiptId: 'redis-time-001',
-      senderAddress: '0xREDIS_TIME',
-      nonce: 1n,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-redis-time',
-      sponsorAddress: '0xSP_REDIS_TIME',
-      clientIp: '10.0.0.97',
-      orderId: null,
-      mode: 'generic' as const,
-    };
-
-    const beforeStore = await readRedisTimeMs(redis!);
-    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(beforeStore - 10 * 60_000);
-    try {
-      const committed = await store.store(draft);
-      const afterStore = await readRedisTimeMs(redis!);
-      expect(committed.issuedAt).toBeGreaterThanOrEqual(beforeStore);
-      expect(committed.issuedAt).toBeLessThanOrEqual(afterStore);
-      const raw = JSON.parse((await redis!.client.get(`${keyPrefix}${draft.receiptId}`))!);
-      expect(raw.issuedAt).toBe(committed.issuedAt);
-
-      dateNowSpy.mockReturnValue(committed.issuedAt + 10 * 60_000);
-      await expect(store.peek(draft.receiptId)).resolves.toMatchObject({
-        receiptId: draft.receiptId,
-        issuedAt: committed.issuedAt,
-      });
-    } finally {
-      dateNowSpy.mockRestore();
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      prepareTtlMs: 60_000,
+    });
+    const finalizedAtMs = await readRedisTimeMs(redis!);
+    const records = Array.from({ length: 101 }, (_, index) => {
+      const receiptId = receipt(index + 1_000);
+      return {
+        state: 'final' as const,
+        receiptId,
+        sponsorAddress: SENDER,
+        transactionDigest: null,
+        finalizedAtMs,
+        callbackDelivery: 'pending' as const,
+        result: storeSponsorResult(
+          genericResult({ receiptId, sponsorAddress: SENDER, outcome: 'internal_error' }),
+        ),
+      };
+    });
+    for (const record of records) {
+      await redis!.client.set(
+        `${prefix}final:${record.receiptId}`,
+        serializeSponsoredExecutionRecord(record),
+      );
+      await redis!.rawClient.sendCommand([
+        'ZADD',
+        `${prefix}callback:pending`,
+        String(finalizedAtMs),
+        record.receiptId,
+      ]);
     }
+
+    const first = await store.readPendingCallbacks(100, null);
+    expect(first.records.map((record) => record.receiptId)).toEqual(
+      records.slice(0, 100).map((record) => record.receiptId),
+    );
+    expect(first.nextCursor).toEqual({
+      throughMs: expect.any(Number),
+      scoreMs: finalizedAtMs,
+      receiptId: records[99]?.receiptId,
+    });
+    if (first.nextCursor === null) throw new Error('Expected a second callback page');
+
+    const second = await store.readPendingCallbacks(100, first.nextCursor);
+    expect(second).toEqual({ records: [records[100]], nextCursor: null });
+    await expect(
+      redis!.rawClient.sendCommand(['ZCARD', `${prefix}callback:pending`]),
+    ).resolves.toBe(101);
   });
 
-  it('RedisPrepareStore — malformed IP index rejects before any STORE mutation', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const clientIp = '10.0.0.96';
-    const senderAddress = '0xNO_PARTIAL_STORE';
-    const receiptId = 'no-partial-store-001';
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix,
-      ttlMs: 60_000,
+  it('RedisSponsoredExecutionStore — generic discard ignores the unused user-index slot', async () => {
+    const prefix = `test:{generic-discard-${randomUUID()}}:`;
+    const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+      hmacSecret: TEST_HMAC_SECRET,
+      keyPrefix: `${prefix}lease:`,
+      leaseTtlMs: 60_000,
     });
-    const ipKey = `${keyPrefix}ip:${clientIp}`;
-    const malformedIpIndex = '{not-valid-json';
-    await redis!.client.set(ipKey, malformedIpIndex, { px: 120_000 });
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      prepareTtlMs: 60_000,
+    });
+    const receiptId = receipt(102);
+    const lease = await sponsorPool.checkout(receiptId);
+    if (!lease) throw new Error('Expected the generic-discard sponsor lease');
+    const bytes = await transactionBytes(lease.sponsorAddress);
+    const nonce = await store.reserveNonce(SENDER, 0n, receiptId);
+    const prepared = await store.commitPreparedReceipt({
+      mode: 'generic',
+      receiptId,
+      senderAddress: SENDER,
+      nonce,
+      txBytesHash: sha256Hex(bytes),
+      sponsorAddress: lease.sponsorAddress,
+      clientIp: '127.0.0.12',
+      executionPathKey: 'generic:redis-test',
+      orderId: null,
+    });
+    const unusedUserKey = `${prefix}unused:user`;
+    await redis!.client.set(unusedUserKey, 'generic-user-index-must-not-be-read-or-written');
 
     await expect(
-      store.store({
-        receiptId,
-        senderAddress,
-        nonce: 1n,
-        executionPathKey: 'direct',
-        txBytesHash: 'hash-no-partial-store',
-        sponsorAddress: '0xSP_NO_PARTIAL_STORE',
-        clientIp,
-        orderId: null,
-        mode: 'generic',
+      store.discardPreparedReceipt({
+        expected: prepared,
+        result: genericResult({
+          receiptId,
+          sponsorAddress: lease.sponsorAddress,
+          outcome: 'validation_failure',
+        }),
       }),
-    ).rejects.toThrow();
-
-    await expect(redis!.client.get(`${keyPrefix}${receiptId}`)).resolves.toBeNull();
-    await expect(redis!.client.get(`${keyPrefix}sender:${senderAddress}`)).resolves.toBeNull();
-    await expect(redis!.client.get(ipKey)).resolves.toBe(malformedIpIndex);
+    ).resolves.toMatchObject({ status: 'discarded' });
+    await expect(redis!.client.get(unusedUserKey)).resolves.toBe(
+      'generic-user-index-must-not-be-read-or-written',
+    );
+    await expect(store.readPreparedReceipt(receiptId)).resolves.toBeNull();
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toBeNull();
   });
 
-  it('RedisPrepareStore — hash_mismatch releases slot', async () => {
-    const released: string[] = [];
-    const store = new RedisPrepareStore(
-      redis!.client,
-      (sponsorAddress) => {
-        released.push(sponsorAddress);
-      },
-      { keyPrefix: `test:ps:${randomUUID()}:`, ttlMs: 60_000 },
-    );
-
-    const entry = {
-      receiptId: 'integ-pay-002',
-      senderAddress: '0xINTEG_SENDER_2',
-      nonce: 1n,
-      executionPathKey: 'direct',
-      txBytesHash: 'correct-hash',
-      sponsorAddress: '0xSP',
-      clientIp: '10.0.0.88',
-      orderId: null,
-      mode: 'generic' as const,
-    };
-
-    await store.store(entry);
-    const result = await store.consume('integ-pay-002', 'wrong-hash');
-    expect(result).toBe('hash_mismatch');
-    expect(released).toContain('0xSP');
-
-    // Entry should be deleted
-    const second = await store.consume('integ-pay-002', 'correct-hash');
-    expect(second).toBe('not_found');
-  });
-
-  it('RedisPrepareStore — malformed consume returns raw evidence and releases the key-bound lease once', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const receiptId = 'integ-malformed-consume';
-    const clientIp = '10.0.0.71';
-    const released: Array<{
-      sponsorAddress: string;
-      receiptId: string;
-      txBytesHash: string | null;
-    }> = [];
-    const store = new RedisPrepareStore(
-      redis!.client,
-      (sponsorAddress, releasedReceiptId, txBytesHash) => {
-        released.push({ sponsorAddress, receiptId: releasedReceiptId, txBytesHash });
-      },
-      { keyPrefix, ttlMs: 60_000 },
-    );
-
-    await store.store({
-      receiptId,
-      senderAddress: '0xMALFORMED_CONSUME',
-      nonce: 1n,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-malformed-consume',
-      sponsorAddress: '0xMALFORMED_SPONSOR',
-      clientIp,
-      orderId: null,
+  it('RedisSponsoredExecutionStore — rejects corrupt current records without partially cleaning the receipt', async () => {
+    const prefix = `test:{corrupt-${randomUUID()}}:`;
+    const keypair = Ed25519Keypair.generate();
+    const sponsorPool = new RedisSponsorPool(redis!.client, [keypair], {
+      hmacSecret: TEST_HMAC_SECRET,
+      keyPrefix: `${prefix}lease:`,
+      leaseTtlMs: 60_000,
+    });
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      prepareTtlMs: 60_000,
+    });
+    const receiptId = receipt(101);
+    const lease = await sponsorPool.checkout(receiptId);
+    if (!lease) throw new Error('Expected the corruption-test sponsor lease');
+    const bytes = await transactionBytes(lease.sponsorAddress);
+    const nonce = await store.reserveNonce(SENDER, 0n, receiptId);
+    const prepared = await store.commitPreparedReceipt({
       mode: 'generic',
-    });
-
-    const entryKey = `${keyPrefix}${receiptId}`;
-    const raw = JSON.parse((await redis!.client.get(entryKey))!);
-    raw.receiptId = 'forged-receipt';
-    raw.senderAddress = { malformed: true };
-    await redis!.client.set(entryKey, JSON.stringify(raw), { px: 65_000 });
-    await redis!.client.set(
-      `${keyPrefix}ip:${clientIp}`,
-      JSON.stringify([true, { pid: { malformed: true }, t: 'bad' }]),
-      { px: 120_000 },
-    );
-
-    await expect(store.consume(receiptId, 'hash-malformed-consume')).rejects.toThrow(
-      /stored receiptId does not match its Redis key/,
-    );
-    await sleep(0);
-
-    expect(released).toEqual([
-      {
-        sponsorAddress: '0xMALFORMED_SPONSOR',
-        receiptId,
-        txBytesHash: 'hash-malformed-consume',
-      },
-    ]);
-    await expect(redis!.client.get(entryKey)).resolves.toBeNull();
-    await expect(store.consume(receiptId, 'hash-malformed-consume')).resolves.toBe('not_found');
-    expect(released).toHaveLength(1);
-  });
-
-  it('RedisPrepareStore — reserveNonce derives from live sender metadata', async () => {
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix: `test:ps:${randomUUID()}:`,
-      ttlMs: 60_000,
-    });
-
-    await store.store({
-      receiptId: 'integ-pay-003',
-      nonce: 7n,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-integ-3',
-      sponsorAddress: '0xSP',
-      clientIp: '10.0.0.77',
-      orderId: null,
-      senderAddress: '0xRECOVER',
-      mode: 'generic',
-    });
-
-    await expect(store.reserveNonce('0xRECOVER', 0n, 'res-1')).resolves.toBe(8n);
-  });
-
-  it('RedisPrepareStore — rewrites retained index rows to their exact current projections', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const senderAddress = '0xINDEX_PROJECTION';
-    const clientIp = '10.0.0.75';
-    const userId = 'index-projection-user';
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix,
-      ttlMs: 60_000,
-    });
-
-    const makePromotionEntry = (receiptId: string, nonce: bigint) => ({
       receiptId,
-      senderAddress,
+      senderAddress: SENDER,
       nonce,
-      reservedGasMist: 2_000_000n,
-      executionPathKey: 'promotion-sponsored',
-      txBytesHash: `hash-${receiptId}`,
-      sponsorAddress: `0xSP_${receiptId}`,
-      clientIp,
+      txBytesHash: sha256Hex(bytes),
+      sponsorAddress: lease.sponsorAddress,
+      clientIp: '127.0.0.2',
+      executionPathKey: 'generic:redis-test',
       orderId: null,
-      mode: 'promotion' as const,
-      promotionId: 'promotion-index-projection',
-      userId,
     });
+    const key = `${prefix}prepared:${receiptId}`;
+    const raw = JSON.parse((await redis!.client.get(key))!) as Record<string, unknown>;
+    await redis!.client.set(key, JSON.stringify({ ...raw, unexpectedField: true }));
 
-    await store.store(makePromotionEntry('projection-1', 1n));
-
-    const ipKey = `${keyPrefix}ip:${clientIp}`;
-    const senderKey = `${keyPrefix}sender:${senderAddress}`;
-    const userKey = `${keyPrefix}user:${userId}`;
-    for (const key of [ipKey, senderKey, userKey]) {
-      const rows = JSON.parse((await redis!.client.get(key))!) as Array<Record<string, unknown>>;
-      await redis!.client.set(
-        key,
-        JSON.stringify(rows.map((row) => ({ ...row, unexpected: 'discard-me' }))),
-        { px: 120_000 },
-      );
-    }
-
-    await store.store(makePromotionEntry('projection-2', 2n));
-
-    const ipRows = JSON.parse((await redis!.client.get(ipKey))!) as Array<Record<string, unknown>>;
-    const senderRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
-      Record<string, unknown>
-    >;
-    const userRows = JSON.parse((await redis!.client.get(userKey))!) as Array<
-      Record<string, unknown>
-    >;
-    expect(ipRows.map((row) => Object.keys(row).sort())).toEqual([
-      ['pid', 't'],
-      ['pid', 't'],
-    ]);
-    expect(senderRows.map((row) => Object.keys(row).sort())).toEqual([
-      ['nonce', 'pid', 't'],
-      ['nonce', 'pid', 't'],
-    ]);
-    expect(userRows.map((row) => Object.keys(row).sort())).toEqual([
-      ['pid', 't'],
-      ['pid', 't'],
-    ]);
-
-    await redis!.client.set(
-      senderKey,
-      JSON.stringify(senderRows.map((row) => ({ ...row, unexpected: 'discard-again' }))),
-      { px: 120_000 },
-    );
-    await expect(store.reserveNonce(senderAddress, 0n, 'projection-pending')).resolves.toBe(3n);
-    const reservedRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
-      Record<string, unknown>
-    >;
-    expect(reservedRows.map((row) => Object.keys(row).sort())).toEqual([
-      ['nonce', 'pid', 't'],
-      ['nonce', 'pid', 't'],
-      ['nonce', 'pending', 'pid', 't'],
-    ]);
-
-    await redis!.client.set(
-      senderKey,
-      JSON.stringify(reservedRows.map((row) => ({ ...row, unexpected: 'discard-on-release' }))),
-      { px: 120_000 },
-    );
-    await store.releaseReservation('projection-pending', senderAddress);
-    const releasedRows = JSON.parse((await redis!.client.get(senderKey))!) as Array<
-      Record<string, unknown>
-    >;
-    expect(releasedRows.map((row) => Object.keys(row).sort())).toEqual([
-      ['nonce', 'pid', 't'],
-      ['nonce', 'pid', 't'],
-    ]);
-  });
-
-  it('RedisPrepareStore — releaseReservation preserves a live entry promoted under same receiptId', async () => {
-    // Locks the Lua releaseReservation contract against the real Redis
-    // server: after store() promotes a pending reservation to a live
-    // sender-metadata entry, a direct releaseReservation under the same
-    // receiptId must remove only pending reservations. The live entry's
-    // nonce must still raise the next reservation. FakeRedisClient
-    // reimplements the Lua, so this case is the authoritative check that
-    // the real script (`redis.call('GET' ... cjson.decode ...
-    // not (item.pending and item.pid == resId)`) behaves as specified.
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix: `test:ps:${randomUUID()}:`,
-      ttlMs: 60_000,
-    });
-
-    const sender = '0xLIVE_PRESERVE';
-    const live = await store.reserveNonce(sender, 5n, 'integ-pay-004');
-    expect(live).toBe(6n);
-
-    await store.store({
-      receiptId: 'integ-pay-004',
-      nonce: live,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-integ-4',
-      sponsorAddress: '0xSP',
-      clientIp: '10.0.0.66',
-      orderId: null,
-      senderAddress: sender,
-      mode: 'generic',
-    });
-
-    // Direct release after promotion — must be a no-op for the live entry.
-    await store.releaseReservation('integ-pay-004', sender);
-
-    // Live nonce must still raise the next reservation.
-    await expect(store.reserveNonce(sender, 5n, 'integ-pay-004b')).resolves.toBe(7n);
-
-    // The live entry itself must remain peekable, unchanged.
-    const peeked = await store.peek('integ-pay-004');
-    expect(peeked).not.toBeNull();
-    expect(peeked!.nonce).toBe(live);
-    expect(peeked!.txBytesHash).toBe('hash-integ-4');
-
-    await store.releaseReservation('integ-pay-004b', sender);
-  });
-
-  it('RedisPrepareStore — ignores stale pending reservations when reserving the next nonce', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const sender = '0xPENDING_TTL';
-    const store = new RedisPrepareStore(redis!.client, () => {}, {
-      keyPrefix,
-      ttlMs: 500,
-      maxOutstandingPerSender: 10,
-    });
-
-    await expect(store.reserveNonce(sender, 0n, 'pending-old')).resolves.toBe(1n);
-    await sleep(550);
-    await expect(redis!.client.get(`${keyPrefix}sender:${sender}`)).resolves.not.toBeNull();
-
-    await expect(store.reserveNonce(sender, 0n, 'pending-new')).resolves.toBe(1n);
-    await store.releaseReservation('pending-new', sender);
-  });
-
-  it('RedisPrepareStore — evictPreparedEntry deletes entry and cleans related indexes atomically', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const released: Array<{
-      sponsorAddress: string;
-      receiptId: string;
-      txBytesHash: string | null;
-    }> = [];
-    const store = new RedisPrepareStore(
-      redis!.client,
-      (sponsorAddress, receiptId, txBytesHash) => {
-        released.push({ sponsorAddress, receiptId, txBytesHash });
-      },
-      {
-        keyPrefix,
-        ttlMs: 60_000,
-        maxPerIp: 5,
-        maxPerStudioUser: 1,
-        maxOutstandingPerSender: 10,
-      },
-    );
-
-    const sender = '0xEVICT_SENDER';
-    const userId = 'studio-user-evict';
-    await store.store({
-      receiptId: 'evict-pay-001',
-      nonce: 1n,
-      reservedGasMist: 2_000_000n,
-      executionPathKey: 'promotion-sponsored',
-      txBytesHash: 'hash-evict',
-      sponsorAddress: '0xSP',
-      clientIp: '10.0.0.42',
-      orderId: null,
-      senderAddress: sender,
-      mode: 'promotion',
-      promotionId: 'promotion-evict',
-      userId,
-    });
-
-    await expect(store.checkUserQuota(userId)).resolves.toEqual({ exceeded: true, limit: 1 });
-
-    await store.evictPreparedEntry('evict-pay-001');
-
-    expect(released).toEqual([
-      { sponsorAddress: '0xSP', receiptId: 'evict-pay-001', txBytesHash: 'hash-evict' },
-    ]);
-    await expect(redis!.client.get(`${keyPrefix}evict-pay-001`)).resolves.toBeNull();
-    await expect(redis!.client.get(`${keyPrefix}ip:10.0.0.42`)).resolves.toBeNull();
-    await expect(redis!.client.get(`${keyPrefix}sender:${sender}`)).resolves.toBeNull();
-    await expect(redis!.client.get(`${keyPrefix}user:${userId}`)).resolves.toBeNull();
-    await expect(store.checkUserQuota(userId)).resolves.toBe('ok');
-    await expect(store.reserveNonce(sender, 0n, 'after-evict')).resolves.toBe(1n);
-    await store.releaseReservation('after-evict', sender);
-
-    await store.evictPreparedEntry('evict-pay-001');
-    expect(released).toHaveLength(1);
-  });
-
-  it('RedisPrepareStore — malformed eviction returns raw evidence and ignores the row receipt authority', async () => {
-    const keyPrefix = `test:ps:${randomUUID()}:`;
-    const receiptId = 'integ-malformed-evict';
-    const senderAddress = '0xMALFORMED_EVICT';
-    const released: Array<{
-      sponsorAddress: string;
-      receiptId: string;
-      txBytesHash: string | null;
-    }> = [];
-    const store = new RedisPrepareStore(
-      redis!.client,
-      (sponsorAddress, releasedReceiptId, txBytesHash) => {
-        released.push({ sponsorAddress, receiptId: releasedReceiptId, txBytesHash });
-      },
-      { keyPrefix, ttlMs: 60_000 },
-    );
-
-    await store.store({
-      receiptId,
-      senderAddress,
-      nonce: 1n,
-      executionPathKey: 'direct',
-      txBytesHash: 'hash-malformed-evict',
-      sponsorAddress: '0xMALFORMED_EVICT_SPONSOR',
-      clientIp: '10.0.0.72',
-      orderId: null,
-      mode: 'generic',
-    });
-
-    const entryKey = `${keyPrefix}${receiptId}`;
-    const raw = JSON.parse((await redis!.client.get(entryKey))!);
-    raw.receiptId = 'forged-evict-receipt';
-    raw.clientIp = { malformed: true };
-    await redis!.client.set(entryKey, JSON.stringify(raw), { px: 65_000 });
-    await redis!.client.set(
-      `${keyPrefix}sender:${senderAddress}`,
-      JSON.stringify([null, { pid: [], t: 'bad' }]),
-      { px: 120_000 },
-    );
-
-    await store.evictPreparedEntry(receiptId);
-    await store.evictPreparedEntry(receiptId);
-
-    expect(released).toEqual([
-      {
-        sponsorAddress: '0xMALFORMED_EVICT_SPONSOR',
+    await expect(store.readPreparedReceipt(receiptId)).rejects.toThrow(/unexpected field set/);
+    await expect(
+      store.beginSponsoredExecution({
         receiptId,
-        txBytesHash: 'hash-malformed-evict',
-      },
+        txBytes: bytes,
+        expectedMode: 'generic',
+        executionBudgetMs: 1_000,
+        recovery: {
+          route: 'generic',
+          senderAddress: SENDER,
+          executionPathKey: 'generic:redis-test',
+          orderIdHash: null,
+          recoveredGasMist: '0',
+          hostFeeMist: '0',
+          protocolFeeMist: '0',
+        },
+      }),
+    ).rejects.toThrow(/unexpected field set/);
+    await expect(redis!.client.get(key)).resolves.not.toBeNull();
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'committed', receiptId, txBytesHash: prepared.txBytesHash },
+    });
+  });
+
+  it('RedisSponsoredExecutionStore — leaves an expired prepared receipt intact for recovery', async () => {
+    const prefix = `test:{expired-${randomUUID()}}:`;
+    const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+      hmacSecret: TEST_HMAC_SECRET,
+      keyPrefix: `${prefix}lease:`,
+      leaseTtlMs: 60_000,
+    });
+    const prepareTtlMs = 20;
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      prepareTtlMs,
+    });
+    const receiptId = receipt(105);
+    const lease = await sponsorPool.checkout(receiptId);
+    if (!lease) throw new Error('Expected the expiry-test sponsor lease');
+    const bytes = await transactionBytes(lease.sponsorAddress);
+    const nonce = await store.reserveNonce(SENDER, 0n, receiptId);
+    const prepared = await store.commitPreparedReceipt({
+      mode: 'generic',
+      receiptId,
+      senderAddress: SENDER,
+      nonce,
+      txBytesHash: sha256Hex(bytes),
+      sponsorAddress: lease.sponsorAddress,
+      clientIp: '127.0.0.4',
+      executionPathKey: 'generic:redis-expiry',
+      orderId: null,
+    });
+    const deadlineMs = prepared.issuedAt + prepareTtlMs;
+    const waitMs = Math.max(0, deadlineMs - (await readRedisTimeMs(redis!)) + 2);
+    await sleep(waitMs);
+    expect(await readRedisTimeMs(redis!)).toBeGreaterThanOrEqual(deadlineMs);
+
+    await expect(
+      store.beginSponsoredExecution({
+        receiptId,
+        txBytes: bytes,
+        expectedMode: 'generic',
+        executionBudgetMs: 1_000,
+        recovery: {
+          route: 'generic',
+          senderAddress: SENDER,
+          executionPathKey: 'generic:redis-expiry',
+          orderIdHash: null,
+          recoveredGasMist: '0',
+          hostFeeMist: '0',
+          protocolFeeMist: '0',
+        },
+      }),
+    ).resolves.toEqual({ status: 'expired' });
+    await expect(store.readPreparedReceipt(receiptId)).resolves.toEqual(prepared);
+    await expect(store.readExpiredPreparedReceipts(100, null)).resolves.toEqual({
+      records: [prepared],
+      nextCursor: null,
+    });
+    await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject({
+      record: { stage: 'committed', receiptId },
+    });
+    await expect(redis!.client.get(`${prefix}executing:${receiptId}`)).resolves.toBeNull();
+  });
+
+  it('RedisSponsoredExecutionStore — keeps same-receipt nonce retries idempotent at quota and bounds u64', async () => {
+    const prefix = `test:{nonce-${randomUUID()}}:`;
+    const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+      hmacSecret: TEST_HMAC_SECRET,
+      keyPrefix: `${prefix}lease:`,
+      leaseTtlMs: 60_000,
+    });
+    const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, undefined, {
+      keyPrefix: prefix,
+      maxOutstandingPerSender: 1,
+    });
+    const first = receipt(110);
+    await expect(store.reserveNonce(SENDER, 0n, first)).resolves.toBe(1n);
+    await expect(store.reserveNonce(SENDER, 0n, first)).resolves.toBe(1n);
+    const oversizedNonce = '1'.repeat(21);
+    await redis!.client.set(`${prefix}nonce:${first}`, oversizedNonce);
+    await expect(store.reserveNonce(SENDER, 0n, first)).rejects.toThrow();
+    await expect(redis!.client.get(`${prefix}nonce:${first}`)).resolves.toBe(oversizedNonce);
+    await redis!.client.set(`${prefix}nonce:${first}`, '1');
+    await store.releaseNonceReservation(first, SENDER);
+    const contenderReceipts = [receipt(111), receipt(112)] as const;
+    const contenders = await Promise.allSettled([
+      store.reserveNonce(SENDER, 0n, contenderReceipts[0]),
+      store.reserveNonce(SENDER, 0n, contenderReceipts[1]),
     ]);
-    await expect(redis!.client.get(entryKey)).resolves.toBeNull();
+    expect(contenders.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(contenders.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const loser = contenders.find((result) => result.status === 'rejected');
+    expect(loser).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(PrepareSenderQuotaError),
+    });
+    const winnerIndex = contenders.findIndex((result) => result.status === 'fulfilled');
+    const winnerReceipt = contenderReceipts[winnerIndex];
+    const winner = contenders[winnerIndex];
+    if (winnerReceipt === undefined || winner === undefined || winner.status !== 'fulfilled') {
+      throw new Error('Expected exactly one concurrent nonce reservation winner');
+    }
+    expect(winner.value).toBe(1n);
+    const loserReceipt = contenderReceipts[winnerIndex === 0 ? 1 : 0];
+    await expect(redis!.client.get(`${prefix}nonce:${loserReceipt}`)).resolves.toBeNull();
+    const senderIndexKey = `${prefix}prepared:sender:${SENDER}`;
+    const senderIndexBeforeCorruption = await redis!.rawClient.sendCommand([
+      'ZRANGE',
+      senderIndexKey,
+      '0',
+      '-1',
+      'WITHSCORES',
+    ]);
+    await redis!.client.set(`${prefix}nonce:${winnerReceipt}`, oversizedNonce);
+    const thirdReceipt = receipt(114);
+    await expect(store.reserveNonce(SENDER, 0n, thirdReceipt)).rejects.toThrow();
+    await expect(redis!.client.get(`${prefix}nonce:${thirdReceipt}`)).resolves.toBeNull();
+    await expect(
+      redis!.rawClient.sendCommand(['ZRANGE', senderIndexKey, '0', '-1', 'WITHSCORES']),
+    ).resolves.toEqual(senderIndexBeforeCorruption);
+    await redis!.client.set(`${prefix}nonce:${winnerReceipt}`, winner.value.toString());
+    await store.releaseNonceReservation(winnerReceipt, SENDER);
+    await expect(store.reserveNonce(SENDER, U64_MAX, receipt(113))).rejects.toThrow(
+      'No u64 nonce remains for this sender',
+    );
+  });
+
+  it('RedisSponsoredExecutionStore — moves Promotion reservation and accounting in the receipt mutations', async () => {
+    const prefix = `test:{promotion-${randomUUID()}}:`;
+    const promotionStore = await createRedisPromotionLedgerStore(redis!.client);
+    const ledger = new RedisPromotionExecutionLedger(redis!.client, promotionStore, 60_000, 0);
+    try {
+      await expect(ledger.claim(PROMO_ID, USER, { useUntilAt: null })).resolves.toMatchObject({
+        ok: true,
+      });
+      const receiptId = receipt(120);
+      await expect(
+        ledger.reserve({
+          promotionId: PROMO_ID,
+          userId: USER,
+          receiptId,
+          amountMist: 1_000_000n,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+        hmacSecret: TEST_HMAC_SECRET,
+        keyPrefix: `${prefix}lease:`,
+        leaseTtlMs: 60_000,
+      });
+      const lease = await sponsorPool.checkout(receiptId);
+      if (!lease) throw new Error('Expected the Promotion real-Redis sponsor lease');
+      const bytes = await transactionBytes(lease.sponsorAddress);
+      const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, ledger, {
+        keyPrefix: prefix,
+      });
+      const draft: PromotionPreparedTxDraft = {
+        mode: 'promotion',
+        receiptId,
+        senderAddress: SENDER,
+        txBytesHash: sha256Hex(bytes),
+        sponsorAddress: lease.sponsorAddress,
+        clientIp: '127.0.0.3',
+        executionPathKey: 'promotion:redis-test',
+        orderId: null,
+        promotionId: PROMO_ID,
+        userId: USER,
+        reservedGasMist: 1_000_000n,
+      };
+      await store.commitPreparedReceipt(draft);
+      const reservationBeforePause = await redis!.client.get(promotionReservationKey(receiptId));
+      const ledgerBeforePause = await ledger.getPromotionLedgerStatus(PROMO_ID, USER);
+      await promotionStore.transitionStatus(PROMO_ID, 'paused');
+      await expect(
+        store.beginSponsoredExecution({
+          receiptId,
+          txBytes: bytes,
+          expectedMode: 'promotion',
+          executionBudgetMs: 2_000,
+          recovery: {
+            route: 'promotion',
+            senderAddress: SENDER,
+            executionPathKey: 'promotion:redis-test',
+            promotionId: PROMO_ID,
+            userId: USER,
+            reservedGasMist: '1000000',
+          },
+        }),
+      ).resolves.toEqual({ status: 'promotion_not_active' });
+      await expect(store.readPreparedReceipt(receiptId)).resolves.toMatchObject({ receiptId });
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject(
+        {
+          record: { stage: 'committed', receiptId },
+        },
+      );
+      await expect(redis!.client.get(promotionReservationKey(receiptId))).resolves.toBe(
+        reservationBeforePause,
+      );
+      await expect(ledger.getPromotionLedgerStatus(PROMO_ID, USER)).resolves.toEqual(
+        ledgerBeforePause,
+      );
+
+      await promotionStore.transitionStatus(PROMO_ID, 'active');
+      const unusedNonceKey = `${prefix}unused:nonce`;
+      await redis!.client.set(unusedNonceKey, 'promotion-nonce-must-not-be-read-or-written');
+      const begun = await store.beginSponsoredExecution({
+        receiptId,
+        txBytes: bytes,
+        expectedMode: 'promotion',
+        executionBudgetMs: 2_000,
+        recovery: {
+          route: 'promotion',
+          senderAddress: SENDER,
+          executionPathKey: 'promotion:redis-test',
+          promotionId: PROMO_ID,
+          userId: USER,
+          reservedGasMist: '1000000',
+        },
+      });
+      expect(begun.status).toBe('executing');
+      if (begun.status !== 'executing') return;
+      await expect(redis!.client.get(unusedNonceKey)).resolves.toBe(
+        'promotion-nonce-must-not-be-read-or-written',
+      );
+      await promotionStore.transitionStatus(PROMO_ID, 'paused');
+      const result: SponsorResultMetadata = {
+        sponsorAddress: lease.sponsorAddress,
+        outcome: 'success',
+        executionStage: 'on_chain',
+        route: 'promotion',
+        digest: begun.execution.transactionDigest,
+        receiptId,
+        senderAddress: SENDER,
+        executionPathKey: 'promotion:redis-test',
+        orderIdHash: null,
+        promotionId: PROMO_ID,
+        userId: USER,
+        economics: {
+          economicsStatus: 'known',
+          recoveredGasMist: '0',
+          hostPaidGasMist: '600000',
+          hostFeeMist: '0',
+          hostNetMist: '-600000',
+          grossGasMist: '600000',
+          storageRebateMist: '0',
+          protocolFeeMist: '0',
+          failureReason: null,
+        },
+      };
+      const finalInput = {
+        expected: begun.execution,
+        result,
+        promotion: { operation: 'consume' as const, chargedMist: 600_000n },
+      };
+      await expect(store.finalizeSponsoredExecution(finalInput)).resolves.toMatchObject({
+        status: 'finalized',
+      });
+      await expect(store.finalizeSponsoredExecution(finalInput)).resolves.toMatchObject({
+        status: 'already_final',
+      });
+      await expect(
+        store.finalizeSponsoredExecution({
+          ...finalInput,
+          promotion: { operation: 'consume', chargedMist: 500_000n },
+        }),
+      ).resolves.toEqual({ status: 'state_changed' });
+      await expect(ledger.getPromotionLedgerStatus(PROMO_ID, USER)).resolves.toMatchObject({
+        budget: { reservedMist: 0n, consumedMist: 600_000n },
+        entitlement: {
+          activeReservationReceiptId: null,
+          remainingGasAllowanceMist: '4400000',
+          consumedGasAllowanceMist: '600000',
+        },
+      });
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toBeNull();
+    } finally {
+      await ledger.dispose();
+    }
+  });
+
+  it('RedisSponsoredExecutionStore — recovers an exact Promotion commit after its Redis response is lost', async () => {
+    const prefix = `test:{promotion-lost-commit-${randomUUID()}}:`;
+    const preparedKeyPrefix = sponsoredExecutionPreparedRecordKeyPrefix(prefix);
+    const promotionStore = await createRedisPromotionLedgerStore(redis!.client);
+    const ledger = new RedisPromotionExecutionLedger(
+      redis!.client,
+      promotionStore,
+      60_000,
+      0,
+      preparedKeyPrefix,
+    );
+    try {
+      await expect(ledger.claim(PROMO_ID, USER, { useUntilAt: null })).resolves.toMatchObject({
+        ok: true,
+      });
+      const receiptId = receipt(122);
+      await expect(
+        ledger.reserve({
+          promotionId: PROMO_ID,
+          userId: USER,
+          receiptId,
+          amountMist: 1_000_000n,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+        hmacSecret: TEST_HMAC_SECRET,
+        keyPrefix: `${prefix}lease:`,
+        leaseTtlMs: 60_000,
+      });
+      const lease = await sponsorPool.checkout(receiptId);
+      if (!lease) throw new Error('Expected the lost-response test sponsor lease');
+      const bytes = await transactionBytes(lease.sponsorAddress);
+      const draft: PromotionPreparedTxDraft = {
+        mode: 'promotion',
+        receiptId,
+        senderAddress: SENDER,
+        txBytesHash: sha256Hex(bytes),
+        sponsorAddress: lease.sponsorAddress,
+        clientIp: '127.0.0.14',
+        executionPathKey: 'promotion:redis-lost-commit',
+        orderId: null,
+        promotionId: PROMO_ID,
+        userId: USER,
+        reservedGasMist: 1_000_000n,
+      };
+      const preparedKey = `${preparedKeyPrefix}${receiptId}`;
+      let responseLost = false;
+      let attemptedPreparedRaw: string | null = null;
+      const responseLosingClient: RedisClientLike = {
+        get: (key) => redis!.client.get(key),
+        set: (key, value, options) => redis!.client.set(key, value, options),
+        del: (...keys) => redis!.client.del(...keys),
+        hgetall: (key) => redis!.client.hgetall(key),
+        async eval(script, keys, args) {
+          const result = await redis!.client.eval(script, keys, args);
+          if (!responseLost && keys[0] === preparedKey) {
+            responseLost = true;
+            attemptedPreparedRaw = args[2] ?? null;
+            throw new Error('simulated Redis response loss after commit');
+          }
+          return result;
+        },
+      };
+      const store = new RedisSponsoredExecutionStore(responseLosingClient, sponsorPool, ledger, {
+        keyPrefix: prefix,
+      });
+      const reservationBeforeCommit = await redis!.client.get(promotionReservationKey(receiptId));
+      const ledgerBeforeCommit = await ledger.getPromotionLedgerStatus(PROMO_ID, USER);
+
+      const prepared = await store.commitPreparedReceipt(draft);
+
+      expect(responseLost).toBe(true);
+      expect(prepared).toEqual({ ...draft, issuedAt: expect.any(Number) });
+      expect(serializePreparedTxEntry(prepared)).toBe(attemptedPreparedRaw);
+      await expect(store.readPreparedReceipt(receiptId)).resolves.toEqual(prepared);
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject(
+        {
+          record: {
+            stage: 'committed',
+            receiptId,
+            txBytesHash: draft.txBytesHash,
+          },
+        },
+      );
+      await expect(ledger.release(receiptId)).resolves.toEqual({
+        ok: false,
+        reason: 'record_changed',
+      });
+      await expect(redis!.client.get(promotionReservationKey(receiptId))).resolves.toBe(
+        reservationBeforeCommit,
+      );
+      await expect(ledger.getPromotionLedgerStatus(PROMO_ID, USER)).resolves.toEqual(
+        ledgerBeforeCommit,
+      );
+      const promotionKeys = promotionReceiptStorageKeys({
+        promotionId: PROMO_ID,
+        userId: USER,
+        receiptId,
+        promotionRecordKey: promotionStore.recordKey(PROMO_ID),
+      });
+      await expect(redis!.client.get(promotionKeys.result)).resolves.toBeNull();
+    } finally {
+      await ledger.dispose();
+    }
+  });
+
+  it('RedisSponsoredExecutionStore — protects then atomically discards an expired Promotion prepared receipt', async () => {
+    const prefix = `test:{promotion-discard-${randomUUID()}}:`;
+    const preparedKeyPrefix = sponsoredExecutionPreparedRecordKeyPrefix(prefix);
+    const promotionStore = await createRedisPromotionLedgerStore(redis!.client);
+    const ledger = new RedisPromotionExecutionLedger(
+      redis!.client,
+      promotionStore,
+      20,
+      0,
+      preparedKeyPrefix,
+    );
+    try {
+      await expect(ledger.claim(PROMO_ID, USER, { useUntilAt: null })).resolves.toMatchObject({
+        ok: true,
+      });
+      const receiptId = receipt(121);
+      await expect(
+        ledger.reserve({
+          promotionId: PROMO_ID,
+          userId: USER,
+          receiptId,
+          amountMist: 1_000_000n,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+        hmacSecret: TEST_HMAC_SECRET,
+        keyPrefix: `${prefix}lease:`,
+        leaseTtlMs: 60_000,
+      });
+      const lease = await sponsorPool.checkout(receiptId);
+      if (!lease) throw new Error('Expected the Promotion-discard sponsor lease');
+      const bytes = await transactionBytes(lease.sponsorAddress);
+      const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, ledger, {
+        keyPrefix: prefix,
+        prepareTtlMs: 60_000,
+      });
+      const draft: PromotionPreparedTxDraft = {
+        mode: 'promotion',
+        receiptId,
+        senderAddress: SENDER,
+        txBytesHash: sha256Hex(bytes),
+        sponsorAddress: lease.sponsorAddress,
+        clientIp: '127.0.0.13',
+        executionPathKey: 'promotion:redis-discard',
+        orderId: null,
+        promotionId: PROMO_ID,
+        userId: USER,
+        reservedGasMist: 1_000_000n,
+      };
+      const prepared = await store.commitPreparedReceipt(draft);
+      const promotionKeys = promotionReceiptStorageKeys({
+        promotionId: PROMO_ID,
+        userId: USER,
+        receiptId,
+        promotionRecordKey: promotionStore.recordKey(PROMO_ID),
+      });
+      const reservationDeadlineRaw = await redis!.rawClient.sendCommand([
+        'ZSCORE',
+        promotionReservationDeadlineIndexKey(),
+        receiptId,
+      ]);
+      if (typeof reservationDeadlineRaw !== 'string') {
+        throw new Error('Expected the Promotion reservation deadline score');
+      }
+      const reservationDeadlineMs = Number(reservationDeadlineRaw);
+      if (!Number.isSafeInteger(reservationDeadlineMs) || reservationDeadlineMs <= 0) {
+        throw new Error('Expected a positive safe Promotion reservation deadline');
+      }
+      const waitMs = Math.max(0, reservationDeadlineMs - (await readRedisTimeMs(redis!)) + 2);
+      if (waitMs > 0) await sleep(waitMs);
+      expect(await readRedisTimeMs(redis!)).toBeGreaterThanOrEqual(reservationDeadlineMs);
+
+      const ledgerBeforeSweep = await ledger.getPromotionLedgerStatus(PROMO_ID, USER);
+      const reservationBeforeSweep = await redis!.client.get(promotionKeys.reservation);
+      await expect(ledger.sweepExpiredReservations()).resolves.toBe(0);
+      await expect(store.readPreparedReceipt(receiptId)).resolves.toEqual(prepared);
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toMatchObject(
+        {
+          record: { stage: 'committed', receiptId },
+        },
+      );
+      await expect(redis!.client.get(promotionKeys.reservation)).resolves.toBe(
+        reservationBeforeSweep,
+      );
+      await expect(ledger.getPromotionLedgerStatus(PROMO_ID, USER)).resolves.toEqual(
+        ledgerBeforeSweep,
+      );
+
+      const discardResult: SponsorResultMetadata = {
+        sponsorAddress: lease.sponsorAddress,
+        outcome: 'validation_failure',
+        executionStage: 'before_sponsor_signature',
+        route: 'promotion',
+        receiptId,
+        senderAddress: SENDER,
+        executionPathKey: 'promotion:redis-discard',
+        orderIdHash: null,
+        promotionId: PROMO_ID,
+        userId: USER,
+        economics: { economicsStatus: 'unknown', failureReason: 'expired before execution' },
+      };
+      const callbackKey = `${prefix}callback:pending`;
+      const promotionNonceKey = `${prefix}nonce:${receiptId}`;
+      await redis!.client.set(callbackKey, 'wrong-type');
+      await redis!.client.set(promotionNonceKey, 'promotion-nonce-must-not-be-read-or-written');
+      const readState = async () => ({
+        prepared: await redis!.client.get(`${preparedKeyPrefix}${receiptId}`),
+        lease: await redis!.client.get(sponsorPool.sponsorLeaseRecordKey(lease.sponsorAddress)),
+        final: await redis!.client.get(`${prefix}final:${receiptId}`),
+        executing: await redis!.client.get(`${prefix}executing:${receiptId}`),
+        nonce: await redis!.client.get(promotionNonceKey),
+        preparedDeadline: await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          `${prefix}prepared:deadlines`,
+          receiptId,
+        ]),
+        ipIndex: await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          `${prefix}prepared:ip:${draft.clientIp}`,
+          receiptId,
+        ]),
+        senderIndex: await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          `${prefix}prepared:sender:${SENDER}`,
+          receiptId,
+        ]),
+        userIndex: await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          `${prefix}prepared:user:${USER}`,
+          receiptId,
+        ]),
+        callback: await redis!.client.get(callbackKey),
+        promotion: await redis!.client.get(promotionKeys.promotion),
+        reservation: await redis!.client.get(promotionKeys.reservation),
+        operationResult: await redis!.client.get(promotionKeys.result),
+        reservationDeadline: await redis!.rawClient.sendCommand([
+          'ZSCORE',
+          promotionKeys.reservationDeadlineIndex,
+          receiptId,
+        ]),
+        accounting: await redis!.rawClient.sendCommand(['HGETALL', promotionKeys.accounting]),
+        entitlement: await redis!.rawClient.sendCommand(['HGETALL', promotionKeys.entitlement]),
+      });
+      const beforeFailedDiscard = await readState();
+      await expect(
+        store.discardPreparedReceipt({ expected: prepared, result: discardResult }),
+      ).rejects.toThrow('Pending callback index has the wrong Redis type');
+      await expect(readState()).resolves.toEqual(beforeFailedDiscard);
+
+      await redis!.client.del(callbackKey);
+      const discarded = await store.discardPreparedReceipt({
+        expected: prepared,
+        result: discardResult,
+      });
+      expect(discarded.status).toBe('discarded');
+      if (discarded.status !== 'discarded') return;
+      await expect(store.readPreparedReceipt(receiptId)).resolves.toBeNull();
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand(['ZSCORE', `${prefix}prepared:deadlines`, receiptId]),
+      ).resolves.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand([
+          'ZSCORE',
+          `${prefix}prepared:ip:${draft.clientIp}`,
+          receiptId,
+        ]),
+      ).resolves.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand(['ZSCORE', `${prefix}prepared:sender:${SENDER}`, receiptId]),
+      ).resolves.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand(['ZSCORE', `${prefix}prepared:user:${USER}`, receiptId]),
+      ).resolves.toBeNull();
+      await expect(redis!.client.get(promotionKeys.reservation)).resolves.toBeNull();
+      await expect(
+        redis!.rawClient.sendCommand(['ZSCORE', promotionKeys.reservationDeadlineIndex, receiptId]),
+      ).resolves.toBeNull();
+      await expect(redis!.client.get(promotionNonceKey)).resolves.toBe(
+        'promotion-nonce-must-not-be-read-or-written',
+      );
+      const ledgerAfterDiscard = await ledger.getPromotionLedgerStatus(PROMO_ID, USER);
+      expect(ledgerAfterDiscard).toMatchObject({
+        entitlement: {
+          activeReservationReceiptId: null,
+          activeReservationAmountMist: null,
+          remainingGasAllowanceMist: '5000000',
+          consumedGasAllowanceMist: '0',
+        },
+      });
+      expect(ledgerAfterDiscard.budget).toEqual({
+        availableMist: ledgerBeforeSweep.budget.availableMist + 1_000_000n,
+        reservedMist: 0n,
+        consumedMist: ledgerBeforeSweep.budget.consumedMist,
+      });
+      const operationResultRaw = await redis!.client.get(promotionKeys.result);
+      if (operationResultRaw === null) throw new Error('Expected the Promotion release result');
+      expect(decodePromotionOperationResultRecord(operationResultRaw)).toMatchObject({
+        receiptId,
+        operation: 'release',
+        amountMist: '1000000',
+        result: 'released',
+      });
+      await expect(store.readPendingCallbacks(100, null)).resolves.toEqual({
+        records: [discarded.record],
+        nextCursor: null,
+      });
+      await expect(ledger.release(receiptId)).resolves.toMatchObject({ ok: true });
+      await expect(ledger.sweepExpiredReservations()).resolves.toBe(0);
+    } finally {
+      await ledger.dispose();
+    }
+  });
+
+  it('SponsoredExecutionRecovery — consumes the full Promotion reservation after an unresolved submit', async () => {
+    const prefix = `test:{unresolved-${randomUUID()}}:`;
+    const promotionStore = await createRedisPromotionLedgerStore(redis!.client);
+    const ledger = new RedisPromotionExecutionLedger(redis!.client, promotionStore, 60_000, 0);
+    let recovery: SponsoredExecutionRecovery | null = null;
+    try {
+      const unresolvedUser = `${USER}-unresolved`;
+      await expect(
+        ledger.claim(PROMO_X, unresolvedUser, { useUntilAt: null }),
+      ).resolves.toMatchObject({
+        ok: true,
+      });
+      const receiptId = receipt(130);
+      await expect(
+        ledger.reserve({
+          promotionId: PROMO_X,
+          userId: unresolvedUser,
+          receiptId,
+          amountMist: 1_000_000n,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      const sponsorPool = new RedisSponsorPool(redis!.client, [Ed25519Keypair.generate()], {
+        hmacSecret: TEST_HMAC_SECRET,
+        keyPrefix: `${prefix}lease:`,
+        leaseTtlMs: 60_000,
+      });
+      const lease = await sponsorPool.checkout(receiptId);
+      if (!lease) throw new Error('Expected the unresolved-submit sponsor lease');
+      const bytes = await transactionBytes(lease.sponsorAddress);
+      const store = new RedisSponsoredExecutionStore(redis!.client, sponsorPool, ledger, {
+        keyPrefix: prefix,
+      });
+      await store.commitPreparedReceipt({
+        mode: 'promotion',
+        receiptId,
+        senderAddress: SENDER,
+        txBytesHash: sha256Hex(bytes),
+        sponsorAddress: lease.sponsorAddress,
+        clientIp: '127.0.0.5',
+        executionPathKey: 'promotion:redis-unresolved',
+        orderId: null,
+        promotionId: PROMO_X,
+        userId: unresolvedUser,
+        reservedGasMist: 1_000_000n,
+      });
+      const begun = await store.beginSponsoredExecution({
+        receiptId,
+        txBytes: bytes,
+        expectedMode: 'promotion',
+        executionBudgetMs: 1,
+        recovery: {
+          route: 'promotion',
+          senderAddress: SENDER,
+          executionPathKey: 'promotion:redis-unresolved',
+          promotionId: PROMO_X,
+          userId: unresolvedUser,
+          reservedGasMist: '1000000',
+        },
+      });
+      if (begun.status !== 'executing') throw new Error('Expected an executing unresolved receipt');
+      const waitMs = Math.max(0, begun.execution.deadlineMs - (await readRedisTimeMs(redis!)) + 2);
+      await sleep(waitMs);
+      expect(await readRedisTimeMs(redis!)).toBeGreaterThanOrEqual(begun.execution.deadlineMs);
+
+      const lookupDigests: string[] = [];
+      const delivered: SponsorResultMetadata[] = [];
+      recovery = new SponsoredExecutionRecovery({
+        store,
+        sui: suiEndpointSnapshotFixture(),
+        intervalMs: 60_000,
+        lookup: async (digest) => {
+          lookupDigests.push(digest);
+          return null;
+        },
+        onSponsorResult: async (metadata) => {
+          delivered.push(metadata);
+        },
+      });
+      await recovery.start();
+
+      expect(lookupDigests).toEqual([begun.execution.transactionDigest]);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({
+        receiptId,
+        digest: begun.execution.transactionDigest,
+        outcome: 'internal_error',
+        executionStage: 'after_sponsor_signature',
+        economics: {
+          economicsStatus: 'unknown',
+          failureReason: 'transaction_result_unresolved',
+        },
+      });
+      const finalRaw = await redis!.client.get(`${prefix}final:${receiptId}`);
+      expect(finalRaw).not.toBeNull();
+      expect(decodeSponsoredExecutionRecord(finalRaw!)).toMatchObject({
+        state: 'final',
+        receiptId,
+        transactionDigest: begun.execution.transactionDigest,
+        callbackDelivery: 'delivered',
+      });
+      await expect(redis!.client.get(`${prefix}executing:${receiptId}`)).resolves.toBeNull();
+      await expect(redis!.client.get(promotionReservationKey(receiptId))).resolves.toBeNull();
+      await expect(store.readDueExecutions(100, null)).resolves.toEqual({
+        records: [],
+        nextCursor: null,
+      });
+      await expect(store.readPendingCallbacks(100, null)).resolves.toEqual({
+        records: [],
+        nextCursor: null,
+      });
+      await expect(sponsorPool.readSponsorLeaseRecord(lease.sponsorAddress)).resolves.toBeNull();
+      await expect(ledger.getPromotionLedgerStatus(PROMO_X, unresolvedUser)).resolves.toMatchObject(
+        {
+          budget: { reservedMist: 0n, consumedMist: 1_000_000n },
+          entitlement: {
+            activeReservationReceiptId: null,
+            remainingGasAllowanceMist: '4000000',
+            consumedGasAllowanceMist: '1000000',
+          },
+        },
+      );
+    } finally {
+      await recovery?.dispose();
+      await ledger.dispose();
+    }
   });
 });

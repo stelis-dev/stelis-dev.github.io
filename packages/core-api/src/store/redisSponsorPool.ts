@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SponsorSlotLeaseSummary } from '@stelis/contracts';
-import type { SponsorLease, SponsorPoolAdapter, SponsorPoolOptions } from '../context.js';
+import type { SponsorLease, SponsorPoolOptions, SponsorPoolRecordAdapter } from '../context.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import {
   SPONSOR_POOL_LEASE_CHECKIN,
   SPONSOR_POOL_LEASE_CHECKOUT,
-  SPONSOR_POOL_LEASE_COMMITTED,
   SPONSOR_POOL_LEASE_EXHAUSTED,
   SPONSOR_POOL_SIGN,
 } from '../observability/events.js';
@@ -14,11 +13,19 @@ import { PREPARE_TTL_MS } from '../preparePolicy.js';
 import type { RedisClientLike } from './redisClient.js';
 import { SponsorLeaseExpiredError } from './sponsorPoolErrors.js';
 import {
-  computeLeaseProof,
-  leaseProofMatches,
-  COMMIT_DIGEST_RESERVED,
-  SponsorLeaseCommitError,
+  assertSponsorLeaseRecordProof,
+  createReservedSponsorLeaseRecord,
+  planCommittedSponsorLeaseRecordTransition,
+  planExecutingSponsorLeaseRecordTransition,
+  planSponsorLeaseRecordRemoval,
+  parseSponsorLeaseRecord,
+  serializeSponsorLeaseRecord,
   SPONSOR_LEASE_HMAC_SECRET_MIN_LENGTH,
+  type SponsorLeaseRecordRemoval,
+  type SponsorLeaseRemovalExpectation,
+  type SponsorLeaseRecordDeadlineTransition,
+  type SponsorLeaseRecordSnapshot,
+  type SponsorLeaseRecordTransition,
 } from './sponsorLeaseProof.js';
 import { assertSponsorSlotCount } from '../sponsorSlotPolicy.js';
 
@@ -34,11 +41,11 @@ export interface RedisSponsorPoolOptions extends SponsorPoolOptions {
  * Lua checkout used by `checkout()`:
  *
  *   for each rotated lease key
- *     SET(key, reservedProof, NX, PX leaseTtlMs)
+ *     SET(key, reservedRecord, NX, PX leaseTtlMs)
  *     return {slotAddress, oneBasedOffset} on the first successful reservation
  *   return false when every slot is leased
  *
- * The HMAC proof is computed in process and passed in ARGV; Redis never
+ * The lease record and HMAC proof are computed in process and passed in ARGV; Redis never
  * receives `SPONSOR_LEASE_HMAC_SECRET`.
  */
 const LEASE_CHECKOUT_SCRIPT = `
@@ -47,13 +54,19 @@ local ttlMs = ARGV[1]
 local slotCount = #KEYS
 for i = 1, slotCount do
   local slotAddress = ARGV[1 + i]
-  local reservedProof = ARGV[1 + slotCount + i]
-  local result = redis.call('SET', KEYS[i], reservedProof, 'NX', 'PX', ttlMs)
+  local reservedRecord = ARGV[1 + slotCount + i]
+  local result = redis.call('SET', KEYS[i], reservedRecord, 'NX', 'PX', ttlMs)
   if result then
     return { slotAddress, tostring(i) }
   end
 end
 return false
+`;
+
+const REDIS_TIME_MS_SCRIPT = `
+-- RedisSponsorPool REDIS_TIME_MS_SCRIPT
+local t = redis.call('TIME')
+return tostring(t[1] * 1000 + math.floor(t[2] / 1000))
 `;
 
 /**
@@ -81,32 +94,6 @@ return { tostring(leasedSlots), rows }
 `;
 
 /**
- * Lua CAS used by `commit()`:
- *
- *   if GET(key) == ARGV[1] (reserved proof)
- *     SET(key, ARGV[2] (committed proof), PX ARGV[3])
- *     return 'OK'
- *   else
- *     return 'LEASE_MISSING' (key absent) or 'LEASE_COMMIT_CAS_FAILED'
- *
- * We re-set with an explicit PX rather than KEEPTTL so the committed
- * window starts from a fresh TTL matching `leaseTtlMs`. That keeps the
- * lease window bounded even if the reservation lingered briefly.
- */
-const LEASE_COMMIT_CAS_SCRIPT = `
-local current = redis.call('GET', KEYS[1])
-if current == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-  return 'OK'
-else
-  if current == false then
-    return 'LEASE_MISSING'
-  end
-  return 'LEASE_COMMIT_CAS_FAILED'
-end
-`;
-
-/**
  * Lua CAS used by `checkin()`:
  *
  *   if GET(key) == ARGV[1] (expected proof for the supplied stage)
@@ -128,7 +115,7 @@ end
 return 'MISMATCH'
 `;
 
-/** Hex SHA-256 of the built txBytes — the canonical commit digest. */
+/** Canonical lowercase SHA-256 hash of the validated transaction bytes. */
 function sha256Hex(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
 }
@@ -143,35 +130,37 @@ function sha256Hex(data: Uint8Array): string {
  * Lease lifecycle:
  *
  *   checkout(receiptId)
- *     → Redis[lease:sponsorAddress] = HMAC(secret, receiptId||sponsorAddress||":reserved")
+ *     → Redis[lease:sponsorAddress] = the strict reserved lease record
  *       via Lua-wrapped `SET NX PX` over the rotated slot list. The
  *       first free slot is reserved and existing leases are refused.
  *
- *   commit(sponsorAddress, receiptId, txBytesHash)
- *     → Lua CAS: expect reserved proof, swap to
- *       HMAC(secret, receiptId||sponsorAddress||txBytesHash). Any mismatch
+ *   prepared receipt commit
+ *     → the sponsored execution store performs one Lua mutation that
+ *       expects the reserved record and swaps it to a committed record whose
+ *       HMAC binds receipt, sponsor, and txBytesHash. Any mismatch
  *       (missing, wrong receiptId, already committed) raises
  *       `SponsorLeaseCommitError` — silent no-op is not allowed.
  *
- *   sign(sponsorAddress, receiptId, txBytes)
- *     → computes HMAC(secret, receiptId||sponsorAddress||hash(txBytes)) and
- *       compares to the stored value. Reserved leases fail this check
- *       because the sentinel never collides with a hex digest. A
+ *   execution start and sign(sponsorAddress, receiptId, txBytes)
+ *     → the sponsored execution store first advances the committed record to
+ *       `executing` and binds the expected transaction digest
+ *     → verifies the executing HMAC over receipt, sponsor, transaction-byte
+ *       hash, and transaction digest. Reserved and committed leases fail. A
  *       Redis-write attacker who overwrites the prepare entry under
  *       `receiptId` to a forged `txBytesHash` still cannot satisfy
  *       sign() — the Redis lease value was committed by the legitimate
- *       prepare flow to a different hash.
+ *       atomic prepare flow to a different hash.
  *
- *   checkin(sponsorAddress, receiptId, txBytesHash|null)
- *     → Lua CAS: expect the proof for the specified stage, then DEL.
- *       Silent no-op on mismatch; the Redis PX TTL covers residual state.
+ *   checkin(sponsorAddress, receiptId)
+ *     → Lua CAS: expect the exact reserved record, then DEL.
+ *       Committed and executing records are removed only by the atomic
+ *       sponsored-execution store; the Redis PX TTL covers residual reserved state.
  *
- * The sponsor lease key stores only the HMAC proof. The prepared-entry
- * namespace separately stores `receiptId` and `txBytesHash` for consume and
- * cleanup, but neither namespace stores `SPONSOR_LEASE_HMAC_SECRET`; that
+ * The sponsor lease key stores the strict current lease record. Neither that
+ * record nor the receipt namespace stores `SPONSOR_LEASE_HMAC_SECRET`; that
  * secret remains in process env and is what prevents proof forgery.
  */
-export class RedisSponsorPool implements SponsorPoolAdapter {
+export class RedisSponsorPool implements SponsorPoolRecordAdapter {
   private readonly _client: RedisClientLike;
   private readonly _keypairs: Map<string, Ed25519Keypair>;
   private readonly _addresses: string[];
@@ -222,7 +211,7 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
   async leaseStatus(): Promise<SponsorSlotLeaseSummary> {
     const raw = await this._client.eval(
       LEASE_STATUS_SCRIPT,
-      this._addresses.map((address) => this.leaseKey(address)),
+      this._addresses.map((address) => this.sponsorLeaseRecordKey(address)),
       [...this._addresses],
     );
 
@@ -272,21 +261,29 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     const startCursor = this._cursor;
     const rotatedAddresses: string[] = [];
     const leaseKeys: string[] = [];
-    const reservedProofs: string[] = [];
+    const reservedRecords: string[] = [];
+    const deadlineMs = leaseDeadline(await this.redisNowMs(), this._leaseTtlMs);
 
     for (let i = 0; i < this._addresses.length; i++) {
       const sponsorAddress = this._addresses[(startCursor + i) % this._addresses.length]!;
       rotatedAddresses.push(sponsorAddress);
-      leaseKeys.push(this.leaseKey(sponsorAddress));
-      reservedProofs.push(
-        computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, COMMIT_DIGEST_RESERVED),
+      leaseKeys.push(this.sponsorLeaseRecordKey(sponsorAddress));
+      reservedRecords.push(
+        serializeSponsorLeaseRecord(
+          createReservedSponsorLeaseRecord({
+            secret: this._hmacSecret,
+            receiptId,
+            sponsorAddress,
+            deadlineMs,
+          }),
+        ),
       );
     }
 
     const result = await this._client.eval(LEASE_CHECKOUT_SCRIPT, leaseKeys, [
       String(this._leaseTtlMs),
       ...rotatedAddresses,
-      ...reservedProofs,
+      ...reservedRecords,
     ]);
 
     if (result === null || result === false) {
@@ -323,67 +320,30 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     };
   }
 
-  async commit(sponsorAddress: string, receiptId: string, txBytesHash: string): Promise<void> {
-    const reservedProof = computeLeaseProof(
-      this._hmacSecret,
-      receiptId,
-      sponsorAddress,
-      COMMIT_DIGEST_RESERVED,
-    );
-    const committedProof = computeLeaseProof(
-      this._hmacSecret,
-      receiptId,
-      sponsorAddress,
-      txBytesHash,
-    );
-    const result = (await this._client.eval(
-      LEASE_COMMIT_CAS_SCRIPT,
-      [this.leaseKey(sponsorAddress)],
-      [reservedProof, committedProof, String(this._leaseTtlMs)],
-    )) as string | null;
-    if (result === 'OK') {
-      logStructuredEvent(SPONSOR_POOL_LEASE_COMMITTED, {
-        adapter: 'redis',
-        sponsor_address: sponsorAddress,
+  async checkin(sponsorAddress: string, receiptId: string): Promise<void> {
+    const snapshot = await this.readSponsorLeaseRecord(sponsorAddress);
+    if (!snapshot) return;
+    let removal: SponsorLeaseRecordRemoval;
+    try {
+      removal = this.prepareSponsorLeaseRecordRemoval(snapshot, {
+        stage: 'reserved',
+        receiptId,
       });
+    } catch {
       return;
     }
-    if (result === 'LEASE_MISSING') {
-      throw new SponsorLeaseCommitError(
-        'LEASE_MISSING',
-        `RedisSponsorPool.commit: no active lease for sponsor ${sponsorAddress}`,
-      );
-    }
-    // LEASE_COMMIT_CAS_FAILED — the Redis value exists but is not the
-    // reserved proof for this (receiptId, sponsorAddress). Typically means the
-    // lease already committed under a different commit digest, or
-    // belongs to a different receiptId, or the reservation expired and
-    // the slot was recycled.
-    throw new SponsorLeaseCommitError(
-      'LEASE_COMMIT_CAS_FAILED',
-      `RedisSponsorPool.commit: lease for sponsor ${sponsorAddress} is not in reserved state for the given receiptId`,
-    );
-  }
-
-  async checkin(
-    sponsorAddress: string,
-    receiptId: string,
-    txBytesHash: string | null,
-  ): Promise<void> {
-    const commitDigest = txBytesHash ?? COMMIT_DIGEST_RESERVED;
-    const expected = computeLeaseProof(this._hmacSecret, receiptId, sponsorAddress, commitDigest);
     // Lua CAS keeps DEL atomic with the GET compare — a racing commit or
     // checkout can never be lost to a stale checkin.
     const result = (await this._client.eval(
       LEASE_CHECKIN_CAS_SCRIPT,
-      [this.leaseKey(sponsorAddress)],
-      [expected],
+      [removal.key],
+      [removal.expectedRaw],
     )) as string | null;
     if (result === 'OK') {
       logStructuredEvent(SPONSOR_POOL_LEASE_CHECKIN, {
         adapter: 'redis',
         sponsor_address: sponsorAddress,
-        stage: txBytesHash === null ? 'reserved' : 'committed',
+        stage: snapshot.record.stage,
         pool_size: this.size,
       });
     }
@@ -398,19 +358,18 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
   ): Promise<{ signature: string }> {
     // Committed HMAC lease proof verification — the only barrier between
     // a Redis-only attacker and the in-memory signing keypair. Reserved
-    // leases fail this check because the sentinel cannot equal any hex
-    // SHA-256 digest. An attacker who overwrites `entry[receiptId]` with
+    // or committed lease fails this executing-stage check. An attacker who
+    // overwrites `entry[receiptId]` with
     // a forged txBytesHash still cannot satisfy this gate because the
     // Redis lease value was committed by the legitimate prepare flow to
     // the original hash.
-    const current = await this._client.get(this.leaseKey(sponsorAddress));
-    const expected = computeLeaseProof(
-      this._hmacSecret,
-      receiptId,
-      sponsorAddress,
-      sha256Hex(txBytes),
-    );
-    if (!leaseProofMatches(current, expected)) {
+    const snapshot = await this.readSponsorLeaseRecord(sponsorAddress);
+    if (
+      !snapshot ||
+      snapshot.record.stage !== 'executing' ||
+      snapshot.record.receiptId !== receiptId ||
+      snapshot.record.txBytesHash !== sha256Hex(txBytes)
+    ) {
       throw new SponsorLeaseExpiredError(sponsorAddress);
     }
     const keypair = this._keypairs.get(sponsorAddress);
@@ -425,7 +384,82 @@ export class RedisSponsorPool implements SponsorPoolAdapter {
     return keypair.signTransaction(txBytes);
   }
 
-  private leaseKey(sponsorAddress: string): string {
+  sponsorLeaseRecordKey(sponsorAddress: string): string {
     return `${this._keyPrefix}${sponsorAddress}`;
   }
+
+  async readSponsorLeaseRecord(sponsorAddress: string): Promise<SponsorLeaseRecordSnapshot | null> {
+    const raw = await this._client.get(this.sponsorLeaseRecordKey(sponsorAddress));
+    if (raw === null) return null;
+    const record = parseSponsorLeaseRecord(raw);
+    assertSponsorLeaseRecordProof(record, this._hmacSecret);
+    if (record.sponsorAddress !== sponsorAddress) {
+      throw new Error('RedisSponsorPool: lease record sponsor does not match its key');
+    }
+    return { raw, record };
+  }
+
+  prepareCommittedSponsorLeaseRecord(
+    snapshot: SponsorLeaseRecordSnapshot,
+    receiptId: string,
+    txBytesHash: string,
+    deadlineMs: number,
+  ): SponsorLeaseRecordTransition {
+    return planCommittedSponsorLeaseRecordTransition({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      receiptId,
+      txBytesHash,
+      deadlineMs,
+    });
+  }
+
+  prepareExecutingSponsorLeaseRecord(
+    snapshot: SponsorLeaseRecordSnapshot,
+    receiptId: string,
+    txBytesHash: string,
+    transactionDigest: string,
+  ): SponsorLeaseRecordDeadlineTransition {
+    return planExecutingSponsorLeaseRecordTransition({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      receiptId,
+      txBytesHash,
+      transactionDigest,
+    });
+  }
+
+  prepareSponsorLeaseRecordRemoval(
+    snapshot: SponsorLeaseRecordSnapshot,
+    expectation: SponsorLeaseRemovalExpectation,
+  ): SponsorLeaseRecordRemoval {
+    return planSponsorLeaseRecordRemoval({
+      key: this.sponsorLeaseRecordKey(snapshot.record.sponsorAddress),
+      secret: this._hmacSecret,
+      snapshot,
+      expectation,
+    });
+  }
+
+  private async redisNowMs(): Promise<number> {
+    const raw = await this._client.eval(REDIS_TIME_MS_SCRIPT, [], []);
+    if (typeof raw !== 'string' || !/^(0|[1-9][0-9]*)$/.test(raw)) {
+      throw new Error('RedisSponsorPool: Redis TIME returned an invalid millisecond value');
+    }
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error('RedisSponsorPool: Redis TIME exceeds the safe integer range');
+    }
+    return value;
+  }
+}
+
+function leaseDeadline(nowMs: number, ttlMs: number): number {
+  const deadlineMs = nowMs + ttlMs;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= nowMs) {
+    throw new Error('RedisSponsorPool: lease deadline exceeds the safe integer range');
+  }
+  return deadlineMs;
 }

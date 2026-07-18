@@ -49,6 +49,7 @@ const SPONSOR_OPERATIONS_DATA = {
   settlementPayoutRecipientAddress: '0x' + 'b'.repeat(64),
   sponsorBalanceWarnMist: '1000000000',
   sponsorBalanceRefillTargetMist: '2000000000',
+  sponsorRefillAccountRunwayTargetMist: '2000000000',
   refillEnabled: true,
   quotedHostFeeMist: '100000',
   onChainIds: {
@@ -72,7 +73,7 @@ const SPONSOR_OPERATIONS_DATA = {
   },
   sponsorOperations: {
     gateErrorCode: null,
-    availableSlots: 3,
+    healthySlots: 3,
     degradedSlots: 0,
     slotLeases: {
       leasedSlots: 0,
@@ -87,30 +88,29 @@ const SPONSOR_OPERATIONS_DATA = {
       {
         address: '0x' + 'd'.repeat(64),
         state: 'healthy',
-        balanceMist: '3000000000',
+        addressBalanceMist: '3000000000',
         lastObservedAtMs: 1_700_000_000_000,
         lastError: null,
       },
       {
         address: '0x' + 'e'.repeat(64),
         state: 'healthy',
-        balanceMist: '3000000000',
+        addressBalanceMist: '3000000000',
         lastObservedAtMs: 1_700_000_000_000,
         lastError: null,
       },
       {
         address: '0x' + 'f'.repeat(64),
         state: 'healthy',
-        balanceMist: '3000000000',
+        addressBalanceMist: '3000000000',
         lastObservedAtMs: 1_700_000_000_000,
         lastError: null,
       },
     ],
     sponsorRefillAccount: {
       address: '0x' + 'c'.repeat(64),
-      balanceMist: '2000000000',
+      totalBalanceMist: '2000000000',
       healthy: true,
-      refillsRemaining: 5,
       lastObservedAtMs: 1_700_000_000_000,
       lastError: null,
     },
@@ -411,7 +411,7 @@ describe('DashboardPage integration', () => {
       sponsorOperations: {
         ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
         gateErrorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
-        availableSlots: 0,
+        healthySlots: 0,
         degradedSlots: 3,
         slots: SPONSOR_OPERATIONS_DATA.sponsorOperations.slots.map((slot) => ({
           ...slot,
@@ -450,11 +450,11 @@ describe('DashboardPage integration', () => {
       sponsorOperations: {
         ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
         slots: SPONSOR_OPERATIONS_DATA.sponsorOperations.slots.map((slot, index) =>
-          index === 0 ? { ...slot, balanceMist: hugeMist } : slot,
+          index === 0 ? { ...slot, addressBalanceMist: hugeMist } : slot,
         ),
         sponsorRefillAccount: {
           ...SPONSOR_OPERATIONS_DATA.sponsorOperations.sponsorRefillAccount,
-          balanceMist: hugeMist,
+          totalBalanceMist: hugeMist,
         },
       },
     };

@@ -48,11 +48,11 @@ Sponsor Refill Account withdrawal is privileged. The withdrawal route requires a
 
 The Host runtime adds request and operations controls:
 
-- Redis-backed prepare store
+- Redis-backed sponsored execution store
 - rate limiting
 - abuse blocking
 - sponsor slot leasing
-- sponsor operation health gate
+- aggregate sponsor capacity checks before prepare and a fresh receipt-assigned sponsor balance check before execution
 - admin session validation
 
 Generic `/relay/prepare` requires signed prepare authorization before the prepare state machine performs sponsor slot checkout, nonce reservation, on-chain reads, or transaction building. The Host recomputes `txKindBytesHash`, verifies the sender personal-message signature, enforces the prepare authorization timestamp window, and rejects reused prepare authorization nonces.

@@ -56,8 +56,10 @@ import { createRelayRoutes } from '../src/routes/relay.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import { buildSponsorUnavailableResponse } from '../src/sponsor-operations/gateResponse.js';
 import type { AppApiContext } from '../src/context.js';
+import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
 
 const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
+const SPONSOR_OPERATIONS_SETTINGS = createTestSponsorOperationsSettings();
 
 const PREPARE_AUTH_FIELDS = {
   txKindBytesHash: '0x' + '11'.repeat(32),
@@ -132,27 +134,29 @@ function createMockCtx(): AppApiContext {
       // gate admits by default; deny-path tests override `readState`
       // via `(ctx.sponsorOperations.readState as Mock).mockResolvedValue(...)`.
       readState: vi.fn().mockResolvedValue({
+        settings: SPONSOR_OPERATIONS_SETTINGS,
         slots: [
           {
             address: '0xslot',
             state: 'healthy',
-            balanceMist: '10000000000',
+            addressBalanceMist: '10000000000',
+            observationFresh: true,
             lastError: null,
             lastObservedAtMs: 1_700_000_000_000,
             writeSeq: 1,
           },
         ],
         sponsorRefillAccount: {
-          balanceMist: '20000000000',
+          totalBalanceMist: '20000000000',
           healthy: true,
-          refillsRemaining: 2,
+          observationFresh: true,
           lastError: null,
           lastObservedAtMs: 1_700_000_000_000,
           writeSeq: 1,
         },
       }),
-      probeSponsorRefillAccount: vi.fn().mockResolvedValue(undefined),
-      requestRefill: vi.fn(),
+      settings: SPONSOR_OPERATIONS_SETTINGS,
+      observeBalances: vi.fn().mockResolvedValue(undefined),
       slotAddresses: ['0xslot'],
       sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
       dispose: vi.fn(),
@@ -185,16 +189,17 @@ const SPONSOR_OPERATIONS_BLOCKED_CASES = [
         {
           address: '0xslot',
           state: 'low_balance',
-          balanceMist: '100',
+          addressBalanceMist: '100',
+          observationFresh: true,
           lastError: null,
           lastObservedAtMs: 1_700_000_000_000,
           writeSeq: 1,
         },
       ],
       sponsorRefillAccount: {
-        balanceMist: '20000000000',
+        totalBalanceMist: '20000000000',
         healthy: true,
-        refillsRemaining: 2,
+        observationFresh: true,
         lastError: null,
         lastObservedAtMs: 1_700_000_000_000,
         writeSeq: 1,
@@ -210,16 +215,17 @@ const SPONSOR_OPERATIONS_BLOCKED_CASES = [
         {
           address: '0xslot',
           state: 'rpc_unreachable',
-          balanceMist: null,
+          addressBalanceMist: null,
+          observationFresh: true,
           lastError: 'rpc down',
           lastObservedAtMs: 1_700_000_000_000,
           writeSeq: 1,
         },
       ],
       sponsorRefillAccount: {
-        balanceMist: null,
+        totalBalanceMist: null,
         healthy: false,
-        refillsRemaining: null,
+        observationFresh: true,
         lastError: 'sponsor refill account rpc down',
         lastObservedAtMs: 1_700_000_000_000,
         writeSeq: 1,
@@ -370,12 +376,9 @@ describe('relay routes', () => {
           sponsorRefillAccount: expect.any(Object),
         }),
         {
-          requireFreeSponsorSlot: true,
-          slotLeases: {
-            leasedSlots: 0,
-            freeSlots: 1,
-            slots: [{ address: '0xslot', leased: false }],
-          },
+          leasedSlots: 0,
+          freeSlots: 1,
+          slots: [{ address: '0xslot', leased: false }],
         },
       );
     });
@@ -488,7 +491,7 @@ describe('relay routes', () => {
       expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ requireFreeSponsorSlot: true }),
+        expect.objectContaining({ freeSlots: 1 }),
       );
       // Verify success response includes nonce (PrepareResponse contract)
       const body = await res.json();
@@ -856,49 +859,6 @@ describe('relay routes', () => {
       userSignature: 'sig',
       receiptId: 'rcpt-1',
     };
-
-    it('uses the sponsor health gate without requiring a free sponsor slot', async () => {
-      const res = await app.request('/relay/sponsor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(validBody),
-      });
-
-      expect(res.status).toBe(200);
-      expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
-      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
-      const gateCall = vi.mocked(buildSponsorUnavailableResponse).mock.calls[0];
-      expect(gateCall).toHaveLength(1);
-      expect(gateCall?.[0]).toEqual(
-        expect.objectContaining({
-          slots: expect.any(Array),
-          sponsorRefillAccount: expect.any(Object),
-        }),
-      );
-    });
-
-    it.each(SPONSOR_OPERATIONS_BLOCKED_CASES)(
-      'returns 503 + $code when the sponsor operations gate blocks /relay/sponsor',
-      async ({ code, error }) => {
-        const coreApi = await import('@stelis/core-api');
-        vi.mocked(buildSponsorUnavailableResponse).mockReturnValueOnce({
-          errorCode: code,
-          headers: {},
-        });
-
-        const res = await app.request('/relay/sponsor', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(validBody),
-        });
-
-        expect(res.status).toBe(503);
-        expect(await res.json()).toEqual({ error, code });
-        expect(coreApi.handleSponsor).not.toHaveBeenCalled();
-        expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
-      },
-    );
 
     it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
       const coreApi = await import('@stelis/core-api');

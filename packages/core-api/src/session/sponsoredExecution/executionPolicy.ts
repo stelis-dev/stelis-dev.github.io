@@ -42,7 +42,7 @@ type MaybePromise<T> = Promise<T> | T;
 // ─────────────────────────────────────────────
 
 /**
- * Public discriminator for a sponsored execution policy. Matches the prepared-store
+ * Public discriminator for a sponsored execution policy. Matches the prepared receipt
  * entry's policy/mode field so a single dispatch keys both prepare-side
  * registration and sponsor-side lookup. New policies require a new
  * discriminant literal AND a corresponding registration.
@@ -54,7 +54,7 @@ export type PolicyDiscriminator = 'generic' | 'promotion';
  * different reservation handle kinds:
  *
  *   - GasBoundBuild — generic requires `Nonce` before build; Studio does not.
- *   - PrepareStoreCommit — Studio requires `LedgerReservation` after build;
+ *   - PreparedCommit — Promotion requires `LedgerReservation` after build;
  *     generic does not acquire another route-specific handle there.
  *   - SponsorResult — Studio requires `LedgerReservation` for entitlement
  *     consume/release; generic does not.
@@ -76,7 +76,7 @@ export interface PreparedCommitHandleRequirements {
 export interface SponsorResultHandleRequirements {
   readonly ledgerReservation?: true;
   // nonce is intentionally absent — the in-PTB nonce match runs at
-  // SharedPostconsumeChecks; nonce reservation handle has no sponsor result verb.
+  // SharedSponsorChecks; nonce reservation handle has no sponsor result verb.
 }
 
 /**
@@ -131,39 +131,29 @@ export type PrepareChainSnapshot<D extends PolicyDiscriminator = PolicyDiscrimin
       : never;
 
 /**
- * Read-only state supplied to sponsor-side hooks that fire BEFORE the
- * atomic consume succeeds (`DecodeSponsorSubmission`,
- * `UserSignatureValidation`, `Consume`). At this point the prepared
- * entry has not been stored-hash-verified to the submitted `txBytes` yet, so no
- * phase-local reservation handles can be reconstructed — `txSender` is still
- * attacker-choosable and the sponsor-address lease identity is not yet authoritative.
- *
- * `Consume` runs immediately after `UserSignatureValidation`;
- * reconstruction begins only after that boundary clears.
+ * Request identity supplied while the submitted transaction and user signature
+ * are checked. The runner has read the current prepared record but has not
+ * mutated receipt or lease state.
  */
-export interface PreConsumeSponsorContext {
+export interface SponsorSubmissionContext {
   readonly receiptId: string;
   readonly clientIp: string;
 }
 
 /**
- * Read-only state supplied to sponsor-side hooks that fire AFTER the
- * atomic consume succeeds. The runner reconstructs `sponsorSlot`
- * immediately after `runSponsorConsumePhase` returns success. The handle
- * carries the consumed entry's sponsor-address lease identity; the pool's
- * `sign()` boundary later performs the committed HMAC verification against
- * the submitted transaction bytes.
+ * Read-only state supplied after the submitted bytes match the prepared
+ * record and before the atomic prepared -> executing transition.
  *
  * `nonce` and `ledgerReservation` are minted progressively by the
  * runner from typed reconstruction inputs returned by the
- * `SharedPostconsumeChecks` and `PolicyPostconsumeChecks` hooks
+ * `SharedSponsorChecks` and `PolicySponsorChecks` hooks
  * respectively. Both fields are optional at the type level: a generic
  * policy never produces `ledgerReservation`; a Studio policy never
  * produces `nonce`. The runner enforces presence at the corresponding
  * `handleRequirements.sponsorResult` boundary via
  * `RunnerSponsorReservationHandleMissingError`.
  */
-export interface PostConsumeSponsorContext {
+export interface SponsorValidatedContext {
   readonly receiptId: string;
   readonly clientIp: string;
   /** Runner-owned irreversible execution boundary; never inferred by a policy. */
@@ -174,22 +164,22 @@ export interface PostConsumeSponsorContext {
 }
 
 /**
- * Reconstruction inputs returned by `SharedPostconsumeChecks` so the
+ * Reconstruction inputs returned by `SharedSponsorChecks` so the
  * runner can mint `NonceReservationHandle` after the S-14 in-PTB nonce match
  * verifies. Generic policies populate this; Studio returns an empty
  * object because there is no nonce on the promotion path.
  */
-export interface SharedPostconsumeReconstruction {
+export interface SharedSponsorReconstruction {
   readonly nonce?: NonceReconstructionInputs;
 }
 
 /**
- * Reconstruction inputs returned by `PolicyPostconsumeChecks` so the
+ * Reconstruction inputs returned by `PolicySponsorChecks` so the
  * runner can mint `LedgerReservationHandle` after the Studio ledger
  * read model verifies the active reservation matches the prepared-entry
  * copy. Studio populates this; generic returns an empty object.
  */
-export interface PolicyPostconsumeReconstruction {
+export interface PolicySponsorReconstruction {
   readonly ledgerReservation?: LedgerReservationReconstructionInputs;
 }
 
@@ -210,121 +200,51 @@ export interface PolicyPostconsumeReconstruction {
 export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscriminator> {
   readonly Intent: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   readonly RequestValidation: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly InflightAdmission: (ctx: PreparePolicyHookContext) => Promise<void> | void;
   readonly ChainSnapshot: (ctx: PreparePolicyHookContext) => MaybePromise<PrepareChainSnapshot<D>>;
-  readonly ExecutionPolicySelected: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly SlotFreePlan: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly SponsorSlotReservationAcquired: (
-    ctx: PreparePolicyHookContext,
-    sponsorSlot: SponsorSlotReservationHandle,
-  ) => Promise<void> | void;
-  // The runner — not the hook — owns reservation acquisition. After
-  // the runner acquires the nonce reservation (when
-  // `handleRequirements.gasBoundBuild.nonce === true`), it passes the
-  // resulting `NonceReservationHandle` to this hook for any policy-side
-  // verification (signature parity, audit log, etc.). The hook returns
-  // `void`; ownership of the reservation stays with the runner so
-  // reverse-cleanup is correct on every failure path.
-  readonly RouteReservationBeforeBuild: (
-    ctx: PreparePolicyHookContext,
-    sponsorSlot: SponsorSlotReservationHandle,
-    nonce: NonceReservationHandle,
-  ) => Promise<void> | void;
   // The hook drives the route-specific gas-bound build
   // (`runGenericPrepareBuildPipeline` for generic, sponsor-ready
   // Transaction.build for Studio) and returns the durable build result.
-  // The runner consumes `txBytesHash` for sponsor-pool commit +
-  // prepared-store entry; `measuredGasMist` is forwarded to
-  // `RouteReservationAfterBuild` for Studio ledger reservation amount.
+  // The runner consumes `txBytesHash` for the sponsor lease and prepared
+  // receipt; `measuredGasMist` is the Studio ledger reservation amount.
   readonly GasBoundBuild: (
     ctx: PreparePolicyHookContext,
     input: GasBoundBuildInput,
   ) => Promise<GasBoundBuildResult> | GasBoundBuildResult;
-  // After the runner acquires the ledger reservation (when
-  // `handleRequirements.preparedCommit.ledgerReservation === true`),
-  // it passes the `LedgerReservationHandle` to this hook for any
-  // policy-side verification. Same ownership contract as
-  // `RouteReservationBeforeBuild`.
-  readonly RouteReservationAfterBuild: (
-    ctx: PreparePolicyHookContext,
-    sponsorSlot: SponsorSlotReservationHandle,
-    ledgerReservation: LedgerReservationHandle,
-  ) => Promise<void> | void;
-  readonly SelfCheck: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  readonly SponsorLeaseCommitted: (ctx: PreparePolicyHookContext) => Promise<void> | void;
-  // Pre-consume hooks: fire BEFORE the atomic consume succeeds, so they
-  // see a context that carries no phase-local reservation handles. `txSender` is
-  // still attacker-choosable at this point — abuse attribution is
+  // Submission hooks run before the atomic prepared -> executing transition.
+  // `txSender` is still attacker-choosable until the prepared bytes match, so abuse attribution is
   // IP-only (generic) or studio-user (promotion, via the route-verified
   // developer JWT principal).
-  readonly DecodeSponsorSubmission: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
-  readonly UserSignatureValidation: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
-  // The `Consume` hook is observability-only by contract: the runner
-  // delegates the atomic stored-hash match to `runSponsorConsumePhase`
-  // (`sponsorLifecycle.ts`) using the route-supplied
-  // `SponsorConsumePolicyAdapter`. The hook fires only after the
-  // sub-runner returns success.
-  readonly Consume: (ctx: PreConsumeSponsorContext) => Promise<void> | void;
-  // Post-consume hooks: fire AFTER the runner has reconstructed
-  // `sponsorSlot` from the consumed entry's sponsor-address lease identity.
-  // The later `sign()` boundary remains the committed HMAC authority.
+  readonly DecodeSponsorSubmission: (ctx: SponsorSubmissionContext) => Promise<void> | void;
+  readonly UserSignatureValidation: (ctx: SponsorSubmissionContext) => Promise<void> | void;
+  // These checks run after the submitted bytes have been matched to the
+  // current prepared record, but before the atomic prepared -> executing
+  // transition. They must not mutate receipt, lease, or Promotion state.
   //
-  // `SharedPostconsumeChecks` performs route-shared verification (gas
+  // `SharedSponsorChecks` performs route-shared verification (gas
   // owner cross-check, S-14 in-PTB nonce match for generic, etc.). It
   // returns optional reconstruction inputs so the runner can mint
   // `NonceReservationHandle` after the S-14 verification clears. Generic
   // policies populate `nonce`; Studio omits it.
-  readonly SharedPostconsumeChecks: (
-    ctx: PostConsumeSponsorContext,
-  ) => MaybePromise<SharedPostconsumeReconstruction>;
-  // `PolicyPostconsumeChecks` performs route-specific verification
+  readonly SharedSponsorChecks: (
+    ctx: SponsorValidatedContext,
+  ) => MaybePromise<SharedSponsorReconstruction>;
+  // `PolicySponsorChecks` performs route-specific verification
   // (new-user User Vault drift for generic; promotion ledger lookup
   // verification for Studio). It returns optional reconstruction inputs
   // so the runner can mint `LedgerReservationHandle` after Studio's
   // ledger read model verifies the active reservation matches the
   // prepared-entry copy. Generic policies omit it.
-  readonly PolicyPostconsumeChecks: (
-    ctx: PostConsumeSponsorContext,
-  ) => MaybePromise<PolicyPostconsumeReconstruction>;
-  readonly Preflight: (ctx: PostConsumeSponsorContext) => Promise<void> | void;
-  readonly PolicyApproval: (ctx: PostConsumeSponsorContext) => Promise<void> | void;
-  // `SponsorSign` fires BEFORE the runner invokes the
-  // `signAndSubmit` host port. Observability-only — the actual sign +
-  // submit call is owned by the runner via the host port.
-  readonly SponsorSign: (ctx: PostConsumeSponsorContext) => Promise<void> | void;
-  // `Submit` fires AFTER `signAndSubmit` returns a normalized result,
-  // but before `ClassifySponsorResult` receives that result for route-specific
-  // classification. Observability-only: a throw is swallowed by the
-  // runner so it cannot replace the result that `ClassifySponsorResult`
-  // will classify next. The hook receives only the post-consume context;
-  // `ClassifySponsorResult` is the single owner of result classification and
-  // accounting. Pre-sign failures (e.g. `SponsorLeaseExpiredError`) and
-  // post-signature uncertainty (`SponsorPostSignatureUncertaintyError`) propagates
-  // from the port without invoking this hook — the public route adapter's
-  // outer catch handles those.
-  readonly Submit: (ctx: PostConsumeSponsorContext) => Promise<void> | void;
-  // `ClassifySponsorResult` owns route-specific sponsor result classification:
-  //   - on `result.success === true`: success-side accounting (Studio
-  //     ledger consume, generic economics log).
-  //   - on `result.success === false`: failure-side accounting (Studio
-  //     ledger release on congestion, ledger consume on on-chain revert,
-  //     structured execution log, `SponsorOnchainError` /
-  //     `SponsorCongestionError` classified throw).
-  // The runner does not classify the failure itself — it propagates
-  // any throw the hook raises so the public route adapter's outer catch can
-  // map runner output to its public error vocabulary.
+  readonly PolicySponsorChecks: (
+    ctx: SponsorValidatedContext,
+  ) => MaybePromise<PolicySponsorReconstruction>;
+  readonly Preflight: (ctx: SponsorValidatedContext) => Promise<void> | void;
+  // Classification updates route-owned result metadata and may return a
+  // classified public error. Durable accounting and callback delivery belong
+  // to the runner's receipt store, not to this hook.
   readonly ClassifySponsorResult: (
-    ctx: PostConsumeSponsorContext,
+    ctx: SponsorValidatedContext,
     result: ExecResult,
   ) => Promise<void> | void;
-  // The `Release` hook fires AFTER the runner's `finally` already ran
-  // `safeSlotCheckin`. Observability-only: a throw is swallowed by
-  // the runner — a Release hook fault must not mask the primary
-  // success path or the original error. The runner intentionally emits
-  // no shared hook-failure event; route-owned callback failures that
-  // have a verified consumer are logged inside the policy hook that
-  // owns that callback contract.
-  readonly Release: (ctx: PostConsumeSponsorContext) => Promise<void> | void;
 }
 
 /** Compile-time guarantee: every state literal has a corresponding hook signature. */
@@ -334,16 +254,6 @@ const _exhaustiveCheck: _AssertExhaustive = true;
 const _noExtrasCheck: _AssertNoExtras = true;
 void _exhaustiveCheck;
 void _noExtrasCheck;
-
-/**
- * Subset of prepare hooks required in every execution policy. The two
- * route-reservation hooks may be omitted; the procedural runner decides whether
- * to execute those actions from the policy's actual handle requirements.
- */
-export type MandatoryPrepareState = Exclude<
-  PrepareState,
-  'RouteReservationBeforeBuild' | 'RouteReservationAfterBuild'
->;
 
 // ─────────────────────────────────────────────
 // SponsoredExecutionPolicy interface
@@ -363,24 +273,15 @@ export interface SponsoredExecutionPolicy<D extends PolicyDiscriminator = Policy
    * decide optional acquisition or validation behavior.
    */
   readonly handleRequirements: SponsoredExecutionPolicyHandleRequirements;
-  /**
-   * Hook function registry, keyed by lifecycle state. Mandatory states
-   * MUST have a registered hook; optional states MAY omit the entry.
-   */
+  /** Hook registry for route-specific decisions and validation. */
   readonly hooks: PolicyHooks<D>;
 }
 
-/**
- * Hook registry shape: required mandatory keys + optional state keys.
- * Forwarded as the value of `SponsoredExecutionPolicy.hooks`.
- */
+/** Hook registry shape forwarded as `SponsoredExecutionPolicy.hooks`. */
 export type PolicyHooks<D extends PolicyDiscriminator = PolicyDiscriminator> = {
-  readonly [K in MandatoryPrepareState]: StateHookSignatures<D>[K];
+  readonly [K in PrepareState]: StateHookSignatures<D>[K];
 } & {
   readonly [K in SponsorState]: StateHookSignatures<D>[K];
-} & {
-  readonly RouteReservationBeforeBuild?: StateHookSignatures<D>['RouteReservationBeforeBuild'];
-  readonly RouteReservationAfterBuild?: StateHookSignatures<D>['RouteReservationAfterBuild'];
 };
 
 // ─────────────────────────────────────────────

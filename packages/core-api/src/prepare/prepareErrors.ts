@@ -41,6 +41,7 @@ import {
   buildAddressBalanceGasTransaction,
   findUniqueSettleCommandIndex,
   getSuiRejectedExecutionError,
+  SuiAddressBalanceGasUnavailableError,
   type AddressBalanceGasTransaction,
 } from '@stelis/core-relay/server';
 import {
@@ -536,6 +537,12 @@ export async function safeBuildAddressBalanceGasTransaction(
       gasBudget,
     });
   } catch (err) {
+    if (err instanceof SuiAddressBalanceGasUnavailableError) {
+      throw new PrepareValidationError(
+        'SPONSOR_CAPACITY_UNAVAILABLE',
+        'The assigned sponsor address cannot supply the requested gas budget',
+      );
+    }
     const error = getSuiRejectedExecutionError(err);
     if (error) {
       // Only the address-balance builder can bind a parsed current execution failure to

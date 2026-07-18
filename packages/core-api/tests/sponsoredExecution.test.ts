@@ -60,10 +60,10 @@ describe('sponsoredExecution — derive known economics', () => {
       recoveredGasMist: 0n,
       hostPaidGasMist: 12_345n,
       hostFeeMist: 0n,
-      failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED',
+      failureReason: 'recorder_write_failed',
     });
     expect(econ.hostNetMist).toBe(-12_345n);
-    expect(econ.failureReason).toBe('PROMOTION_LEDGER_CONSUME_FAILED');
+    expect(econ.failureReason).toBe('recorder_write_failed');
   });
 
   it('protocol_fee is auxiliary context only — NOT subtracted from hostNetMist', () => {
