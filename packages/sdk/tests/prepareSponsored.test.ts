@@ -13,7 +13,7 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
-import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import { parseRelayPrepareRequest, STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 const {
   mockExtractSettleFields,
@@ -193,6 +193,10 @@ describe('StelisSDK.prepareSponsored — prepare delegation', () => {
     expect(typeof prepareArgs['prepareAuthorizationTimestampMs']).toBe('number');
     expect(prepareArgs['prepareAuthorizationRequestNonce']).toMatch(/^[0-9a-f]+$/);
     expect(prepareArgs['prepareAuthorizationSignature']).toBe('prepare-signature');
+    expect(prepareArgs).not.toHaveProperty('slippageBps');
+    expect(prepareArgs).not.toHaveProperty('gasMarginBps');
+    expect(prepareArgs).not.toHaveProperty('orderId');
+    expect(() => parseRelayPrepareRequest(prepareArgs)).not.toThrow();
     expect(prepareAuthorizationSigner).toHaveBeenCalledWith(expect.any(Uint8Array));
     expect(mockValidateGenericUserTx).toHaveBeenCalledTimes(1);
     expect(mockValidateGenericUserTx.mock.calls[0][1]).toEqual({

@@ -77,7 +77,7 @@ function makeSettleEventBcs() {
 function makeEvent(bcsBytes: Uint8Array, overrides: Partial<Omit<SuiEvent, 'bcs'>> = {}): SuiEvent {
   return {
     packageId: PACKAGE_ID,
-    module: 'events',
+    module: 'settle',
     sender: USER_ADDR,
     eventType: `${PACKAGE_ID}::events::SettleEvent`,
     bcs: bcsBytes,
@@ -454,7 +454,7 @@ describe('verifySettleEventAgainstExpected', () => {
 
   it.each([
     ['package', { packageId: `0x${'9'.repeat(64)}` }],
-    ['module', { module: 'not_events' }],
+    ['module', { module: 'not_settle' }],
   ] as const)(
     'rejects a canonical eventType whose top-level %s identity conflicts',
     async (_field, overrides) => {
