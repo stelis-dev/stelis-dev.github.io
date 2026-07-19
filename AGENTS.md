@@ -26,6 +26,35 @@ If a rule below mentions an unfamiliar package, first decide whether the package
 - For non-trivial work, keep the accepted task name stable. Do not rename, split, or reframe work to make incomplete work look complete.
 - Every changed line should trace to the user request, an accepted plan, or an affected shared invariant. Avoid drive-by cleanup.
 
+## Review and Verification Discipline
+
+### Verification Order
+
+Review the affected boundary in this order:
+
+1. Define the correctness model first: responsibilities, invariants, allowed
+   state transitions, points at which changes become durable or externally
+   visible, terminal outcomes, rollback behavior where rollback is possible,
+   failure outcomes, recovery, and cleanup.
+2. Derive boundary and adversarial checks from that model. Inspect malformed
+   input, parameter combinations, individual and aggregate size limits, numeric
+   limits, stale state, concurrency, cancellation, deadlines, ambiguous
+   outcomes such as lost responses, storage and memory limits, and error
+   precedence where they apply.
+3. Audit the tests independently. Do not accept a test as proof of the complete
+   boundary when it uses test-only production behavior, derives its oracle from
+   the implementation under test, bypasses production composition, manipulates
+   the outcome, or verifies only isolated components.
+
+Every layer is required. Boundary checks do not replace structural reasoning,
+and structural reasoning does not replace boundary checks. A counterexample
+that exposes an incomplete or incorrect correctness model must update that
+model and its checks.
+
+Test quantity, branch quantity, and exhaustive parameter enumeration are not
+proof of correctness. Prefer a small number of checks that can falsify distinct
+invariants over many overlapping or low-value examples.
+
 ## Completion Reporting Rule
 
 - When reporting the result of an accepted user request, the outcome is binary: success or failure. Do not report an intermediate completion state for the task itself.
@@ -91,6 +120,26 @@ Current internal source-of-truth packages:
 - Treat the publish/deploy allowlist as stricter than the workspace list.
 - This repository has no public release contract. Use the clearest current API, type, field, and tool names directly.
 - Do not keep alternate public names, deprecated wrappers, compatibility exports, or compatibility readers for names and data shapes that current code no longer uses.
+
+## Shared Process Ownership
+
+- When more than one code path performs the same ordered operation with the same
+  responsibilities, invariants, lifecycle, points at which changes become
+  durable or externally visible, terminal outcomes, failure behavior, and
+  cleanup requirements, implement that operation through one owner.
+- Sharing utility functions is not sufficient when each caller still controls
+  the order, validation, state changes, commit or rollback, error handling,
+  recovery, or cleanup.
+- Pass caller-specific data and external dependencies through a narrow,
+  validated input. Do not make callers configure, bypass, reorder, or reproduce
+  the shared operation's internal rules.
+- Repeated syntax alone is not evidence of a shared process. Keep operations
+  separate when they have different responsibilities, state lifecycles,
+  durable or externally visible effects, terminal outcomes, failure meanings,
+  trust boundaries, or independent verification purposes.
+- Do not create a generic wrapper merely to remove repeated code. A wrapper that
+  only forwards calls or delegates its internal decisions back to callbacks
+  does not provide shared process ownership.
 
 ## Boundary Naming Rules
 
