@@ -5,9 +5,14 @@
  * dAppKit is created only after the configured public endpoint proves the
  * same live chain identity.
  */
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { buildApiUrl, issueAdminAuthChallenge, verifyAdminAuth } from '../api/client';
+import {
+  ApiError,
+  buildApiUrl,
+  issueAdminAuthChallenge,
+  verifyAdminAuth,
+} from '../api/client';
 import {
   createDAppKit,
   DAppKitProvider,
@@ -18,6 +23,7 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { parseRelayConfigResponse, type SuiNetwork } from '@stelis/contracts';
 import { getWallets } from '@mysten/wallet-standard';
 import { createVerifiedAdminSuiClient } from '../suiRpc';
+import { truncateAddress } from '../utils';
 
 import type { SuiSignPersonalMessageFeature } from '../types';
 
@@ -28,6 +34,70 @@ type LoginState = 'idle' | 'signing' | 'verifying' | 'error';
 interface VerifiedAdminSuiClient {
   readonly network: SuiNetwork;
   readonly client: SuiGrpcClient;
+}
+
+function createVerifiedAdminDAppKit({ network, client }: VerifiedAdminSuiClient) {
+  return {
+    network,
+    instance: createDAppKit({
+      networks: [network] as const,
+      createClient: (requestedNetwork) => {
+        if (requestedNetwork !== network) {
+          throw new TypeError('app-admin requested an unverified Sui network');
+        }
+        return client;
+      },
+    }),
+  };
+}
+
+type VerifiedAdminDAppKit = ReturnType<typeof createVerifiedAdminDAppKit>;
+
+/** One load task per explicit attempt; React effect replay joins that task. */
+export function createAdminDAppKitLoadOwner<T>(
+  load: () => Promise<T>,
+): { load(attempt: number): Promise<T> } {
+  let activeAttempt: number | null = null;
+  let activeTask: Promise<T> | null = null;
+  return Object.freeze({
+    load(attempt: number) {
+      if (!Number.isSafeInteger(attempt) || attempt < 0) {
+        throw new TypeError('Admin dAppKit load attempt must be a non-negative safe integer');
+      }
+      if (activeTask === null || activeAttempt !== attempt) {
+        activeAttempt = attempt;
+        activeTask = load();
+      }
+      return activeTask;
+    },
+  });
+}
+
+const adminDAppKitLoadOwner = createAdminDAppKitLoadOwner(async () =>
+  createVerifiedAdminDAppKit(await fetchVerifiedAdminSuiClient()),
+);
+
+function retryDelayLabel(retryAfterMs: number | undefined): string {
+  if (retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) {
+    return 'after the current login window expires';
+  }
+  const minutes = Math.max(1, Math.ceil(retryAfterMs / 60_000));
+  return `in ${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+export function adminLoginErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'RATE_LIMITED') {
+      return `Too many login attempts. Try again ${retryDelayLabel(error.meta.retryAfterMs)}.`;
+    }
+    if (error.code === 'ADMIN_UNAUTHORIZED') {
+      return 'Login was not authorized. Check the connected administrator wallet and try again.';
+    }
+    if (error.code === 'INTERNAL_ERROR') {
+      return 'Admin login is temporarily unavailable. Try again.';
+    }
+  }
+  return error instanceof Error ? error.message : 'Admin login failed';
 }
 
 /** Fetch the exact Host config, then prove the app-admin Sui client against it. */
@@ -49,7 +119,19 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [state, setState] = useState<LoginState>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  const [loginAttempt, setLoginAttempt] = useState(0);
   const signingRef = useRef(false);
+  const [modalElement, setModalElement] = useState<EventTarget | null>(null);
+  const setModalElementRef = useCallback((element: unknown) => {
+    setModalElement(element instanceof EventTarget ? element : null);
+  }, []);
+
+  useEffect(() => {
+    if (modalElement === null) return;
+    const handleClose = () => setModalOpen(false);
+    modalElement.addEventListener('close', handleClose);
+    return () => modalElement.removeEventListener('close', handleClose);
+  }, [modalElement]);
 
   // Auto-sign when wallet connects
   useEffect(() => {
@@ -90,10 +172,10 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
       } catch (err) {
         signingRef.current = false;
         setState('error');
-        setErrorMsg(err instanceof Error ? err.message : 'Unknown error');
+        setErrorMsg(adminLoginErrorMessage(err));
       }
     })();
-  }, [account, navigate]);
+  }, [account, loginAttempt, navigate]);
 
   const isBusy = state === 'signing' || state === 'verifying';
   const statusLabel =
@@ -119,11 +201,7 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
 
         <ConnectModal
           open={modalOpen}
-          ref={(el: unknown) => {
-            const node = el as EventTarget | null;
-            if (!node) return;
-            node.addEventListener('close', () => setModalOpen(false), { once: false });
-          }}
+          ref={setModalElementRef}
         />
 
         <button
@@ -134,6 +212,7 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
               signingRef.current = false;
               setState('idle');
               setErrorMsg('');
+              if (account) setLoginAttempt((current) => current + 1);
             }
             if (!account) setModalOpen(true);
           }}
@@ -148,9 +227,15 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
             {errorMsg}
           </p>
         )}
-        <p className="login-hint">
-          Only the configured <code>ADMIN_ADDRESS</code> can log in.
-        </p>
+        {state !== 'error' && (
+          <p className="login-hint">
+            {state === 'signing' && account
+              ? `Confirm the login message for ${truncateAddress(account.address)} in your wallet.`
+              : state === 'verifying' && account
+                ? `Verifying administrator access for ${truncateAddress(account.address)}.`
+                : 'Connect the administrator wallet for this Host.'}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -159,27 +244,26 @@ function AdminLoginForm({ network }: { network: SuiNetwork }) {
 // ── Page export ────────────────────────────────────────────────────────────
 
 export function LoginPage() {
-  const [verified, setVerified] = useState<VerifiedAdminSuiClient | null>(null);
+  const [verified, setVerified] = useState<VerifiedAdminDAppKit | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
-    fetchVerifiedAdminSuiClient()
-      .then(setVerified)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to fetch config'));
-  }, []);
-
-  const dAppKit = useMemo(() => {
-    if (!verified) return null;
-    return createDAppKit({
-      networks: [verified.network] as const,
-      createClient: (network) => {
-        if (network !== verified.network) {
-          throw new TypeError('app-admin requested an unverified Sui network');
+    let active = true;
+    adminDAppKitLoadOwner
+      .load(loadAttempt)
+      .then((result) => {
+        if (active) setVerified(result);
+      })
+      .catch((loadError) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : 'Failed to fetch config');
         }
-        return verified.client;
-      },
-    });
-  }, [verified]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
 
   if (error) {
     return (
@@ -191,9 +275,8 @@ export function LoginPage() {
             className="login-btn"
             onClick={() => {
               setError(null);
-              fetchVerifiedAdminSuiClient()
-                .then(setVerified)
-                .catch((e) => setError(e instanceof Error ? e.message : 'Failed'));
+              setVerified(null);
+              setLoadAttempt((current) => current + 1);
             }}
           >
             Retry
@@ -203,7 +286,7 @@ export function LoginPage() {
     );
   }
 
-  if (!dAppKit || !verified) {
+  if (!verified) {
     return (
       <div className="login-page">
         <div className="login-card">
@@ -217,7 +300,7 @@ export function LoginPage() {
   }
 
   return (
-    <DAppKitProvider dAppKit={dAppKit}>
+    <DAppKitProvider dAppKit={verified.instance}>
       <AdminLoginForm network={verified.network} />
     </DAppKitProvider>
   );
