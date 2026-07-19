@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import { parseAppAdminEnvironment } from './src/environment';
 
 function loadEnvFile() {
   const envPath = resolve('.env');
@@ -34,13 +35,7 @@ function loadEnvFile() {
 
 export default defineConfig(({ mode }) => {
   loadEnvFile();
-  const env = loadEnv(mode, false, 'VITE_');
-  const apiUrl = (env.VITE_STELIS_API_URL || '').trim();
-  if (!apiUrl) {
-    throw new Error(
-      '[app-admin] Missing required env VITE_STELIS_API_URL. Set packages/app-admin/.env (see .env.example).',
-    );
-  }
+  const environment = parseAppAdminEnvironment(loadEnv(mode, false, 'VITE_'));
 
   return {
     envFile: false,
@@ -48,10 +43,10 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3100,
       proxy: {
-        '/admin': apiUrl,
-        '/relay': apiUrl,
-        '/studio': apiUrl,
-        '/health': apiUrl,
+        '/admin': environment.apiBase,
+        '/relay': environment.apiBase,
+        '/studio': environment.apiBase,
+        '/health': environment.apiBase,
       },
     },
     build: {

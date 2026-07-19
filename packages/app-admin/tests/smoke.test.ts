@@ -69,6 +69,28 @@ describe('API client', () => {
     expect(result.nonce).toBe('test-nonce-123');
   });
 
+  it('preserves the nonce browser-policy rejection as ADMIN_UNAUTHORIZED', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () =>
+          Promise.resolve({
+            error: hostErrorPublicMessage('ADMIN_UNAUTHORIZED'),
+            code: 'ADMIN_UNAUTHORIZED',
+          }),
+      }),
+    );
+
+    const { issueAdminAuthChallenge } = await import('../src/api/client');
+
+    await expect(issueAdminAuthChallenge()).rejects.toMatchObject({
+      status: 401,
+      code: 'ADMIN_UNAUTHORIZED',
+    });
+  });
+
   it('verifyAdminAuth sends POST /admin/auth/verify with body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -647,6 +669,46 @@ describe('Component exports', () => {
 });
 
 // ── Utility function tests ──────────────────────────────────────────────
+
+describe('Admin login lifecycle', () => {
+  it('joins repeated reads of one load attempt and starts one new explicit retry', async () => {
+    const { createAdminDAppKitLoadOwner } = await import('../src/pages/LoginPage');
+    const load = vi.fn(async () => ({ instance: load.mock.calls.length }));
+    const owner = createAdminDAppKitLoadOwner(load);
+
+    const first = owner.load(0);
+    const replay = owner.load(0);
+    expect(replay).toBe(first);
+    await expect(first).resolves.toEqual({ instance: 1 });
+    expect(load).toHaveBeenCalledTimes(1);
+
+    await expect(owner.load(1)).resolves.toEqual({ instance: 2 });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports the observed Host login failure without claiming an address mismatch', async () => {
+    const { ApiError } = await import('../src/api/client');
+    const { adminLoginErrorMessage } = await import('../src/pages/LoginPage');
+
+    expect(
+      adminLoginErrorMessage(
+        new ApiError(429, 'RATE_LIMITED', 'Request temporarily blocked', {
+          retryAfterMs: 709_599,
+        }),
+      ),
+    ).toBe('Too many login attempts. Try again in 12 minutes.');
+    expect(
+      adminLoginErrorMessage(
+        new ApiError(401, 'ADMIN_UNAUTHORIZED', 'Authentication failed'),
+      ),
+    ).toBe(
+      'Login was not authorized. Check the connected administrator wallet and try again.',
+    );
+    expect(
+      adminLoginErrorMessage(new ApiError(500, 'INTERNAL_ERROR', 'Internal server error')),
+    ).toBe('Admin login is temporarily unavailable. Try again.');
+  });
+});
 
 describe('mistToSui', () => {
   it('converts small MIST values correctly', async () => {

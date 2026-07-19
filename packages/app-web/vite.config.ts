@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import { parseAppWebEnvironment } from './src/environment';
 
 function loadEnvFile() {
   const envPath = resolve('.env');
@@ -35,19 +36,8 @@ function loadEnvFile() {
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   loadEnvFile();
-  const env = loadEnv(mode, false, 'VITE_');
-  const relayApiUrl = (env.VITE_STELIS_RELAY_API_URL || '').trim();
-  if (!relayApiUrl) {
-    throw new Error(
-      '[app-web] Missing required env VITE_STELIS_RELAY_API_URL. Set packages/app-web/.env (see .env.example).',
-    );
-  }
-  if (!/\/relay\/?$/.test(relayApiUrl)) {
-    throw new Error('[app-web] VITE_STELIS_RELAY_API_URL must end with /relay.');
-  }
-
-  // Strip /relay suffix to get the origin for proxy target
-  const proxyTarget = relayApiUrl.replace(/\/relay\/?$/, '');
+  const environment = parseAppWebEnvironment(loadEnv(mode, false, 'VITE_'));
+  const proxyTarget = new URL(environment.relayApiBase).origin;
 
   return {
     // Relative asset URLs let the static bundle run from GitHub Pages project paths.

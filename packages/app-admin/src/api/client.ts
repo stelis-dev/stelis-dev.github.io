@@ -63,18 +63,15 @@ import {
   type HostErrorMeta,
   type SponsorRefillAccountWithdrawalRequest,
 } from '@stelis/contracts';
+import { APP_ADMIN_API_BASE } from '../runtimeEnv';
 
 /**
  * API base URL — platform-agnostic.
  * DEV:  empty — Vite proxy forwards relative paths.
  * PROD: VITE_STELIS_API_URL (build-time env var, e.g. https://your-api-host.example).
  */
-const API_BASE = import.meta.env.DEV
-  ? ''
-  : (import.meta.env.VITE_STELIS_API_URL?.replace(/\/+$/, '') ?? '');
-
 export function buildApiUrl(path: string): string {
-  return `${API_BASE}${path}`;
+  return `${APP_ADMIN_API_BASE}${path}`;
 }
 
 // ── Typed fetch wrapper ────────────────────────────────────────────────────

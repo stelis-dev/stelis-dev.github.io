@@ -38,12 +38,15 @@ VITE_STELIS_RELAY_API_URL=https://your-host.example.com/relay
 # Optional: repository docs base URL used by /docs deep links (GitHub links hidden if omitted)
 VITE_REPO_DOCS_BASE_URL=https://github.com/stelis-dev/stelis/blob/main
 
-# Optional: UI mode (relay | studio). Default: relay
+# Optional: UI mode (relay | studio). Default: relay; other values fail the build.
 # 'studio' enables the /promotion route for studio JWT and promotion testing.
 # VITE_STELIS_UI_MODE=relay
 ```
 
-`VITE_STELIS_RELAY_API_URL` is required. The app fails fast at runtime if it is missing.
+`VITE_STELIS_RELAY_API_URL` is required and must be an HTTP(S) Host URL whose
+path is exactly `/relay`. Credentials, query strings, fragments, unsupported
+UI modes, and unknown `VITE_*` settings fail the build instead of being ignored.
+The same validated environment snapshot is used by the build and browser app.
 Network is auto-detected from the Relay API, and the sample page selects the matching public Sui RPC endpoint internally.
 
 ## Pages
@@ -110,6 +113,7 @@ Required build-time variables:
 | Variable                    | Required | Example                                          |
 | --------------------------- | -------- | ------------------------------------------------ |
 | `VITE_STELIS_RELAY_API_URL` | ✅       | `https://your-app-api.vercel.app/relay`          |
+| `VITE_STELIS_UI_MODE`       | optional | `relay`                                          |
 | `VITE_REPO_DOCS_BASE_URL`   | optional | `https://github.com/stelis-dev/stelis/blob/main` |
 
 > **Important**: `VITE_STELIS_RELAY_API_URL` must point to your `app-api` deployment URL with the `/relay` suffix.

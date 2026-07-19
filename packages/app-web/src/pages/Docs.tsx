@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom';
 import { SyntaxHighlight } from '../components/SyntaxHighlight';
 import { Mermaid } from '../components/Mermaid';
+import { APP_WEB_ENVIRONMENT } from '../runtimeEnv';
 
-const rawRepoDocsBaseUrl = (import.meta.env.VITE_REPO_DOCS_BASE_URL || '').trim();
-const REPO_DOCS_BASE_URL = rawRepoDocsBaseUrl ? rawRepoDocsBaseUrl.replace(/\/$/, '') : null;
+const REPO_DOCS_BASE_URL = APP_WEB_ENVIRONMENT.repoDocsBaseUrl;
 
 const API_DOC_URL = REPO_DOCS_BASE_URL ? `${REPO_DOCS_BASE_URL}/docs/api.md` : null;
 const INTEGRATION_DOC_URL = REPO_DOCS_BASE_URL ? `${REPO_DOCS_BASE_URL}/docs/integration.md` : null;

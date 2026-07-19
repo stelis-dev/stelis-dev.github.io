@@ -73,7 +73,10 @@ cp .env.example .env
 
 Required:
 
-- `VITE_STELIS_API_URL` (app-api base URL)
+- `VITE_STELIS_API_URL` (exact HTTP(S) app-api Host origin; no credentials,
+  path, query, or fragment)
+
+Unknown `VITE_*` settings fail the build instead of being ignored.
 
 Network is auto-detected from `GET /relay/config`. The dashboard selects the
 matching public Sui RPC endpoint internally.
