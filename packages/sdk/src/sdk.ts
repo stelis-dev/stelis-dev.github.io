@@ -43,6 +43,7 @@ import {
   DEEPBOOK_IDS,
   SUI_CHAIN_IDENTIFIERS,
   requireContractId,
+  type PrepareAuthorizationFields,
 } from '@stelis/contracts';
 import { parseRelayConfig } from './connection.js';
 import { normalizeApiError, StelisSponsoredError } from './errors.js';
@@ -78,6 +79,21 @@ import {
 const SUI_DECIMALS = 9;
 const DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST = 5_000_000;
 const PREPARE_REQUEST_NONCE_BYTES = 16;
+
+type OptionalPrepareFields = Pick<
+  PrepareAuthorizationFields,
+  'slippageBps' | 'gasMarginBps' | 'orderId'
+>;
+
+function createOptionalPrepareFields(
+  opts: Pick<PrepareSponsoredOptions, 'slippageBps' | 'gasMarginBps' | 'orderId'>,
+): OptionalPrepareFields {
+  return {
+    ...(opts.slippageBps === undefined ? {} : { slippageBps: opts.slippageBps }),
+    ...(opts.gasMarginBps === undefined ? {} : { gasMarginBps: opts.gasMarginBps }),
+    ...(opts.orderId === undefined ? {} : { orderId: opts.orderId }),
+  };
+}
 
 function isSuiInfrastructureFailure(error: unknown): boolean {
   return (
@@ -557,15 +573,14 @@ export class StelisSDK {
     const txKindBytesHash = bytesToHex(await sha256Bytes(kindBytes));
     const prepareAuthorizationTimestampMs = Date.now();
     const prepareAuthorizationRequestNonce = generatePrepareRequestNonce();
+    const optionalPrepareFields = createOptionalPrepareFields(opts);
     const prepareAuthorizationFields = {
       network: this._relayConfig.network,
       packageId: this._packageId,
       senderAddress: opts.addr,
       txKindBytesHash,
       settlementTokenType: opts.settlementToken.type,
-      slippageBps: opts.slippageBps,
-      gasMarginBps: opts.gasMarginBps,
-      orderId: opts.orderId,
+      ...optionalPrepareFields,
       timestampMs: prepareAuthorizationTimestampMs,
       requestNonce: prepareAuthorizationRequestNonce,
     } as const;
@@ -578,9 +593,7 @@ export class StelisSDK {
       txKindBytes,
       senderAddress: opts.addr,
       settlementTokenType: opts.settlementToken.type,
-      slippageBps: opts.slippageBps,
-      gasMarginBps: opts.gasMarginBps,
-      orderId: opts.orderId,
+      ...optionalPrepareFields,
       txKindBytesHash,
       prepareAuthorizationTimestampMs,
       prepareAuthorizationRequestNonce,

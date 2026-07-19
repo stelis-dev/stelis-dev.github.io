@@ -63,7 +63,7 @@ function createMockSettleEventBcs(): Uint8Array {
 function createEvent(bcs: Uint8Array, overrides: Partial<Omit<SuiEvent, 'bcs'>> = {}): SuiEvent {
   return {
     packageId: PACKAGE_ID,
-    module: 'events',
+    module: 'settle',
     sender: USER,
     eventType: SETTLE_EVENT_TYPE,
     bcs,
@@ -239,7 +239,7 @@ describe('extractSettleEvents', () => {
 
   it.each([
     ['package', { packageId: `0x${'9'.repeat(64)}` }],
-    ['module', { module: 'not_events' }],
+    ['module', { module: 'not_settle' }],
   ] as const)(
     'rejects a canonical eventType whose top-level %s identity conflicts',
     async (_field, overrides) => {

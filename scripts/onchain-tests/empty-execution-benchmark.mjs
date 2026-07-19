@@ -639,7 +639,11 @@ async function signSponsoredPreparation(prepared, keypair) {
   };
 }
 
-async function getTransactionWithEvents(endpoints, digest) {
+async function waitForTransactionWithEvents(client, endpoints, digest) {
+  await client.waitForTransaction({
+    digest,
+    include: { effects: true, events: true },
+  });
   return getSuiTransactionEvents(endpoints, { digest });
 }
 
@@ -960,7 +964,7 @@ async function runSponsoredPhase(ctx) {
           let loaded;
           let terminal;
           try {
-            loaded = await getTransactionWithEvents(ctx.endpoints, expectedDigest);
+            loaded = await waitForTransactionWithEvents(ctx.client, ctx.endpoints, expectedDigest);
             terminal = loaded;
             if (terminal.outcome !== 'failure') {
               throw new Error(
@@ -1042,7 +1046,11 @@ async function runSponsoredPhase(ctx) {
 
       let loaded;
       try {
-        loaded = await getTransactionWithEvents(ctx.endpoints, sponsorResponse.digest);
+        loaded = await waitForTransactionWithEvents(
+          ctx.client,
+          ctx.endpoints,
+          sponsorResponse.digest,
+        );
       } catch (err) {
         activeAttempt = await ctx.journal.markUncertain(activeAttempt);
         await appendSubmittedUnverified(

@@ -18,6 +18,7 @@ import {
   SETTLE_EVENT_FIELDS,
   SETTLE_EVENT_MODULE,
   SETTLE_EVENT_NAME,
+  SETTLE_MODULE,
   SETTLEMENT_CONTRACT_NETWORK,
   STELIS_CONTRACT_IDS,
   type SettleEventFieldMoveType,
@@ -136,9 +137,12 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
  * Decode the one current settlement event identity.
  *
  * A different event type is not a settlement event. Once an envelope claims
- * the generated settlement event type, however, its redundant package/module
- * metadata and sender must agree with the same compiled-contract identity and
- * decoded payload. A contradictory envelope is malformed rather than absent.
+ * the generated settlement event type, however, its redundant package,
+ * transaction-module, and sender metadata must agree with the compiled
+ * settlement contract and decoded payload. A contradictory envelope is
+ * malformed rather than absent. Sui's event envelope `module` identifies the
+ * transaction module that emitted the event, not the module that defines the
+ * event type.
  *
  * This helper is intentionally internal to the SDK server implementation. It
  * is the shared identity authority for verification and batch reconciliation.
@@ -146,7 +150,7 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
 export function decodeCanonicalSettleEvent(event: SuiEvent): DecodedSettleEvent | null {
   if (event.eventType !== SETTLE_EVENT_TYPE) return null;
 
-  if (event.packageId !== settlementPackageId || event.module !== SETTLE_EVENT_MODULE) {
+  if (event.packageId !== settlementPackageId || event.module !== SETTLE_MODULE) {
     throw new Error(`[Stelis] SettleEvent envelope identity does not match ${SETTLE_EVENT_TYPE}`);
   }
 

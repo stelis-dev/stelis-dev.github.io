@@ -125,6 +125,14 @@ reconciliation proves every candidate terminal. A resolved filename and an
 idempotent archive collision must match the entire normalized attempt record,
 not only its attempt ID.
 
+After the Host returns a sponsored transaction digest, the script calls the
+current Sui SDK `waitForTransaction` method for that exact digest with effects
+and events requested. This wait handles the interval between transaction
+execution and availability through the read API; it never submits or rebuilds
+the transaction. The wait result is only a readiness barrier. The benchmark's
+strict current-effects and compiled `SettleEvent` validation remains the
+authority for a verified success.
+
 At the next invocation, recovery runs before Host connection, settlement-token
 selection, or wallet snapshots. A `ready` attempt is safely archived because
 submission had not started. A closed current Host preflight response can record
