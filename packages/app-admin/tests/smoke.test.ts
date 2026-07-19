@@ -69,6 +69,28 @@ describe('API client', () => {
     expect(result.nonce).toBe('test-nonce-123');
   });
 
+  it('preserves the nonce browser-policy rejection as ADMIN_UNAUTHORIZED', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () =>
+          Promise.resolve({
+            error: hostErrorPublicMessage('ADMIN_UNAUTHORIZED'),
+            code: 'ADMIN_UNAUTHORIZED',
+          }),
+      }),
+    );
+
+    const { issueAdminAuthChallenge } = await import('../src/api/client');
+
+    await expect(issueAdminAuthChallenge()).rejects.toMatchObject({
+      status: 401,
+      code: 'ADMIN_UNAUTHORIZED',
+    });
+  });
+
   it('verifyAdminAuth sends POST /admin/auth/verify with body', async () => {
     vi.stubGlobal(
       'fetch',

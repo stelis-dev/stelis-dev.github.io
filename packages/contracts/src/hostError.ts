@@ -222,10 +222,8 @@ export const PROMOTION_SPONSOR_ERROR_CODES = [
 
 /** Current errors for `POST /admin/auth/nonce`. */
 export const ADMIN_AUTH_NONCE_ERROR_CODES = [
-  ...HOST_REQUEST_ADMISSION_ERROR_CODES,
+  ...ADMIN_ROUTE_BASE_ERROR_CODES,
   'RATE_LIMITED',
-  'ADMIN_UNAVAILABLE',
-  'INTERNAL_ERROR',
 ] as const;
 
 /** Current errors shared by `POST /admin/auth/verify` and `POST /admin/auth/renew`. */

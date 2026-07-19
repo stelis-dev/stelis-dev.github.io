@@ -194,6 +194,17 @@ describe('auth routes', () => {
       );
     });
 
+    it('returns 401 without issuing a nonce when the browser Origin is not allowed', async () => {
+      const res = await app.request('/admin/auth/nonce', {
+        method: 'POST',
+        headers: { Origin: 'https://untrusted.example' },
+      });
+
+      expect(res.status).toBe(401);
+      await expect(res.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
+      expect(mockRedis.set).not.toHaveBeenCalled();
+    });
+
     it('returns 400 without issuing a nonce when client IP cannot be resolved', async () => {
       const { checkAndIncrement } = await import('@stelis/core-api/admin');
       mockResolveClientIp.mockImplementationOnce(() => {

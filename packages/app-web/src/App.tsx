@@ -3,6 +3,7 @@ import { Routes, Route } from 'react-router-dom';
 import { NavBar } from './components/NavBar';
 import { NetworkBadge } from './components/NetworkBadge';
 import { useAppConfig } from './AppConfigContext';
+import { APP_WEB_ENVIRONMENT } from './runtimeEnv';
 
 const Home = lazy(() => import('./pages/Home'));
 const Status = lazy(() => import('./pages/Status'));
@@ -15,7 +16,7 @@ const Promotion = lazy(() => import('./pages/promotion'));
  * UI mode gate: 'studio' enables /promotion route + nav entry.
  * Default: 'relay' (public relay pages only — fail-closed).
  */
-const isStudioMode = import.meta.env.VITE_STELIS_UI_MODE === 'studio';
+const isStudioMode = APP_WEB_ENVIRONMENT.uiMode === 'studio';
 
 const BASE_LINKS = [
   { href: '/status', label: 'Status' },
