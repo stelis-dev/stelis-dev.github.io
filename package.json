@@ -12,6 +12,9 @@
     "packages/app-admin",
     "packages/mcp-server"
   ],
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "build": "npm run build -w @stelis/contracts && npm run build -w @stelis/core-relay && npm run build -w @stelis/core-api && npm run build -w @stelis/sdk && npm run build -w @stelis/app-api && npm run build:app-web && npm run build:app-admin && npm run build -w @stelis/mcp-server",
     "build:onchain-benchmark": "npm run build -w @stelis/contracts && npm run build -w @stelis/core-relay && npm run build -w @stelis/core-api && npm run build -w @stelis/sdk",
