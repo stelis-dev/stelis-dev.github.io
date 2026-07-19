@@ -85,7 +85,10 @@ vi.mock('@stelis/core-api', async () => {
 
 import { createAdminRoutes, type AdminRoutesRuntimeInput } from '../src/routes/admin.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../src/sponsor-operations/accountSpendState.js';
-import type { RelayAndStudioAppApiContext } from '../src/context.js';
+import type {
+  RelayWithAdminAndStudioAppApiContext,
+  RelayWithAdminAppApiContext,
+} from '../src/context.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
 
@@ -163,7 +166,7 @@ async function requestAdminApplication(
   return application.request(path, { ...init, headers });
 }
 
-function createMockCtx(): RelayAndStudioAppApiContext {
+function createMockCtx(): RelayWithAdminAndStudioAppApiContext {
   const promotionStore = new MemoryPromotionStore();
   const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const host = {
@@ -241,7 +244,7 @@ function createMockCtx(): RelayAndStudioAppApiContext {
     },
   });
   return {
-    mode: 'relay_and_studio',
+    mode: 'relay_with_admin_and_studio',
     host: host as never,
     prepareConfig: prepareConfig as never,
     promotionStore,
@@ -342,7 +345,7 @@ function resetMockDefaults(): void {
 
 describe('admin routes', () => {
   let app: Hono;
-  let mockCtx: RelayAndStudioAppApiContext;
+  let mockCtx: RelayWithAdminAndStudioAppApiContext;
   let mountedRuntime: AdminRoutesRuntimeInput;
   const adminRequest = (path: string, init: RequestInit = {}) =>
     requestAdminApplication(app, path, init);
@@ -1136,16 +1139,85 @@ describe('admin routes', () => {
   });
 
   describe('GET /api/studio', () => {
-    it('returns the current Studio configuration without an additional enabled flag', async () => {
+    it.each([
+      {
+        name: 'disabled response with config',
+        value: { enabled: false, config: { developerJwtVerifyUrlConfigured: false } },
+      },
+      { name: 'enabled response without config', value: { enabled: true } },
+      {
+        name: 'previous response without enabled',
+        value: { config: { developerJwtVerifyUrlConfigured: false } },
+      },
+      { name: 'response with an unknown property', value: { enabled: false, extra: true } },
+      {
+        name: 'enabled response with an unknown config property',
+        value: {
+          enabled: true,
+          config: { developerJwtVerifyUrlConfigured: false, extra: true },
+        },
+      },
+    ])('rejects a non-current Admin Studio wire shape: $name', ({ value }) => {
+      expect(() => parseAdminStudioResponse(value)).toThrow();
+    });
+
+    it('returns the current Studio configuration as an enabled response', async () => {
       const res = await adminRequest('/api/studio');
 
       expect(res.status).toBe(200);
       const body: unknown = await res.json();
       expect(parseAdminStudioResponse(body)).toEqual({
+        enabled: true,
         config: {
           developerJwtVerifyUrlConfigured: false,
         },
       });
+    });
+
+    it('admits Admin-only Promotion reads and mutations before closing Studio domain I/O', async () => {
+      const full = createMockCtx();
+      const listPromotions = vi.spyOn(full.promotionStore, 'listPage');
+      const createPromotion = vi.spyOn(full.promotionStore, 'create');
+      const readPromotionLedger = vi.spyOn(full.executionLedger, 'getPromotionLedgerStatus');
+      const adminOnly: RelayWithAdminAppApiContext = {
+        mode: 'relay_with_admin',
+        host: full.host,
+        prepareConfig: full.prepareConfig,
+        sponsorAvailability: full.sponsorAvailability,
+        sponsorOperations: full.sponsorOperations,
+        rpcFleet: full.rpcFleet,
+        redis: full.redis,
+        abuseStore: full.abuseStore,
+        sponsoredLogsStore: full.sponsoredLogsStore,
+      };
+      const adminOnlyApp = new Hono();
+      adminOnlyApp.route('/api', createAdminRoutes(adminOnly, mountedRuntime));
+
+      const status = await requestAdminApplication(adminOnlyApp, '/api/studio');
+      expect(parseAdminStudioResponse(await status.json())).toEqual({ enabled: false });
+
+      const promotions = await requestAdminApplication(adminOnlyApp, '/api/promotions');
+      await expectHostError(promotions, 'STUDIO_UNAVAILABLE');
+
+      const mutation = await requestAdminApplication(adminOnlyApp, '/api/promotions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'gas_sponsorship',
+          displayName: 'Admin-only boundary',
+          maxParticipants: 1,
+          perUserGasAllowanceMist: '1000000',
+        }),
+      });
+      await expectHostError(mutation, 'STUDIO_UNAVAILABLE');
+
+      const bodyReadOrder = mockReadJsonBodyWithLimit.mock.invocationCallOrder.at(-1);
+      const sessionOrder = mockRequireAdminSessionFromContext.mock.invocationCallOrder.at(-1);
+      const subjectAdmissionOrder = mockAbuseStore.checkSubject.mock.invocationCallOrder.at(-1);
+      expect(bodyReadOrder).toBeLessThan(sessionOrder!);
+      expect(sessionOrder).toBeLessThan(subjectAdmissionOrder!);
+      expect(listPromotions).not.toHaveBeenCalled();
+      expect(createPromotion).not.toHaveBeenCalled();
+      expect(readPromotionLedger).not.toHaveBeenCalled();
     });
   });
 

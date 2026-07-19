@@ -54,7 +54,11 @@ export const ABUSE_BLOCK_REASONS = [
 
 export type AdminBlockScope = (typeof ABUSE_BLOCK_SCOPES)[number];
 export type AbuseBlockReason = (typeof ABUSE_BLOCK_REASONS)[number];
-const HOST_OPERATING_MODES = ['relay_only', 'relay_and_studio'] as const;
+const HOST_OPERATING_MODES = [
+  'relay_only',
+  'relay_with_admin',
+  'relay_with_admin_and_studio',
+] as const;
 export type HostOperatingMode = (typeof HOST_OPERATING_MODES)[number];
 
 export interface HostHealthResponse {
@@ -373,11 +377,16 @@ export interface AdminBlocklistDeleteResponse {
   removed: boolean;
 }
 
-export interface AdminStudioResponse {
-  config: {
-    developerJwtVerifyUrlConfigured: boolean;
-  };
-}
+export type AdminStudioResponse =
+  | {
+      enabled: false;
+    }
+  | {
+      enabled: true;
+      config: {
+        developerJwtVerifyUrlConfigured: boolean;
+      };
+    };
 
 /** Current operator-facing Promotion projection returned by Admin routes. */
 export interface AdminPromotionRecord {
@@ -1703,11 +1712,17 @@ export function parseAdminBlocklistDeleteResponse(value: unknown): AdminBlocklis
 export function parseAdminStudioResponse(value: unknown): AdminStudioResponse {
   const label = 'AdminStudioResponse';
   const raw = record(value, label);
-  onlyKeys(raw, ['config'], label);
+  const enabled = booleanField(raw, 'enabled', label);
+  if (!enabled) {
+    onlyKeys(raw, ['enabled'], label);
+    return { enabled: false };
+  }
+  onlyKeys(raw, ['enabled', 'config'], label);
   const configLabel = `${label}.config`;
   const config = record(raw.config, configLabel);
   onlyKeys(config, ['developerJwtVerifyUrlConfigured'], configLabel);
   return {
+    enabled: true,
     config: {
       developerJwtVerifyUrlConfigured: booleanField(
         config,

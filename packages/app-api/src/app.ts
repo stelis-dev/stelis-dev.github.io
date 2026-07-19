@@ -5,15 +5,15 @@ import { cors } from 'hono/cors';
 import { parseHostHealthResponse, type HostOperatingMode } from '@stelis/contracts';
 import {
   runBootValidation,
+  type AdminAppRuntimeInput,
   type AppRuntimeInput,
-  type RelayAndStudioAppRuntimeInput,
   type RelayOnlyAppRuntimeInput,
 } from './boot.js';
 import {
   createAppApiContextOwner,
+  type AdminAppApiContext,
   type AppApiContext,
   type AppApiContextOwner,
-  type RelayAndStudioAppApiContext,
   type RelayOnlyAppApiContext,
 } from './context.js';
 import { createRelayRoutes } from './routes/relay.js';
@@ -22,7 +22,7 @@ import { createAdminRoutes } from './routes/admin.js';
 import { createStudioRoutes } from './routes/studio.js';
 import { createClientIpResolver, type ClientIpSourceProvider } from './clientIp.js';
 import { createAdminRedisAdapter } from './adminRedis.js';
-import { raiseAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
+import { initializeAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
 import type { RequestAdmissionDependencies } from './requestAdmission.js';
 import { codedHostError, respondMapped } from './errorMap.js';
 
@@ -45,10 +45,14 @@ export interface ApplicationRuntime {
   stop(): Promise<void>;
 }
 
-function isRelayAndStudioRuntimeInput(
-  input: AppRuntimeInput,
-): input is RelayAndStudioAppRuntimeInput {
-  return input.context.mode === 'relay_and_studio';
+interface OwnedListener {
+  readonly server: ServerType;
+  readonly bindTask: Promise<void>;
+  readonly closedTask: Promise<void>;
+}
+
+function isAdminRuntimeInput(input: AppRuntimeInput): input is AdminAppRuntimeInput {
+  return input.context.mode !== 'relay_only';
 }
 
 function createHonoAppBase(
@@ -90,8 +94,8 @@ function createHonoAppBase(
 
 function installPublicStudioCors(app: Hono): void {
   // Each mode-specific builder installs this after Host mode is resolved.
-  // Preflight succeeds in both modes so browser clients can read the actual
-  // request's typed STUDIO_UNAVAILABLE result from a `relay_only` Host.
+  // Preflight succeeds in every mode so browser clients can read the actual
+  // request's typed STUDIO_UNAVAILABLE result from a Host without Studio.
   app.use(
     '/studio/*',
     cors({
@@ -121,11 +125,11 @@ function buildRelayOnlyHonoApp(
   return app;
 }
 
-function buildRelayAndStudioHonoApp(
-  runtimeInput: RelayAndStudioAppRuntimeInput,
-  context: RelayAndStudioAppApiContext,
+function buildAdminHonoAppBase(
+  runtimeInput: AdminAppRuntimeInput,
+  context: AdminAppApiContext,
   clientIpSourceProvider?: ClientIpSourceProvider,
-): Hono {
+): { readonly app: Hono; readonly admission: RequestAdmissionDependencies } {
   const allowedOrigins = [...runtimeInput.corsAllowedOrigins];
   const { app, admission } = createHonoAppBase(runtimeInput, context, clientIpSourceProvider);
   installPublicStudioCors(app);
@@ -162,8 +166,41 @@ function buildRelayAndStudioHonoApp(
       admin: { address: admin.address, jwt: admin.auth.jwt },
     }),
   );
-  app.route('/studio', createStudioRoutes(context, admission));
+  return { app, admission };
+}
+
+function buildAdminHonoApp(
+  runtimeInput: AdminAppRuntimeInput,
+  context: AdminAppApiContext,
+  clientIpSourceProvider?: ClientIpSourceProvider,
+): Hono {
+  const { app, admission } = buildAdminHonoAppBase(runtimeInput, context, clientIpSourceProvider);
+  if (context.mode === 'relay_with_admin_and_studio') {
+    app.route('/studio', createStudioRoutes(context, admission));
+  } else {
+    app.all('/studio/*', (c) =>
+      respondMapped(c, codedHostError('STUDIO_UNAVAILABLE', ['STUDIO_UNAVAILABLE'])),
+    );
+  }
   return app;
+}
+
+async function startAdminApplication(
+  runtimeInput: AdminAppRuntimeInput,
+  owner: AppApiContextOwner<AdminAppApiContext>,
+  startupSignal: AbortSignal,
+  clientIpSourceProvider?: ClientIpSourceProvider,
+): Promise<Hono> {
+  const context = await owner.start(startupSignal);
+  startupSignal.throwIfAborted();
+  if (context.mode !== runtimeInput.context.mode) {
+    throw new Error(
+      `[app-api] Admin context mode ${context.mode} does not match boot mode ${runtimeInput.context.mode}`,
+    );
+  }
+  await initializeAppApiAdminSessionNotBefore(createAdminRedisAdapter(context.redis), Date.now());
+  startupSignal.throwIfAborted();
+  return buildAdminHonoApp(runtimeInput, context, clientIpSourceProvider);
 }
 
 export function createApplicationRuntime(
@@ -173,13 +210,10 @@ export function createApplicationRuntime(
   const startupController = new AbortController();
   let app: Hono | null = null;
   let contextOwner: AppApiContextOwner | null = null;
-  let server: ServerType | null = null;
+  let listener: OwnedListener | null = null;
   let startTask: Promise<AppBootResult> | null = null;
-  let activeCleanupTask: Promise<readonly unknown[]> | null = null;
-  let completedCleanupTask: Promise<readonly unknown[]> | null = null;
-  let activeStopTask: Promise<void> | null = null;
-  let completedStopTask: Promise<void> | null = null;
-  let activeServerCloseTask: Promise<void> | null = null;
+  let cleanupTask: Promise<readonly unknown[]> | null = null;
+  let stopTask: Promise<void> | null = null;
   let acceptingRequests = false;
   let activeRequests = 0;
   let resolveDrain: (() => void) | null = null;
@@ -210,34 +244,47 @@ export function createApplicationRuntime(
   };
 
   const closeServer = (): Promise<void> => {
-    if (activeServerCloseTask !== null) return activeServerCloseTask;
-    // A server object exists before bind completes. Node reports
-    // ERR_SERVER_NOT_RUNNING when close() is called after a bind failure, so
-    // only a successfully listening server enters the close lifecycle.
-    if (server === null) return Promise.resolve();
-    if (!server.listening) {
-      server = null;
-      return Promise.resolve();
-    }
-    const ownedServer = server;
-    const attempt = new Promise<void>((resolve, reject) => {
-      ownedServer.close((error?: Error) => {
-        if (error) reject(error);
-        else resolve();
+    if (listener === null) return Promise.resolve();
+    const ownedListener = listener;
+    const ownedServer = ownedListener.server;
+
+    const clearOwnedListener = () => {
+      if (listener === ownedListener) listener = null;
+    };
+    const attempt = (async () => {
+      let bindSucceeded = false;
+      try {
+        await ownedListener.bindTask;
+        bindSucceeded = true;
+      } catch {
+        // The start path retains the exact bind error. Cleanup owns only the
+        // now-terminal listener handle.
+      }
+
+      if (listener !== ownedListener) return;
+      if (!bindSucceeded) {
+        clearOwnedListener();
+        return;
+      }
+      if (!ownedServer.listening) {
+        // A successful bind can become non-listening only after `close`.
+        // Await the event rather than treating readiness as ownership.
+        await ownedListener.closedTask;
+        clearOwnedListener();
+        return;
+      }
+
+      const closeTask = new Promise<void>((resolve, reject) => {
+        ownedServer.close((error?: Error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+        const closeIdleConnections = Reflect.get(ownedServer, 'closeIdleConnections');
+        if (typeof closeIdleConnections === 'function') closeIdleConnections.call(ownedServer);
       });
-      const closeIdleConnections = Reflect.get(ownedServer, 'closeIdleConnections');
-      if (typeof closeIdleConnections === 'function') closeIdleConnections.call(ownedServer);
-    });
-    activeServerCloseTask = attempt;
-    void attempt.then(
-      () => {
-        if (server === ownedServer) server = null;
-        if (activeServerCloseTask === attempt) activeServerCloseTask = null;
-      },
-      () => {
-        if (activeServerCloseTask === attempt) activeServerCloseTask = null;
-      },
-    );
+      await Promise.all([closeTask, ownedListener.closedTask]);
+      clearOwnedListener();
+    })();
     return attempt;
   };
 
@@ -252,8 +299,7 @@ export function createApplicationRuntime(
    * only the handles retained by their owners.
    */
   const cleanupRuntimeResources = (): Promise<readonly unknown[]> => {
-    if (completedCleanupTask !== null) return completedCleanupTask;
-    if (activeCleanupTask !== null) return activeCleanupTask;
+    if (cleanupTask !== null) return cleanupTask;
 
     const attempt = (async (): Promise<readonly unknown[]> => {
       const failures: unknown[] = [];
@@ -266,33 +312,33 @@ export function createApplicationRuntime(
       }
       return Object.freeze(failures);
     })();
-    activeCleanupTask = attempt;
+    cleanupTask = attempt;
     void attempt.then((failures) => {
-      if (failures.length === 0) completedCleanupTask = attempt;
-      if (activeCleanupTask === attempt) activeCleanupTask = null;
+      if (failures.length > 0 && cleanupTask === attempt) cleanupTask = null;
     });
     return attempt;
   };
 
   const runtime: ApplicationRuntime = {
     start(startOptions = {}) {
+      if (startupController.signal.aborted) {
+        return Promise.reject(startupController.signal.reason);
+      }
       if (startTask !== null) return startTask;
       const port = startOptions.port;
       startTask = (async () => {
         try {
           const runtimeInput = await runBootValidation(startupController.signal);
           startupController.signal.throwIfAborted();
-          if (isRelayAndStudioRuntimeInput(runtimeInput)) {
+          if (isAdminRuntimeInput(runtimeInput)) {
             const owner = createAppApiContextOwner(runtimeInput.context);
             contextOwner = owner;
-            const context = await owner.start(startupController.signal);
-            startupController.signal.throwIfAborted();
-            await raiseAppApiAdminSessionNotBefore(
-              createAdminRedisAdapter(context.redis),
-              Date.now(),
+            app = await startAdminApplication(
+              runtimeInput,
+              owner,
+              startupController.signal,
+              clientIpSourceProvider,
             );
-            startupController.signal.throwIfAborted();
-            app = buildRelayAndStudioHonoApp(runtimeInput, context, clientIpSourceProvider);
           } else {
             const owner = createAppApiContextOwner(runtimeInput.context);
             contextOwner = owner;
@@ -301,10 +347,15 @@ export function createApplicationRuntime(
             app = buildRelayOnlyHonoApp(runtimeInput, context, clientIpSourceProvider);
           }
           if (port !== undefined) {
-            server = createAdaptorServer({
+            const ownedServer = createAdaptorServer({
               fetch: (request, env) => trackedFetch(request, env),
             });
-            await listen(server, port);
+            const closedTask = new Promise<void>((resolve) => {
+              ownedServer.once('close', resolve);
+            });
+            const bindTask = listen(ownedServer, port, startupController.signal);
+            listener = Object.freeze({ server: ownedServer, bindTask, closedTask });
+            await bindTask;
             startupController.signal.throwIfAborted();
           }
           const bootResult: AppBootResult = Object.freeze({
@@ -331,8 +382,7 @@ export function createApplicationRuntime(
     stop() {
       acceptingRequests = false;
       startupController.abort();
-      if (completedStopTask !== null) return completedStopTask;
-      if (activeStopTask !== null) return activeStopTask;
+      if (stopTask !== null) return stopTask;
 
       const attempt = (async () => {
         const failures = await cleanupRuntimeResources();
@@ -341,37 +391,64 @@ export function createApplicationRuntime(
           throw new AggregateError(failures, 'ApplicationRuntime stop failed');
         }
       })();
-      activeStopTask = attempt;
-      void attempt.then(
-        () => {
-          completedStopTask = attempt;
-          if (activeStopTask === attempt) activeStopTask = null;
-        },
-        () => {
-          // Context and listener owners retain only handles whose cleanup
-          // failed, so a later stop can retry those handles without repeating
-          // cleanup that already succeeded.
-          if (activeStopTask === attempt) activeStopTask = null;
-        },
-      );
+      stopTask = attempt;
+      void attempt.catch(() => {
+        // Context and listener owners retain only handles whose cleanup
+        // failed, so a later stop can retry those handles without repeating
+        // cleanup that already succeeded.
+        if (stopTask === attempt) stopTask = null;
+      });
       return attempt;
     },
   };
   return runtime;
 }
 
-function listen(server: ServerType, port: number): Promise<void> {
+function listen(server: ServerType, port: number, startupSignal: AbortSignal): Promise<void> {
+  const bindController = new AbortController();
   return new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => {
+    let settled = false;
+    const removeListeners = () => {
+      startupSignal.removeEventListener('abort', onAbort);
+      server.off('error', onError);
       server.off('listening', onListening);
-      reject(error);
+      server.off('close', onCloseBeforeListening);
+    };
+    const settle = (outcome: { readonly error?: unknown }) => {
+      if (settled) return;
+      settled = true;
+      removeListeners();
+      if ('error' in outcome) reject(outcome.error);
+      else resolve();
+    };
+    const onError = (error: Error) => {
+      settle({ error });
     };
     const onListening = () => {
-      server.off('error', onError);
-      resolve();
+      settle({});
     };
+    const onCloseBeforeListening = () => {
+      settle({
+        error: startupSignal.aborted
+          ? startupSignal.reason
+          : new Error('ApplicationRuntime listener closed before binding completed'),
+      });
+    };
+    const onAbort = () => {
+      bindController.abort(startupSignal.reason);
+    };
+    startupSignal.addEventListener('abort', onAbort, { once: true });
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(port);
+    server.once('close', onCloseBeforeListening);
+    if (startupSignal.aborted) {
+      settle({ error: startupSignal.reason });
+      return;
+    }
+    try {
+      server.listen({ port, signal: bindController.signal });
+    } catch (error) {
+      settle({ error });
+    }
   });
 }

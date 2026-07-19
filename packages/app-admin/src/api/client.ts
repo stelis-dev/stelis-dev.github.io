@@ -238,8 +238,13 @@ export function executeSponsorRefillAccountWithdrawal(data: SponsorRefillAccount
 
 // ── Studio ─────────────────────────────────────────────────────────────
 
-export function getStudio() {
-  return apiFetch('/api/studio', undefined, parseAdminStudioResponse, ADMIN_READ_ERROR_CODES);
+export function getStudio(signal?: AbortSignal) {
+  return apiFetch(
+    '/api/studio',
+    signal === undefined ? undefined : { signal },
+    parseAdminStudioResponse,
+    ADMIN_READ_ERROR_CODES,
+  );
 }
 
 // ── Promotions ────────────────────────────────────────────────────────────

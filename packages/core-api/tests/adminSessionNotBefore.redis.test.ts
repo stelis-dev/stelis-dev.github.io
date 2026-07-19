@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { raiseAdminSessionNotBefore } from '../src/admin/adminSessionNotBefore.js';
+import {
+  initializeAdminSessionNotBefore,
+  raiseAdminSessionNotBefore,
+} from '../src/admin/adminSessionNotBefore.js';
 import { startRealRedis, type RealRedisHandle } from '../src/testing/redis.js';
 
 const KEY = 'stelis:test:admin:not_before';
 
-describe('admin session not-before — real Redis monotonicity', () => {
+describe('admin session not-before — real Redis state transitions', () => {
   let redis: RealRedisHandle | null = null;
 
   beforeAll(async () => {
@@ -19,18 +22,31 @@ describe('admin session not-before — real Redis monotonicity', () => {
     await redis?.stop();
   });
 
-  it('boot and logout writes preserve the logout cutoff in both execution orders', async () => {
-    const bootCandidate = 1_700_000_000_000;
-    const logoutCandidate = bootCandidate + 10_000;
+  it('initializes once across instances and preserves an explicit logout cutoff', async () => {
+    const firstStart = 1_700_000_000_000;
+    const laterStart = firstStart + 5_000;
+    const logoutCutoff = laterStart + 5_000;
 
-    await raiseAdminSessionNotBefore(redis!.client, KEY, logoutCandidate);
-    await raiseAdminSessionNotBefore(redis!.client, KEY, bootCandidate);
-    await expect(redis!.client.get(KEY)).resolves.toBe(String(logoutCandidate));
+    await expect(initializeAdminSessionNotBefore(redis!.client, KEY, firstStart)).resolves.toBe(
+      firstStart,
+    );
+    await expect(initializeAdminSessionNotBefore(redis!.client, KEY, laterStart)).resolves.toBe(
+      firstStart,
+    );
+    await raiseAdminSessionNotBefore(redis!.client, KEY, logoutCutoff);
+    await expect(
+      initializeAdminSessionNotBefore(redis!.client, KEY, logoutCutoff + 5_000),
+    ).resolves.toBe(logoutCutoff);
+    await expect(redis!.client.get(KEY)).resolves.toBe(String(logoutCutoff));
+  });
 
-    await redis!.flush();
-    await raiseAdminSessionNotBefore(redis!.client, KEY, bootCandidate);
-    await raiseAdminSessionNotBefore(redis!.client, KEY, logoutCandidate);
-    await expect(redis!.client.get(KEY)).resolves.toBe(String(logoutCandidate));
+  it('rejects a malformed existing cutoff without replacing it', async () => {
+    await redis!.client.set(KEY, '01');
+
+    await expect(
+      initializeAdminSessionNotBefore(redis!.client, KEY, 1_700_000_000_000),
+    ).rejects.toThrow(/INVALID_CURRENT_NOT_BEFORE/);
+    await expect(redis!.client.get(KEY)).resolves.toBe('01');
   });
 
   it('logout writes preserve the greatest cutoff in both execution orders', async () => {

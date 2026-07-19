@@ -23,8 +23,8 @@ export function ConnectionPanel({
     <div className="promo-panel">
       <h3 className="promo-panel-title">🔗 Host Connection</h3>
       <p className="promo-panel-desc">
-        Connect to a Host Relay API. Promotion calls use the Host&apos;s Studio routes; a{' '}
-        <code>relay_only</code> Host returns <code>STUDIO_UNAVAILABLE</code>.
+        Connect to a Host Relay API. Promotion calls use the Host&apos;s Studio routes; a Host
+        without Studio returns <code>STUDIO_UNAVAILABLE</code>.
       </p>
 
       <div className="promo-input-group">

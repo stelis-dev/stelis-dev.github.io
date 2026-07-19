@@ -257,7 +257,7 @@ function deferred(): { readonly promise: Promise<void>; resolve(): void } {
 function runtimeInput(
   options: {
     prepareInflightCapacity?: number;
-    mode?: 'relay_only' | 'relay_and_studio';
+    mode?: 'relay_only' | 'relay_with_admin' | 'relay_with_admin_and_studio';
   } = {},
 ): ContextRuntimeInput {
   const sui = suiEndpointSnapshotFixture();
@@ -313,15 +313,17 @@ function runtimeInput(
     },
   };
 
-  if (options.mode === 'relay_and_studio') {
+  const rpcFleet = Object.freeze({
+    endpoints: Object.freeze([
+      Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
+    ]),
+  });
+
+  if (options.mode === 'relay_with_admin_and_studio') {
     return {
       ...base,
-      mode: 'relay_and_studio',
-      rpcFleet: Object.freeze({
-        endpoints: Object.freeze([
-          Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
-        ]),
-      }),
+      mode: 'relay_with_admin_and_studio',
+      rpcFleet,
       studio: {
         globalAllowedTargets: new Set([`${PACKAGE_ID}::promotion::claim`]),
         developerJwtTrustConfig: {
@@ -334,6 +336,10 @@ function runtimeInput(
         developerJwtVerifyUrl: 'https://auth.runtime-input.test/verify',
       },
     };
+  }
+
+  if (options.mode === 'relay_with_admin') {
+    return { ...base, mode: 'relay_with_admin', rpcFleet };
   }
 
   return { ...base, mode: 'relay_only' };
@@ -451,17 +457,40 @@ describe('App API context owner boot-snapshot wiring', () => {
     }
   });
 
-  it('creates Studio resources only from a complete `relay_and_studio` input', async () => {
-    const input = runtimeInput({ mode: 'relay_and_studio' });
-    if (input.mode !== 'relay_and_studio') {
-      throw new Error('Expected relay_and_studio runtime input');
+  it('exposes Admin resources without creating Studio resources', async () => {
+    const input = runtimeInput({ mode: 'relay_with_admin' });
+    if (input.mode !== 'relay_with_admin') {
+      throw new Error('Expected relay_with_admin runtime input');
     }
     const runtime = createAppApiContextOwner(input);
     const context = await runtime.start();
 
     try {
-      if (context.mode !== 'relay_and_studio') {
-        throw new Error('Expected relay_and_studio context');
+      if (context.mode !== 'relay_with_admin') {
+        throw new Error('Expected relay_with_admin context');
+      }
+      expect(context.rpcFleet).toBe(input.rpcFleet);
+      expect(Object.hasOwn(context, 'promotionStore')).toBe(false);
+      expect(Object.hasOwn(context, 'executionLedger')).toBe(false);
+      expect(Object.hasOwn(context, 'studioGlobalAllowedTargets')).toBe(false);
+      expect(Object.hasOwn(context, 'developerJwtTrustConfig')).toBe(false);
+      expect(Object.hasOwn(context, 'developerJwtVerifyUrl')).toBe(false);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it('creates Studio resources only from a complete Admin-and-Studio input', async () => {
+    const input = runtimeInput({ mode: 'relay_with_admin_and_studio' });
+    if (input.mode !== 'relay_with_admin_and_studio') {
+      throw new Error('Expected relay_with_admin_and_studio runtime input');
+    }
+    const runtime = createAppApiContextOwner(input);
+    const context = await runtime.start();
+
+    try {
+      if (context.mode !== 'relay_with_admin_and_studio') {
+        throw new Error('Expected relay_with_admin_and_studio context');
       }
       expect(Object.hasOwn(context, 'studio')).toBe(false);
       expect(context.rpcFleet).toBe(input.rpcFleet);

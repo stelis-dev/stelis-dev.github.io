@@ -1,7 +1,7 @@
 /**
  * [app-api] Runtime context creation.
  *
- * Creates a HostContext for `relay_only` or `relay_and_studio` operation
+ * Creates a HostContext for one of the current Host operating modes
  * using Redis-backed stores for multi-instance runtime operation.
  *
  * Shared references:
@@ -88,8 +88,7 @@ export interface RelayOnlyAppApiContext extends AppApiContextBase {
   readonly mode: 'relay_only';
 }
 
-export interface RelayAndStudioAppApiContext extends AppApiContextBase {
-  readonly mode: 'relay_and_studio';
+interface AppApiAdminContextBase extends AppApiContextBase {
   /** Full SponsorOperations control surface used only by Admin routes. */
   readonly sponsorOperations: AppSponsorOperations;
   /** Immutable public view of the boot-qualified RPC fleet. */
@@ -104,6 +103,14 @@ export interface RelayAndStudioAppApiContext extends AppApiContextBase {
    * the persisted final receipt callback writes through `host.onSponsorResult`.
    */
   readonly sponsoredLogsStore: import('./sponsoredLogs/store.js').SponsoredLogsStoreAdapter;
+}
+
+export interface RelayWithAdminAppApiContext extends AppApiAdminContextBase {
+  readonly mode: 'relay_with_admin';
+}
+
+export interface RelayWithAdminAndStudioAppApiContext extends AppApiAdminContextBase {
+  readonly mode: 'relay_with_admin_and_studio';
   readonly promotionStore: PromotionStoreAdapter;
   readonly executionLedger: PromotionExecutionLedger;
   readonly studioGlobalAllowedTargets: ReadonlySet<string>;
@@ -111,7 +118,9 @@ export interface RelayAndStudioAppApiContext extends AppApiContextBase {
   readonly developerJwtVerifyUrl: string | null;
 }
 
-export type AppApiContext = RelayOnlyAppApiContext | RelayAndStudioAppApiContext;
+export type AdminAppApiContext = RelayWithAdminAppApiContext | RelayWithAdminAndStudioAppApiContext;
+
+export type AppApiContext = RelayOnlyAppApiContext | AdminAppApiContext;
 
 /**
  * Minimal context-level sponsor operations API for routes and admin. Composes the
@@ -179,9 +188,16 @@ export type RelayOnlyContextRuntimeInput = ContextRuntimeInputBase & {
   readonly mode: 'relay_only';
 };
 
-export type RelayAndStudioContextRuntimeInput = ContextRuntimeInputBase & {
-  readonly mode: 'relay_and_studio';
+interface AdminContextRuntimeInputBase extends ContextRuntimeInputBase {
   readonly rpcFleet: Readonly<SuiRpcFleetStatus>;
+}
+
+export type RelayWithAdminContextRuntimeInput = AdminContextRuntimeInputBase & {
+  readonly mode: 'relay_with_admin';
+};
+
+export type RelayWithAdminAndStudioContextRuntimeInput = AdminContextRuntimeInputBase & {
+  readonly mode: 'relay_with_admin_and_studio';
   readonly studio: {
     readonly globalAllowedTargets: ReadonlySet<string>;
     readonly developerJwtTrustConfig: DeveloperJwtTrustConfig;
@@ -189,7 +205,11 @@ export type RelayAndStudioContextRuntimeInput = ContextRuntimeInputBase & {
   };
 };
 
-export type ContextRuntimeInput = RelayOnlyContextRuntimeInput | RelayAndStudioContextRuntimeInput;
+export type AdminContextRuntimeInput =
+  | RelayWithAdminContextRuntimeInput
+  | RelayWithAdminAndStudioContextRuntimeInput;
+
+export type ContextRuntimeInput = RelayOnlyContextRuntimeInput | AdminContextRuntimeInput;
 
 /**
  * Internal initialization — creates all resources.
@@ -199,8 +219,14 @@ export function createAppApiContextOwner(
   input: RelayOnlyContextRuntimeInput,
 ): AppApiContextOwner<RelayOnlyAppApiContext>;
 export function createAppApiContextOwner(
-  input: RelayAndStudioContextRuntimeInput,
-): AppApiContextOwner<RelayAndStudioAppApiContext>;
+  input: RelayWithAdminContextRuntimeInput,
+): AppApiContextOwner<RelayWithAdminAppApiContext>;
+export function createAppApiContextOwner(
+  input: RelayWithAdminAndStudioContextRuntimeInput,
+): AppApiContextOwner<RelayWithAdminAndStudioAppApiContext>;
+export function createAppApiContextOwner(
+  input: AdminContextRuntimeInput,
+): AppApiContextOwner<AdminAppApiContext>;
 export function createAppApiContextOwner(input: ContextRuntimeInput): AppApiContextOwner;
 export function createAppApiContextOwner(input: ContextRuntimeInput): AppApiContextOwner {
   let redisForCleanup: RedisClient | null = null;
@@ -352,7 +378,7 @@ export function createAppApiContextOwner(input: ContextRuntimeInput): AppApiCont
         // its reservation stage and final accounting.
         let promotionStore: PromotionStoreAdapter | null = null;
         let executionLedger: RedisPromotionExecutionLedger | null = null;
-        if (input.mode === 'relay_and_studio') {
+        if (input.mode === 'relay_with_admin_and_studio') {
           const redisPromotionStore = new RedisPromotionStore(redis);
           promotionStore = redisPromotionStore;
           executionLedger = new RedisPromotionExecutionLedger(
@@ -561,10 +587,10 @@ export function createAppApiContextOwner(input: ContextRuntimeInput): AppApiCont
           sponsorAvailability,
         } as const;
         let context: AppApiContext;
-        if (input.mode === 'relay_and_studio') {
+        if (input.mode === 'relay_with_admin_and_studio') {
           if (promotionStore === null || executionLedger === null) {
             throw new Error(
-              '`relay_and_studio` context construction did not create every dependency',
+              '`relay_with_admin_and_studio` context construction did not create every dependency',
             );
           }
           context = {
@@ -580,6 +606,16 @@ export function createAppApiContextOwner(input: ContextRuntimeInput): AppApiCont
             studioGlobalAllowedTargets: input.studio.globalAllowedTargets,
             developerJwtTrustConfig: input.studio.developerJwtTrustConfig,
             developerJwtVerifyUrl: input.studio.developerJwtVerifyUrl,
+          };
+        } else if (input.mode === 'relay_with_admin') {
+          context = {
+            ...contextBase,
+            mode: input.mode,
+            sponsorOperations,
+            rpcFleet: input.rpcFleet,
+            redis,
+            abuseStore: abuseBlocker,
+            sponsoredLogsStore,
           };
         } else {
           context = {

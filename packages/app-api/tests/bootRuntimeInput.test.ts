@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { DEEPBOOK_IDS, NODE_TIMER_MAX_DELAY_MS, STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import {
+  DEEPBOOK_IDS,
+  NODE_TIMER_MAX_DELAY_MS,
+  STELIS_CONTRACT_IDS,
+  type HostOperatingMode,
+} from '@stelis/contracts';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
 import type { HostChainState } from '@stelis/core-api';
 import { createSuiEndpointSnapshot } from '@stelis/core-relay';
@@ -120,15 +125,96 @@ function setRequiredEnvironment(): void {
   vi.stubEnv('SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS', '15000');
 }
 
-function setStudioEnvironment(allowedTargets: string, developerJwtTrustJson = '{}'): void {
-  vi.stubEnv('ADMIN_JWT_SECRET', 'studio-admin-jwt-secret-00000000');
+function setAdminEnvironment(): void {
+  vi.stubEnv('ADMIN_JWT_SECRET', 'admin-jwt-secret-for-boot-tests-0000');
   vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
   vi.stubEnv('CORS_ORIGINS', 'https://admin.before.example');
+}
+
+function setStudioEnvironment(allowedTargets: string, developerJwtTrustJson = '{}'): void {
+  setAdminEnvironment();
   vi.stubEnv('STUDIO_ALLOWED_TARGETS', allowedTargets);
   // Target validation runs before trust parsing; these tests intentionally
   // isolate the target boundary from JWT key construction.
   vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', developerJwtTrustJson);
 }
+
+function clearCapabilityEnvironment(): void {
+  for (const name of [
+    'ADMIN_ADDRESS',
+    'ADMIN_JWT_SECRET',
+    'CORS_ORIGINS',
+    'ADMIN_SESSION_EXPIRY',
+    'COOKIE_DOMAIN',
+    'STUDIO_ALLOWED_TARGETS',
+    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
+    'STUDIO_DEVELOPER_JWT_VERIFY_URL',
+  ] as const) {
+    vi.stubEnv(name, '');
+  }
+}
+
+type CapabilityConfigurationCase = {
+  readonly name: string;
+  readonly configure: () => void;
+  readonly result:
+    | { readonly kind: 'mode'; readonly mode: HostOperatingMode }
+    | {
+        readonly kind: 'error';
+        readonly mode: Exclude<HostOperatingMode, 'relay_only'>;
+        readonly missing: string;
+      };
+};
+
+const CAPABILITY_CONFIGURATION_CASES: readonly CapabilityConfigurationCase[] = [
+  {
+    name: 'Relay only',
+    configure: () => undefined,
+    result: { kind: 'mode', mode: 'relay_only' },
+  },
+  {
+    name: 'complete Admin',
+    configure: setAdminEnvironment,
+    result: { kind: 'mode', mode: 'relay_with_admin' },
+  },
+  {
+    name: 'complete Admin and Studio',
+    configure: () => setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON),
+    result: { kind: 'mode', mode: 'relay_with_admin_and_studio' },
+  },
+  {
+    name: 'partial Admin selected by an optional setting',
+    configure: () => vi.stubEnv('ADMIN_SESSION_EXPIRY', '3600'),
+    result: {
+      kind: 'error',
+      mode: 'relay_with_admin',
+      missing: 'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS',
+    },
+  },
+  {
+    name: 'partial Studio selected by an optional setting',
+    configure: () =>
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', 'https://auth.example.test/verify'),
+    result: {
+      kind: 'error',
+      mode: 'relay_with_admin_and_studio',
+      missing:
+        'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS, STUDIO_ALLOWED_TARGETS, STUDIO_DEVELOPER_JWT_TRUST_JSON',
+    },
+  },
+  {
+    name: 'complete Studio without Admin',
+    configure: () => {
+      vi.stubEnv('STUDIO_ALLOWED_TARGETS', STUDIO_TARGET);
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', VALID_STUDIO_TRUST_JSON);
+    },
+    result: {
+      kind: 'error',
+      mode: 'relay_with_admin_and_studio',
+      missing: 'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS',
+    },
+  },
+];
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -145,6 +231,7 @@ beforeEach(async () => {
     'utf8',
   );
   setRequiredEnvironment();
+  clearCapabilityEnvironment();
 
   state.loadRpcConfig.mockImplementation(
     (
@@ -167,12 +254,12 @@ beforeEach(async () => {
     ) => {
       const controller = new AbortController();
       state.qualificationSignal = controller.signal;
-      process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
-      process.env.CORS_ORIGINS = 'https://admin.after.example';
-      process.env.ADMIN_JWT_SECRET = 'x'.repeat(32);
-      process.env.ADMIN_ADDRESS = `0x${'ab'.repeat(32)}`;
-      process.env.STUDIO_ALLOWED_TARGETS = `0x${'cd'.repeat(32)}::module::entry`;
-      process.env.STUDIO_DEVELOPER_JWT_TRUST_JSON = '{not valid json';
+      vi.stubEnv('RPC_AUTH_VALUE', 'rpc-auth-after-await');
+      vi.stubEnv('CORS_ORIGINS', 'https://admin.after.example');
+      vi.stubEnv('ADMIN_JWT_SECRET', 'x'.repeat(32));
+      vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
+      vi.stubEnv('STUDIO_ALLOWED_TARGETS', `0x${'cd'.repeat(32)}::module::entry`);
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', '{not valid json');
       const qualification = await options.qualify({
         snapshot: QUALIFICATION_SNAPSHOT,
         signal: controller.signal,
@@ -197,6 +284,25 @@ afterEach(async () => {
 });
 
 describe('runBootValidation runtime input', () => {
+  it.each(CAPABILITY_CONFIGURATION_CASES)(
+    'selects the capability state for $name',
+    async (testCase) => {
+      testCase.configure();
+
+      if (testCase.result.kind === 'mode') {
+        const result = await runBootValidation();
+        expect(result.context.mode).toBe(testCase.result.mode);
+        expect(state.qualifySuiRpcEndpoints).toHaveBeenCalledTimes(1);
+        return;
+      }
+
+      await expect(runBootValidation()).rejects.toThrow(
+        `\`${testCase.result.mode}\` configuration is incomplete. Missing: ${testCase.result.missing}`,
+      );
+      expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses one pre-await env snapshot and retains the primary endpoint qualification', async () => {
     const result = await runBootValidation();
     await rm(state.registryPath);
@@ -228,16 +334,35 @@ describe('runBootValidation runtime input', () => {
     );
   });
 
-  it('retains one complete `relay_and_studio` snapshot without post-await env reads', async () => {
+  it('retains one complete Admin-only snapshot without creating Studio input', async () => {
+    setAdminEnvironment();
+
+    const result = await runBootValidation();
+
+    if (result.context.mode !== 'relay_with_admin') {
+      throw new Error('expected `relay_with_admin` runtime input');
+    }
+    if (!('adminAddress' in result)) {
+      throw new Error('expected Admin configuration in `relay_with_admin` runtime input');
+    }
+    expect(result.corsAllowedOrigins).toEqual(['https://admin.before.example']);
+    expect(result.adminAddress).toBe(`0x${'ab'.repeat(32)}`);
+    expect(result.context.rpcFleet).toEqual({
+      endpoints: [{ origin: 'https://rpc.snapshot.test', role: 'primary' }],
+    });
+    expect(Object.hasOwn(result.context, 'studio')).toBe(false);
+  });
+
+  it('retains one complete Admin-and-Studio snapshot without post-await env reads', async () => {
     setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
 
     const result = await runBootValidation();
 
-    if (result.context.mode !== 'relay_and_studio') {
-      throw new Error('expected `relay_and_studio` runtime input');
+    if (result.context.mode !== 'relay_with_admin_and_studio') {
+      throw new Error('expected `relay_with_admin_and_studio` runtime input');
     }
     if (!('adminAddress' in result)) {
-      throw new Error('expected Admin configuration in `relay_and_studio` runtime input');
+      throw new Error('expected Admin configuration in the Admin-and-Studio runtime input');
     }
     expect(result.corsAllowedOrigins).toEqual(['https://admin.before.example']);
     expect(result.adminAddress).toBe(`0x${'ab'.repeat(32)}`);
@@ -257,8 +382,8 @@ describe('runBootValidation runtime input', () => {
       vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', verifyUrl);
 
       const result = await runBootValidation();
-      if (result.context.mode !== 'relay_and_studio') {
-        throw new Error('expected `relay_and_studio` context input');
+      if (result.context.mode !== 'relay_with_admin_and_studio') {
+        throw new Error('expected `relay_with_admin_and_studio` context input');
       }
       expect(result.context.studio.developerJwtVerifyUrl).toBe(verifyUrl);
     },
@@ -312,24 +437,15 @@ describe('runBootValidation runtime input', () => {
     expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 
-  it.each([
-    'ADMIN_ADDRESS',
-    'ADMIN_JWT_SECRET',
-    'CORS_ORIGINS',
-    'STUDIO_ALLOWED_TARGETS',
-    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
-  ] as const)(
-    'rejects `relay_and_studio` config missing %s before external services',
-    async (key) => {
-      setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
-      vi.stubEnv(key, '');
+  it('rejects an almost-complete capability group missing one required setting', async () => {
+    setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+    vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', '');
 
-      await expect(runBootValidation()).rejects.toThrow(
-        `\`relay_and_studio\` configuration is incomplete. Missing: ${key}`,
-      );
-      expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
-    },
-  );
+    await expect(runBootValidation()).rejects.toThrow(
+      '`relay_with_admin_and_studio` configuration is incomplete. Missing: STUDIO_DEVELOPER_JWT_TRUST_JSON',
+    );
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
 
   it('rejects enabled refill without its documented target before external services', async () => {
     vi.stubEnv('SPONSOR_OPERATIONS_REFILL_ENABLED', 'true');

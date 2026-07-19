@@ -10,7 +10,7 @@
 import type { Context } from 'hono';
 import { ADMIN_COOKIE, verifyAdminJwt } from './adminAuth.js';
 import type { AdminJwtConfig, AdminRedisClient } from '@stelis/core-api/admin';
-import type { RelayAndStudioAppApiContext } from './context.js';
+import type { AdminAppApiContext } from './context.js';
 import { createAdminRedisAdapter } from './adminRedis.js';
 import { ADMIN_SESSION_NOT_BEFORE_KEY } from './adminSessionNotBefore.js';
 
@@ -26,7 +26,7 @@ export interface AdminSession {
 
 export async function requireAdminSessionFromContext(
   c: Context,
-  context: RelayAndStudioAppApiContext,
+  context: AdminAppApiContext,
   jwtConfig: AdminJwtConfig,
 ): Promise<AdminSession | null> {
   try {
@@ -58,21 +58,21 @@ export async function requireAdminSession(
 
     const raw = await redis.get(ADMIN_SESSION_NOT_BEFORE_KEY);
 
-    // fail-closed: key missing → reject (boot sets this key at startup)
+    // fail-closed: key missing → reject (boot initializes this key before serving requests)
     if (raw == null) {
       if (!_keyMissingWarned) {
         _keyMissingWarned = true;
         // eslint-disable-next-line no-console
         console.error(
           `[admin] Redis key "${ADMIN_SESSION_NOT_BEFORE_KEY}" is missing. ` +
-            'All admin sessions will be rejected until server restart.',
+            'All admin sessions will be rejected until Admin-capable startup initializes it.',
         );
       }
       return null;
     }
 
     // strict integer validation — parseInt('123abc')=123 prevention
-    if (!/^\d+$/.test(raw)) return null;
+    if (!/^(?:0|[1-9]\d*)$/.test(raw)) return null;
     const notBefore = Number(raw);
     if (!Number.isSafeInteger(notBefore)) return null;
     if (session.iatMs < notBefore) return null;

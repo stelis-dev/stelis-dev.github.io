@@ -132,29 +132,42 @@ When `SPONSOR_OPERATIONS_REFILL_ENABLED=true`,
 `SPONSOR_BALANCE_REFILL_TARGET_MIST` is required and must be greater than
 `SPONSOR_BALANCE_WARN_MIST`.
 
-The Host has two operating modes. `relay_only` requires every setting in the
-following two lists to be unset. `relay_and_studio` requires all of these:
+The Host has three operating modes:
+
+| Mode                          | Admin       | Studio      |
+| ----------------------------- | ----------- | ----------- |
+| `relay_only`                  | unavailable | unavailable |
+| `relay_with_admin`            | available   | unavailable |
+| `relay_with_admin_and_studio` | available   | available   |
+
+Admin configuration is one group with these required settings:
 
 - `ADMIN_ADDRESS`
 - `ADMIN_JWT_SECRET`
 - `CORS_ORIGINS`
-- `STUDIO_ALLOWED_TARGETS`
-- `STUDIO_DEVELOPER_JWT_TRUST_JSON`
 
-These settings are optional only in `relay_and_studio` mode:
+These Admin settings are optional after the required group is complete:
 
 - `ADMIN_SESSION_EXPIRY`
 - `COOKIE_DOMAIN`
-- `STUDIO_DEVELOPER_JWT_VERIFY_URL`
 
-Setting any required or optional mode setting selects `relay_and_studio`; boot
-fails when any of its five required settings is then missing. The developer JWT
-verification URL must use HTTPS, except that HTTP is accepted for the exact
-parsed hostnames `localhost`, `127.0.0.1`, and `[::1]`. It must not contain
-embedded username or password credentials or a URL fragment. Callback requests
-omit ambient credentials and reject redirects instead of following them. All
-local `relay_and_studio` settings are validated before Sui endpoint
-qualification starts.
+Studio configuration is a second group with these required settings:
+
+- `STUDIO_ALLOWED_TARGETS`
+- `STUDIO_DEVELOPER_JWT_TRUST_JSON`
+
+`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional after the required Studio group
+is complete. Any Admin setting selects the Admin group and requires every
+required Admin setting. Any Studio setting selects the Studio group and
+requires every required Studio setting plus complete Admin configuration.
+Partial configuration fails boot.
+
+The developer JWT verification URL must use HTTPS, except that HTTP is accepted
+for the exact parsed hostnames `localhost`, `127.0.0.1`, and `[::1]`. It must
+not contain embedded username or password credentials or a URL fragment.
+Callback requests omit ambient credentials and reject redirects instead of
+following them. All local Admin and Studio settings are validated before Sui
+endpoint qualification starts.
 
 ## Static App Environment
 

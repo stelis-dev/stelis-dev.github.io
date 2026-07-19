@@ -55,12 +55,14 @@ The Host runtime adds request and operations controls:
 - aggregate sponsor capacity checks before prepare and a fresh receipt-assigned sponsor balance check before execution
 - admin session validation
 
-Relay, Studio, Auth, and Admin routes apply their relevant checks in one
-fail-closed sequence: operating mode, client-IP admission, Origin and
-Content-Type admission, bounded body reading, credential verification,
-authenticated-subject admission, then route-specific work. In particular,
-SponsorOperations and sponsor-lease reads for Relay prepare do not occur until
-wallet authorization and sender admission succeed.
+Host composition first selects the route implementation for the booted mode.
+Each mounted Relay, Studio, Auth, or Admin route then applies its relevant
+checks in a fail-closed order beginning with client-IP admission. In
+particular, SponsorOperations and sponsor-lease reads for Relay prepare do not
+occur until wallet authorization and sender admission succeed. Admin Promotion
+routes complete bounded-body, Admin-session, and authenticated-subject
+admission before checking Studio capability; an Admin-only Host returns
+`STUDIO_UNAVAILABLE` without Promotion-domain I/O.
 The exact HTTP header and mode contract is in
 [`API Reference → Request admission`](./api.md#request-admission).
 
@@ -70,7 +72,7 @@ Production deployments still place the API behind upstream traffic controls such
 
 ## Studio Promotion Security
 
-Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`. It validates the complete local Studio configuration before Sui endpoint qualification begins.
+Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`. It validates the complete local Admin and Studio configuration before Sui endpoint qualification begins.
 
 An optional developer-verification callback must use HTTPS, apart from exact
 loopback HTTP hostnames, and cannot contain embedded credentials or a URL

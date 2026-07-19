@@ -9,13 +9,13 @@ hand-maintained JSON Schema.
 
 ## Route Groups
 
-| Prefix      | Purpose                      | Available mode     |
-| ----------- | ---------------------------- | ------------------ |
-| `/health`   | Host health probe            | Both modes         |
-| `/relay/*`  | Public Relay API flow        | Both modes         |
-| `/studio/*` | Developer-JWT promotion flow | `relay_and_studio` |
-| `/auth/*`   | Admin session authentication | `relay_and_studio` |
-| `/api/*`    | Operator admin routes        | `relay_and_studio` |
+| Prefix      | Purpose                      | Available modes                                   |
+| ----------- | ---------------------------- | ------------------------------------------------- |
+| `/health`   | Host health probe            | All modes                                         |
+| `/relay/*`  | Public Relay API flow        | All modes                                         |
+| `/studio/*` | Developer-JWT promotion flow | `relay_with_admin_and_studio`                     |
+| `/auth/*`   | Admin session authentication | `relay_with_admin`, `relay_with_admin_and_studio` |
+| `/api/*`    | Operator admin routes        | `relay_with_admin`, `relay_with_admin_and_studio` |
 
 ## GET /health
 
@@ -25,15 +25,18 @@ Returns Host health:
 { "status": "ok", "mode": "relay_only" }
 ```
 
-`mode` is exactly `relay_only` or `relay_and_studio`.
+`mode` is exactly `relay_only`, `relay_with_admin`, or
+`relay_with_admin_and_studio`.
 
 ## Request admission
 
-Relay, Studio, Auth, and Admin routes apply the checks relevant to that route
-in this order: Host operating mode, client-IP admission, Origin and
-Content-Type admission, bounded body reading, credential verification,
-authenticated-subject admission, then route-specific work. A failed earlier
-check does not start a later check.
+Host composition first selects the route implementation for the booted mode.
+Each mounted Relay, Studio, Auth, or Admin route then applies its relevant
+checks in this order: client-IP admission, Origin and Content-Type admission,
+bounded body reading, credential verification, authenticated-subject
+admission, then route-specific work. A failed earlier check does not start a
+later check. On an Admin-only Host, `/api/promotions*` completes Admin admission
+before returning `STUDIO_UNAVAILABLE`; it performs no Promotion-domain I/O.
 
 Requests with a JSON body require `Content-Type: application/json`; valid
 media-type parameters such as `charset=utf-8` are accepted. Missing, different,
@@ -43,9 +46,11 @@ matches one configured in `CORS_ORIGINS`.
 
 In `relay_only` mode, Studio routes return `STUDIO_UNAVAILABLE` and Auth/Admin
 routes return `ADMIN_UNAVAILABLE` without performing credential or domain
-work. CORS preflight for the public Studio surface is the transport-level
-exception: it succeeds in both modes so a browser can issue the actual request
-and read the typed `STUDIO_UNAVAILABLE` response.
+work. In `relay_with_admin` mode, Auth/Admin routes are available and Studio
+routes return `STUDIO_UNAVAILABLE`. `relay_with_admin_and_studio` exposes all
+three route groups. CORS preflight for the public Studio surface is the
+transport-level exception: it succeeds in all modes so a browser can issue the
+actual request and read the typed `STUDIO_UNAVAILABLE` response.
 
 ## GET /relay/status
 
@@ -275,6 +280,12 @@ Mounted admin routes:
 - `POST /api/promotions/:id/status`
 - `DELETE /api/promotions/:id`
 - `GET /api/promotions/:id/summary`
+
+`GET /api/studio` is the Admin app's Studio-availability authority. A
+`relay_with_admin` Host returns `{ "enabled": false }`. A
+`relay_with_admin_and_studio` Host returns an enabled response whose `config`
+reports `developerJwtVerifyUrlConfigured`. Admin Promotion routes return
+`STUDIO_UNAVAILABLE` in `relay_with_admin` mode.
 
 The Admin Promotion list uses the same bounded cursor contract as the Studio
 list. `status` is optional and accepts the current Promotion status values.

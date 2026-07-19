@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { createServer } from 'node:http';
+import { Server as NetServer } from 'node:net';
+import { parseHostHealthResponse } from '@stelis/contracts';
 
 const mocks = vi.hoisted(() => ({
   HostContextInitializationCleanupError: class extends AggregateError {
@@ -18,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   createAdminRoutes: vi.fn(),
   createStudioRoutes: vi.fn(),
   createAdminRedisAdapter: vi.fn(),
-  raiseAppApiAdminSessionNotBefore: vi.fn(),
+  initializeAppApiAdminSessionNotBefore: vi.fn(),
 }));
 
 vi.mock('../src/boot.js', () => ({
@@ -51,7 +53,7 @@ vi.mock('../src/adminRedis.js', () => ({
 }));
 
 vi.mock('../src/adminSessionNotBefore.js', () => ({
-  raiseAppApiAdminSessionNotBefore: mocks.raiseAppApiAdminSessionNotBefore,
+  initializeAppApiAdminSessionNotBefore: mocks.initializeAppApiAdminSessionNotBefore,
 }));
 
 import { createApplicationRuntime } from '../src/app.js';
@@ -72,23 +74,12 @@ function relayOnlyBoot() {
   };
 }
 
-function relayAndStudioBoot() {
+function relayWithAdminBoot() {
   return {
     context: {
-      mode: 'relay_and_studio' as const,
+      mode: 'relay_with_admin' as const,
       sponsorLeaseHmacSecret: HMAC_SECRET,
       network: 'testnet' as const,
-      studio: {
-        globalAllowedTargets: new Set<string>(),
-        developerJwtTrustConfig: {
-          issuer: 'https://auth.runtime.test',
-          audience: 'stelis-studio',
-          algorithm: 'RS256' as const,
-          publicKeyPem: 'test-only-key-not-parsed-by-application-runtime',
-          claimPaths: { userId: 'sub', senderAddress: 'wallet_address' },
-        },
-        developerJwtVerifyUrl: null,
-      },
     },
     trustedProxyHops: 1,
     corsAllowedOrigins: ['https://admin.snapshot.example'],
@@ -108,10 +99,32 @@ function relayAndStudioBoot() {
   };
 }
 
+function relayWithAdminAndStudioBoot() {
+  const admin = relayWithAdminBoot();
+  return {
+    ...admin,
+    context: {
+      ...admin.context,
+      mode: 'relay_with_admin_and_studio' as const,
+      studio: {
+        globalAllowedTargets: new Set<string>(),
+        developerJwtTrustConfig: {
+          issuer: 'https://auth.runtime.test',
+          audience: 'stelis-studio',
+          algorithm: 'RS256' as const,
+          publicKeyPem: 'test-only-key-not-parsed-by-application-runtime',
+          claimPaths: { userId: 'sub', senderAddress: 'wallet_address' },
+        },
+        developerJwtVerifyUrl: null,
+      },
+    },
+  };
+}
+
 function contextResources(
   trace: string[] = [],
   options: {
-    readonly mode?: 'relay_only' | 'relay_and_studio';
+    readonly mode?: 'relay_only' | 'relay_with_admin' | 'relay_with_admin_and_studio';
     readonly domainStopError?: Error;
   } = {},
 ) {
@@ -135,21 +148,38 @@ function contextResources(
       trace.push('redis.close');
     }),
   };
-  const stop = vi.fn(async () => {
-    const failures: unknown[] = [];
-    for (const phase of [
-      lifecycle.stopSponsorOperations,
-      lifecycle.stopDomainTasks,
-      lifecycle.disposeHostContext,
-      lifecycle.closeRedis,
-    ]) {
-      try {
-        await phase();
-      } catch (error) {
-        failures.push(error);
+  let activeStopTask: Promise<void> | null = null;
+  let completedStopTask: Promise<void> | null = null;
+  const stop = vi.fn((): Promise<void> => {
+    if (completedStopTask !== null) return completedStopTask;
+    if (activeStopTask !== null) return activeStopTask;
+    const attempt = (async () => {
+      const failures: unknown[] = [];
+      for (const phase of [
+        lifecycle.stopSponsorOperations,
+        lifecycle.stopDomainTasks,
+        lifecycle.disposeHostContext,
+        lifecycle.closeRedis,
+      ]) {
+        try {
+          await phase();
+        } catch (error) {
+          failures.push(error);
+        }
       }
-    }
-    if (failures.length > 0) throw new AggregateError(failures, 'context stop failed');
+      if (failures.length > 0) throw new AggregateError(failures, 'context stop failed');
+    })();
+    activeStopTask = attempt;
+    void attempt.then(
+      () => {
+        completedStopTask = attempt;
+        if (activeStopTask === attempt) activeStopTask = null;
+      },
+      () => {
+        if (activeStopTask === attempt) activeStopTask = null;
+      },
+    );
+    return attempt;
   });
   return {
     context,
@@ -206,7 +236,7 @@ async function occupyPort(): Promise<{
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mocks.runBootValidation.mockResolvedValue(relayOnlyBoot());
   mocks.createAppApiContextOwner.mockReturnValue(contextResources().runtime);
   mocks.createRelayRoutes.mockImplementation(() => new Hono());
@@ -214,7 +244,7 @@ beforeEach(() => {
   mocks.createAdminRoutes.mockImplementation(() => new Hono());
   mocks.createStudioRoutes.mockImplementation(() => new Hono());
   mocks.createAdminRedisAdapter.mockReturnValue(adminRedis);
-  mocks.raiseAppApiAdminSessionNotBefore.mockResolvedValue(1);
+  mocks.initializeAppApiAdminSessionNotBefore.mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -223,7 +253,21 @@ afterEach(() => {
 });
 
 describe('ApplicationRuntime input and resource boundary', () => {
-  it('keeps `relay_only` construction free of Admin credentials and session mutation', async () => {
+  it.each(['relay_only', 'relay_with_admin', 'relay_with_admin_and_studio'] as const)(
+    'accepts the current Host mode in the health wire response: %s',
+    (mode) => {
+      expect(parseHostHealthResponse({ status: 'ok', mode })).toEqual({ status: 'ok', mode });
+    },
+  );
+
+  it.each(['relay_and_studio', 'generic', 'unknown'])(
+    'rejects a non-current Host mode in the health wire response: %s',
+    (mode) => {
+      expect(() => parseHostHealthResponse({ status: 'ok', mode })).toThrow();
+    },
+  );
+
+  it('keeps `relay_only` construction free of Admin credentials and session state', async () => {
     const boot = relayOnlyBoot();
     mocks.runBootValidation.mockResolvedValueOnce(boot);
     const resources = contextResources();
@@ -236,7 +280,7 @@ describe('ApplicationRuntime input and resource boundary', () => {
     expect(mocks.runBootValidation).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(mocks.createAppApiContextOwner).toHaveBeenCalledWith(boot.context);
     expect(resources.runtime.start).toHaveBeenCalledWith(expect.any(AbortSignal));
-    expect(mocks.raiseAppApiAdminSessionNotBefore).not.toHaveBeenCalled();
+    expect(mocks.initializeAppApiAdminSessionNotBefore).not.toHaveBeenCalled();
 
     expect(mocks.createAuthRoutes).not.toHaveBeenCalled();
     expect(mocks.createAdminRoutes).not.toHaveBeenCalled();
@@ -301,24 +345,164 @@ describe('ApplicationRuntime input and resource boundary', () => {
     await runtime.stop();
   });
 
-  it('uses one `relay_and_studio` snapshot for Admin routes, CORS, and session cutoff', async () => {
-    const boot = relayAndStudioBoot();
+  it('mounts Admin without creating Studio routes for an Admin-only Host', async () => {
+    const boot = relayWithAdminBoot();
     mocks.runBootValidation.mockResolvedValueOnce(boot);
-    const resources = contextResources([], { mode: 'relay_and_studio' });
+    const resources = contextResources([], { mode: 'relay_with_admin' });
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    const runtime = createApplicationRuntime();
+
+    await expect(runtime.start()).resolves.toEqual({ mode: 'relay_with_admin' });
+    expect(mocks.createAuthRoutes).toHaveBeenCalledOnce();
+    expect(mocks.createAdminRoutes).toHaveBeenCalledOnce();
+    expect(mocks.createStudioRoutes).not.toHaveBeenCalled();
+    const response = await runtime.fetch(
+      new Request('http://host.test/studio/promotions', {
+        headers: { Origin: 'https://example.test' },
+      }),
+    );
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ code: 'STUDIO_UNAVAILABLE' });
+    await runtime.stop();
+  });
+
+  it.each([
+    {
+      name: 'Admin only',
+      boot: relayWithAdminBoot,
+      mode: 'relay_with_admin' as const,
+      studioRoutes: false,
+    },
+    {
+      name: 'Admin and Studio',
+      boot: relayWithAdminAndStudioBoot,
+      mode: 'relay_with_admin_and_studio' as const,
+      studioRoutes: true,
+    },
+  ])('uses one ordered Admin startup process for $name', async (testCase) => {
+    const trace: string[] = [];
+    const cutoffGate = deferred();
+    const boot = testCase.boot();
+    const resources = contextResources(trace, { mode: testCase.mode });
+    resources.runtime.start.mockImplementationOnce(async () => {
+      trace.push('context.start');
+      return resources.context;
+    });
+    mocks.runBootValidation.mockResolvedValueOnce(boot);
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    mocks.initializeAppApiAdminSessionNotBefore.mockImplementationOnce(async () => {
+      trace.push('session-cutoff-initialization.start');
+      await cutoffGate.promise;
+      trace.push('session-cutoff-initialization.finish');
+      return 1;
+    });
+    mocks.createRelayRoutes.mockImplementationOnce(() => {
+      trace.push('routes.relay');
+      return new Hono();
+    });
+    mocks.createAuthRoutes.mockImplementationOnce(() => {
+      trace.push('routes.auth');
+      return new Hono();
+    });
+    mocks.createAdminRoutes.mockImplementationOnce(() => {
+      trace.push('routes.admin');
+      return new Hono();
+    });
+    if (testCase.studioRoutes) {
+      mocks.createStudioRoutes.mockImplementationOnce(() => {
+        trace.push('routes.studio');
+        return new Hono();
+      });
+    }
+    const runtime = createApplicationRuntime();
+
+    const startTask = runtime.start();
+    await vi.waitFor(() =>
+      expect(mocks.initializeAppApiAdminSessionNotBefore).toHaveBeenCalledOnce(),
+    );
+    expect(trace).toEqual(['context.start', 'session-cutoff-initialization.start']);
+    expect(mocks.createRelayRoutes).not.toHaveBeenCalled();
+    expect(mocks.createAuthRoutes).not.toHaveBeenCalled();
+    expect(mocks.createAdminRoutes).not.toHaveBeenCalled();
+    expect(mocks.createStudioRoutes).not.toHaveBeenCalled();
+
+    cutoffGate.resolve();
+    await expect(startTask).resolves.toEqual({ mode: testCase.mode });
+    expect(trace).toEqual([
+      'context.start',
+      'session-cutoff-initialization.start',
+      'session-cutoff-initialization.finish',
+      'routes.relay',
+      'routes.auth',
+      'routes.admin',
+      ...(testCase.studioRoutes ? ['routes.studio'] : []),
+    ]);
+    expect(mocks.createStudioRoutes).toHaveBeenCalledTimes(testCase.studioRoutes ? 1 : 0);
+    await runtime.stop();
+  });
+
+  it.each(['context start', 'session cutoff initialization'] as const)(
+    'does not compose Admin routes when stop aborts during %s',
+    async (stage) => {
+      const gate = deferred();
+      const resources = contextResources([], { mode: 'relay_with_admin' });
+      if (stage === 'context start') {
+        resources.runtime.start.mockImplementationOnce(async () => {
+          await gate.promise;
+          return resources.context;
+        });
+      } else {
+        mocks.initializeAppApiAdminSessionNotBefore.mockImplementationOnce(async () => {
+          await gate.promise;
+          return 1;
+        });
+      }
+      mocks.runBootValidation.mockResolvedValueOnce(relayWithAdminBoot());
+      mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+      const runtime = createApplicationRuntime();
+
+      const startTask = runtime.start();
+      if (stage === 'context start') {
+        await vi.waitFor(() => expect(resources.runtime.start).toHaveBeenCalledOnce());
+      } else {
+        await vi.waitFor(() =>
+          expect(mocks.initializeAppApiAdminSessionNotBefore).toHaveBeenCalledOnce(),
+        );
+      }
+      const stopTask = runtime.stop();
+      gate.resolve();
+
+      await expect(startTask).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(stopTask).resolves.toBeUndefined();
+      expect(resources.runtime.stop).toHaveBeenCalledOnce();
+      expect(mocks.createRelayRoutes).not.toHaveBeenCalled();
+      expect(mocks.createAuthRoutes).not.toHaveBeenCalled();
+      expect(mocks.createAdminRoutes).not.toHaveBeenCalled();
+      expect(mocks.createStudioRoutes).not.toHaveBeenCalled();
+      expect(mocks.initializeAppApiAdminSessionNotBefore).toHaveBeenCalledTimes(
+        stage === 'context start' ? 0 : 1,
+      );
+    },
+  );
+
+  it('uses one Admin-and-Studio snapshot for routes, CORS, and session initialization', async () => {
+    const boot = relayWithAdminAndStudioBoot();
+    mocks.runBootValidation.mockResolvedValueOnce(boot);
+    const resources = contextResources([], { mode: 'relay_with_admin_and_studio' });
     mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
     const runtime = createApplicationRuntime();
 
     const bootResult = await runtime.start();
-    expect(bootResult).toEqual({ mode: 'relay_and_studio' });
+    expect(bootResult).toEqual({ mode: 'relay_with_admin_and_studio' });
     expect(JSON.stringify(bootResult)).not.toContain(JWT_SECRET);
     expect(JSON.stringify(bootResult)).not.toContain(HMAC_SECRET);
     expect(mocks.createAdminRedisAdapter).toHaveBeenCalledWith(resources.context.redis);
-    expect(mocks.raiseAppApiAdminSessionNotBefore).toHaveBeenCalledWith(
+    expect(mocks.initializeAppApiAdminSessionNotBefore).toHaveBeenCalledWith(
       adminRedis,
       expect.any(Number),
     );
     expect(mocks.createAppApiContextOwner.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.raiseAppApiAdminSessionNotBefore.mock.invocationCallOrder[0],
+      mocks.initializeAppApiAdminSessionNotBefore.mock.invocationCallOrder[0],
     );
 
     const [, authRuntime] = mocks.createAuthRoutes.mock.calls[0];
@@ -379,17 +563,18 @@ describe('ApplicationRuntime input and resource boundary', () => {
   it('continues reverse cleanup through failure and closes Redis last when start fails', async () => {
     const trace: string[] = [];
     const resources = contextResources(trace, {
-      mode: 'relay_and_studio',
+      mode: 'relay_with_admin_and_studio',
       domainStopError: new Error('domain stop failed'),
     });
-    mocks.runBootValidation.mockResolvedValueOnce(relayAndStudioBoot());
+    mocks.runBootValidation.mockResolvedValueOnce(relayWithAdminAndStudioBoot());
     mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
-    mocks.raiseAppApiAdminSessionNotBefore.mockRejectedValueOnce(
+    mocks.initializeAppApiAdminSessionNotBefore.mockRejectedValueOnce(
       new Error('session cutoff failed'),
     );
     const runtime = createApplicationRuntime();
 
-    const startFailure = await runtime.start().catch((error: unknown) => error);
+    const startTask = runtime.start();
+    const startFailure = await startTask.catch((error: unknown) => error);
     expect(startFailure).toBeInstanceOf(AggregateError);
     expect(startFailure).toMatchObject({
       message: 'ApplicationRuntime start and cleanup both failed',
@@ -409,6 +594,9 @@ describe('ApplicationRuntime input and resource boundary', () => {
     await expect(runtime.fetch(new Request('http://host.test/health'))).rejects.toThrow(
       'has not started',
     );
+    expect(runtime.start()).toBe(startTask);
+    expect(mocks.runBootValidation).toHaveBeenCalledOnce();
+    expect(resources.runtime.start).toHaveBeenCalledOnce();
   });
 
   it('retries retained context cleanup after start reports a cleanup failure', async () => {
@@ -482,6 +670,65 @@ describe('ApplicationRuntime input and resource boundary', () => {
     expect(resources.lifecycle.closeRedis).toHaveBeenCalledOnce();
   });
 
+  it('makes stop before start terminal without acquiring boot or context resources', async () => {
+    const runtime = createApplicationRuntime();
+
+    await expect(runtime.stop()).resolves.toBeUndefined();
+    await expect(runtime.start()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.runBootValidation).not.toHaveBeenCalled();
+    expect(mocks.createAppApiContextOwner).not.toHaveBeenCalled();
+  });
+
+  it('shares one start operation and cannot report ready again after stop', async () => {
+    const resources = contextResources();
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    const runtime = createApplicationRuntime();
+
+    const firstStart = runtime.start();
+    const secondStart = runtime.start();
+    expect(secondStart).toBe(firstStart);
+    await expect(firstStart).resolves.toEqual({ mode: 'relay_only' });
+    await expect(runtime.stop()).resolves.toBeUndefined();
+
+    await expect(runtime.start()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.runBootValidation).toHaveBeenCalledOnce();
+    expect(resources.runtime.start).toHaveBeenCalledOnce();
+  });
+
+  it('settles start and stop when shutdown closes the listener during binding', async () => {
+    const port = await reservePort();
+    const resources = contextResources();
+    const contextStartGate = deferred();
+    resources.runtime.start.mockImplementationOnce(async () => {
+      await contextStartGate.promise;
+      return resources.context;
+    });
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    const listenObserved = deferred();
+    const originalListen = NetServer.prototype.listen;
+    vi.spyOn(NetServer.prototype, 'listen').mockImplementation(function (
+      this: NetServer,
+      ...args: unknown[]
+    ) {
+      listenObserved.resolve();
+      return Reflect.apply(originalListen, this, args) as NetServer;
+    } as typeof originalListen);
+    const runtime = createApplicationRuntime();
+
+    const startTask = runtime.start({ port });
+    await vi.waitFor(() => expect(resources.runtime.start).toHaveBeenCalledOnce());
+    contextStartGate.resolve();
+    await listenObserved.promise;
+
+    const startFailure = expect(startTask).rejects.toMatchObject({ name: 'AbortError' });
+    const stopTask = runtime.stop();
+
+    await startFailure;
+    await expect(stopTask).resolves.toBeUndefined();
+    expect(resources.runtime.stop).toHaveBeenCalledOnce();
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  });
+
   it('preserves the original listener bind error and treats a never-listening server as closed', async () => {
     const occupied = await occupyPort();
     const resources = contextResources();
@@ -497,6 +744,43 @@ describe('ApplicationRuntime input and resource boundary', () => {
     } finally {
       await occupied.close();
     }
+  });
+
+  it('retains a listener after close failure and retries only that handle', async () => {
+    const port = await reservePort();
+    const resources = contextResources();
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    const runtime = createApplicationRuntime();
+    await runtime.start({ port });
+
+    const originalClose = NetServer.prototype.close;
+    let failFirstClose = true;
+    vi.spyOn(NetServer.prototype, 'close').mockImplementation(function (
+      this: NetServer,
+      callback?: (error?: Error) => void,
+    ) {
+      if (failFirstClose) {
+        failFirstClose = false;
+        queueMicrotask(() => callback?.(new Error('listener close failed')));
+        return this;
+      }
+      return Reflect.apply(originalClose, this, [callback]) as NetServer;
+    } as typeof originalClose);
+
+    await expect(runtime.stop()).rejects.toMatchObject({
+      message: 'ApplicationRuntime stop failed',
+      errors: [expect.objectContaining({ message: 'listener close failed' })],
+    });
+    expect(resources.runtime.stop).toHaveBeenCalledOnce();
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).resolves.toMatchObject({ status: 503 });
+
+    await expect(runtime.stop()).resolves.toBeUndefined();
+    expect(resources.runtime.stop).toHaveBeenCalledTimes(2);
+    expect(resources.lifecycle.stopSponsorOperations).toHaveBeenCalledOnce();
+    expect(resources.lifecycle.stopDomainTasks).toHaveBeenCalledOnce();
+    expect(resources.lifecycle.disposeHostContext).toHaveBeenCalledOnce();
+    expect(resources.lifecycle.closeRedis).toHaveBeenCalledOnce();
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
   });
 
   it.each(['SIGINT', 'SIGTERM'] as const)(
