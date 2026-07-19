@@ -50,6 +50,7 @@ import {
   suiEndpointSnapshotFixture,
   unclassifiedSuiExecutionError,
 } from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 const { executeSuiTransactionMock, simulateSuiTransactionMock } = vi.hoisted(() => ({
   executeSuiTransactionMock: vi.fn(),
@@ -196,6 +197,7 @@ async function setup(opts: SetupOptions = {}) {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, executionLedger);
   const abuseBlocker = new MemoryAbuseBlocker();
+  const admittedClientIp = await admitTestClientIp(abuseBlocker);
 
   // Claim promotion (creates entitlement via ExecutionLedger)
   await executionLedger.claim(TEST_PROMO_ID, TEST_USER_ID, {
@@ -263,6 +265,7 @@ async function setup(opts: SetupOptions = {}) {
     sponsorPool,
     sponsoredExecutionStore,
     promotionStore,
+    admittedClientIp,
   };
 }
 
@@ -285,7 +288,7 @@ describe('handlePromotionSponsor', () => {
       txBytes: fixture.signed.txBytesBase64,
       userSignature: fixture.signed.userSignature,
       verifiedIdentity: buildIdentity(),
-      clientIp: '127.0.0.1',
+      clientIp: fixture.admittedClientIp,
       ...overrides,
     });
 
@@ -308,16 +311,18 @@ describe('handlePromotionSponsor', () => {
     expect((await fixture.sponsorPool.leaseStatus()).leasedSlots).toBe(1);
   });
 
-  test('preserves the legitimate session when verified sender identity is wrong', async () => {
+  test('rejects a JWT sender mismatch before reading the prepared session', async () => {
     const fixture = await setup();
     const otherAddress = Ed25519Keypair.generate().toSuiAddress();
+    const readPreparedReceipt = vi.spyOn(fixture.sponsoredExecutionStore, 'readPreparedReceipt');
 
     const error = await sponsor(fixture, {
       verifiedIdentity: buildIdentity({ senderAddress: otherAddress }),
     }).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(PromotionSponsorError);
-    expect((error as PromotionSponsorError).code).toBe('SENDER_ADDRESS_MISMATCH');
+    expect((error as PromotionSponsorError).code).toBe('SENDER_SIGNATURE_INVALID');
+    expect(readPreparedReceipt).not.toHaveBeenCalled();
     expect(
       await fixture.sponsoredExecutionStore.readPreparedReceipt(fixture.receiptId),
     ).not.toBeNull();
@@ -381,7 +386,7 @@ describe('handlePromotionSponsor', () => {
     expect((await fixture.sponsorPool.leaseStatus()).leasedSlots).toBe(0);
   });
 
-  test('uses one decoded transaction object through simulation, sponsor signing, and submission', async () => {
+  test('passes one original byte array through simulation, sponsor signing, and submission', async () => {
     const fixture = await setup();
     const callbacks: SponsorResultMetadata[] = [];
     fixture.ctx.onSponsorResult = async (result) => {

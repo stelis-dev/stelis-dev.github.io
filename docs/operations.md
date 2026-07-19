@@ -51,7 +51,12 @@ The temporary Vercel demo adapter is an exception to the proxy-hop model. Vercel
 
 In `development` and `test`, an unset `TRUSTED_PROXY_HOPS` defaults to `0` and uses the socket remote address.
 
-`/relay/*` and `/studio/*` allow all origins. `/auth/*` and `/api/*` allow only origins listed in `CORS_ORIGINS`.
+`/relay/*` and `/studio/*` allow all origins. `/auth/*` and `/api/*` send
+credentialed CORS responses only to origins listed in `CORS_ORIGINS`. CORS is
+not the mutation authorization check: Admin mutations and the Auth mutations
+that establish, renew, or end an Admin session also require the request's
+`Origin` to exactly match one of those configured origins. The complete HTTP
+request contract is in [`API Reference → Request admission`](./api.md#request-admission).
 
 ## On-Chain Admin Updates
 
@@ -79,18 +84,18 @@ Memory adapters remain test fixtures. They are not runtime defaults for the depl
 
 Default Redis namespaces are owned by their adapter modules:
 
-| Namespace | Runtime state |
-| --- | --- |
-| `stelis:{sponsored-execution}:` | Prepared, executing, and final receipt records; deadlines; pending callbacks; prepare indexes; generic nonce reservations. |
-| `stelis:inflight:slots` | Shared prepare in-flight limiter. |
-| `stelis:rate_limit:` | Fixed-window request counters. |
-| `stelis:abuse:` | Abuse counters and temporary blocks. |
-| `stelis:sponsor_lease:` | Sponsor slot leases. |
-| `stelis:app-api:sponsor-operations:` | Sponsor-address and Sponsor Refill Account balance observations, account-spend records, and operation locks. |
-| `stelis:sponsored_logs:` | Sponsored execution aggregate and recent entries read by admin routes. |
-| `stelis:promo:` | Promotion records and promotion indexes. |
-| `stelis:promotion_execution_ledger:` | Promotion accounting, entitlements, reservations, final operation results, and reservation deadlines. |
-| `stelis:app-api:admin:not_before` | Admin session invalidation timestamp. |
+| Namespace                            | Runtime state                                                                                                              |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `stelis:{sponsored-execution}:`      | Prepared, executing, and final receipt records; deadlines; pending callbacks; prepare indexes; generic nonce reservations. |
+| `stelis:inflight:slots`              | Shared prepare in-flight limiter.                                                                                          |
+| `stelis:rate_limit:`                 | Fixed-window request counters.                                                                                             |
+| `stelis:abuse:`                      | Abuse counters and temporary blocks.                                                                                       |
+| `stelis:sponsor_lease:`              | Sponsor slot leases.                                                                                                       |
+| `stelis:app-api:sponsor-operations:` | Sponsor-address and Sponsor Refill Account balance observations, account-spend records, and operation locks.               |
+| `stelis:sponsored_logs:`             | Sponsored execution aggregate and recent entries read by admin routes.                                                     |
+| `stelis:promo:`                      | Promotion records and promotion indexes.                                                                                   |
+| `stelis:promotion_execution_ledger:` | Promotion accounting, entitlements, reservations, final operation results, and reservation deadlines.                      |
+| `stelis:app-api:admin:not_before`    | Admin session invalidation timestamp.                                                                                      |
 
 ## Redis Deployment Topology
 
@@ -133,33 +138,41 @@ Prepare capacity is enforced by the shared Redis write authority.
 
 Prepare admission uses these gates in order:
 
-1. Sponsor operation state and sponsor slot leases are read from Redis.
-2. The request is rejected with `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` when no healthy sponsor slot remains and the sponsor refill account is unhealthy.
-3. The request is rejected with `SPONSOR_CAPACITY_UNAVAILABLE` when no healthy sponsor slot remains or every healthy sponsor slot is already leased.
-4. IP abuse and rate-limit checks run after the sponsor capacity gate.
-5. `RedisPrepareInflight` reserves one in-flight prepare slot before chain reads, build, and simulation.
-6. A full in-flight limiter rejects prepare with `PREPARE_OVERLOADED` and `Retry-After: 2`.
-7. Sponsor slot checkout failure after in-flight admission rejects prepare with `NO_SPONSOR_SLOT`.
+1. The Host applies client-IP abuse and rate-limit checks.
+2. It validates `Content-Type`, reads the bounded JSON body, and validates the
+   request fields.
+3. It verifies the wallet-signed prepare authorization and applies the
+   authenticated sender block check.
+4. Only then does it read SponsorOperations state and sponsor slot leases from
+   Redis. It returns `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` when no healthy sponsor
+   slot remains and the Sponsor Refill Account is unhealthy, or
+   `SPONSOR_CAPACITY_UNAVAILABLE` when no healthy sponsor slot remains or every
+   healthy sponsor slot is already leased.
+5. `RedisPrepareInflight` reserves one in-flight prepare slot before chain
+   reads, build, and simulation. A full limiter returns `PREPARE_OVERLOADED`
+   with `Retry-After: 2`.
+6. Sponsor slot checkout failure after in-flight admission returns
+   `NO_SPONSOR_SLOT`.
 
 Sponsor submission does not require a free sponsor address. It completes an existing prepared receipt and checks the fresh balance observation for the sponsor address bound to that receipt.
 
 Capacity-related retry contract:
 
-| Code | HTTP status | Retry guidance |
-| --- | ---: | --- |
-| `SPONSOR_CAPACITY_UNAVAILABLE` | 503 | Retry after sponsor capacity recovers. |
-| `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` | 503 | Retry after sponsor capacity recovers; operators inspect refill account health. |
-| `PREPARE_OVERLOADED` | 503 | Retry after the `Retry-After` header. |
-| `NO_SPONSOR_SLOT` | 503 | Retry prepare after sponsor capacity recovers. |
+| Code                               | HTTP status | Retry guidance                                                                  |
+| ---------------------------------- | ----------: | ------------------------------------------------------------------------------- |
+| `SPONSOR_CAPACITY_UNAVAILABLE`     |         503 | Retry after sponsor capacity recovers.                                          |
+| `SPONSOR_REFILL_ACCOUNT_UNHEALTHY` |         503 | Retry after sponsor capacity recovers; operators inspect refill account health. |
+| `PREPARE_OVERLOADED`               |         503 | Retry after the `Retry-After` header.                                           |
+| `NO_SPONSOR_SLOT`                  |         503 | Retry prepare after sponsor capacity recovers.                                  |
 
 Capacity alert thresholds:
 
-| Signal | Alert condition |
-| --- | --- |
-| Free healthy sponsor slots | `0` for `60s`. |
-| Prepare in-flight utilization | `>= 90%` of `PREPARE_INFLIGHT_CAPACITY` or the default capacity for `60s`. |
-| `SPONSOR_CAPACITY_UNAVAILABLE` responses | Greater than `0` for `60s`. |
-| `PREPARE_OVERLOADED` responses | Greater than `0` for `60s`. |
+| Signal                                   | Alert condition                                                            |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| Free healthy sponsor slots               | `0` for `60s`.                                                             |
+| Prepare in-flight utilization            | `>= 90%` of `PREPARE_INFLIGHT_CAPACITY` or the default capacity for `60s`. |
+| `SPONSOR_CAPACITY_UNAVAILABLE` responses | Greater than `0` for `60s`.                                                |
+| `PREPARE_OVERLOADED` responses           | Greater than `0` for `60s`.                                                |
 
 Sponsor slot scan policy:
 
@@ -198,22 +211,23 @@ An admin withdrawal `503` with code `WITHDRAWAL_PENDING` is an uncertain outcome
 
 State writers use Redis server time for `lastObservedAtMs`. Sponsor Refill Account observations compare the sampled operation ID, spend sequence, and account write sequence. General slot observations compare the sampled slot write sequence and cannot write while a refill operation is active. Spend transitions compare operation ID and spend sequence; their account-balance projection is applied only when its sampled account write sequence is still current, so ordinary observations cannot starve the transaction state machine or be overwritten by an older sample. Terminal refill slot projection also compares the owning operation and slot write sequence. Each accepted observation advances its sequence, so a late RPC or submit result cannot overwrite a newer operation or observation.
 
-## Studio Mode Operations
+## `relay_and_studio` Operations
 
 Studio promotion routes are available when the Host boots with all required Studio configuration:
 
 - `ADMIN_JWT_SECRET`
 - `ADMIN_ADDRESS`
+- `CORS_ORIGINS`
 - `STUDIO_ALLOWED_TARGETS`
 - `STUDIO_DEVELOPER_JWT_TRUST_JSON`
 
 `STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional.
 
-When these variables are present, the Host runs in dual mode: generic relay routes and Studio promotion routes are both active. Without the complete Studio configuration, the Host runs the generic relay routes only.
+The Host has exactly two operating modes. With all required Studio configuration it runs in `relay_and_studio` mode and exposes both Relay API and Studio routes. With none of the Studio or Admin configuration it runs in `relay_only` mode and exposes only the Relay API. A partial Studio or Admin configuration fails boot. Every local `relay_and_studio` setting is parsed and validated before the Host starts Sui endpoint qualification.
 
 `STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation canonicalizes package addresses and rejects an empty list, malformed entries, and canonical duplicates. Promotion prepare and sponsor requests compare every MoveCall with that same boot-time set.
 
-`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds. The callback response is the closed current shape `{ "valid": boolean, "reason"?: string }`: an explicit `false` is `AUTH_JWT_INVALID`, while transport failure or a malformed/non-current response is `AUTH_UNAVAILABLE`. Both fail closed.
+`STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds. The callback URL must use HTTPS. HTTP is accepted only when its parsed hostname is exactly `localhost`, `127.0.0.1`, or `[::1]`; subdomains, other `127/8` addresses, and IPv4-mapped IPv6 addresses are rejected. Embedded username or password credentials and URL fragments are rejected. The Host sends the JWT only to that validated URL, omits ambient credentials, and never follows a redirect response. The callback response is the closed current shape `{ "valid": boolean, "reason"?: string }`: an explicit `false` is `AUTH_JWT_INVALID`, while a redirect, transport failure, or malformed/non-current response is `AUTH_UNAVAILABLE`. Both fail closed.
 
 Promotion execution uses Redis-backed promotion records and one promotion execution ledger. The ledger owns Promotion accounting, entitlements, reservations, permanent final operation results, and the reservation deadline index. It reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
 
@@ -221,7 +235,8 @@ Promotion execution uses Redis-backed promotion records and one promotion execut
 
 `@stelis/app-admin` uses `/auth/*` for admin sessions and `/api/*` for operator actions.
 
-Admin dashboard operation requires `ADMIN_ADDRESS` and `ADMIN_JWT_SECRET`.
+Admin dashboard operation requires a `relay_and_studio` Host, including the
+five required settings listed above.
 
 Optional admin settings:
 
@@ -229,6 +244,20 @@ Optional admin settings:
 - `COOKIE_DOMAIN`
 
 Boot validation requires `ADMIN_JWT_SECRET` to be at least 32 characters when it is configured. If `ADMIN_ADDRESS` is configured, the sponsor refill account address must be different from the admin address.
+
+## Host process shutdown
+
+The standard Node entry point uses one `ApplicationRuntime` for boot,
+readiness, request intake, and shutdown. `SIGINT` and `SIGTERM` invoke the same
+awaited stop operation. Shutdown stops HTTP intake and drains in-flight HTTP
+requests, stops and awaits SponsorOperations, stops and awaits sponsored
+execution recovery and expiration-cleanup tasks, disposes the Host context,
+then closes Redis. A partial boot cleans up every resource acquired before the
+failure in the same ownership order.
+
+The temporary Vercel adapter is not a long-running process runtime and does not
+provide this process-signal lifecycle. Its deployment limitation is described
+in the [`@stelis/app-api` README](../packages/app-api/README.md#temporary-vercel-demo-adapter).
 
 <a id="settlement-token-onboarding-procedure"></a>
 
@@ -240,12 +269,8 @@ The file is a network-keyed object with `testnet` and `mainnet` sections. The Ho
 
 ```json
 {
-  "testnet": [
-    "0x..."
-  ],
-  "mainnet": [
-    "0x..."
-  ]
+  "testnet": ["0x..."],
+  "mainnet": ["0x..."]
 }
 ```
 
@@ -265,15 +290,15 @@ The runtime event-name list is owned by [`packages/core-api/src/observability/ev
 
 Current structured event families:
 
-| Family | Representative events |
-| --- | --- |
-| Prepare pipeline | `PREPARE_STAGE`, `PREPARE_BUILD_STAGE`, `PREPARE_INFLIGHT_REJECTED`, `PREPARE_ENTRY_CORRUPT`, `PREPARE_SLOT_EXHAUSTED` |
-| Sponsor runtime | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `SETTLEMENT_ECONOMICS_EXECUTION` |
+| Family                              | Representative events                                                                                                                                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prepare pipeline                    | `PREPARE_STAGE`, `PREPARE_BUILD_STAGE`, `PREPARE_INFLIGHT_REJECTED`, `PREPARE_ENTRY_CORRUPT`, `PREPARE_SLOT_EXHAUSTED`                                                                                                       |
+| Sponsor runtime                     | `SPONSOR_FAILURE_RECORDED`, `SPONSOR_DRIFT_OBSERVED`, `SETTLEMENT_ECONOMICS_EXECUTION`                                                                                                                                       |
 | Sponsor pool and sponsor operations | `SPONSOR_POOL_LEASE_CHECKOUT`, `SPONSOR_POOL_LEASE_CHECKIN`, `SPONSOR_POOL_SIGN`, `SPONSOR_POOL_CHECKIN_FAILED`, `SPONSOR_RESULT_CALLBACK_FAILED`, `SPONSOR_OPERATIONS_STATE_WRITE_FAILED`, `SPONSOR_OPERATIONS_TASK_FAILED` |
-| Sponsored execution logs | `SPONSORED_LOGS_RECORDER_FAILED` |
-| Studio promotion | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_GAS_OVERRUN_WARNING` |
-| Promotion execution ledger | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR` |
-| Abuse blocking | `ABUSE_BLOCK_EXPIRY_TASK_FAILED` |
+| Sponsored execution logs            | `SPONSORED_LOGS_RECORDER_FAILED`                                                                                                                                                                                             |
+| Studio promotion                    | `PROMOTION_ABUSE_RECORDED`, `PROMOTION_SPONSOR_EXECUTION`, `PROMOTION_GAS_OVERRUN_WARNING`                                                                                                                                   |
+| Promotion execution ledger          | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR`                                                                                                                                                |
+| Abuse blocking                      | `ABUSE_BLOCK_EXPIRY_TASK_FAILED`                                                                                                                                                                                             |
 
 Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.
 

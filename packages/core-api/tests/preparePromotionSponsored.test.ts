@@ -16,7 +16,7 @@ import { describe, test, expect, vi } from 'vitest';
 import { SUI_CHAIN_IDENTIFIERS, type AdminPromotionCreateRequest } from '@stelis/contracts';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
-  handlePromotionPrepare,
+  handlePromotionPrepare as handlePromotionPrepareCore,
   PromotionPrepareError,
   type PromotionPrepareContext,
 } from '../src/studio/preparePromotionSponsoredHandler.js';
@@ -42,6 +42,7 @@ import {
   suiEndpointSnapshotFixture,
   suiSimulationSuccess,
 } from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 type BuildAddressBalanceGasTransactionOptions = Parameters<
   typeof buildAddressBalanceGasTransaction
@@ -104,6 +105,29 @@ const BASE_PROMO: AdminPromotionCreateRequest = {
   postClaimUseWindowMs: 0,
   startAt: null,
 };
+
+type TestPromotionPrepareParams = Omit<
+  Parameters<typeof handlePromotionPrepareCore>[1],
+  'clientIp'
+> & { readonly clientIp: string };
+
+const TEST_ADMISSION_BLOCKER = {
+  checkIp: async () => ({ blocked: false as const }),
+  checkSubject: async () => ({ blocked: false as const }),
+  recordSponsorFailure: async () => undefined,
+};
+
+async function handlePromotionPrepare(
+  ctx: PromotionPrepareContext,
+  params: TestPromotionPrepareParams,
+  admission = { assertSponsorAvailable: async () => undefined },
+) {
+  return handlePromotionPrepareCore(
+    ctx,
+    { ...params, clientIp: await admitTestClientIp(TEST_ADMISSION_BLOCKER, params.clientIp) },
+    admission,
+  );
+}
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -418,6 +442,9 @@ describe('handlePromotionPrepare', () => {
 
   test('rejects undecodable txKindBytes with BAD_TX_KIND before inflight, checkout, reserve, or store (fail-closed decode)', async () => {
     const { ctx, promoId } = await setup();
+    const sponsorAvailable = vi.fn(async () => undefined);
+    const promotionReadSpy = vi.spyOn(ctx.promotionStore, 'get');
+    const entitlementReadSpy = vi.spyOn(ctx.executionLedger, 'getEntitlement');
     const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
@@ -428,19 +455,26 @@ describe('handlePromotionPrepare', () => {
     const garbageTxKind = toBase64(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
 
     try {
-      await handlePromotionPrepare(ctx, {
-        promotionId: promoId,
-        senderAddress: USER_ADDR,
-        txKindBytes: garbageTxKind,
-        verifiedIdentity: buildIdentity(),
-        clientIp: '127.0.0.1',
-      });
+      await handlePromotionPrepare(
+        ctx,
+        {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes: garbageTxKind,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        },
+        { assertSponsorAvailable: sponsorAvailable },
+      );
       expect.unreachable('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('BAD_TX_KIND');
     }
     expect(inflightSpy).not.toHaveBeenCalled();
+    expect(sponsorAvailable).not.toHaveBeenCalled();
+    expect(promotionReadSpy).not.toHaveBeenCalled();
+    expect(entitlementReadSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
     expect(checkoutSpy).not.toHaveBeenCalled();
     expect(reserveSpy).not.toHaveBeenCalled();

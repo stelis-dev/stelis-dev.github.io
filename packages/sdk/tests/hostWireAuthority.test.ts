@@ -14,8 +14,10 @@ import {
   parseAdminSponsoredLogsQuery,
   parseAdminSponsoredLogsResponse,
   parseHostErrorResponse,
+  parsePromotionClaimRequest,
   parsePromotionListResponse,
   parsePromotionPageQuery,
+  parseReceiptId,
   parseSponsorRefillAccountWithdrawalResponse,
   type HostErrorCode,
 } from '@stelis/contracts';
@@ -77,7 +79,7 @@ function currentSponsoredLogsResponse() {
         createdAt: '2026-07-15T00:00:00.000Z',
         mode: 'generic',
         outcome: 'success',
-        receiptId: 'receipt-1',
+        receiptId: `0x${'ab'.repeat(32)}`,
         digest: 'digest-1',
         senderAddress: '0x1',
         sponsorAddress: '0x2',
@@ -144,7 +146,6 @@ function currentSponsorOperationsResponse() {
       vaultRegistryId: null,
       deepbookPackageId: null,
     },
-    studioEnabled: false,
     rpcFleet: { endpoints: [{ origin: 'https://rpc.test', role: 'primary' }] },
   };
 }
@@ -213,6 +214,25 @@ describe('contracts-owned Host wire authority', () => {
       expect(() => parsePromotionPageQuery({ cursor })).toThrow(/canonical lowercase UUID-v4/);
     }
     expect(() => parseAdminPromotionListQuery({ status: '' })).toThrow(/status is not current/);
+  });
+
+  test('owns the current receipt ID and empty Promotion-claim contracts', () => {
+    const receiptId = `0x${'ab'.repeat(32)}`;
+    expect(parseReceiptId(receiptId)).toBe(receiptId);
+    for (const invalidReceiptId of [
+      'ab'.repeat(32),
+      `0x${'AB'.repeat(32)}`,
+      `0x${'ab'.repeat(31)}`,
+    ]) {
+      expect(() => parseReceiptId(invalidReceiptId)).toThrow(
+        /0x followed by 64 lowercase hex digits/,
+      );
+    }
+
+    expect(parsePromotionClaimRequest({})).toEqual({});
+    expect(() => parsePromotionClaimRequest({ legacyClaimOption: true })).toThrow(
+      /non-current field/,
+    );
   });
 
   test('binds Studio pages to canonical ascending IDs and the final-item cursor', () => {
@@ -303,7 +323,11 @@ describe('contracts-owned Host wire authority', () => {
     expect(() => parseAdminSponsoredLogsResponse(outOfRangeMist)).toThrow(/fit in u64/);
 
     const genericWithPromotionIdentity = currentSponsoredLogsResponse();
-    Reflect.set(genericWithPromotionIdentity.entries[0]!, 'promotionId', 'promotion-1');
+    Reflect.set(
+      genericWithPromotionIdentity.entries[0]!,
+      'promotionId',
+      '00000000-0000-4000-8000-000000000001',
+    );
     expect(() => parseAdminSponsoredLogsResponse(genericWithPromotionIdentity)).toThrow(
       /generic mode cannot carry Promotion identity/,
     );

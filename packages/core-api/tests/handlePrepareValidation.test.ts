@@ -30,6 +30,7 @@ import {
   withPrepareAuthorization,
 } from './prepareAuthTestHelpers.js';
 import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -76,6 +77,11 @@ const SPONSOR_ADDRESS = `0x${'55'.repeat(32)}`;
 const DEEPBOOK_PACKAGE_ID = `0x${'66'.repeat(32)}`;
 const POOL_ID = `0x${'77'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
+const TEST_ABUSE_BLOCKER = {
+  checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+  checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+  recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+};
 
 function addressBalanceGasTransactionFixture(bytes: Uint8Array): AddressBalanceGasTransaction {
   const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
@@ -128,11 +134,7 @@ function makeCtx() {
     configId: CONFIG_ID,
     vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
-    abuseBlocker: {
-      checkIp: vi.fn().mockResolvedValue({ blocked: false }),
-      checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
-      recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
-    },
+    abuseBlocker: TEST_ABUSE_BLOCKER,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
@@ -210,6 +212,7 @@ async function makeParams(txKindBytes: string): Promise<PrepareParams> {
       senderAddress: TEST_PREPARE_AUTH_SENDER,
       settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       clientIp: '127.0.0.1',
+      abuseBlocker: TEST_ABUSE_BLOCKER,
     },
     { packageId: TEST_PREPARE_AUTH_PACKAGE_ID },
   );
@@ -293,7 +296,12 @@ describe('handlePrepare — built-transaction validation rejection', () => {
     const ctx = makeCtx();
 
     try {
-      await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg());
+      await handlePrepare(
+        ctx,
+        await makeParams(txKindBytes),
+        makeExtraCfg(),
+        ALLOW_PREPARE_REQUEST,
+      );
       expect.unreachable('Expected PrepareValidationError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
@@ -331,7 +339,12 @@ describe('handlePrepare — built-transaction validation rejection', () => {
     const ctx = makeCtx();
 
     try {
-      await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg());
+      await handlePrepare(
+        ctx,
+        await makeParams(txKindBytes),
+        makeExtraCfg(),
+        ALLOW_PREPARE_REQUEST,
+      );
       expect.unreachable('Expected PrepareValidationError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
@@ -366,7 +379,12 @@ describe('handlePrepare — built-transaction validation rejection', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const ctx = makeCtx();
 
-    await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg()).catch(() => {});
+    await handlePrepare(
+      ctx,
+      await makeParams(txKindBytes),
+      makeExtraCfg(),
+      ALLOW_PREPARE_REQUEST,
+    ).catch(() => {});
 
     // Slot must be released even on built-transaction validation failure. checkin is called with
     // `(sponsorAddress, receiptId)` where receiptId is the generated lease

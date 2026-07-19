@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, useOutletContext } from 'react-router-dom';
 import { RenewModal } from './RenewModal';
-import { logoutAdminSession, getSponsorOperations } from '../api/client';
+import { logoutAdminSession } from '../api/client';
 import type { AuthContext } from './AuthGuard';
 
 const RENEW_WARNING_SECONDS = 60;
@@ -32,14 +32,6 @@ export function AdminLayout() {
   const isRenewingRef = useRef(false);
   const graceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [fastTick, setFastTick] = useState(false);
-  const [studioEnabled, setStudioEnabled] = useState(false);
-
-  // Fetch studio mode on mount
-  useEffect(() => {
-    getSponsorOperations()
-      .then((data) => setStudioEnabled(data.studioEnabled === true))
-      .catch(() => setStudioEnabled(false));
-  }, []);
 
   // Sync session exp
   useEffect(() => {
@@ -122,7 +114,7 @@ export function AdminLayout() {
 
   const navItems = [
     { path: '/dashboard', label: 'Dashboard' },
-    ...(studioEnabled ? [{ path: '/promotions', label: 'Promotions' }] : []),
+    { path: '/promotions', label: 'Promotions' },
     { path: '/sponsored-logs', label: 'Sponsored Logs' },
     { path: '/security', label: 'Security' },
     { path: '/config', label: 'Config' },

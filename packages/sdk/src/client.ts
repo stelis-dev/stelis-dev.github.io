@@ -23,14 +23,19 @@ import type {
 } from './types.js';
 import {
   parsePromotionPrepareResponse,
+  parsePromotionPrepareRequest,
   parsePromotionSponsorResponse,
+  parsePromotionSponsorRequest,
+  parsePromotionId,
   parsePromotionPageQuery,
   parsePromotionListResponse,
   parsePromotionDetailResponse,
   parseRelayConfigResponse,
   parseRelayPrepareResponse,
+  parseRelayPrepareRequest,
   parseHostErrorResponse,
   parseRelaySponsorResponse,
+  parseRelaySponsorRequest,
   parseRelayStatusResponse,
   PROMOTION_PREPARE_ERROR_CODES,
   PROMOTION_SPONSOR_ERROR_CODES,
@@ -120,10 +125,11 @@ export class StelisClient {
     params: RelayPrepareRequest,
     headers?: Record<string, string>,
   ): Promise<RelayPrepareResponse> {
+    const request = parseRelayPrepareRequest(params);
     return parseRelayPrepareResponse(
       await this.post(
         '/prepare',
-        params,
+        request,
         this.timeouts.prepareMs,
         RELAY_PREPARE_ERROR_CODES,
         headers,
@@ -139,10 +145,11 @@ export class StelisClient {
     params: RelaySponsorRequest,
     headers?: Record<string, string>,
   ): Promise<RelaySponsorResponse> {
+    const request = parseRelaySponsorRequest(params);
     return parseRelaySponsorResponse(
       await this.post(
         '/sponsor',
-        params,
+        request,
         this.timeouts.sponsorMs,
         RELAY_SPONSOR_ERROR_CODES,
         headers,
@@ -159,10 +166,12 @@ export class StelisClient {
     params: PromotionPrepareRequest,
     developerJwt: string,
   ): Promise<PromotionPrepareResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
+    const request = parsePromotionPrepareRequest(params);
     return parsePromotionPrepareResponse(
       await this.studioPost(
-        `/studio/promotions/${encodeURIComponent(promotionId)}/prepare`,
-        params,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}/prepare`,
+        request,
         this.timeouts.studioWriteMs,
         PROMOTION_PREPARE_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
@@ -175,10 +184,12 @@ export class StelisClient {
     params: PromotionSponsorRequest,
     developerJwt: string,
   ): Promise<PromotionSponsorResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
+    const request = parsePromotionSponsorRequest(params);
     return parsePromotionSponsorResponse(
       await this.studioPost(
-        `/studio/promotions/${encodeURIComponent(promotionId)}/sponsor`,
-        params,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}/sponsor`,
+        request,
         this.timeouts.studioWriteMs,
         PROMOTION_SPONSOR_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
@@ -216,9 +227,10 @@ export class StelisClient {
     promotionId: string,
     developerJwt: string,
   ): Promise<PromotionDetailResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
     return parsePromotionDetailResponse(
       await this.studioGet(
-        `/studio/promotions/${encodeURIComponent(promotionId)}`,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}`,
         { Authorization: `Bearer ${developerJwt}` },
         this.timeouts.studioReadMs,
         STUDIO_DETAIL_ERROR_CODES,

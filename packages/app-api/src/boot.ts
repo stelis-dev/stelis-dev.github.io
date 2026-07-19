@@ -1,8 +1,8 @@
 /**
  * [app-api] Boot/instrumentation — runs before the server starts.
  *
- * Validates all required env vars and determines runtime mode
- * (generic-only vs. generic+studio). Runtime resources are created only after
+ * Validates all required env vars and determines the Host operating mode
+ * (`relay_only` or `relay_and_studio`). Runtime resources are created only after
  * every boot input and Sui endpoint has qualified.
  *
  * Shared references:
@@ -13,7 +13,8 @@
  *   - STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId → @stelis/contracts
  *
  * Admin session keyspace → stelis:app-api:admin:not_before
- * Dual auto-detect mode: generic always on, studio on when env is complete
+ * Any mode-specific setting selects `relay_and_studio`; partial configuration
+ * fails before runtime resources are created.
  */
 import {
   parseSponsorKey,
@@ -30,6 +31,7 @@ import {
   isNodeTimerDelayMs,
   NODE_TIMER_MAX_DELAY_MS,
   requireContractId,
+  type HostOperatingMode,
   type SingleHopSettlementSwapPath,
 } from '@stelis/contracts';
 import {
@@ -53,38 +55,30 @@ import {
 import { canonicalizePromotionTarget, parseDeveloperJwtTrustConfig } from '@stelis/core-api/studio';
 import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
-import type { ContextRuntimeInput } from './context.js';
+import type {
+  ContextRuntimeInput,
+  RelayAndStudioContextRuntimeInput,
+  RelayOnlyContextRuntimeInput,
+} from './context.js';
 import type { AdminAuthRuntimeConfig } from './adminAuth.js';
 import { createSponsorOperationsSettings } from './sponsor-operations/settings.js';
 
-/** Runtime mode resolved at boot — determines which route groups are active. */
-export interface BootSummary {
-  /** 'generic' | 'dual' (generic always on, studio conditional) */
-  readonly mode: 'generic' | 'dual';
-  /** Whether the studio env set is complete. */
-  readonly studioEnabled: boolean;
-  /** Network: testnet or mainnet */
-  readonly network: 'testnet' | 'mainnet';
-}
-
-/** Secret-bearing process input. This value never leaves createApp. */
-export interface AppRuntimeInput {
-  readonly context: ContextRuntimeInput;
+/** Secret-bearing process input. This value never leaves ApplicationRuntime. */
+interface AppRuntimeInputBase<TContext extends ContextRuntimeInput> {
+  readonly context: TContext;
   readonly trustedProxyHops: number;
-  readonly corsAllowedOrigins: readonly string[];
-  readonly adminAddress: string | null;
-  readonly adminAuth: AdminAuthRuntimeConfig;
 }
 
-export interface BootValidationResult {
-  readonly runtimeInput: AppRuntimeInput;
-  readonly publicSummary: BootSummary;
-}
+export type RelayOnlyAppRuntimeInput = AppRuntimeInputBase<RelayOnlyContextRuntimeInput>;
 
-/** Human-readable runtime mode string for boot logs. */
-export function formatRuntimeMode(mode: BootSummary['mode']): string {
-  return mode === 'dual' ? 'dual (relay + studio)' : 'generic (relay only)';
-}
+export type RelayAndStudioAppRuntimeInput =
+  AppRuntimeInputBase<RelayAndStudioContextRuntimeInput> & {
+    readonly corsAllowedOrigins: readonly string[];
+    readonly adminAddress: string;
+    readonly adminAuth: AdminAuthRuntimeConfig;
+  };
+
+export type AppRuntimeInput = RelayOnlyAppRuntimeInput | RelayAndStudioAppRuntimeInput;
 
 export function resolveTrustedProxyHopsForBoot(input: {
   trustedProxyHops: string | null | undefined;
@@ -158,7 +152,7 @@ function parseCookieDomain(rawValue: string | undefined): string | null {
  *
  * Throws on any validation failure (fail-closed).
  */
-export async function runBootValidation(): Promise<BootValidationResult> {
+export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntimeInput> {
   // Capture before the first await. RPC auth variables referenced indirectly
   // from rpc.json use this same snapshot through the injected lookup below.
   const environment: Readonly<Record<string, string | undefined>> = { ...process.env };
@@ -167,6 +161,33 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     if (!value) throw new Error(`[app-api] Missing required environment variable: ${name}`);
     return value;
   };
+
+  const relayAndStudioRequiredKeys = [
+    'ADMIN_ADDRESS',
+    'ADMIN_JWT_SECRET',
+    'CORS_ORIGINS',
+    'STUDIO_ALLOWED_TARGETS',
+    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
+  ] as const;
+  const relayAndStudioOptionalKeys = [
+    'ADMIN_SESSION_EXPIRY',
+    'COOKIE_DOMAIN',
+    'STUDIO_DEVELOPER_JWT_VERIFY_URL',
+  ] as const;
+  const configuredHostModeKeys = [
+    ...relayAndStudioRequiredKeys,
+    ...relayAndStudioOptionalKeys,
+  ].filter((name) => !!environment[name]?.trim());
+  const mode: HostOperatingMode =
+    configuredHostModeKeys.length === 0 ? 'relay_only' : 'relay_and_studio';
+  if (mode === 'relay_and_studio') {
+    const missing = relayAndStudioRequiredKeys.filter((name) => !environment[name]?.trim());
+    if (missing.length > 0) {
+      throw new Error(
+        `[app-api] \`relay_and_studio\` configuration is incomplete. Missing: ${missing.join(', ')}`,
+      );
+    }
+  }
 
   // ── 1. Generic required env vars ─────────────────────────────────────────
   // RPC fleet config is loaded from packages/app-api/rpc.json (not env).
@@ -351,7 +372,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
   });
 
   // ── 9. Admin env validation ──────────────────────────────────────────────
-  const adminAddrRaw = environment.ADMIN_ADDRESS?.trim();
+  const adminAddrRaw = mode === 'relay_and_studio' ? requireBootEnv('ADMIN_ADDRESS') : undefined;
   let adminAddress: string | null = null;
   if (adminAddrRaw) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(adminAddrRaw)) {
@@ -368,7 +389,7 @@ export async function runBootValidation(): Promise<BootValidationResult> {
       );
     }
   }
-  const adminJwtSecret = environment.ADMIN_JWT_SECRET?.trim() || null;
+  const adminJwtSecret = mode === 'relay_and_studio' ? requireBootEnv('ADMIN_JWT_SECRET') : null;
   if (adminJwtSecret) {
     if (adminJwtSecret.length < 32) {
       throw new Error('[app-api] ADMIN_JWT_SECRET must be at least 32 characters');
@@ -381,20 +402,21 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     throw new Error('[app-api] ADMIN_SESSION_EXPIRY is too large for withdrawal receipt TTL');
   }
   const cookieDomain = parseCookieDomain(environment.COOKIE_DOMAIN);
-  const adminAuth: AdminAuthRuntimeConfig = {
-    jwt: adminJwtSecret
+  const adminAuth: AdminAuthRuntimeConfig | null =
+    mode === 'relay_and_studio'
       ? {
-          jwtSecret: adminJwtSecret,
-          sessionExpiry: adminSessionExpiry,
-          issuer: 'app-api',
+          jwt: {
+            jwtSecret: adminJwtSecret!,
+            sessionExpiry: adminSessionExpiry,
+            issuer: 'app-api',
+          },
+          cookie: {
+            maxAgeSeconds: adminSessionMaxAgeSeconds,
+            secure: environment.NODE_ENV === 'production',
+            domain: cookieDomain,
+          },
         }
-      : null,
-    cookie: {
-      maxAgeSeconds: adminSessionMaxAgeSeconds,
-      secure: environment.NODE_ENV === 'production',
-      domain: cookieDomain,
-    },
-  };
+      : null;
 
   const sponsorOperationsSettings = createSponsorOperationsSettings({
     network,
@@ -413,64 +435,19 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     withdrawalReceiptTtlMs,
   });
 
-  const corsAllowedOrigins = parseCorsAllowedOrigins(environment.CORS_ORIGINS);
-
-  // ── 10. Qualify the immutable Sui endpoint boundary ──────────────────────
-  const rpcEndpoints = loadRpcConfig(network, undefined, (name) => environment[name]);
-  const hostChainStateIds = Object.freeze({
-    packageId: contractIds!.packageId,
-    configId: contractIds!.configId,
-    vaultRegistryId: contractIds!.vaultRegistryId,
-  });
-  const qualifiedSui = await qualifySuiRpcEndpoints<{
-    readonly initialHostChainState: HostChainState;
-    readonly settlementSwapPaths: readonly SingleHopSettlementSwapPath[];
-  }>({
-    network,
-    endpoints: rpcEndpoints,
-    qualify: async ({ snapshot, signal }) => {
-      const [initialHostChainState, settlementSwapPaths] = await Promise.all([
-        readHostChainState(snapshot, hostChainStateIds, signal),
-        resolveSettlementSwapPathRegistry(
-          snapshot,
-          deepbookIds!.packageId,
-          settlementSwapPathRegistryEntries,
-          signal,
-        ),
-      ]);
-      return Object.freeze({
-        initialHostChainState,
-        settlementSwapPaths: Object.freeze([...settlementSwapPaths]),
-      });
-    },
-  });
-  if (qualifiedSui.rejected.length > 0) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[app-api] RPC endpoint(s) excluded: ${qualifiedSui.rejected
-        .map((endpoint) => `${endpoint.url}: ${endpoint.kind}`)
-        .join('; ')}`,
-    );
+  const corsAllowedOrigins =
+    mode === 'relay_and_studio' ? parseCorsAllowedOrigins(environment.CORS_ORIGINS) : [];
+  if (mode === 'relay_and_studio' && corsAllowedOrigins.length === 0) {
+    throw new Error('[app-api] CORS_ORIGINS must contain at least one Admin origin');
   }
-  // eslint-disable-next-line no-console
-  console.log(
-    `[app-api] Sui RPC: ${qualifiedSui.snapshot.endpointCount}/${rpcEndpoints.length} endpoint(s) qualified — ` +
-      qualifiedSui.adminSnapshot.endpoints.map((endpoint) => endpoint.origin).join(', '),
-  );
-  const primaryQualification = qualifiedSui.primaryQualification;
 
-  // ── 10. Studio auto-detect ─────────────────────────────────────────────
-  // Studio auth uses developer JWT trust (STUDIO_DEVELOPER_JWT_TRUST_JSON).
-  const studioEnvKeys = [
-    'ADMIN_JWT_SECRET',
-    'ADMIN_ADDRESS',
-    'STUDIO_ALLOWED_TARGETS',
-    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
-  ];
-  const studioEnvPresent = studioEnvKeys.every((k) => !!environment[k]?.trim());
-  let studioRuntimeInput: ContextRuntimeInput['studio'] = null;
+  // ── 10. `relay_and_studio` configuration ────────────────────────────────
+  // Validate every local Studio input before any Sui endpoint qualification.
+  let studioRuntimeInput:
+    | Extract<ContextRuntimeInput, { readonly mode: 'relay_and_studio' }>['studio']
+    | null = null;
 
-  if (studioEnvPresent) {
+  if (mode === 'relay_and_studio') {
     // STUDIO_ALLOWED_TARGETS — comma-separated pkg::mod::fn, at least one entry
     const targetsRaw = requireBootEnv('STUDIO_ALLOWED_TARGETS');
     const targets = targetsRaw
@@ -512,8 +489,18 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     if (verifyUrl) {
       try {
         const parsed = new URL(verifyUrl);
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-          throw new Error('must be http or https');
+        const loopbackHttpHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+        if (
+          parsed.protocol !== 'https:' &&
+          !(parsed.protocol === 'http:' && loopbackHttpHosts.has(parsed.hostname))
+        ) {
+          throw new Error('must use HTTPS, except for an exact loopback hostname');
+        }
+        if (parsed.username !== '' || parsed.password !== '') {
+          throw new Error('must not contain embedded credentials');
+        }
+        if (parsed.hash !== '') {
+          throw new Error('must not contain a fragment');
         }
       } catch (e) {
         throw new Error(
@@ -529,46 +516,94 @@ export async function runBootValidation(): Promise<BootValidationResult> {
     };
   }
 
-  const studioEnabled = studioEnvPresent;
-  const mode: BootSummary['mode'] = studioEnabled ? 'dual' : 'generic';
+  // ── 11. Qualify the immutable Sui endpoint boundary ──────────────────────
+  const rpcEndpoints = loadRpcConfig(network, undefined, (name) => environment[name]);
+  const hostChainStateIds = Object.freeze({
+    packageId: contractIds!.packageId,
+    configId: contractIds!.configId,
+    vaultRegistryId: contractIds!.vaultRegistryId,
+  });
+  const qualifiedSui = await qualifySuiRpcEndpoints<{
+    readonly initialHostChainState: HostChainState;
+    readonly settlementSwapPaths: readonly SingleHopSettlementSwapPath[];
+  }>({
+    network,
+    endpoints: rpcEndpoints,
+    signal,
+    qualify: async ({ snapshot, signal }) => {
+      const [initialHostChainState, settlementSwapPaths] = await Promise.all([
+        readHostChainState(snapshot, hostChainStateIds, signal),
+        resolveSettlementSwapPathRegistry(
+          snapshot,
+          deepbookIds!.packageId,
+          settlementSwapPathRegistryEntries,
+          signal,
+        ),
+      ]);
+      return Object.freeze({
+        initialHostChainState,
+        settlementSwapPaths: Object.freeze([...settlementSwapPaths]),
+      });
+    },
+  });
+  if (qualifiedSui.rejected.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[app-api] RPC endpoint(s) excluded: ${qualifiedSui.rejected
+        .map((endpoint) => `${endpoint.url}: ${endpoint.kind}`)
+        .join('; ')}`,
+    );
+  }
   // eslint-disable-next-line no-console
-  console.log(`[app-api] Boot validation complete — mode: ${formatRuntimeMode(mode)}`);
+  console.log(
+    `[app-api] Sui RPC: ${qualifiedSui.snapshot.endpointCount}/${rpcEndpoints.length} endpoint(s) qualified — ` +
+      qualifiedSui.adminSnapshot.endpoints.map((endpoint) => endpoint.origin).join(', '),
+  );
+  const primaryQualification = qualifiedSui.primaryQualification;
 
-  return {
-    runtimeInput: {
-      context: {
-        redisUrl,
-        network,
-        contractIds: {
-          packageId: contractIds!.packageId,
-          configId: contractIds!.configId,
-          vaultRegistryId: contractIds!.vaultRegistryId,
-        },
-        deepbookPackageId: deepbookIds!.packageId,
-        sui: qualifiedSui.snapshot,
-        rpcFleet: qualifiedSui.adminSnapshot,
-        initialHostChainState: primaryQualification.initialHostChainState,
-        settlementSwapPaths: primaryQualification.settlementSwapPaths,
-        sponsorKeys,
-        sponsorLeaseHmacSecret: leaseHmacSecret,
-        settlementPayoutRecipientAddress: recipientAddr,
-        quotedHostFeeMist,
-        prepareInflightCapacity,
-        sponsorOperations: {
-          sponsorRefillAccountKey,
-          settings: sponsorOperationsSettings,
-        },
-        studio: studioRuntimeInput,
-      },
-      trustedProxyHops,
-      corsAllowedOrigins,
-      adminAddress,
-      adminAuth,
+  // eslint-disable-next-line no-console
+  console.log(`[app-api] Boot validation complete — mode: ${mode}`);
+
+  const contextBase = {
+    redisUrl,
+    network,
+    contractIds: {
+      packageId: contractIds!.packageId,
+      configId: contractIds!.configId,
+      vaultRegistryId: contractIds!.vaultRegistryId,
     },
-    publicSummary: {
-      mode,
-      studioEnabled,
-      network,
+    deepbookPackageId: deepbookIds!.packageId,
+    sui: qualifiedSui.snapshot,
+    initialHostChainState: primaryQualification.initialHostChainState,
+    settlementSwapPaths: primaryQualification.settlementSwapPaths,
+    sponsorKeys,
+    sponsorLeaseHmacSecret: leaseHmacSecret,
+    settlementPayoutRecipientAddress: recipientAddr,
+    quotedHostFeeMist,
+    prepareInflightCapacity,
+    sponsorOperations: {
+      sponsorRefillAccountKey,
+      settings: sponsorOperationsSettings,
     },
-  };
+  } as const;
+  const runtimeInput: AppRuntimeInput =
+    mode === 'relay_and_studio'
+      ? {
+          context: {
+            ...contextBase,
+            mode,
+            rpcFleet: qualifiedSui.adminSnapshot,
+            studio: studioRuntimeInput!,
+          },
+          trustedProxyHops,
+          corsAllowedOrigins,
+          adminAddress: adminAddress!,
+          adminAuth: adminAuth!,
+        }
+      : {
+          context: { ...contextBase, mode },
+          trustedProxyHops,
+        };
+
+  return runtimeInput;
 }

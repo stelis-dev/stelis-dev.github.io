@@ -58,7 +58,6 @@ const SPONSOR_OPERATIONS_DATA = {
     vaultRegistryId: '0x' + '3'.repeat(64),
     deepbookPackageId: '0x' + '4'.repeat(64),
   },
-  studioEnabled: false,
   rpcFleet: {
     endpoints: [
       {
@@ -1511,7 +1510,7 @@ describe('ConfigPage integration', () => {
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': sponsorOperationsDataWith1hop,
-        '/api/studio': { enabled: false },
+        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 
@@ -1532,7 +1531,7 @@ describe('ConfigPage integration', () => {
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
-        '/api/studio': { enabled: false },
+        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 

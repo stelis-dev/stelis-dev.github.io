@@ -1,6 +1,8 @@
 # @stelis/app-api
 
-Deployable Host API for sponsoring Sui transactions and enforcing settlement policy. It runs as a Hono server with Relay API, auth, admin, and promotion endpoints.
+Deployable Host API for sponsoring Sui transactions and enforcing settlement
+policy. It runs in exactly one of two modes: `relay_only`, or
+`relay_and_studio` with Relay API, Auth, Admin, and Studio routes available.
 
 - Built for: Host operators deploying the provided Host runtime, plus maintainers changing it.
 - Use for: running the Relay API, admin API, auth routes, and promotion routes.
@@ -15,7 +17,7 @@ This Host runtime does not deploy contracts itself. It uses only the selected
 network's current package, config, and vault IDs from the shipped code and docs.
 
 - Host Operator: start with [docs/getting-started.md](../../docs/getting-started.md), then [docs/operations.md](../../docs/operations.md).
-- Promotion operator: start with [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations).
+- Promotion operator: start with [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations).
 - API route and field reference: [docs/api.md](../../docs/api.md).
 - User transaction constraints: [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
 
@@ -23,13 +25,13 @@ This README is an entry point for the package. It does not replace the route and
 
 ## Mounted Endpoints
 
-| Prefix      | Purpose                                                                                           | Primary audience                              |
-| ----------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `/health`   | Root health probe returning `{ status: 'ok', mode }`                                              | Container/runtime health checks               |
-| `/relay/*`  | Public Relay API endpoints: status, config, prepare, sponsor                                      | SDK consumers, Host Operators                 |
-| `/studio/*` | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | Studio Operators, trusted backend integrators |
-| `/auth/*`   | Admin session authentication (nonce, verify, renew, logout, session)                              | Operators using `app-admin`                   |
-| `/api/*`    | Admin dashboard, sponsor pool operations, blocklist, auth audit, studio status, promotions        | Operators using `app-admin`                   |
+| Prefix      | Purpose                                                                                            | Available mode     |
+| ----------- | -------------------------------------------------------------------------------------------------- | ------------------ |
+| `/health`   | Root health probe returning `{ status: 'ok', mode }`                                               | Both modes         |
+| `/relay/*`  | Public Relay API endpoints: status, config, prepare, sponsor                                       | Both modes         |
+| `/studio/*` | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | `relay_and_studio` |
+| `/auth/*`   | Admin session authentication (nonce, verify, renew, logout, session)                               | `relay_and_studio` |
+| `/api/*`    | Admin dashboard, sponsor pool operations, blocklist, auth audit, studio status, promotions         | `relay_and_studio` |
 
 ## Runtime Role
 
@@ -39,6 +41,11 @@ This README is an entry point for the package. It does not replace the route and
 - Host-level env validation and boot flow
 - Redis-backed runtime state for prepare records, rate limiting, admin sessions, and studio budget state
 - CORS and route mounting for public relay traffic and admin/studio endpoints
+- one `ApplicationRuntime` that owns readiness, request draining, background
+  task shutdown, Host disposal, and Redis closure
+
+The exact operating-mode settings and ordered shutdown behavior are documented
+in [docs/operations.md](../../docs/operations.md).
 
 ## Quick Start
 
@@ -106,7 +113,8 @@ For this temporary Vercel path, set `TRUSTED_PROXY_HOPS=0`. The Vercel adapter s
 Use Vercel only as a temporary demo path. Move stable API hosting to Cloud Run or another long-running Node/OCI host, then remove the root `index.js` file, `packages/app-api/src/vercel.ts`, and `packages/app-api/src/vercelClientIp.ts`.
 
 For a full local Host bring-up, follow [docs/getting-started.md](../../docs/getting-started.md).
-For operator policy, sponsor management, Studio mode, and incident handling, use [docs/operations.md](../../docs/operations.md).
+For operator policy, sponsor management, `relay_and_studio` operation, and
+incident handling, use [docs/operations.md](../../docs/operations.md).
 
 ## Related Documents
 
@@ -114,5 +122,5 @@ For operator policy, sponsor management, Studio mode, and incident handling, use
 - [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules) - generic prepare transaction constraints
 - [docs/getting-started.md](../../docs/getting-started.md) - Host entry path
 - [docs/operations.md](../../docs/operations.md) - baseline Host Operator runbook
-- [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations) - Studio Operator runbook section
+- [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations) - Studio Operator runbook section
 - [docs/repository-structure.md](../../docs/repository-structure.md) - package dependency map

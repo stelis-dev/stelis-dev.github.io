@@ -247,7 +247,6 @@ describe('API client', () => {
         vaultRegistryId: '0x3',
         deepbookPackageId: '0x4',
       },
-      studioEnabled: false,
       rpcFleet: {
         endpoints: [
           {

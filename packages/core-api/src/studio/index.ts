@@ -5,9 +5,6 @@
  * Runtime host concerns (env, singleton, boot) remain in app-api.
  */
 
-// Domain types
-export type { StudioHostContext } from './types.js';
-
 // Auth token extraction (framework-agnostic Bearer token parser)
 export { extractBearerToken } from './extractBearerToken.js';
 

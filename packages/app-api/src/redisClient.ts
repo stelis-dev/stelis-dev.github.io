@@ -12,18 +12,20 @@ import { redactSensitiveText } from '@stelis/core-api/observability';
 
 interface RedisRuntimeClient extends RawRedisClient {
   isOpen: boolean;
+  on(event: 'error', listener: (error: unknown) => void): this;
   connect(): Promise<void>;
-  quit(): Promise<void>;
+  disconnect(): Promise<void>;
   lRange(key: string, start: number, stop: number): Promise<string[]>;
   lPush(key: string, ...values: string[]): Promise<number>;
   lTrim(key: string, start: number, stop: number): Promise<void>;
   /** Raw command execution — used for topology probe before wrapping. */
-  sendCommand(args: string[]): Promise<unknown>;
+  sendCommand(args: string[], options?: { readonly signal?: AbortSignal }): Promise<unknown>;
 }
 
 const REQUIRED_REDIS_RUNTIME_METHODS = [
   'connect',
-  'quit',
+  'disconnect',
+  'on',
   'get',
   'set',
   'del',
@@ -51,11 +53,17 @@ function assertRedisRuntimeClient(value: unknown): asserts value is RedisRuntime
 }
 
 async function loadRedisModule(): Promise<{
-  createClient: (options: { url: string }) => RedisRuntimeClient;
+  createClient: (options: {
+    url: string;
+    socket: { reconnectStrategy: false; signal?: AbortSignal };
+  }) => RedisRuntimeClient;
 }> {
   try {
     return (await import(/* webpackIgnore: true */ 'redis')) as unknown as {
-      createClient: (options: { url: string }) => RedisRuntimeClient;
+      createClient: (options: {
+        url: string;
+        socket: { reconnectStrategy: false; signal?: AbortSignal };
+      }) => RedisRuntimeClient;
     };
   } catch (error) {
     const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
@@ -74,26 +82,57 @@ export interface RedisClient extends RedisClientLike {
   dispose(): Promise<void>;
 }
 
-export async function createRedisClient(redisUrl: string): Promise<RedisClient> {
+export async function createRedisClient(
+  redisUrl: string,
+  startupSignal?: AbortSignal,
+): Promise<RedisClient> {
   const { createClient } = await loadRedisModule();
-  const client = createClient({ url: redisUrl });
+  // A runtime must be able to abort and clean up a failed start. The node-redis
+  // default reconnect loop can otherwise keep the initial connect pending
+  // forever while the raw client is still private to this factory. Independent
+  // later commands may call ensureOpen(), but each connection attempt is finite.
+  // node-redis stores its internal socket only after TCP/TLS connect resolves,
+  // so disconnect() alone cannot cancel a connection that is still pending.
+  // RedisSocket forwards this option to Node net.connect/tls.connect; binding
+  // the owner signal here makes cancellation destroy both pending and connected
+  // sockets, including an independent reconnect during runtime shutdown.
+  const client = createClient({
+    url: redisUrl,
+    socket: {
+      reconnectStrategy: false,
+      ...(startupSignal === undefined ? {} : { signal: startupSignal }),
+    },
+  });
   assertRedisRuntimeClient(client);
+  client.on('error', (error) => {
+    if (startupSignal?.aborted) return;
+    const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+    // Command promises remain the operation-level failure authority. This
+    // listener owns node-redis's separate process-level EventEmitter channel.
+    // eslint-disable-next-line no-console
+    console.error(`[app-api] Redis client error: ${message}`);
+  });
   let reconnectPromise: Promise<void> | null = null;
 
-  async function connectAndProbe(): Promise<void> {
+  const disconnectImmediately = async (): Promise<void> => {
+    if (!client.isOpen) return;
+    await client.disconnect().catch(() => undefined);
+  };
+
+  async function connectAndProbe(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (!client.isOpen) {
       await client.connect();
     }
+    signal?.throwIfAborted();
 
     try {
-      await assertSupportedRedisTopology(client);
+      await assertSupportedRedisTopology(client, signal);
+      signal?.throwIfAborted();
     } catch (err) {
-      // Clean up the connected client before propagating the failure.
-      // Prevents connection leak in boot-failure-retry environments and keeps
-      // reconnect attempts fail-closed if the endpoint changes under us.
-      if (client.isOpen) {
-        await client.quit().catch(() => {});
-      }
+      // Failure and cancellation use an immediate socket disconnect. QUIT is
+      // itself a Redis command and cannot be trusted to settle on this path.
+      await disconnectImmediately();
       throw err;
     }
   }
@@ -121,7 +160,18 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
   // Receipt lifecycle scripts use dynamic Lua key access that Redis
   // Multi-key Lua scripts require one writable Redis data endpoint. Boot must reject
   // unsupported topologies rather than relying on operator memory.
-  await connectAndProbe();
+  const onStartupAbort = () => {
+    void disconnectImmediately();
+  };
+  startupSignal?.addEventListener('abort', onStartupAbort, { once: true });
+  try {
+    await connectAndProbe(startupSignal);
+  } catch (error) {
+    await disconnectImmediately();
+    throw error;
+  } finally {
+    startupSignal?.removeEventListener('abort', onStartupAbort);
+  }
 
   const commandClient: RawRedisClient = {
     get(key) {
@@ -156,7 +206,7 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
     },
     async dispose() {
       if (client.isOpen) {
-        await client.quit();
+        await client.disconnect();
       }
     },
   };
@@ -177,10 +227,16 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
  * reports `redis_mode:standalone`.
  * Direct Sentinel and Redis Cluster endpoints are not supported.
  */
-async function assertSupportedRedisTopology(client: RedisRuntimeClient): Promise<void> {
+async function assertSupportedRedisTopology(
+  client: RedisRuntimeClient,
+  signal?: AbortSignal,
+): Promise<void> {
   let infoText: string;
   try {
-    const result = await client.sendCommand(['INFO', 'server']);
+    const result =
+      signal === undefined
+        ? await client.sendCommand(['INFO', 'server'])
+        : await client.sendCommand(['INFO', 'server'], { signal });
     if (typeof result !== 'string') {
       throw new Error(
         `Unexpected INFO server response type: ${typeof result}. ` +
@@ -189,6 +245,7 @@ async function assertSupportedRedisTopology(client: RedisRuntimeClient): Promise
     }
     infoText = result;
   } catch (err) {
+    if (signal?.aborted) throw signal.reason;
     // Command unavailable, permission denied, or transport error → fail closed
     throw new Error(
       `Redis topology probe failed — cannot verify supported deployment. ` +

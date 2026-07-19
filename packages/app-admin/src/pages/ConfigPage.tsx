@@ -1,10 +1,10 @@
 /**
- * ConfigPage — Common config + Studio settings (conditional).
+ * ConfigPage — Host and Studio configuration.
  *
  * Section order (by operator priority):
  * §1: Sponsor Operations — refill controls and thresholds
  * §2: Fee Config — host + on-chain fee parameters
- * §3: Studio Settings — JWT/API key config status (studio-only)
+ * §3: Studio Settings — developer-verification configuration
  * §4: Supported Settlement Swap Paths — settlement token settlement
  * §5: On-chain IDs — contract reference (rarely changes)
  *
@@ -250,8 +250,8 @@ export function ConfigPage() {
         </div>
       )}
 
-      {/* ═══════════════ §3: Studio Settings (conditional) ═══════════════ */}
-      {studioStatus?.enabled && (
+      {/* ═══════════════ §3: Studio Settings ═══════════════ */}
+      {studioStatus && (
         <>
           <div
             style={{
@@ -277,59 +277,35 @@ export function ConfigPage() {
             </h2>
           </div>
 
-          {studioStatus.config && (
-            <div className="admin-card">
-              <div className="admin-card-title">Studio Config</div>
-              <table className="admin-table">
-                <tbody>
-                  <tr>
-                    <td
-                      style={{ cursor: 'help' }}
-                      title="STUDIO_DEVELOPER_JWT_TRUST_JSON env status. Required for developer JWT asymmetric verification (RS256/ES256)"
+          <div className="admin-card">
+            <div className="admin-card-title">Studio Config</div>
+            <table className="admin-table">
+              <tbody>
+                <tr>
+                  <td
+                    style={{ cursor: 'help' }}
+                    title="STUDIO_DEVELOPER_JWT_VERIFY_URL env status. Optional callback for additional developer JWT verification"
+                  >
+                    Verify URL
+                  </td>
+                  <td>
+                    <span
+                      style={{
+                        color: studioStatus.config.developerJwtVerifyUrlConfigured
+                          ? '#22c55e'
+                          : '#64748b',
+                        fontWeight: 600,
+                      }}
                     >
-                      Developer JWT Trust
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          color: studioStatus.config.developerJwtTrustConfigured
-                            ? '#22c55e'
-                            : '#f87171',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {studioStatus.config.developerJwtTrustConfigured
-                          ? '● Configured'
-                          : '● Missing'}
-                      </span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td
-                      style={{ cursor: 'help' }}
-                      title="STUDIO_DEVELOPER_JWT_VERIFY_URL env status. Optional callback for additional developer JWT verification"
-                    >
-                      Verify URL
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          color: studioStatus.config.developerJwtVerifyUrlConfigured
-                            ? '#22c55e'
-                            : '#64748b',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {studioStatus.config.developerJwtVerifyUrlConfigured
-                          ? '● Configured'
-                          : '○ Not set (optional)'}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
+                      {studioStatus.config.developerJwtVerifyUrlConfigured
+                        ? '● Configured'
+                        : '○ Not set (optional)'}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </>
       )}
 

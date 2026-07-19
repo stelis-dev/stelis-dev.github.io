@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { ExpectedSettleEventFields } from '@stelis/contracts';
+import { isReceiptId, RECEIPT_ID_FORMAT, type ExpectedSettleEventFields } from '@stelis/contracts';
 import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
 import {
   getSuiTransactionEvents,
@@ -63,7 +63,11 @@ function validateExpectedFields(expected: ExpectedSettleEventFields): {
   user: string;
 } {
   const candidate = expected as Record<string, unknown>;
-  const receiptId = normalizeExactHex32Field(candidate['receiptId'], 'receiptId');
+  assertStringField(candidate['receiptId'], 'receiptId');
+  if (!isReceiptId(candidate['receiptId'])) {
+    throw new Error(`[Stelis] expected.receiptId must be ${RECEIPT_ID_FORMAT}`);
+  }
+  const receiptId = candidate['receiptId'];
   assertStringField(candidate['user'], 'user');
   const normalizedUser = normalizeSuiAddress(candidate['user']);
   if (!isValidSuiAddress(normalizedUser)) {
@@ -132,7 +136,7 @@ function verifySettleEvent(
   }
 
   const verified = settleEvents[0]!;
-  const onChainReceiptId = normalizeHex(verified.receiptId);
+  const onChainReceiptId = verified.receiptId;
   const onChainOrderIdHash = normalizeHex(verified.orderIdHash);
   const normalizedOnChainUser = verified.user;
 

@@ -121,11 +121,6 @@ interface WithdrawParams {
 export class StelisSDK {
   private _client: StelisClient;
   private _relayConfig: RelayConfig;
-  /**
-   * True when studioEndpoint was explicitly true at connect time.
-   * Developer JWT requests require studio mode — prevents routing to generic Hosts.
-   */
-  private readonly _studioMode: boolean;
   // Contract IDs from shared @stelis/contracts constants.
   private _packageId: string;
   private _configId: string;
@@ -164,14 +159,9 @@ export class StelisSDK {
   get supportedSettlementSwapPaths(): SingleHopSettlementSwapPath[] {
     return this._relayConfig.supportedSettlementSwapPaths;
   }
-  private constructor(
-    client: StelisClient,
-    relayConfig: RelayConfig,
-    options: StelisConnectOptions = {},
-  ) {
+  private constructor(client: StelisClient, relayConfig: RelayConfig) {
     this._client = client;
     this._relayConfig = relayConfig;
-    this._studioMode = options.studioEndpoint === true;
     // Resolve contract IDs from shared @stelis/contracts constants.
     const network = relayConfig.network;
     const ids = STELIS_CONTRACT_IDS[network];
@@ -224,7 +214,7 @@ export class StelisSDK {
    * 3. Contract addresses from SDK built-in constants
    *
    * @param endpoint - Relay API URL (required).
-   * @param options  - Connection options (pinnedPackageId, studioEndpoint, requestTimeouts)
+   * @param options  - Connection options (pinnedPackageId, requestTimeouts)
    */
   static async connect(endpoint: string, options?: StelisConnectOptions): Promise<StelisSDK> {
     const opts = options ?? {};
@@ -262,7 +252,7 @@ export class StelisSDK {
       }
     }
 
-    return new StelisSDK(client, relayConfig, opts);
+    return new StelisSDK(client, relayConfig);
   }
 
   // ─────────────────────────────────────────
@@ -848,12 +838,6 @@ export class StelisSDK {
       developerJwt: string;
     },
   ): Promise<PromotionPrepareResponse> {
-    if (!this._studioMode) {
-      throw new Error(
-        '[StelisSDK] preparePromotionSponsored requires studioEndpoint: true in connect().',
-      );
-    }
-
     const endpoints = await this._suiEndpoints(opts.client);
 
     // Build TransactionKind bytes
@@ -892,12 +876,6 @@ export class StelisSDK {
     userSignature: string;
     developerJwt: string;
   }): Promise<PromotionSponsorResponse> {
-    if (!this._studioMode) {
-      throw new Error(
-        '[StelisSDK] sponsorPromotionSponsored requires studioEndpoint: true in connect().',
-      );
-    }
-
     return this._client.promotionSponsor(
       opts.promotionId,
       {
@@ -921,12 +899,11 @@ export class StelisSDK {
    *   network: 'testnet',
    *   baseUrl: 'https://fullnode.testnet.sui.io:443',
    * });
-   * // studioEndpoint: true is required — promotion methods are rejected at call time
-   * // if the SDK was not connected in studio mode.
-   * const sdk = await StelisSDK.connect(endpoint, { studioEndpoint: true });
+   * const sdk = await StelisSDK.connect(endpoint);
+   * // Use a Promotion ID returned by the Host's promotion list.
    * const result = await sdk.executePromotionSponsored(tx, {
    *   client: suiClient,
-   *   promotionId: '00000000-0000-4000-8000-000000000001',
+   *   promotionId,
    *   signer: wallet.signTransaction,
    *   addr: userAddress,
    *   developerJwt: token,

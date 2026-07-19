@@ -21,7 +21,7 @@ import type {
   SingleHopSettlementSwapPath,
   SponsorFailureSubcode,
 } from '@stelis/contracts';
-import { GAS_MARGIN_CAP_BPS, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
+import { GAS_MARGIN_CAP_BPS, isReceiptId, SLIPPAGE_CAP_BPS } from '@stelis/contracts';
 import { RELAY_PREPARE_ERROR_CODES } from '@stelis/contracts';
 import {
   convertSdkCommands,
@@ -58,7 +58,11 @@ import { runGenericPrepareBuildPipeline } from '../../prepare/build.js';
 import type { GenericPrepareBuildOutput } from '../../prepare/build.js';
 import { buildPolicyFields } from '../../preparePolicy.js';
 import { computePolicyHash } from '../../policyHash.js';
-import { checkBlockedRequest, recordSponsorFailureForAbuse } from '../../abuseBlocking.js';
+import {
+  checkBlockedSubject,
+  recordSponsorFailureForAbuse,
+  type AdmittedClientIp,
+} from '../../abuseBlocking.js';
 import {
   SERIALIZED_UNKNOWN_ECONOMICS,
   SPONSOR_CONGESTION_FAILURE_REASON,
@@ -158,6 +162,7 @@ export interface GenericExecutionPolicyOptions {
     readonly nowMs?: () => number;
   };
   readonly sponsor?: {
+    readonly admittedClientIp: AdmittedClientIp;
     readonly txBytes: Uint8Array;
     readonly userSignature: string;
     readonly errors: GenericSponsorErrorFactory;
@@ -166,7 +171,7 @@ export interface GenericExecutionPolicyOptions {
 }
 
 export interface GenericExecutionPolicyDependencies {
-  readonly checkBlockedRequest: typeof checkBlockedRequest;
+  readonly checkBlockedSubject: typeof checkBlockedSubject;
   readonly deserializeUserTxKind: typeof deserializeUserTxKind;
   readonly queryUserCredit: typeof queryUserCredit;
   readonly recordSponsorFailureForAbuse: typeof recordSponsorFailureForAbuse;
@@ -201,6 +206,7 @@ export interface GenericPrepareRuntimeState {
 }
 
 export interface GenericSponsorRuntimeState {
+  builtTxForValidation?: Transaction;
   txSender?: string;
   prepared?: GenericPreparedTxEntry;
   revalidation?: RevalidateGenericResult;
@@ -272,7 +278,7 @@ export interface GenericPreparePolicyResult {
 }
 
 const DEFAULT_DEPS: GenericExecutionPolicyDependencies = {
-  checkBlockedRequest,
+  checkBlockedSubject,
   deserializeUserTxKind,
   queryUserCredit,
   recordSponsorFailureForAbuse,
@@ -842,7 +848,9 @@ async function runGenericDecodeSponsorSubmission(
   const sponsor = requireSponsor(options);
   const state = requireSponsorState(runtime);
   try {
-    state.txSender = extractTxSender(Transaction.from(sponsor.txBytes));
+    const builtTx = Transaction.from(sponsor.txBytes);
+    state.builtTxForValidation = builtTx;
+    state.txSender = extractTxSender(builtTx);
   } catch (err) {
     if (err instanceof SenderSignatureError) {
       throw sponsor.errors.sponsorPreflight(err.message);
@@ -864,7 +872,6 @@ async function runGenericUserSignatureValidation(
   const state = requireSponsorState(runtime);
   const d = getDeps(options);
   const txSender = requireValue(state.txSender, 'tx sender');
-  const prepared = requireValue(state.prepared, 'generic prepared entry');
 
   try {
     await d.verifySenderSignature(sponsor.txBytes, sponsor.userSignature, txSender);
@@ -881,27 +888,11 @@ async function runGenericUserSignatureValidation(
     throw err;
   }
 
-  if (txSender !== prepared.senderAddress) {
-    logStructuredEvent(SPONSOR_SENDER_STORE_DIVERGENCE, {
-      route: 'generic',
-      receipt_id: ctx.receiptId,
-      tx_sender: txSender,
-      stored_sender: prepared.senderAddress,
-      outcome: 'rejected',
-    });
-    await d.recordSponsorFailureForAbuse(
-      options.hostContext.abuseBlocker,
-      ctx.clientIp,
-      undefined,
-      'RECEIPT_SESSION_MISMATCH',
-    );
-    throw sponsor.errors.sponsorValidation(
-      'RECEIPT_SESSION_MISMATCH',
-      'tx.sender does not match the prepared session sender — retry /prepare',
-    );
-  }
-
-  const blocked = await d.checkBlockedRequest(options.hostContext.abuseBlocker, ctx.clientIp);
+  const blocked = await d.checkBlockedSubject(
+    options.hostContext.abuseBlocker,
+    sponsor.admittedClientIp,
+    { kind: 'address', address: txSender },
+  );
   if (blocked.blocked) {
     throw sponsor.errors.sponsorBlocked(blocked.retryAfterMs);
   }
@@ -916,22 +907,34 @@ async function runGenericSharedSponsorChecks(
   const state = requireSponsorState(runtime);
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
+  const builtTx = requireValue(state.builtTxForValidation, 'decoded generic transaction');
   const txSender = requireValue(state.txSender, 'tx sender');
 
-  const blocked = await d.checkBlockedRequest(options.hostContext.abuseBlocker, ctx.clientIp, {
-    kind: 'address',
-    address: txSender,
-  });
-  if (blocked.blocked) {
-    setValidationFailure(state, 'Request temporarily blocked');
-    throw sponsor.errors.sponsorBlocked(blocked.retryAfterMs);
+  if (txSender !== prepared.senderAddress) {
+    logStructuredEvent(SPONSOR_SENDER_STORE_DIVERGENCE, {
+      route: 'generic',
+      receipt_id: ctx.receiptId,
+      tx_sender: txSender,
+      stored_sender: prepared.senderAddress,
+      outcome: 'rejected',
+    });
+    await d.recordSponsorFailureForAbuse(
+      options.hostContext.abuseBlocker,
+      ctx.clientIp,
+      { kind: 'address', address: txSender },
+      'RECEIPT_SESSION_MISMATCH',
+    );
+    throw sponsor.errors.sponsorValidation(
+      'RECEIPT_SESSION_MISMATCH',
+      'tx.sender does not match the prepared session sender — retry /prepare',
+    );
   }
 
   try {
     state.revalidation = await d.revalidateGenericSponsorPolicy(
       options.hostContext,
       prepared,
-      sponsor.txBytes,
+      builtTx,
       ctx.clientIp,
     );
   } catch (err) {
@@ -1275,14 +1278,13 @@ function emitGenericDriftEvent(
 async function revalidateGenericSponsorPolicy(
   ctx: HostContext,
   prepared: GenericPreparedTxEntry,
-  txBytes: Uint8Array,
+  builtTx: Transaction,
   clientIp: string,
 ): Promise<RevalidateGenericResult> {
   ctx.invalidateConfigCache();
   const freshConfig = await ctx.getConfig();
 
   const env = buildGenericSponsorEnv(ctx);
-  const builtTx = Transaction.from(txBytes);
   const builtTxData = builtTx.getData();
   const builtCommands = convertSdkCommands(builtTxData.commands);
   const txSender = extractTxSender(builtTx);
@@ -1414,11 +1416,10 @@ function findSettlementSwapPathDescriptor(
 }
 
 function parseReceiptIdBytes(receiptId: string): Uint8Array {
-  const hex = receiptId.startsWith('0x') ? receiptId.slice(2) : receiptId;
-  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new GenericExecutionPolicyError('generic prepare receiptId must be a 32-byte hex string');
+  if (!isReceiptId(receiptId)) {
+    throw new GenericExecutionPolicyError('generic prepare receiptId is not canonical');
   }
-  return fromHex(hex);
+  return fromHex(receiptId.slice(2));
 }
 
 function assertPrepareCtx(

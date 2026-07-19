@@ -16,6 +16,7 @@ import {
 } from '@stelis/contracts';
 
 const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 
 function createConfig(fetchFn: FetchLike): StelisMcpServerConfig {
   return {
@@ -190,7 +191,7 @@ describe('current Host error boundary', () => {
     await expect(
       claimPromotion(createConfig(claimFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promotion',
+        promotionId: PROMOTION_ID,
       }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST', status: 400 });
 
@@ -300,7 +301,7 @@ describe('Stelis MCP operations', () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse({
         txBytes: 'tx',
-        receiptId: '0xabc',
+        receiptId: RECEIPT_ID,
         nonce: '1',
         cost: {
           simGas: '1',
@@ -385,27 +386,27 @@ describe('Stelis MCP operations', () => {
     expect(invalidFetch).not.toHaveBeenCalled();
   });
 
-  it('posts promotion sponsor to the studio base URL', async () => {
+  it('posts a current Promotion sponsor request to the Studio base URL', async () => {
     const fetchFn = vi
       .fn<FetchLike>()
       .mockResolvedValue(jsonResponse({ digest: 'abc', effects: {}, actualGasMist: '1' }));
 
     await submitPromotionSponsoredTransaction(createConfig(fetchFn), {
       developerJwt: 'jwt',
-      promotionId: 'promo/1',
-      receiptId: '0xabc',
+      promotionId: PROMOTION_ID,
+      receiptId: RECEIPT_ID,
       txBytes: 'tx',
       userSignature: 'sig',
     });
 
     const [url, init] = fetchFn.mock.calls[0];
-    expect(url).toBe('https://host.example/studio/promotions/promo%2F1/sponsor');
+    expect(url).toBe(`https://host.example/studio/promotions/${PROMOTION_ID}/sponsor`);
     expect(init?.headers).toEqual({
       'Content-Type': 'application/json',
       Authorization: 'Bearer jwt',
     });
     expect(JSON.parse(String(init?.body))).toEqual({
-      receiptId: '0xabc',
+      receiptId: RECEIPT_ID,
       txBytes: 'tx',
       userSignature: 'sig',
     });
@@ -415,16 +416,16 @@ describe('Stelis MCP operations', () => {
     const prepareFetch = vi
       .fn<FetchLike>()
       .mockResolvedValue(
-        jsonResponse({ txBytes: 'tx', receiptId: 'receipt', estimatedGasMist: '1' }),
+        jsonResponse({ txBytes: 'tx', receiptId: RECEIPT_ID, estimatedGasMist: '1' }),
       );
     await expect(
       preparePromotionSponsoredTransaction(createConfig(prepareFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
+        promotionId: PROMOTION_ID,
         senderAddress: '0x1',
         txKindBytes: 'kind',
       }),
-    ).resolves.toMatchObject({ receiptId: 'receipt' });
+    ).resolves.toMatchObject({ receiptId: RECEIPT_ID });
 
     const malformedSponsorFetch = vi
       .fn<FetchLike>()
@@ -432,8 +433,8 @@ describe('Stelis MCP operations', () => {
     await expect(
       submitPromotionSponsoredTransaction(createConfig(malformedSponsorFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
-        receiptId: 'receipt',
+        promotionId: PROMOTION_ID,
+        receiptId: RECEIPT_ID,
         txBytes: 'tx',
         userSignature: 'signature',
       }),
@@ -444,7 +445,7 @@ describe('Stelis MCP operations', () => {
     const malformedClaimFetch = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse({
         entitlement: {
-          promotionId: 'promo',
+          promotionId: PROMOTION_ID,
           userId: 'user',
           claimedAt: '2026-07-14T00:00:00.000Z',
           useUntilAt: null,
@@ -461,10 +462,12 @@ describe('Stelis MCP operations', () => {
     await expect(
       claimPromotion(createConfig(malformedClaimFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
+        promotionId: PROMOTION_ID,
       }),
     ).rejects.toThrow(
       'PromotionEntitlement.remainingGasAllowanceMist must be a canonical non-negative decimal string',
     );
+    const [, init] = malformedClaimFetch.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({});
   });
 });

@@ -120,6 +120,7 @@ vi.mock('../src/prepare/extractSettleArgs.js');
 // ─────────────────────────────────────────────
 
 import { handlePrepare, type PrepareHandlerConfig } from '../src/handlers/prepare.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
 import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { handleSponsor, SponsorValidationError } from '../src/handlers/sponsor.js';
 import { computePolicyHash } from '../src/policyHash.js';
@@ -152,6 +153,7 @@ import {
   TEST_SUI_TRANSACTION_DIGEST,
   type TestGasUsed,
 } from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 const gatewayGasUsed = new WeakMap<object, TestGasUsed>();
 
@@ -372,12 +374,14 @@ interface GenericHarness {
   abuseBlocker: MemoryAbuseBlocker;
   prepareInflight: MemoryPrepareInflight;
   extraCfg: PrepareHandlerConfig;
+  admittedClientIp: import('../src/abuseBlocking.js').AdmittedClientIp;
 }
 
-function makeGenericHarness(): GenericHarness {
+async function makeGenericHarness(): Promise<GenericHarness> {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, undefined);
   const abuseBlocker = new MemoryAbuseBlocker();
+  const admittedClientIp = await admitTestClientIp(abuseBlocker, CLIENT_IP);
   const prepareInflight = new MemoryPrepareInflight(8);
   const sui = genericMockSui();
 
@@ -452,6 +456,7 @@ function makeGenericHarness(): GenericHarness {
     abuseBlocker,
     prepareInflight,
     extraCfg,
+    admittedClientIp,
   };
 }
 
@@ -536,11 +541,12 @@ async function drivePrepare(harness: GenericHarness): Promise<{
         txKindBytes: await makeEmptyUserTxKindBytes(),
         senderAddress: USER_ADDR,
         settlementTokenType: '0x' + 'de'.repeat(32) + '::deep::DEEP',
-        clientIp: CLIENT_IP,
+        clientIp: harness.admittedClientIp,
       },
       { keypair: USER_KP, packageId: GENERIC_MOCK_CONFIG.packageId },
     ),
     harness.extraCfg,
+    ALLOW_PREPARE_REQUEST,
   );
 
   return { response, txBytes: built.txBytes, txBytesHash: built.txBytesHash };
@@ -558,7 +564,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
   });
 
   test('happy path: prepare commits hash → user signs → sponsor executes successfully', async () => {
-    const harness = makeGenericHarness();
+    const harness = await makeGenericHarness();
     const { response, txBytes, txBytesHash } = await drivePrepare(harness);
 
     // Cross-request binding check #1: the receipt lifecycle store now holds an entry
@@ -575,7 +581,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     const sponsorResult = await handleSponsor(
       harness.ctx,
       { txBytes: response.txBytes, userSignature: userSig, receiptId: response.receiptId },
-      CLIENT_IP,
+      harness.admittedClientIp,
     );
 
     expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytes));
@@ -588,7 +594,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
   });
 
   test('tamper: prepare commits tx A; sponsor receives tx B → TAMPERING_DETECTED before execution', async () => {
-    const harness = makeGenericHarness();
+    const harness = await makeGenericHarness();
     const { response, txBytesHash: hashA } = await drivePrepare(harness);
 
     // Build a second valid signed tx with the SAME sender / gas-owner
@@ -618,7 +624,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
         userSignature: userSigB,
         receiptId: response.receiptId,
       },
-      CLIENT_IP,
+      harness.admittedClientIp,
     ).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(SponsorValidationError);
@@ -632,21 +638,21 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
   });
 
   test('replay: same receipt sponsored twice → second call rejects with PREPARED_TX_NOT_FOUND', async () => {
-    const harness = makeGenericHarness();
+    const harness = await makeGenericHarness();
     const { response, txBytes } = await drivePrepare(harness);
     const userSig = (await USER_KP.signTransaction(txBytes)).signature;
 
     const first = await handleSponsor(
       harness.ctx,
       { txBytes: response.txBytes, userSignature: userSig, receiptId: response.receiptId },
-      CLIENT_IP,
+      harness.admittedClientIp,
     );
     expect(first.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytes));
 
     const replay = await handleSponsor(
       harness.ctx,
       { txBytes: response.txBytes, userSignature: userSig, receiptId: response.receiptId },
-      CLIENT_IP,
+      harness.admittedClientIp,
     ).catch((e: unknown) => e);
 
     expect(replay).toBeInstanceOf(SponsorValidationError);
@@ -654,7 +660,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
   });
 
   test('malformed signature: sponsor classifies as SENDER_SIGNATURE_INVALID', async () => {
-    const harness = makeGenericHarness();
+    const harness = await makeGenericHarness();
     const { response } = await drivePrepare(harness);
 
     // Sign with a different keypair so the signature is cryptographically
@@ -666,7 +672,7 @@ describe('generic two-actor golden flow (handlePrepare → user sign → handleS
     const err = await handleSponsor(
       harness.ctx,
       { txBytes: response.txBytes, userSignature: wrongSig, receiptId: response.receiptId },
-      CLIENT_IP,
+      harness.admittedClientIp,
     ).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(SponsorValidationError);
@@ -713,6 +719,7 @@ interface StudioHarness {
   executionLedger: MemoryPromotionExecutionLedger;
   promoId: string;
   identity: VerifiedDeveloperIdentity;
+  admittedClientIp: import('../src/abuseBlocking.js').AdmittedClientIp;
 }
 
 async function makeStudioHarness(): Promise<StudioHarness> {
@@ -721,6 +728,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
   const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, executionLedger);
   const abuseBlocker = new MemoryAbuseBlocker();
+  const admittedClientIp = await admitTestClientIp(abuseBlocker, CLIENT_IP);
   const prepareInflight = new MemoryPrepareInflight(8);
 
   const promoRecord = await promotionStore.create({
@@ -784,6 +792,7 @@ async function makeStudioHarness(): Promise<StudioHarness> {
     executionLedger,
     promoId,
     identity: { userId: STUDIO_USER_ID, senderAddress: USER_ADDR },
+    admittedClientIp,
   };
 }
 
@@ -831,13 +840,17 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
-    const prepareResult = await handlePromotionPrepare(h.prepareCtx, {
-      promotionId: h.promoId,
-      senderAddress: USER_ADDR,
-      txKindBytes: txKind,
-      verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
-    });
+    const prepareResult = await handlePromotionPrepare(
+      h.prepareCtx,
+      {
+        promotionId: h.promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes: txKind,
+        verifiedIdentity: h.identity,
+        clientIp: h.admittedClientIp,
+      },
+      ALLOW_PREPARE_REQUEST,
+    );
 
     // Cross-request binding check #1: receipt store + sponsorPool
     // both observe the same receiptId → entry hash + committed lease.
@@ -856,7 +869,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       txBytes: prepareResult.txBytes,
       userSignature: userSig,
       verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
+      clientIp: h.admittedClientIp,
     });
 
     expect(sponsorResult.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytesRaw));
@@ -872,13 +885,17 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
-    const prepareResult = await handlePromotionPrepare(h.prepareCtx, {
-      promotionId: h.promoId,
-      senderAddress: USER_ADDR,
-      txKindBytes: txKind,
-      verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
-    });
+    const prepareResult = await handlePromotionPrepare(
+      h.prepareCtx,
+      {
+        promotionId: h.promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes: txKind,
+        verifiedIdentity: h.identity,
+        clientIp: h.admittedClientIp,
+      },
+      ALLOW_PREPARE_REQUEST,
+    );
 
     const tampered = await buildStudioTamperedTx();
     const userSigB = (await USER_KP.signTransaction(tampered.txBytes)).signature;
@@ -889,7 +906,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       txBytes: toBase64(tampered.txBytes),
       userSignature: userSigB,
       verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
+      clientIp: h.admittedClientIp,
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(PromotionSponsorError);
@@ -909,13 +926,17 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
-    const prepareResult = await handlePromotionPrepare(h.prepareCtx, {
-      promotionId: h.promoId,
-      senderAddress: USER_ADDR,
-      txKindBytes: txKind,
-      verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
-    });
+    const prepareResult = await handlePromotionPrepare(
+      h.prepareCtx,
+      {
+        promotionId: h.promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes: txKind,
+        verifiedIdentity: h.identity,
+        clientIp: h.admittedClientIp,
+      },
+      ALLOW_PREPARE_REQUEST,
+    );
     const txBytesRaw = Uint8Array.from(Buffer.from(prepareResult.txBytes, 'base64'));
     const userSig = (await USER_KP.signTransaction(txBytesRaw)).signature;
 
@@ -925,7 +946,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       txBytes: prepareResult.txBytes,
       userSignature: userSig,
       verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
+      clientIp: h.admittedClientIp,
     });
     expect(first.digest).toBe(TransactionDataBuilder.getDigestFromBytes(txBytesRaw));
 
@@ -935,7 +956,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       txBytes: prepareResult.txBytes,
       userSignature: userSig,
       verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
+      clientIp: h.admittedClientIp,
     }).catch((e: unknown) => e);
 
     expect(replay).toBeInstanceOf(PromotionSponsorError);
@@ -946,13 +967,17 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
     const h = await makeStudioHarness();
     const txKind = await makeAllowedStudioTxKindBytes();
 
-    const prepareResult = await handlePromotionPrepare(h.prepareCtx, {
-      promotionId: h.promoId,
-      senderAddress: USER_ADDR,
-      txKindBytes: txKind,
-      verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
-    });
+    const prepareResult = await handlePromotionPrepare(
+      h.prepareCtx,
+      {
+        promotionId: h.promoId,
+        senderAddress: USER_ADDR,
+        txKindBytes: txKind,
+        verifiedIdentity: h.identity,
+        clientIp: h.admittedClientIp,
+      },
+      ALLOW_PREPARE_REQUEST,
+    );
 
     const wrongKp = Ed25519Keypair.generate();
     const txBytesRaw = Uint8Array.from(Buffer.from(prepareResult.txBytes, 'base64'));
@@ -964,7 +989,7 @@ describe('Studio two-actor golden flow (handlePromotionPrepare → user sign →
       txBytes: prepareResult.txBytes,
       userSignature: wrongSig,
       verifiedIdentity: h.identity,
-      clientIp: CLIENT_IP,
+      clientIp: h.admittedClientIp,
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(PromotionSponsorError);

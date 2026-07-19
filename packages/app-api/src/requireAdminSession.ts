@@ -10,7 +10,7 @@
 import type { Context } from 'hono';
 import { ADMIN_COOKIE, verifyAdminJwt } from './adminAuth.js';
 import type { AdminJwtConfig, AdminRedisClient } from '@stelis/core-api/admin';
-import type { AppApiContext } from './context.js';
+import type { RelayAndStudioAppApiContext } from './context.js';
 import { createAdminRedisAdapter } from './adminRedis.js';
 import { ADMIN_SESSION_NOT_BEFORE_KEY } from './adminSessionNotBefore.js';
 
@@ -26,15 +26,11 @@ export interface AdminSession {
 
 export async function requireAdminSessionFromContext(
   c: Context,
-  contextPromise: Promise<AppApiContext>,
-  jwtConfig: AdminJwtConfig | null,
+  context: RelayAndStudioAppApiContext,
+  jwtConfig: AdminJwtConfig,
 ): Promise<AdminSession | null> {
   try {
-    return await requireAdminSession(
-      c,
-      createAdminRedisAdapter((await contextPromise).redis),
-      jwtConfig,
-    );
+    return await requireAdminSession(c, createAdminRedisAdapter(context.redis), jwtConfig);
   } catch {
     return null;
   }
@@ -47,11 +43,9 @@ export async function requireAdminSessionFromContext(
 export async function requireAdminSession(
   c: Context,
   redis: AdminRedisClient,
-  jwtConfig: AdminJwtConfig | null,
+  jwtConfig: AdminJwtConfig,
 ): Promise<AdminSession | null> {
   try {
-    if (jwtConfig === null) return null;
-
     // Extract token from cookie
     const cookieHeader = c.req.header('cookie') ?? '';
     const match = cookieHeader.match(new RegExp(`(?:^|;)\\s*${ADMIN_COOKIE}=([^;]+)`));

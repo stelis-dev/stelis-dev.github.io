@@ -22,10 +22,12 @@ import { MemoryAbuseBlocker } from '../src/store/memoryAbuseBlocker.js';
 import { RedisAbuseBlocker } from '../src/store/redisAbuseBlocker.js';
 import type { RedisClientLike } from '../src/store/redisClient.js';
 import {
+  admitClientIp,
   BlockCheckUnavailableError,
-  checkBlockedRequest,
+  checkBlockedSubject,
   recordSponsorFailureForAbuse,
 } from '../src/abuseBlocking.js';
+import type { AdmittedClientIp } from '../src/abuseBlocking.js';
 import {
   runAbuseBlockerConformanceTests,
   type AbuseBlockerFactory,
@@ -258,17 +260,17 @@ describe('recordSponsorFailureForAbuse — recorder-adapter fault policy', () =>
 });
 
 // ─────────────────────────────────────────────
-// checkBlockedRequest — adapter-unavailability fail-closed contract
+// Opaque request admission — adapter-unavailability + anti-forgery contract
 // ─────────────────────────────────────────────
 
 /**
- * On adapter throw, `checkBlockedRequest` fails closed with a typed
+ * On adapter throw, IP/subject admission fails closed with a typed
  * `BlockCheckUnavailableError` and emits exactly one
  * `ABUSE_BLOCK_CHECK_FAILED` structured warn. Callers (routes +
  * middleware) rely on this helper rather than duplicating the
  * swallow-and-log inline.
  */
-describe('checkBlockedRequest — adapter-unavailability fail-closed contract', () => {
+describe('opaque request admission', () => {
   function makeThrowingBlocker(scope: 'ip' | 'subject', error: Error): AbuseBlockerAdapter {
     return {
       checkIp: async () => {
@@ -289,7 +291,7 @@ describe('checkBlockedRequest — adapter-unavailability fail-closed contract', 
     const blocker = makeThrowingBlocker('ip', new Error('redis down'));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await expect(checkBlockedRequest(blocker, '127.0.0.1')).rejects.toBeInstanceOf(
+    await expect(admitClientIp(blocker, '127.0.0.1')).rejects.toBeInstanceOf(
       BlockCheckUnavailableError,
     );
 
@@ -315,8 +317,13 @@ describe('checkBlockedRequest — adapter-unavailability fail-closed contract', 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const ADDRESS = '0x' + 'cd'.repeat(32);
+    const admission = await admitClientIp(blocker, '10.0.0.1');
+    if (admission.blocked) throw new Error('expected admitted test IP');
     await expect(
-      checkBlockedRequest(blocker, '10.0.0.1', { kind: 'address', address: ADDRESS }),
+      checkBlockedSubject(blocker, admission.admittedClientIp, {
+        kind: 'address',
+        address: ADDRESS,
+      }),
     ).rejects.toBeInstanceOf(BlockCheckUnavailableError);
 
     const failedEvents = warnSpy.mock.calls
@@ -346,8 +353,10 @@ describe('checkBlockedRequest — adapter-unavailability fail-closed contract', 
     };
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
+    const admission = await admitClientIp(blocker, '127.0.0.1');
+    if (admission.blocked) throw new Error('expected admitted test IP');
     await expect(
-      checkBlockedRequest(blocker, '127.0.0.1', {
+      checkBlockedSubject(blocker, admission.admittedClientIp, {
         kind: 'address',
         address: '0x' + '11'.repeat(32),
       }),
@@ -366,5 +375,35 @@ describe('checkBlockedRequest — adapter-unavailability fail-closed contract', 
     expect(emitted).toBe(false);
 
     warnSpy.mockRestore();
+  });
+
+  it('does not mint a token for a blocked IP', async () => {
+    const blocker: AbuseBlockerAdapter = {
+      checkIp: async () => ({ blocked: true, retryAfterMs: 5000 }),
+      checkSubject: vi.fn(async () => ({ blocked: false })),
+      recordSponsorFailure: async () => undefined,
+    };
+
+    const result = await admitClientIp(blocker, '203.0.113.10');
+
+    expect(result).toEqual({ blocked: true, retryAfterMs: 5000 });
+    expect('admittedClientIp' in result).toBe(false);
+  });
+
+  it('rejects a forged structural token before calling the subject adapter', async () => {
+    const checkSubject = vi.fn(async () => ({ blocked: false }));
+    const blocker: AbuseBlockerAdapter = {
+      checkIp: async () => ({ blocked: false }),
+      checkSubject,
+      recordSponsorFailure: async () => undefined,
+    };
+
+    await expect(
+      checkBlockedSubject({ ...blocker, checkSubject }, {} as AdmittedClientIp, {
+        kind: 'address',
+        address: '0x' + '11'.repeat(32),
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(checkSubject).not.toHaveBeenCalled();
   });
 });

@@ -31,6 +31,9 @@ import {
 const DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
 const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
 const PROMOTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
+export const PROMOTION_ID_FORMAT = 'a canonical lowercase UUID-v4';
+export const RECEIPT_ID_FORMAT = '0x followed by 64 lowercase hex digits';
 const U64_MAX = (1n << 64n) - 1n;
 
 const PROMOTION_PAGE_DEFAULT_LIMIT = 50;
@@ -51,6 +54,13 @@ export const ABUSE_BLOCK_REASONS = [
 
 export type AdminBlockScope = (typeof ABUSE_BLOCK_SCOPES)[number];
 export type AbuseBlockReason = (typeof ABUSE_BLOCK_REASONS)[number];
+const HOST_OPERATING_MODES = ['relay_only', 'relay_and_studio'] as const;
+export type HostOperatingMode = (typeof HOST_OPERATING_MODES)[number];
+
+export interface HostHealthResponse {
+  status: 'ok';
+  mode: HostOperatingMode;
+}
 
 export function isValidStudioUserId(value: unknown): value is string {
   return (
@@ -190,7 +200,18 @@ export function isPromotionId(value: unknown): value is string {
 
 export function parsePromotionId(value: unknown, label = 'promotionId'): string {
   if (!isPromotionId(value)) {
-    throw new HostWireParseError(`${label} must be a canonical lowercase UUID-v4`);
+    throw new HostWireParseError(`${label} must be ${PROMOTION_ID_FORMAT}`);
+  }
+  return value;
+}
+
+export function isReceiptId(value: unknown): value is string {
+  return typeof value === 'string' && RECEIPT_ID_RE.test(value);
+}
+
+export function parseReceiptId(value: unknown, label = 'receiptId'): string {
+  if (!isReceiptId(value)) {
+    throw new HostWireParseError(`${label} must be ${RECEIPT_ID_FORMAT}`);
   }
   return value;
 }
@@ -261,6 +282,8 @@ export interface PromotionEntitlement {
 export interface PromotionClaimResponse {
   entitlement: PromotionEntitlement;
 }
+
+export type PromotionClaimRequest = Record<string, never>;
 
 export interface PromotionPrepareRequest {
   senderAddress: string;
@@ -350,15 +373,11 @@ export interface AdminBlocklistDeleteResponse {
   removed: boolean;
 }
 
-export type AdminStudioResponse =
-  | { enabled: false }
-  | {
-      enabled: true;
-      config: {
-        developerJwtTrustConfigured: boolean;
-        developerJwtVerifyUrlConfigured: boolean;
-      };
-    };
+export interface AdminStudioResponse {
+  config: {
+    developerJwtVerifyUrlConfigured: boolean;
+  };
+}
 
 /** Current operator-facing Promotion projection returned by Admin routes. */
 export interface AdminPromotionRecord {
@@ -607,7 +626,6 @@ export interface AdminSponsorOperationsResponse {
     vaultRegistryId: string | null;
     deepbookPackageId: string | null;
   };
-  studioEnabled: boolean;
   rpcFleet: SuiRpcFleetStatus;
 }
 
@@ -1008,6 +1026,19 @@ export function parseRelayStatusResponse(value: unknown): RelayStatusResponse {
   return { ok: true };
 }
 
+export function parseHostHealthResponse(value: unknown): HostHealthResponse {
+  const label = 'HostHealthResponse';
+  const raw = record(value, label);
+  onlyKeys(raw, ['status', 'mode'], label);
+  if (raw.status !== 'ok') {
+    throw new HostWireParseError(`${label}.status must be ok`);
+  }
+  return {
+    status: 'ok',
+    mode: closedStringField(raw, 'mode', label, HOST_OPERATING_MODES),
+  };
+}
+
 export function parseRelayConfigResponse(value: unknown): RelayConfigResponse {
   const raw = record(value, 'RelayConfigResponse');
   onlyKeys(
@@ -1135,7 +1166,7 @@ export function parseRelayPrepareResponse(value: unknown): RelayPrepareResponse 
   }
   return {
     txBytes: stringField(raw, 'txBytes', 'RelayPrepareResponse'),
-    receiptId: stringField(raw, 'receiptId', 'RelayPrepareResponse'),
+    receiptId: parseReceiptId(raw.receiptId, 'RelayPrepareResponse.receiptId'),
     nonce: decimalField(raw, 'nonce', 'RelayPrepareResponse'),
     cost: {
       simGas: decimalField(cost, 'simGas', 'RelayPrepareResponse.cost'),
@@ -1159,7 +1190,7 @@ export function parseRelaySponsorRequest(value: unknown): RelaySponsorRequest {
   return {
     txBytes: stringField(raw, 'txBytes', 'RelaySponsorRequest'),
     userSignature: stringField(raw, 'userSignature', 'RelaySponsorRequest'),
-    receiptId: stringField(raw, 'receiptId', 'RelaySponsorRequest'),
+    receiptId: parseReceiptId(raw.receiptId, 'RelaySponsorRequest.receiptId'),
   };
 }
 
@@ -1410,7 +1441,7 @@ export function parsePromotionDetailResponse(value: unknown): PromotionDetailRes
     label,
   );
   return {
-    promotionId: stringField(raw, 'promotionId', label),
+    promotionId: parsePromotionId(raw.promotionId, `${label}.promotionId`),
     displayName: stringField(raw, 'displayName', label),
     type: closedStringField(raw, 'type', label, PROMOTION_TYPES),
     promotionRemainingBudgetMist: decimalField(raw, 'promotionRemainingBudgetMist', label),
@@ -1438,14 +1469,17 @@ function parsePromotionEntitlement(value: unknown): PromotionEntitlement {
     label,
   );
   return {
-    promotionId: stringField(raw, 'promotionId', label),
+    promotionId: parsePromotionId(raw.promotionId, `${label}.promotionId`),
     userId: stringField(raw, 'userId', label),
     claimedAt: stringField(raw, 'claimedAt', label),
     useUntilAt: nullableStringField(raw, 'useUntilAt', label),
     remainingGasAllowanceMist: decimalField(raw, 'remainingGasAllowanceMist', label),
     consumedGasAllowanceMist: decimalField(raw, 'consumedGasAllowanceMist', label),
     status: closedStringField(raw, 'status', label, PROMOTION_ENTITLEMENT_STATUSES),
-    activeReservationReceiptId: nullableStringField(raw, 'activeReservationReceiptId', label),
+    activeReservationReceiptId:
+      raw.activeReservationReceiptId === null
+        ? null
+        : parseReceiptId(raw.activeReservationReceiptId, `${label}.activeReservationReceiptId`),
     activeReservationAmountMist: nullableDecimalField(raw, 'activeReservationAmountMist', label),
     lastUsedAt: nullableStringField(raw, 'lastUsedAt', label),
   };
@@ -1456,6 +1490,13 @@ export function parsePromotionClaimResponse(value: unknown): PromotionClaimRespo
   const raw = record(value, label);
   onlyKeys(raw, ['entitlement'], label);
   return { entitlement: parsePromotionEntitlement(raw.entitlement) };
+}
+
+export function parsePromotionClaimRequest(value: unknown): PromotionClaimRequest {
+  const label = 'PromotionClaimRequest';
+  const raw = record(value, label);
+  onlyKeys(raw, [], label);
+  return {};
 }
 
 export function parsePromotionPrepareRequest(value: unknown): PromotionPrepareRequest {
@@ -1472,7 +1513,7 @@ export function parsePromotionPrepareResponse(value: unknown): PromotionPrepareR
   onlyKeys(raw, ['txBytes', 'receiptId', 'estimatedGasMist'], 'PromotionPrepareResponse');
   return {
     txBytes: stringField(raw, 'txBytes', 'PromotionPrepareResponse'),
-    receiptId: stringField(raw, 'receiptId', 'PromotionPrepareResponse'),
+    receiptId: parseReceiptId(raw.receiptId, 'PromotionPrepareResponse.receiptId'),
     estimatedGasMist: decimalField(raw, 'estimatedGasMist', 'PromotionPrepareResponse'),
   };
 }
@@ -1481,7 +1522,7 @@ export function parsePromotionSponsorRequest(value: unknown): PromotionSponsorRe
   const raw = record(value, 'PromotionSponsorRequest');
   onlyKeys(raw, ['receiptId', 'txBytes', 'userSignature'], 'PromotionSponsorRequest');
   return {
-    receiptId: stringField(raw, 'receiptId', 'PromotionSponsorRequest'),
+    receiptId: parseReceiptId(raw.receiptId, 'PromotionSponsorRequest.receiptId'),
     txBytes: stringField(raw, 'txBytes', 'PromotionSponsorRequest'),
     userSignature: stringField(raw, 'userSignature', 'PromotionSponsorRequest'),
   };
@@ -1662,19 +1703,12 @@ export function parseAdminBlocklistDeleteResponse(value: unknown): AdminBlocklis
 export function parseAdminStudioResponse(value: unknown): AdminStudioResponse {
   const label = 'AdminStudioResponse';
   const raw = record(value, label);
-  const enabled = booleanField(raw, 'enabled', label);
-  if (!enabled) {
-    onlyKeys(raw, ['enabled'], label);
-    return { enabled: false };
-  }
-  onlyKeys(raw, ['enabled', 'config'], label);
+  onlyKeys(raw, ['config'], label);
   const configLabel = `${label}.config`;
   const config = record(raw.config, configLabel);
-  onlyKeys(config, ['developerJwtTrustConfigured', 'developerJwtVerifyUrlConfigured'], configLabel);
+  onlyKeys(config, ['developerJwtVerifyUrlConfigured'], configLabel);
   return {
-    enabled: true,
     config: {
-      developerJwtTrustConfigured: booleanField(config, 'developerJwtTrustConfigured', configLabel),
       developerJwtVerifyUrlConfigured: booleanField(
         config,
         'developerJwtVerifyUrlConfigured',
@@ -1830,7 +1864,7 @@ export function parseAdminPromotionSummaryResponse(value: unknown): AdminPromoti
   const raw = record(value, label);
   onlyKeys(raw, ['promotionId', 'summary'], label);
   return {
-    promotionId: nonEmptyStringField(raw, 'promotionId', label),
+    promotionId: parsePromotionId(raw.promotionId, `${label}.promotionId`),
     summary: parseAdminPromotionSummaryAt(raw.summary, `${label}.summary`),
   };
 }
@@ -2097,7 +2131,8 @@ function parseAdminSponsoredExecutionLogEntry(
     throw new HostWireParseError(`${label}.economicsStatus is not current`);
   }
   const orderIdHash = nullableNonEmptyStringField(raw, 'orderIdHash', label);
-  const promotionId = nullableNonEmptyStringField(raw, 'promotionId', label);
+  const promotionId =
+    raw.promotionId === null ? null : parsePromotionId(raw.promotionId, `${label}.promotionId`);
   const userId = nullableNonEmptyStringField(raw, 'userId', label);
   if (mode === 'generic' && (promotionId !== null || userId !== null)) {
     throw new HostWireParseError(`${label} generic mode cannot carry Promotion identity`);
@@ -2123,7 +2158,7 @@ function parseAdminSponsoredExecutionLogEntry(
     createdAt: isoStringField(raw, 'createdAt', label),
     mode,
     outcome,
-    receiptId: nonEmptyStringField(raw, 'receiptId', label),
+    receiptId: parseReceiptId(raw.receiptId, `${label}.receiptId`),
     digest: nullableNonEmptyStringField(raw, 'digest', label),
     senderAddress: nonEmptyStringField(raw, 'senderAddress', label),
     sponsorAddress: nonEmptyStringField(raw, 'sponsorAddress', label),
@@ -2255,7 +2290,6 @@ export function parseAdminSponsorOperationsResponse(
       'feeConfig',
       'supportedSettlementSwapPaths',
       'onChainIds',
-      'studioEnabled',
       'rpcFleet',
     ],
     label,
@@ -2544,7 +2578,6 @@ export function parseAdminSponsorOperationsResponse(
       vaultRegistryId: nullableNonEmptyStringField(onChainIds, 'vaultRegistryId', idsLabel),
       deepbookPackageId: nullableNonEmptyStringField(onChainIds, 'deepbookPackageId', idsLabel),
     },
-    studioEnabled: booleanField(raw, 'studioEnabled', label),
     rpcFleet: { endpoints },
   };
 }

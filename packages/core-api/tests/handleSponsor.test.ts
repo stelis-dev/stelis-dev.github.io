@@ -40,11 +40,13 @@ import { computePolicyHash } from '../src/policyHash.js';
 import {
   handleSponsor,
   SponsorValidationError,
+  SponsorBlockedError,
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
   SponsorSubmissionUncertainError,
 } from '../src/handlers/sponsor.js';
+import type { AdmittedClientIp } from '../src/abuseBlocking.js';
 import type { HostContext } from '../src/context.js';
 import type { SponsorResultMetadata } from '../src/handlers/sponsorResult.js';
 import type { GenericPreparedTxDraft, GenericPreparedTxEntry } from '../src/store/prepareTypes.js';
@@ -64,6 +66,7 @@ import {
   moveAbortSuiExecutionError,
   suiEndpointSnapshotFixture,
 } from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 const suiGateways = vi.hoisted(() => ({
   executeSuiTransaction: vi.fn(),
@@ -607,6 +610,7 @@ async function makePreparedContext(input?: {
   readonly prepared: GenericPreparedTxEntry;
   readonly sponsorPool: SponsorPool;
   readonly store: MemorySponsoredExecutionStore;
+  readonly admittedClientIp: AdmittedClientIp;
 }> {
   const tx = input?.tx ?? (await buildValidTx(SPONSOR_ADDRESS));
   const sponsorPool = new SponsorPool([sponsorKeypair], { hmacSecret: TEST_HMAC_SECRET });
@@ -628,11 +632,12 @@ async function makePreparedContext(input?: {
     ...input?.entry,
   };
   const prepared = (await store.commitPreparedReceipt(draft)) as GenericPreparedTxEntry;
+  const abuseBlocker = input?.abuseBlocker ?? makeMockAbuseBlocker();
   return {
     ctx: makeMockContext({
       sponsorPool,
       sponsoredExecutionStore: store,
-      abuseBlocker: input?.abuseBlocker,
+      abuseBlocker,
       sui: input?.sui,
       onSponsorResult: input?.onSponsorResult,
     }),
@@ -640,6 +645,7 @@ async function makePreparedContext(input?: {
     prepared,
     sponsorPool,
     store,
+    admittedClientIp: await admitTestClientIp(abuseBlocker, CLIENT_IP),
   };
 }
 
@@ -679,7 +685,7 @@ describe('handleSponsor', () => {
     consoleInfoSpy.mockRestore();
   });
 
-  it('uses one decoded transaction object through simulation, sponsor signing, and submission', async () => {
+  it('passes one original byte array through simulation, sponsor signing, and submission', async () => {
     const callbacks: SponsorResultMetadata[] = [];
     const sui = makeMockSui();
     const fixture = await makePreparedContext({
@@ -698,7 +704,7 @@ describe('handleSponsor', () => {
         userSignature,
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     );
 
     const signedBytes = signSpy.mock.calls[0]?.[2];
@@ -725,6 +731,7 @@ describe('handleSponsor', () => {
     const store = new MemorySponsoredExecutionStore(sponsorPool, undefined);
     const signSpy = vi.spyOn(sponsorPool, 'sign');
     const ctx = makeMockContext({ sponsorPool, sponsoredExecutionStore: store });
+    const admittedClientIp = await admitTestClientIp(ctx.abuseBlocker, CLIENT_IP);
     const tx = await buildValidTx(SPONSOR_ADDRESS);
 
     const error = await handleSponsor(
@@ -734,7 +741,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: PAYMENT_ID,
       },
-      CLIENT_IP,
+      admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorValidationError);
@@ -762,7 +769,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tampered.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorValidationError);
@@ -785,6 +792,7 @@ describe('handleSponsor', () => {
     const attacker = Ed25519Keypair.generate();
     const attackerSignature = await attacker.signTransaction(fixture.tx.txBytes);
     const signSpy = vi.spyOn(fixture.sponsorPool, 'sign');
+    const readPreparedReceipt = vi.spyOn(fixture.store, 'readPreparedReceipt');
 
     const error = await handleSponsor(
       fixture.ctx,
@@ -793,16 +801,71 @@ describe('handleSponsor', () => {
         userSignature: attackerSignature.signature,
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorValidationError);
     expect((error as SponsorValidationError).code).toBe('SENDER_SIGNATURE_INVALID');
+    expect(readPreparedReceipt).not.toHaveBeenCalled();
     expect(signSpy).not.toHaveBeenCalled();
     expect(await fixture.store.readPreparedReceipt(fixture.prepared.receiptId)).toEqual(
       fixture.prepared,
     );
     expect((await fixture.sponsorPool.leaseStatus()).leasedSlots).toBe(1);
+  });
+
+  it('admits the signed address subject before reading the prepared receipt', async () => {
+    const abuseBlocker = makeMockAbuseBlocker();
+    vi.mocked(abuseBlocker.checkSubject).mockResolvedValue({
+      blocked: true,
+      retryAfterMs: 10_000,
+    });
+    const fixture = await makePreparedContext({ abuseBlocker });
+    const readPreparedReceipt = vi.spyOn(fixture.store, 'readPreparedReceipt');
+
+    const error = await handleSponsor(
+      fixture.ctx,
+      {
+        txBytes: fixture.tx.encodedTxBytes,
+        userSignature: await buildValidSignature(fixture.tx.txBytes),
+        receiptId: fixture.prepared.receiptId,
+      },
+      fixture.admittedClientIp,
+    ).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(SponsorBlockedError);
+    expect(abuseBlocker.checkIp).toHaveBeenCalledTimes(1);
+    expect(abuseBlocker.checkIp).toHaveBeenCalledWith(CLIENT_IP);
+    expect(abuseBlocker.checkSubject).toHaveBeenCalledWith({
+      kind: 'address',
+      address: SENDER,
+    });
+    expect(readPreparedReceipt).not.toHaveBeenCalled();
+  });
+
+  it('rejects a forged IP admission token before decoding or reading sponsor state', async () => {
+    const abuseBlocker = makeMockAbuseBlocker();
+    const fixture = await makePreparedContext({ abuseBlocker });
+    const readPreparedReceipt = vi.spyOn(fixture.store, 'readPreparedReceipt');
+    const signSpy = vi.spyOn(fixture.sponsorPool, 'sign');
+
+    await expect(
+      handleSponsor(
+        fixture.ctx,
+        {
+          txBytes: fixture.tx.encodedTxBytes,
+          userSignature: await buildValidSignature(fixture.tx.txBytes),
+          receiptId: fixture.prepared.receiptId,
+        },
+        {} as AdmittedClientIp,
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    expect(abuseBlocker.checkIp).toHaveBeenCalledTimes(1);
+    expect(abuseBlocker.checkIp).toHaveBeenCalledWith(CLIENT_IP);
+    expect(abuseBlocker.checkSubject).not.toHaveBeenCalled();
+    expect(readPreparedReceipt).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
   });
 
   it('classifies a replay-nonce Move abort before signing and releases the receipt atomically', async () => {
@@ -831,7 +894,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorPreflightError);
@@ -872,7 +935,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorOnchainError);
@@ -920,7 +983,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorCongestionError);
@@ -948,7 +1011,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(fixture.tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorSubmissionUncertainError);
@@ -981,7 +1044,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     ).catch((cause: unknown) => cause);
 
     expect(error).toBeInstanceOf(SponsorValidationError);
@@ -1015,7 +1078,7 @@ describe('handleSponsor', () => {
         userSignature: await buildValidSignature(tx.txBytes),
         receiptId: fixture.prepared.receiptId,
       },
-      CLIENT_IP,
+      fixture.admittedClientIp,
     );
 
     expect(result.orderId).toBe(orderId);

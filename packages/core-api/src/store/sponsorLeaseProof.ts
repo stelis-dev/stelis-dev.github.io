@@ -44,6 +44,7 @@ import {
   isValidTransactionDigest,
   normalizeSuiAddress,
 } from '@mysten/sui/utils';
+import { isReceiptId } from '@stelis/contracts';
 
 /**
  * Minimum acceptable length for `SPONSOR_LEASE_HMAC_SECRET`. Matches the
@@ -52,7 +53,6 @@ import {
  */
 export const SPONSOR_LEASE_HMAC_SECRET_MIN_LENGTH = 32;
 
-const RECEIPT_ID_PATTERN = /^0x[0-9a-f]{64}$/;
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 interface SponsorLeaseRecordCommon {
@@ -569,7 +569,7 @@ export function parseSponsorLeaseRecord(raw: string): SponsorLeaseRecord {
 }
 
 function validateSponsorLeaseRecord(record: SponsorLeaseRecord): void {
-  if (typeof record.receiptId !== 'string' || !RECEIPT_ID_PATTERN.test(record.receiptId)) {
+  if (!isReceiptId(record.receiptId)) {
     throw new SponsorLeaseRecordCorruptionError('Sponsor lease receiptId is not canonical');
   }
   if (

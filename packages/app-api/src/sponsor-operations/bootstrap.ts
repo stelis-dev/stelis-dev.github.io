@@ -9,7 +9,7 @@
  *
  * Failure policy:
  *   - Redis write failure on any entity → throws. The calling
- *     `createContext()` translates the rejection into a fail-fast boot.
+ *     the App API context owner translates the rejection into a fail-fast boot.
  *     This matches the existing admin `not_before` Redis pattern.
  *   - Chain RPC failure on any slot or sponsor refill account → the failed
  *     observation is written via the Lua update script and boot continues.

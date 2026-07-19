@@ -207,6 +207,13 @@ export async function runSponsorStateMachine<TResult>(
   receiptPolicy: SponsorReceiptPolicyAdapter,
 ): Promise<TResult> {
   const receiptId = request.hookContext.receiptId;
+  // The submitted TransactionData and its user signature are authenticated
+  // before any prepared-record, SponsorAvailability, or lease-backed I/O.
+  // Policies retain the one decoded representation and the runner preserves
+  // the original Uint8Array through signAndSubmit.
+  await policy.hooks.DecodeSponsorSubmission(request.hookContext);
+  await policy.hooks.UserSignatureValidation(request.hookContext);
+
   let prepared: PreparedTxEntry;
   let current: PreparedTxEntry | null;
   try {
@@ -217,9 +224,6 @@ export async function runSponsorStateMachine<TResult>(
   if (!current) throw receiptPolicy.onNotFound(receiptId);
   prepared = current;
   await receiptPolicy.validatePreparedEntry(prepared);
-
-  await policy.hooks.DecodeSponsorSubmission(request.hookContext);
-  await policy.hooks.UserSignatureValidation(request.hookContext);
 
   if (txBytesHash(request.txBytes) !== prepared.txBytesHash) {
     throw await receiptPolicy.onHashMismatch(receiptId);

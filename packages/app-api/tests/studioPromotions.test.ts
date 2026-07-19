@@ -37,7 +37,8 @@ vi.mock('../src/developerJwtVerifyCallback.js', async () => {
 
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
-import type { AppApiContext } from '../src/context.js';
+import type { RelayAndStudioAppApiContext } from '../src/context.js';
+import type { RequestAdmissionDependencies } from '../src/requestAdmission.js';
 import {
   MemoryPromotionStore,
   MemoryPromotionExecutionLedger,
@@ -45,7 +46,8 @@ import {
 import { recordPromotionAbuseEvent } from '@stelis/core-api/studio';
 import type { AdminPromotionCreateRequest } from '@stelis/contracts';
 
-const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
+const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
+const ABSENT_PROMOTION_ID = '00000000-0000-4000-8000-000000000099';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -60,10 +62,13 @@ const BASE_PROMO: AdminPromotionCreateRequest = {
   startAt: null,
 };
 
-function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
+function createFullCtx(
+  overrides: Partial<RelayAndStudioAppApiContext> = {},
+): RelayAndStudioAppApiContext {
   const promotionStore = new MemoryPromotionStore();
 
   return {
+    mode: 'relay_and_studio',
     host: {
       rateLimiter: { check: vi.fn().mockResolvedValue({ allowed: true }) },
       abuseBlocker: {
@@ -72,9 +77,9 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
       },
     } as never,
     prepareConfig: {} as never,
-    studio: {} as never,
     promotionStore,
     executionLedger: new MemoryPromotionExecutionLedger(promotionStore),
+    studioGlobalAllowedTargets: new Set<string>(),
     developerJwtTrustConfig: {
       issuer: 'test',
       audience: 'test',
@@ -83,16 +88,38 @@ function createFullCtx(overrides: Partial<AppApiContext> = {}): AppApiContext {
       claimPaths: { userId: 'sub', senderAddress: 'wallet' },
     },
     developerJwtVerifyUrl: null,
+    rpcFleet: {
+      endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' }],
+    },
     redis: {} as never,
     abuseStore: {} as never,
+    sponsorAvailability: { readState: vi.fn() } as never,
     sponsorOperations: {} as never,
-    dispose: vi.fn(),
+    sponsoredLogsStore: {
+      append: vi.fn().mockResolvedValue(undefined),
+      getSummary: vi.fn(),
+      getRecent: vi.fn(),
+    },
     ...overrides,
-  } as AppApiContext;
+  };
 }
 
-function mountApp(ctx: AppApiContext): Hono {
-  const routes = createStudioRoutes(Promise.resolve(ctx), resolveClientIp);
+function createRequestAdmissionDependencies(
+  ctx: RelayAndStudioAppApiContext,
+  overrides: Partial<RequestAdmissionDependencies> = {},
+): RequestAdmissionDependencies {
+  return {
+    host: ctx.host,
+    resolveClientIp,
+    ...overrides,
+  };
+}
+
+function mountApp(
+  ctx: RelayAndStudioAppApiContext,
+  admission = createRequestAdmissionDependencies(ctx),
+): Hono {
+  const routes = createStudioRoutes(ctx, admission);
   const app = new Hono();
   app.route('/studio', routes);
   return app;
@@ -101,11 +128,12 @@ function mountApp(ctx: AppApiContext): Hono {
 // ── Tests ───────────────────────────────────────────────────────────────
 
 describe('studio promotion routes', () => {
-  let ctx: AppApiContext;
+  let ctx: RelayAndStudioAppApiContext;
   let app: Hono;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resolveClientIp.mockReturnValue('127.0.0.1');
     ctx = createFullCtx();
     app = mountApp(ctx);
   });
@@ -222,6 +250,33 @@ describe('studio promotion routes', () => {
       ]);
     });
 
+    it('orders IP, credential, subject, then promotion domain I/O', async () => {
+      const record = await ctx.promotionStore!.create(BASE_PROMO);
+      await ctx.promotionStore!.transitionStatus(record.promotionId, 'active');
+      const listPage = vi.spyOn(ctx.promotionStore!, 'listPage');
+      const listLedgerStatuses = vi.spyOn(ctx.executionLedger!, 'getPromotionListLedgerStatuses');
+      const orderedApp = mountApp(ctx);
+
+      const res = await orderedApp.request('/studio/promotions', {
+        headers: { Authorization: 'Bearer test-jwt' },
+      });
+
+      expect(res.status).toBe(200);
+      const rateLimitCallOrder = vi.mocked(ctx.host.rateLimiter.check).mock.invocationCallOrder;
+      const orderedCalls = [
+        resolveClientIp.mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.host.abuseBlocker.checkIp).mock.invocationCallOrder[0]!,
+        rateLimitCallOrder[0]!,
+        mockVerifyDeveloperJwt.mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.host.abuseBlocker.checkSubject).mock.invocationCallOrder[0]!,
+        rateLimitCallOrder[1]!,
+        listPage.mock.invocationCallOrder[0]!,
+        listLedgerStatuses.mock.invocationCallOrder[0]!,
+      ];
+      expect(orderedCalls).not.toContain(undefined);
+      expect(orderedCalls).toEqual([...orderedCalls].sort((left, right) => left - right));
+    });
+
     it('returns 429 when list request is blocked', async () => {
       vi.mocked(ctx.host.abuseBlocker.checkIp).mockResolvedValueOnce({
         blocked: true,
@@ -276,12 +331,12 @@ describe('studio promotion routes', () => {
   // ── GET /studio/promotions/:id (detail) ─────────────────────────
   describe('GET /studio/promotions/:id', () => {
     it('returns 401 without Authorization header', async () => {
-      const res = await app.request('/studio/promotions/some-id');
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}`);
       expect(res.status).toBe(401);
     });
 
     it('returns 404 for nonexistent promotion', async () => {
-      const res = await app.request('/studio/promotions/nonexistent', {
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}`, {
         headers: { Authorization: 'Bearer test-jwt' },
       });
       expect(res.status).toBe(404);
@@ -399,7 +454,7 @@ describe('studio promotion routes', () => {
   // ── POST /studio/promotions/:id/claim ───────────────────────────
   describe('POST /studio/promotions/:id/claim', () => {
     it('returns 401 without Authorization header', async () => {
-      const res = await app.request('/studio/promotions/some-id/claim', {
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -407,21 +462,46 @@ describe('studio promotion routes', () => {
       expect(res.status).toBe(401);
     });
 
-    // 503 infrastructure failures outrank 401 auth on this route.
-    it('returns 503 (not 401) when promotion system is unavailable AND Authorization is missing', async () => {
-      const unavailableCtx = createFullCtx({ promotionStore: null, executionLedger: null });
-      const unavailableApp = mountApp(unavailableCtx);
-      const res = await unavailableApp.request('/studio/promotions/some-id/claim', {
+    it('rejects a missing credential before subject admission and promotion domain I/O', async () => {
+      const getPromotion = vi.spyOn(ctx.promotionStore, 'get');
+      const claim = vi.spyOn(ctx.executionLedger, 'claim');
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
-      expect(res.status).toBe(503);
+
+      expect(res.status).toBe(401);
+      expect(resolveClientIp).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(ctx.host.abuseBlocker.checkIp)).toHaveBeenCalledWith('127.0.0.1');
+      expect(ctx.host.rateLimiter.check).toHaveBeenCalledWith('promo_claim:client-ip:127.0.0.1');
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(getPromotion).not.toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-empty claim body before credentials or Promotion domain I/O', async () => {
+      const getPromotion = vi.spyOn(ctx.promotionStore, 'get');
+      const claim = vi.spyOn(ctx.executionLedger, 'claim');
+
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ legacyClaimOption: true }),
+      });
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({ code: 'BAD_REQUEST' });
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(getPromotion).not.toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
     });
 
     it('classifies local JWT rejection consistently on the claim route', async () => {
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('kid not trusted'));
-      const res = await app.request('/studio/promotions/some-id/claim', {
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-jwt' },
         body: JSON.stringify({}),
@@ -432,7 +512,7 @@ describe('studio promotion routes', () => {
     });
 
     it('returns 404 for nonexistent promotion', async () => {
-      const res = await app.request('/studio/promotions/nonexistent/claim', {
+      const res = await app.request(`/studio/promotions/${ABSENT_PROMOTION_ID}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-jwt' },
         body: JSON.stringify({}),

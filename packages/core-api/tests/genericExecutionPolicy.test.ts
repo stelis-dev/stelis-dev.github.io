@@ -39,6 +39,7 @@ import type { HostContext } from '../src/context.js';
 import type { ExecResult } from '../src/session/sessionTypes.js';
 import type { SuiExecutionError } from '@stelis/core-relay';
 import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 const SENDER = `0x${'11'.repeat(32)}`;
@@ -47,6 +48,12 @@ const SPONSOR = `0x${'22'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 const STELIS_PACKAGE_ID = `0x${'66'.repeat(32)}`;
 const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
+const TEST_ABUSE_BLOCKER = {
+  checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+  checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+  recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+};
+const ADMITTED_CLIENT_IP = await admitTestClientIp(TEST_ABUSE_BLOCKER);
 const GAS_USED = {
   computationCost: '1000',
   storageCost: '200',
@@ -132,7 +139,7 @@ function makeContext(overrides: Partial<HostContext> = {}): HostContext {
     sponsorPool: {
       checkin: vi.fn(),
     } as unknown as HostContext['sponsorPool'],
-    abuseBlocker: {} as HostContext['abuseBlocker'],
+    abuseBlocker: TEST_ABUSE_BLOCKER,
     getConfig: vi.fn(),
     invalidateConfigCache: vi.fn(),
     onSponsorResult: undefined,
@@ -164,6 +171,7 @@ function makeSponsorOptions(
   return {
     hostContext: ctx,
     sponsor: {
+      admittedClientIp: ADMITTED_CLIENT_IP,
       txBytes: TX_BYTES,
       userSignature: 'mock-user-signature',
       errors,
@@ -343,6 +351,7 @@ function seedSponsorState(
   overrides: Partial<NonNullable<GenericExecutionPolicyState['sponsor']>> = {},
 ): void {
   state.sponsor = {
+    builtTxForValidation: {} as Transaction,
     txSender: SENDER,
     prepared: makePrepared(),
     revalidation: makeRevalidation(7n),
@@ -397,6 +406,7 @@ describe('createGenericExecutionPolicy', () => {
         {
           senderAddress: makePrepareHookCtx().senderAddress,
           clientIp: makePrepareHookCtx().clientIp,
+          assertSponsorAvailable: vi.fn(async () => undefined),
           preparedDraftFields,
           projectResponse,
         },
@@ -454,6 +464,7 @@ describe('createGenericExecutionPolicy', () => {
       {
         senderAddress: makePrepareHookCtx().senderAddress,
         clientIp: makePrepareHookCtx().clientIp,
+        assertSponsorAvailable: vi.fn(async () => undefined),
         preparedDraftFields: vi.fn(),
         projectResponse: vi.fn(),
       },
@@ -564,7 +575,61 @@ describe('createGenericSponsorReceiptPolicy', () => {
 });
 
 describe('generic sponsor validation', () => {
-  test('records signature failure after the runner supplies the current prepared entry', async () => {
+  test('reuses the one decoded transaction for every generic sponsor validation', async () => {
+    const txBytes = await buildTxBytesWithSender(SENDER);
+    const revalidateGenericSponsorPolicy = vi.fn<
+      GenericExecutionPolicyDependencies['revalidateGenericSponsorPolicy']
+    >(async (_context, _prepared, builtTx) => ({
+      ...makeRevalidation(7n),
+      builtTx,
+    }));
+    const verifyGasOwner = vi.fn<GenericExecutionPolicyDependencies['verifyGasOwner']>(() => ({
+      owner: SPONSOR,
+      budget: 10_000n,
+    }));
+    const options = {
+      ...makeSponsorOptions({
+        deps: {
+          verifySenderSignature: vi.fn(async () => undefined),
+          checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
+          revalidateGenericSponsorPolicy,
+          verifyGasOwner,
+        },
+      }),
+      sponsor: {
+        admittedClientIp: ADMITTED_CLIENT_IP,
+        txBytes,
+        userSignature: 'valid-user-signature',
+        errors,
+      },
+    } satisfies GenericExecutionPolicyOptions;
+    const { policy, state } = createGenericExecutionPolicy(options);
+    const transactionFrom = vi.spyOn(Transaction, 'from');
+
+    try {
+      await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+      const decoded = state.sponsor?.builtTxForValidation;
+      expect(decoded).toBeInstanceOf(Transaction);
+
+      await policy.hooks.UserSignatureValidation(makeSubmissionCtx());
+      await createGenericSponsorReceiptPolicy({
+        hostContext: options.hostContext,
+        clientIp: '127.0.0.1',
+        state,
+        errors,
+        deps: options.deps,
+      }).validatePreparedEntry(makePrepared());
+      await policy.hooks.SharedSponsorChecks(makeValidatedCtx());
+
+      expect(transactionFrom).toHaveBeenCalledTimes(1);
+      expect(revalidateGenericSponsorPolicy.mock.calls[0]?.[2]).toBe(decoded);
+      expect(verifyGasOwner.mock.calls[0]?.[0]).toBe(decoded);
+    } finally {
+      transactionFrom.mockRestore();
+    }
+  });
+
+  test('records signature failure without requiring a prepared entry', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const verifySenderSignature = vi.fn(async () => {
       throw new SenderSignatureError('bad signature');
@@ -580,19 +645,13 @@ describe('generic sponsor validation', () => {
         },
       }),
       sponsor: {
+        admittedClientIp: ADMITTED_CLIENT_IP,
         txBytes,
         userSignature: 'bad-user-signature',
         errors,
       },
     } satisfies GenericExecutionPolicyOptions;
-    const { policy, state } = createGenericExecutionPolicy(options);
-    await createGenericSponsorReceiptPolicy({
-      hostContext: options.hostContext,
-      clientIp: '127.0.0.1',
-      state,
-      errors,
-      deps: options.deps,
-    }).validatePreparedEntry(makePrepared());
+    const { policy } = createGenericExecutionPolicy(options);
 
     await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
     await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
@@ -606,18 +665,20 @@ describe('generic sponsor validation', () => {
     );
   });
 
-  test('records sender mismatch against the exact prepared entry supplied by the runner', async () => {
+  test('admits the signed sender before comparing it with the prepared entry', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
     const txBytes = await buildTxBytesWithSender(OTHER_SENDER);
     const options = {
       ...makeSponsorOptions({
         deps: {
           verifySenderSignature: vi.fn(async () => undefined),
+          checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
         },
       }),
       sponsor: {
+        admittedClientIp: ADMITTED_CLIENT_IP,
         txBytes,
         userSignature: 'valid-for-other-sender',
         errors,
@@ -633,13 +694,16 @@ describe('generic sponsor validation', () => {
     }).validatePreparedEntry(makePrepared());
 
     await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
-    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
+    await expect(
+      policy.hooks.UserSignatureValidation(makeSubmissionCtx()),
+    ).resolves.toBeUndefined();
+    await expect(policy.hooks.SharedSponsorChecks(makeValidatedCtx())).rejects.toMatchObject({
       code: 'RECEIPT_SESSION_MISMATCH',
     });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',
-      undefined,
+      { kind: 'address', address: OTHER_SENDER },
       'RECEIPT_SESSION_MISMATCH',
     );
   });
@@ -651,7 +715,7 @@ describe('generic sponsor read-only checks', () => {
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
+          checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
           revalidateGenericSponsorPolicy: vi.fn(async () => makeRevalidation(7n)),
           verifyGasOwner: vi.fn(() => ({ owner: SPONSOR, budget: 10_000n })),
           recordSponsorFailureForAbuse:
@@ -677,7 +741,7 @@ describe('generic sponsor read-only checks', () => {
     const { policy, state } = createGenericExecutionPolicy(
       makeSponsorOptions({
         deps: {
-          checkBlockedRequest: vi.fn(async () => ({ blocked: false })),
+          checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
           revalidateGenericSponsorPolicy: vi.fn(async () => makeRevalidation(8n)),
           verifyGasOwner: vi.fn(() => ({ owner: SPONSOR, budget: 10_000n })),
           recordSponsorFailureForAbuse:

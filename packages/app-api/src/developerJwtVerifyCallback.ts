@@ -81,6 +81,7 @@ function parseDeveloperVerifyResponse(value: unknown): { valid: boolean; reason?
  *
  * Fail-closed on:
  * - Network error
+ * - Redirect response
  * - Non-2xx response
  * - Invalid response body
  * - Timeout (`DEVELOPER_VERIFY_TIMEOUT_MS`)
@@ -102,6 +103,8 @@ export async function callDeveloperVerifyApi(jwt: string, verifyUrl: string): Pr
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jwt }),
+      redirect: 'error',
+      credentials: 'omit',
       signal: controller.signal,
     });
 

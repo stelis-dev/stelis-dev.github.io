@@ -67,6 +67,7 @@ import type { VerifiedDeveloperIdentity } from '../../studio/developerJwtVerifie
 import {
   PromotionSponsorPolicyError,
   validatePromotionPreparedPolicy,
+  validatePromotionSponsorSubmissionPolicy,
 } from '../../studio/promotionSponsorPolicy.js';
 import { recordPromotionAbuseEvent } from '../../studio/promotionAbusePolicy.js';
 import {
@@ -177,6 +178,7 @@ export interface StudioExecutionPolicyDependencies {
   readonly runPreflight: typeof runPreflight;
   readonly signAndSubmit: typeof signAndSubmit;
   readonly validatePromotionPreparedPolicy: typeof validatePromotionPreparedPolicy;
+  readonly validatePromotionSponsorSubmissionPolicy: typeof validatePromotionSponsorSubmissionPolicy;
   readonly verifyGasOwner: typeof verifyGasOwner;
   readonly verifySenderSignature: typeof verifySenderSignature;
 }
@@ -225,6 +227,7 @@ const DEFAULT_DEPS: StudioExecutionPolicyDependencies = {
   runPreflight,
   signAndSubmit,
   validatePromotionPreparedPolicy,
+  validatePromotionSponsorSubmissionPolicy,
   verifyGasOwner,
   verifySenderSignature,
 };
@@ -344,6 +347,18 @@ export function createStudioSponsorReceiptPolicy(input: {
         throw input.errors.sponsor(
           'Receipt Promotion does not match the requested Promotion',
           'PROMOTION_ID_MISMATCH',
+        );
+      }
+      if (entry.senderAddress !== input.params.verifiedIdentity.senderAddress) {
+        throw input.errors.sponsor(
+          'Verified identity senderAddress does not match prepared senderAddress',
+          'SENDER_ADDRESS_MISMATCH',
+        );
+      }
+      if (entry.userId !== input.params.verifiedIdentity.userId) {
+        throw input.errors.sponsor(
+          'Verified identity userId does not match prepared userId',
+          'USER_ID_MISMATCH',
         );
       }
       const state = requireSponsorState(input.state);
@@ -481,18 +496,6 @@ async function runStudioRequestValidation(
     );
   }
 
-  const promotion = await options.context.promotionStore.get(prepare.params.promotionId);
-  const entitlement = promotion
-    ? await options.context.executionLedger.getEntitlement(
-        prepare.params.promotionId,
-        identity.userId,
-      )
-    : null;
-  const eligibilityFailure = validatePromotionEligibility(promotion, entitlement);
-  if (eligibilityFailure) {
-    throw promotionPrepareErrorForEligibility(prepare.errors, eligibilityFailure);
-  }
-
   try {
     state.kindTx = await d.deserializeUserTxKind(prepare.params.txKindBytes);
   } catch (err) {
@@ -534,6 +537,18 @@ async function runStudioRequestValidation(
       `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
       'BAD_REQUEST',
     );
+  }
+
+  const promotion = await options.context.promotionStore.get(prepare.params.promotionId);
+  const entitlement = promotion
+    ? await options.context.executionLedger.getEntitlement(
+        prepare.params.promotionId,
+        identity.userId,
+      )
+    : null;
+  const eligibilityFailure = validatePromotionEligibility(promotion, entitlement);
+  if (eligibilityFailure) {
+    throw promotionPrepareErrorForEligibility(prepare.errors, eligibilityFailure);
   }
 
   const quotaCheck = await options.context.sponsoredExecutionStore.checkUserQuota(identity.userId);
@@ -619,28 +634,14 @@ async function runStudioDecodeSponsorSubmission(
 ): Promise<void> {
   const sponsor = requireSponsor(options);
   const state = requireSponsorState(runtime);
-  const d = getDeps(options);
-  const sponsorContext = requirePromotionPolicyContext(options.context);
-
-  const prepared = requireValue(state.prepared, 'promotion prepared entry');
-
   try {
-    const { builtTx } = await d.validatePromotionPreparedPolicy(
-      sponsorContext,
-      {
-        promotionId: sponsor.params.promotionId,
-        clientIp: sponsor.params.clientIp,
-        verifiedIdentity: sponsor.params.verifiedIdentity,
-      },
-      prepared,
-      sponsor.txBytes,
-    );
-    state.builtTxForValidation = builtTx;
+    state.builtTxForValidation = Transaction.from(sponsor.txBytes);
+    state.txSender = extractTxSender(state.builtTxForValidation);
   } catch (err) {
-    if (err instanceof PromotionSponsorPolicyError) {
-      throw sponsor.errors.sponsor(err.message, err.code);
-    }
-    throw err;
+    throw sponsor.errors.sponsor(
+      `Malformed txBytes — cannot deserialize TransactionData: ${err instanceof Error ? err.message : String(err)}`,
+      'BAD_REQUEST',
+    );
   }
   void ctx;
 }
@@ -655,36 +656,8 @@ async function runStudioUserSignatureValidation(
   const d = getDeps(options);
   const sponsorContext = requirePromotionPolicyContext(options.context);
   const builtTx = requireValue(state.builtTxForValidation, 'studio builtTxForValidation');
-  const peekedPromotion = requireValue(state.peekedPromotion, 'peeked promotion prepared entry');
   const identity = sponsor.params.verifiedIdentity;
-
-  try {
-    state.txSender = extractTxSender(builtTx);
-  } catch (err) {
-    if (err instanceof SenderSignatureError) {
-      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID');
-    }
-    throw err;
-  }
-
   const txSender = requireValue(state.txSender, 'tx sender');
-  if (txSender !== peekedPromotion.senderAddress) {
-    await d.recordPromotionAbuseEvent(
-      sponsorContext.abuseBlocker,
-      ctx.clientIp,
-      { kind: 'studio_user', userId: peekedPromotion.userId },
-      'PROMO_SENDER_SIGNATURE_INVALID',
-      {
-        promotionId: sponsor.params.promotionId,
-        userId: identity.userId,
-        detail: 'canonical_sender_mismatch',
-      },
-    );
-    throw sponsor.errors.sponsor(
-      'canonical tx.sender does not match prepared senderAddress',
-      'SENDER_SIGNATURE_INVALID',
-    );
-  }
 
   try {
     await d.verifySenderSignature(sponsor.txBytes, sponsor.userSignature, txSender);
@@ -693,7 +666,7 @@ async function runStudioUserSignatureValidation(
       await d.recordPromotionAbuseEvent(
         sponsorContext.abuseBlocker,
         ctx.clientIp,
-        { kind: 'studio_user', userId: peekedPromotion.userId },
+        { kind: 'studio_user', userId: identity.userId },
         'PROMO_SENDER_SIGNATURE_INVALID',
         {
           promotionId: sponsor.params.promotionId,
@@ -702,6 +675,41 @@ async function runStudioUserSignatureValidation(
         },
       );
       throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID');
+    }
+    throw err;
+  }
+
+  if (txSender !== identity.senderAddress) {
+    await d.recordPromotionAbuseEvent(
+      sponsorContext.abuseBlocker,
+      ctx.clientIp,
+      { kind: 'studio_user', userId: identity.userId },
+      'PROMO_SENDER_SIGNATURE_INVALID',
+      {
+        promotionId: sponsor.params.promotionId,
+        userId: identity.userId,
+        detail: 'verified_identity_sender_mismatch',
+      },
+    );
+    throw sponsor.errors.sponsor(
+      'canonical tx.sender does not match verified identity senderAddress',
+      'SENDER_SIGNATURE_INVALID',
+    );
+  }
+
+  try {
+    await d.validatePromotionSponsorSubmissionPolicy(
+      sponsorContext,
+      {
+        promotionId: sponsor.params.promotionId,
+        clientIp: sponsor.params.clientIp,
+        verifiedIdentity: identity,
+      },
+      builtTx,
+    );
+  } catch (err) {
+    if (err instanceof PromotionSponsorPolicyError) {
+      throw sponsor.errors.sponsor(err.message, err.code);
     }
     throw err;
   }
@@ -715,9 +723,28 @@ async function runStudioSharedSponsorChecks(
   const sponsor = requireSponsor(options);
   const state = requireSponsorState(runtime);
   const d = getDeps(options);
+  const sponsorContext = requirePromotionPolicyContext(options.context);
   const prepared = requireValue(state.prepared, 'consumed promotion prepared entry');
   const peekedPromotion = requireValue(state.peekedPromotion, 'peeked promotion prepared entry');
   const builtTx = requireValue(state.builtTxForValidation, 'studio builtTxForValidation');
+
+  try {
+    await d.validatePromotionPreparedPolicy(
+      sponsorContext,
+      {
+        promotionId: sponsor.params.promotionId,
+        clientIp: sponsor.params.clientIp,
+        verifiedIdentity: sponsor.params.verifiedIdentity,
+      },
+      prepared,
+      builtTx,
+    );
+  } catch (err) {
+    if (err instanceof PromotionSponsorPolicyError) {
+      throw sponsor.errors.sponsor(err.message, err.code);
+    }
+    throw err;
+  }
 
   let gasBudget: bigint;
   try {

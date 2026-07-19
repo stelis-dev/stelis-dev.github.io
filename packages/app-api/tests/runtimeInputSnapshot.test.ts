@@ -1,7 +1,7 @@
 /**
  * Runtime input snapshot wiring tests.
  *
- * `createContext` receives an already parsed, secret-bearing runtime input.
+ * The App API context owner receives an already parsed, secret-bearing runtime input.
  * These tests verify that it forwards the exact boot-qualified chain/RPC
  * snapshots to the Host context without consulting process env, re-reading
  * chain readiness state, or resolving the registry again.
@@ -25,6 +25,19 @@ const mocks = vi.hoisted(() => ({
   getSettlementSwapPathRegistryPath: vi.fn(),
   resolveSettlementSwapPathRegistry: vi.fn(),
   getSuiBalance: vi.fn(),
+  createRedisClient: vi.fn(),
+  redisDispose: vi.fn(),
+  recoveryStart: vi.fn(),
+  recoveryDispose: vi.fn(),
+  hostDispose: vi.fn(),
+  createTaskScheduler: vi.fn(),
+  schedulerStart: vi.fn(),
+  schedulerDispose: vi.fn(),
+  schedulerObserveBalances: vi.fn(),
+  schedulerObserveSponsorResult: vi.fn(),
+  schedulerWithdraw: vi.fn(),
+  schedulerRequestObservedSlotRefill: vi.fn(),
+  schedulerRequestEligibleRefills: vi.fn(),
 }));
 
 vi.mock('../src/settlementSwapPathRegistry.js', () => ({
@@ -46,8 +59,8 @@ vi.mock('@stelis/core-api', async () => {
     ...actual,
     RedisSponsoredExecutionStore: class {},
     SponsoredExecutionRecovery: class {
-      readonly start = vi.fn().mockResolvedValue(undefined);
-      readonly dispose = vi.fn().mockResolvedValue(undefined);
+      readonly start = mocks.recoveryStart;
+      readonly dispose = mocks.recoveryDispose;
     },
     createHostContext: vi.fn().mockImplementation((config: Record<string, unknown>) => {
       capturedHostConfig = config;
@@ -68,14 +81,18 @@ vi.mock('@stelis/core-api', async () => {
         vaultsTableId: initialChainState.vaultsTableId,
         getConfig: vi.fn().mockResolvedValue(initialChainState.config),
         invalidateConfigCache: vi.fn(),
-        dispose: vi.fn(),
+        dispose: mocks.hostDispose,
       };
     }),
   };
 });
 
 vi.mock('../src/redisClient.js', () => ({
-  createRedisClient: vi.fn().mockResolvedValue({
+  createRedisClient: mocks.createRedisClient,
+}));
+
+function redisClientFixture() {
+  return {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(1),
@@ -130,9 +147,9 @@ vi.mock('../src/redisClient.js', () => ({
               ]
             : ['UPDATED'],
       ),
-    dispose: vi.fn().mockResolvedValue(undefined),
-  }),
-}));
+    dispose: mocks.redisDispose,
+  };
+}
 
 vi.mock('../src/sponsor-operations/accountSpendState.js', () => ({
   createSponsorRefillAccountSpendState: vi.fn(
@@ -191,7 +208,11 @@ vi.mock('@stelis/core-api/prepareConfig', () => ({
   }),
 }));
 
-import { createContext } from '../src/context.js';
+vi.mock('../src/sponsor-operations/reconciliationScheduler.js', () => ({
+  createSponsorOperationsTaskScheduler: mocks.createTaskScheduler,
+}));
+
+import { createAppApiContextOwner } from '../src/context.js';
 
 const SPONSOR_ADDRESS = `0x${'aa'.repeat(32)}`;
 const SPONSOR_REFILL_ACCOUNT_ADDRESS = `0x${'bb'.repeat(32)}`;
@@ -225,7 +246,20 @@ function keypair(address: string): Ed25519Keypair {
   } as unknown as Ed25519Keypair;
 }
 
-function runtimeInput(options: { prepareInflightCapacity?: number } = {}): ContextRuntimeInput {
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function runtimeInput(
+  options: {
+    prepareInflightCapacity?: number;
+    mode?: 'relay_only' | 'relay_and_studio';
+  } = {},
+): ContextRuntimeInput {
   const sui = suiEndpointSnapshotFixture();
   const initialHostChainState: HostChainState = Object.freeze({
     config: Object.freeze({
@@ -242,9 +276,9 @@ function runtimeInput(options: { prepareInflightCapacity?: number } = {}): Conte
     vaultsTableId: `0x${'07'.repeat(32)}`,
   });
 
-  return {
+  const base = {
     redisUrl: 'redis://boot-snapshot',
-    network: 'testnet',
+    network: 'testnet' as const,
     contractIds: {
       packageId: PACKAGE_ID,
       configId: CONFIG_ID,
@@ -252,11 +286,6 @@ function runtimeInput(options: { prepareInflightCapacity?: number } = {}): Conte
     },
     deepbookPackageId: `0x${'04'.repeat(32)}`,
     sui,
-    rpcFleet: Object.freeze({
-      endpoints: Object.freeze([
-        Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
-      ]),
-    }),
     initialHostChainState,
     settlementSwapPaths: Object.freeze([SETTLEMENT_SWAP_PATH]),
     sponsorKeys: [keypair(SPONSOR_ADDRESS)],
@@ -282,8 +311,32 @@ function runtimeInput(options: { prepareInflightCapacity?: number } = {}): Conte
         withdrawalReceiptTtlMs: 3_600_000,
       }),
     },
-    studio: null,
   };
+
+  if (options.mode === 'relay_and_studio') {
+    return {
+      ...base,
+      mode: 'relay_and_studio',
+      rpcFleet: Object.freeze({
+        endpoints: Object.freeze([
+          Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
+        ]),
+      }),
+      studio: {
+        globalAllowedTargets: new Set([`${PACKAGE_ID}::promotion::claim`]),
+        developerJwtTrustConfig: {
+          issuer: 'https://auth.runtime-input.test',
+          audience: 'stelis-studio',
+          algorithm: 'RS256',
+          publicKeyPem: 'test-only-key-not-parsed-by-context-owner',
+          claimPaths: { userId: 'sub', senderAddress: 'wallet_address' },
+        },
+        developerJwtVerifyUrl: 'https://auth.runtime-input.test/verify',
+      },
+    };
+  }
+
+  return { ...base, mode: 'relay_only' };
 }
 
 beforeEach(() => {
@@ -294,6 +347,29 @@ beforeEach(() => {
   capturedSpendStateOptions = null;
   runtimeEvents = [];
   vi.clearAllMocks();
+  mocks.createRedisClient.mockResolvedValue(redisClientFixture());
+  mocks.recoveryStart.mockResolvedValue(undefined);
+  mocks.recoveryDispose.mockResolvedValue(undefined);
+  mocks.hostDispose.mockResolvedValue(undefined);
+  mocks.redisDispose.mockResolvedValue(undefined);
+  mocks.createTaskScheduler.mockReturnValue({
+    start: mocks.schedulerStart,
+    dispose: mocks.schedulerDispose,
+    observeBalances: mocks.schedulerObserveBalances,
+    observeSponsorResult: mocks.schedulerObserveSponsorResult,
+    withdraw: mocks.schedulerWithdraw,
+    requestObservedSlotRefill: mocks.schedulerRequestObservedSlotRefill,
+    requestEligibleRefills: mocks.schedulerRequestEligibleRefills,
+  });
+  mocks.schedulerStart.mockImplementation(async () => {
+    runtimeEvents.push('recover');
+    runtimeEvents.push('balance');
+  });
+  mocks.schedulerDispose.mockResolvedValue(undefined);
+  mocks.schedulerObserveBalances.mockResolvedValue(undefined);
+  mocks.schedulerObserveSponsorResult.mockResolvedValue(undefined);
+  mocks.schedulerWithdraw.mockResolvedValue(undefined);
+  mocks.schedulerRequestEligibleRefills.mockResolvedValue(undefined);
   mocks.getSettlementSwapPathRegistryPath.mockImplementation(() => {
     throw new Error('context must not resolve the registry file path');
   });
@@ -310,7 +386,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe('createContext boot-snapshot wiring', () => {
+describe('App API context owner boot-snapshot wiring', () => {
   it('uses the exact boot-qualified snapshots without repeating readiness work', async () => {
     const input = runtimeInput();
 
@@ -318,13 +394,29 @@ describe('createContext boot-snapshot wiring', () => {
     vi.stubEnv('SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS', `0x${'ee'.repeat(32)}`);
     vi.stubEnv('SPONSOR_SECRET_KEY', 'different-after-boot');
 
-    const context = await createContext(input);
+    const runtime = createAppApiContextOwner(input);
+    const context = await runtime.start();
     try {
       expect(capturedHostConfig?.sui).toBe(input.sui);
       expect(capturedHostConfig?.initialChainState).toBe(input.initialHostChainState);
       expect(capturedPrepareConfigInput?.settlementSwapPaths).toEqual(input.settlementSwapPaths);
       expect(capturedSpendBoundaryInput?.sui).toBe(input.sui);
-      expect(context.rpcFleet).toBe(input.rpcFleet);
+      expect(context.mode).toBe('relay_only');
+      expect(Object.keys(context.sponsorAvailability)).toEqual(['readState']);
+      for (const studioOrAdminField of [
+        'studio',
+        'rpcFleet',
+        'redis',
+        'abuseStore',
+        'sponsoredLogsStore',
+        'promotionStore',
+        'executionLedger',
+        'studioGlobalAllowedTargets',
+        'developerJwtTrustConfig',
+        'developerJwtVerifyUrl',
+      ]) {
+        expect(Object.hasOwn(context, studioOrAdminField)).toBe(false);
+      }
       expect(mocks.getSettlementSwapPathRegistryPath).not.toHaveBeenCalled();
       expect(mocks.resolveSettlementSwapPathRegistry).not.toHaveBeenCalled();
       for (const [snapshot] of mocks.getSuiBalance.mock.calls) {
@@ -339,7 +431,7 @@ describe('createContext boot-snapshot wiring', () => {
       expect(runtimeEvents[0]).toBe('recover');
       expect(runtimeEvents).toContain('balance');
     } finally {
-      await context.dispose();
+      await runtime.stop();
     }
   });
 
@@ -347,14 +439,134 @@ describe('createContext boot-snapshot wiring', () => {
     const input = runtimeInput({ prepareInflightCapacity: 7 });
     vi.stubEnv('PREPARE_INFLIGHT_CAPACITY', '99');
 
-    const context = await createContext(input);
+    const runtime = createAppApiContextOwner(input);
+    await runtime.start();
     try {
       const limiter = capturedHostConfig?.prepareInflightLimiter as {
         readonly capacity: number;
       };
       expect(limiter.capacity).toBe(7);
     } finally {
-      await context.dispose();
+      await runtime.stop();
     }
+  });
+
+  it('creates Studio resources only from a complete `relay_and_studio` input', async () => {
+    const input = runtimeInput({ mode: 'relay_and_studio' });
+    if (input.mode !== 'relay_and_studio') {
+      throw new Error('Expected relay_and_studio runtime input');
+    }
+    const runtime = createAppApiContextOwner(input);
+    const context = await runtime.start();
+
+    try {
+      if (context.mode !== 'relay_and_studio') {
+        throw new Error('Expected relay_and_studio context');
+      }
+      expect(Object.hasOwn(context, 'studio')).toBe(false);
+      expect(context.rpcFleet).toBe(input.rpcFleet);
+      expect(context.promotionStore).not.toBeNull();
+      expect(context.executionLedger).not.toBeNull();
+      expect(context.studioGlobalAllowedTargets).toBe(input.studio.globalAllowedTargets);
+      expect(context.developerJwtTrustConfig).toBe(input.studio.developerJwtTrustConfig);
+      expect(context.developerJwtVerifyUrl).toBe(input.studio.developerJwtVerifyUrl);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it('uses the same ordered owner when stop aborts the immediate recovery pass', async () => {
+    const trace: string[] = [];
+    const recoveryStartGate = deferred();
+    const sponsorStopGate = deferred();
+    const domainStopGate = deferred();
+    const hostStopGate = deferred();
+    mocks.recoveryStart.mockImplementationOnce(async () => {
+      trace.push('recovery.start');
+      await recoveryStartGate.promise;
+    });
+    mocks.schedulerDispose.mockImplementationOnce(async () => {
+      trace.push('sponsor.stop.start');
+      await sponsorStopGate.promise;
+      trace.push('sponsor.stop.end');
+    });
+    mocks.recoveryDispose.mockImplementationOnce(async () => {
+      trace.push('domain.stop.start');
+      recoveryStartGate.resolve();
+      await domainStopGate.promise;
+      trace.push('domain.stop.end');
+    });
+    mocks.hostDispose.mockImplementationOnce(async () => {
+      trace.push('host.stop.start');
+      await hostStopGate.promise;
+      trace.push('host.stop.end');
+    });
+    mocks.redisDispose.mockImplementationOnce(async () => {
+      trace.push('redis.stop');
+    });
+
+    const owner = createAppApiContextOwner(runtimeInput());
+    const startTask = owner.start();
+    await vi.waitFor(() => expect(trace).toEqual(['recovery.start']));
+    const stopTask = owner.stop();
+    await vi.waitFor(() => expect(trace).toEqual(['recovery.start', 'sponsor.stop.start']));
+
+    sponsorStopGate.resolve();
+    await vi.waitFor(() => expect(trace).toContain('domain.stop.start'));
+    expect(trace).not.toContain('host.stop.start');
+    domainStopGate.resolve();
+    await vi.waitFor(() => expect(trace).toContain('host.stop.start'));
+    expect(trace).not.toContain('redis.stop');
+    hostStopGate.resolve();
+
+    await expect(stopTask).resolves.toBeUndefined();
+    await expect(startTask).rejects.toMatchObject({ name: 'AbortError' });
+    expect(trace).toEqual([
+      'recovery.start',
+      'sponsor.stop.start',
+      'sponsor.stop.end',
+      'domain.stop.start',
+      'domain.stop.end',
+      'host.stop.start',
+      'host.stop.end',
+      'redis.stop',
+    ]);
+  });
+
+  it('cannot acquire Redis after the context owner has stopped', async () => {
+    mocks.createRedisClient.mockImplementationOnce(
+      async (_redisUrl: string, signal?: AbortSignal) =>
+        await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const owner = createAppApiContextOwner(runtimeInput());
+    const startTask = owner.start();
+    await vi.waitFor(() => expect(mocks.createRedisClient).toHaveBeenCalledOnce());
+
+    await expect(owner.stop()).resolves.toBeUndefined();
+    await expect(startTask).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.createTaskScheduler).not.toHaveBeenCalled();
+    expect(mocks.redisDispose).not.toHaveBeenCalled();
+  });
+
+  it('retains only a failed cleanup handle for a later stop attempt', async () => {
+    mocks.redisDispose
+      .mockRejectedValueOnce(new Error('Redis disconnect failed'))
+      .mockResolvedValueOnce(undefined);
+    const owner = createAppApiContextOwner(runtimeInput());
+    await owner.start();
+
+    await expect(owner.stop()).rejects.toBeInstanceOf(AggregateError);
+    expect(mocks.schedulerDispose).toHaveBeenCalledOnce();
+    expect(mocks.recoveryDispose).toHaveBeenCalledOnce();
+    expect(mocks.hostDispose).toHaveBeenCalledOnce();
+    expect(mocks.redisDispose).toHaveBeenCalledOnce();
+
+    await expect(owner.stop()).resolves.toBeUndefined();
+    expect(mocks.schedulerDispose).toHaveBeenCalledOnce();
+    expect(mocks.recoveryDispose).toHaveBeenCalledOnce();
+    expect(mocks.hostDispose).toHaveBeenCalledOnce();
+    expect(mocks.redisDispose).toHaveBeenCalledTimes(2);
   });
 });

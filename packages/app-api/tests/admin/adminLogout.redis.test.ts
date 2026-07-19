@@ -8,7 +8,7 @@ import {
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
 import { startRealRedis, type RealRedisHandle } from '@stelis/core-api/testing/redis';
-import type { AppApiContext } from '../../src/context.js';
+import type { RelayAndStudioAppApiContext } from '../../src/context.js';
 import { createAdminRedisAdapter } from '../../src/adminRedis.js';
 import type { RedisClient } from '../../src/redisClient.js';
 import { requireAdminSession } from '../../src/requireAdminSession.js';
@@ -21,6 +21,7 @@ const JWT_CONFIG: AdminJwtConfig = {
   issuer: 'app-api',
 };
 const ADMIN_ADDRESS = '0x' + '11'.repeat(32);
+const ADMIN_ORIGIN = 'https://admin.example';
 
 function appRedis(real: RealRedisHandle): RedisClient {
   return {
@@ -66,16 +67,31 @@ describe('admin auth durability — real Redis and production adapters', () => {
   it('the logout route rejects its JWT and accepts a session issued after the cutoff', async () => {
     const redis = appRedis(real!);
     const adminRedis = createAdminRedisAdapter(redis);
-    const contextPromise = Promise.resolve({ redis } as AppApiContext);
+    const context = { redis } as RelayAndStudioAppApiContext;
     const app = new Hono();
     app.route(
       '/auth',
-      createAuthRoutes(contextPromise, {
-        resolveClientIp: () => '127.0.0.1',
-        adminAddress: ADMIN_ADDRESS,
-        adminAuth: {
-          jwt: JWT_CONFIG,
-          cookie: { maxAgeSeconds: 3_600, secure: false, domain: null },
+      createAuthRoutes(context, {
+        admission: {
+          resolveClientIp: () => '127.0.0.1',
+          host: {
+            abuseBlocker: {
+              checkIp: async () => ({ blocked: false }),
+              checkSubject: async () => ({ blocked: false }),
+              recordSponsorFailure: async () => {},
+            },
+            rateLimiter: {
+              check: async () => ({ allowed: true, current: 1, limit: 100 }),
+            },
+          },
+        },
+        admin: {
+          address: ADMIN_ADDRESS,
+          allowedOrigins: [ADMIN_ORIGIN],
+          auth: {
+            jwt: JWT_CONFIG,
+            cookie: { maxAgeSeconds: 3_600, secure: false, domain: null },
+          },
         },
       }),
     );
@@ -88,7 +104,7 @@ describe('admin auth durability — real Redis and production adapters', () => {
 
     const response = await app.request('/auth/logout', {
       method: 'POST',
-      headers: { Cookie: `stelis_admin=${oldToken}` },
+      headers: { Cookie: `stelis_admin=${oldToken}`, Origin: ADMIN_ORIGIN },
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });

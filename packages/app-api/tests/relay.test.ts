@@ -18,29 +18,31 @@ vi.mock('@stelis/core-api', async () => {
   return {
     ...actual,
     handleStatus: vi.fn().mockResolvedValue({ ok: true }),
-    handlePrepare: vi.fn().mockResolvedValue({
-      receiptId: 'mock-receipt',
-      txBytes: 'mock-tx-bytes',
-      nonce: '1',
-      cost: {
-        executionCostClaim: '500',
-        simGas: '200',
-        gasVarianceFixedMist: '100',
-        slippageBufferMist: '0',
-        quotedHostFee: '100',
-        protocolFee: '50',
-        grossGas: '300',
-      },
-      profile: 'new_user',
-      quoteTimestampMs: 1700000000000,
-      policyHash: '0xcafebabe',
+    handlePrepare: vi.fn().mockImplementation(async (_host, _params, _config, hooks) => {
+      await hooks?.assertSponsorAvailable();
+      return {
+        receiptId: `0x${'ab'.repeat(32)}`,
+        txBytes: 'mock-tx-bytes',
+        nonce: '1',
+        cost: {
+          executionCostClaim: '500',
+          simGas: '200',
+          gasVarianceFixedMist: '100',
+          slippageBufferMist: '0',
+          quotedHostFee: '100',
+          protocolFee: '50',
+          grossGas: '300',
+        },
+        profile: 'new_user',
+        quoteTimestampMs: 1700000000000,
+        policyHash: '0xcafebabe',
+      };
     }),
     handleSponsor: vi.fn().mockResolvedValue({
       digest: 'mock-digest',
       effects: {},
       executionCostClaim: '500',
     }),
-    checkBlockedRequest: vi.fn().mockResolvedValue({ blocked: false }),
     readJsonBodyWithLimit: vi.fn().mockImplementation(async (req: Request) => {
       return req.json();
     }),
@@ -56,10 +58,12 @@ import { createRelayRoutes } from '../src/routes/relay.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
 import { buildSponsorUnavailableResponse } from '../src/sponsor-operations/gateResponse.js';
 import type { AppApiContext } from '../src/context.js';
+import type { RequestAdmissionDependencies } from '../src/requestAdmission.js';
 import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
 
 const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
 const SPONSOR_OPERATIONS_SETTINGS = createTestSponsorOperationsSettings();
+const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 
 const PREPARE_AUTH_FIELDS = {
   txKindBytesHash: '0x' + '11'.repeat(32),
@@ -81,11 +85,16 @@ function prepareBody(overrides: Record<string, unknown> = {}): Record<string, un
 // ── Mock context factory ────────────────────────────────────────────────
 function createMockCtx(): AppApiContext {
   return {
+    mode: 'relay_only',
     host: {
       network: 'testnet',
       packageId: '0xPKG',
       settlementPayoutRecipientAddress: '0xRECIPIENT',
-      abuseBlocker: {} as never,
+      abuseBlocker: {
+        checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+        checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+        recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+      },
       rateLimiter: {
         check: vi.fn().mockResolvedValue({ allowed: true }),
       } as never,
@@ -99,7 +108,6 @@ function createMockCtx(): AppApiContext {
           slots: [{ address: '0xslot', leased: false }],
         }),
       },
-      dispose: vi.fn(),
     } as never,
     prepareConfig: {
       quotedHostFeeMist: BigInt(500),
@@ -125,14 +133,10 @@ function createMockCtx(): AppApiContext {
       ],
       allowedSettlementSwapPaths: [],
     } as never,
-    studio: null,
-
-    redis: {} as never,
-    abuseStore: {} as never,
-    sponsorOperations: {
+    sponsorAvailability: {
       // Default mock returns a healthy single-slot state so the request
       // gate admits by default; deny-path tests override `readState`
-      // via `(ctx.sponsorOperations.readState as Mock).mockResolvedValue(...)`.
+      // via `(ctx.sponsorAvailability.readState as Mock).mockResolvedValue(...)`.
       readState: vi.fn().mockResolvedValue({
         settings: SPONSOR_OPERATIONS_SETTINGS,
         slots: [
@@ -155,26 +159,18 @@ function createMockCtx(): AppApiContext {
           writeSeq: 1,
         },
       }),
-      settings: SPONSOR_OPERATIONS_SETTINGS,
-      observeBalances: vi.fn().mockResolvedValue(undefined),
-      slotAddresses: ['0xslot'],
-      sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
-      dispose: vi.fn(),
     } as never,
-    promotionStore: null,
-    executionLedger: null,
-    studioGlobalAllowedTargets: null,
-    developerJwtTrustConfig: null,
-    developerJwtVerifyUrl: null,
-    rpcFleet: {
-      endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' }],
-    },
-    sponsoredLogsStore: {
-      append: vi.fn().mockResolvedValue(undefined),
-      getSummary: vi.fn(),
-      getRecent: vi.fn(),
-    },
-    dispose: vi.fn(),
+  };
+}
+
+function createRequestAdmissionDependencies(
+  ctx: AppApiContext,
+  overrides: Partial<RequestAdmissionDependencies> = {},
+): RequestAdmissionDependencies {
+  return {
+    host: ctx.host,
+    resolveClientIp,
+    ...overrides,
   };
 }
 
@@ -242,7 +238,7 @@ describe('relay routes', () => {
     mockCtx = createMockCtx();
     resolveClientIp.mockReset();
     resolveClientIp.mockReturnValue('127.0.0.1');
-    const routes = createRelayRoutes(Promise.resolve(mockCtx), resolveClientIp);
+    const routes = createRelayRoutes(mockCtx, createRequestAdmissionDependencies(mockCtx));
     app = new Hono();
     app.route('/relay', routes);
 
@@ -252,8 +248,11 @@ describe('relay routes', () => {
     // `.mockClear()` keeps later `expect(...).not.toHaveBeenCalled()`
     // assertions deterministic.
     const coreApi = await import('@stelis/core-api');
-    vi.mocked(coreApi.checkBlockedRequest).mockClear();
-    vi.mocked(coreApi.checkBlockedRequest).mockResolvedValue({ blocked: false });
+    vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockClear();
+    vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockResolvedValue({ blocked: false });
+    vi.mocked(mockCtx.host.abuseBlocker.checkSubject).mockClear();
+    vi.mocked(mockCtx.host.abuseBlocker.checkSubject).mockResolvedValue({ blocked: false });
+    vi.mocked(coreApi.readJsonBodyWithLimit).mockClear();
     vi.mocked(coreApi.handlePrepare).mockClear();
     vi.mocked(coreApi.handleSponsor).mockClear();
     vi.mocked(buildSponsorUnavailableResponse).mockClear();
@@ -368,7 +367,7 @@ describe('relay routes', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(mockCtx.sponsorOperations.readState).toHaveBeenCalledTimes(1);
+      expect(mockCtx.sponsorAvailability.readState).toHaveBeenCalledTimes(1);
       expect(mockCtx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(buildSponsorUnavailableResponse).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -395,18 +394,15 @@ describe('relay routes', () => {
         const res = await app.request('/relay/prepare', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            txKindBytes: '0xTX',
-            senderAddress: '0xabc',
-            settlementTokenType: 'SUI',
-          }),
+          body: JSON.stringify(prepareBody({ senderAddress: '0xabc' })),
         });
 
         expect(res.status).toBe(503);
         expect(await res.json()).toEqual({ error, code });
-        expect(coreApi.handlePrepare).not.toHaveBeenCalled();
-        expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
-        expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
+        expect(mockCtx.host.abuseBlocker.checkIp).toHaveBeenCalledWith('127.0.0.1');
+        expect(mockCtx.host.rateLimiter.check).toHaveBeenCalledWith('prepare:client-ip:127.0.0.1');
+        expect(coreApi.readJsonBodyWithLimit).toHaveBeenCalledTimes(1);
+        expect(coreApi.handlePrepare).toHaveBeenCalledTimes(1);
       },
     );
 
@@ -425,10 +421,35 @@ describe('relay routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
-      expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
-      expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
+      expect(mockCtx.sponsorAvailability.readState).not.toHaveBeenCalled();
+      expect(mockCtx.host.abuseBlocker.checkIp).not.toHaveBeenCalled();
+      expect(coreApi.readJsonBodyWithLimit).not.toHaveBeenCalled();
       expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handlePrepare).not.toHaveBeenCalled();
+    });
+
+    it('runs IP admission and bounded body parsing before prepare domain I/O', async () => {
+      const coreApi = await import('@stelis/core-api');
+
+      const res = await app.request('/relay/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prepareBody()),
+      });
+
+      expect(res.status).toBe(200);
+      const orderedCalls = [
+        resolveClientIp.mock.invocationCallOrder[0]!,
+        vi.mocked(mockCtx.host.abuseBlocker.checkIp).mock.invocationCallOrder[0]!,
+        vi.mocked(mockCtx.host.rateLimiter.check).mock.invocationCallOrder[0]!,
+        vi.mocked(coreApi.readJsonBodyWithLimit).mock.invocationCallOrder[0]!,
+        vi.mocked(coreApi.handlePrepare).mock.invocationCallOrder[0]!,
+        vi.mocked(mockCtx.sponsorAvailability.readState).mock.invocationCallOrder[0]!,
+        vi.mocked(mockCtx.host.sponsorPool.leaseStatus).mock.invocationCallOrder[0]!,
+      ];
+      expect(orderedCalls).not.toContain(undefined);
+      expect(orderedCalls).toEqual([...orderedCalls].sort((left, right) => left - right));
+      expect(mockCtx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
     });
 
     it('returns 400 on missing txKindBytes', async () => {
@@ -569,8 +590,8 @@ describe('relay routes', () => {
 
     it('does not check sender address abuse at the HTTP route before authorization', async () => {
       const coreApi = await import('@stelis/core-api');
-      vi.mocked(coreApi.checkBlockedRequest).mockReset();
-      vi.mocked(coreApi.checkBlockedRequest).mockResolvedValueOnce({ blocked: false });
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockReset();
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockResolvedValueOnce({ blocked: false });
 
       const res = await app.request('/relay/prepare', {
         method: 'POST',
@@ -582,14 +603,18 @@ describe('relay routes', () => {
         ),
       });
       expect(res.status).toBe(200);
-      expect(vi.mocked(coreApi.checkBlockedRequest)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockCtx.host.abuseBlocker.checkIp)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockCtx.host.abuseBlocker.checkSubject)).not.toHaveBeenCalled();
       expect(vi.mocked(coreApi.handlePrepare)).toHaveBeenCalledTimes(1);
+      const admittedClientIp = vi.mocked(coreApi.handlePrepare).mock.lastCall?.[1].clientIp;
+      expect(admittedClientIp).toBeDefined();
+      expect(coreApi.readAdmittedClientIp(admittedClientIp!)).toBe('127.0.0.1');
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when IP block check throws BlockCheckUnavailableError', async () => {
       const coreApi = await import('@stelis/core-api');
-      vi.mocked(coreApi.checkBlockedRequest).mockReset();
-      vi.mocked(coreApi.checkBlockedRequest).mockRejectedValueOnce(
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockReset();
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockRejectedValueOnce(
         new coreApi.BlockCheckUnavailableError(),
       );
 
@@ -857,7 +882,7 @@ describe('relay routes', () => {
     const validBody = {
       txBytes: '0x...',
       userSignature: 'sig',
-      receiptId: 'rcpt-1',
+      receiptId: RECEIPT_ID,
     };
 
     it('returns 400 CLIENT_IP_UNRESOLVED before shared admission keys when client IP cannot be resolved', async () => {
@@ -875,8 +900,9 @@ describe('relay routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.code).toBe('CLIENT_IP_UNRESOLVED');
-      expect(mockCtx.sponsorOperations.readState).not.toHaveBeenCalled();
-      expect(coreApi.checkBlockedRequest).not.toHaveBeenCalled();
+      expect(mockCtx.sponsorAvailability.readState).not.toHaveBeenCalled();
+      expect(mockCtx.host.abuseBlocker.checkIp).not.toHaveBeenCalled();
+      expect(coreApi.readJsonBodyWithLimit).not.toHaveBeenCalled();
       expect(mockCtx.host.rateLimiter.check).not.toHaveBeenCalled();
       expect(coreApi.handleSponsor).not.toHaveBeenCalled();
     });
@@ -908,8 +934,8 @@ describe('relay routes', () => {
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {
       const coreApi = await import('@stelis/core-api');
-      vi.mocked(coreApi.checkBlockedRequest).mockReset();
-      vi.mocked(coreApi.checkBlockedRequest).mockRejectedValueOnce(
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockReset();
+      vi.mocked(mockCtx.host.abuseBlocker.checkIp).mockRejectedValueOnce(
         new coreApi.BlockCheckUnavailableError(),
       );
 
@@ -925,7 +951,7 @@ describe('relay routes', () => {
     });
 
     it('takes generic path when studio is null (A=false)', async () => {
-      // studio: null → no binding check → generic handleSponsor.
+      // Relay-only requests use the generic sponsor handler.
       // No route-level observation wake. The sponsor-terminal host
       // callback (wired in `packages/app-api/src/context.ts`) writes
       // slot state directly and is covered by `handleSponsor.test.ts`.
@@ -938,6 +964,10 @@ describe('relay routes', () => {
       const body = await res.json();
       expect(body.digest).toBe('mock-digest');
       expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+      const coreApi = await import('@stelis/core-api');
+      const admittedClientIp = vi.mocked(coreApi.handleSponsor).mock.lastCall?.[2];
+      expect(admittedClientIp).toBeDefined();
+      expect(coreApi.readAdmittedClientIp(admittedClientIp!)).toBe('127.0.0.1');
 
       expect(parseRelaySponsorResponse(body)).toEqual(body);
     });
@@ -951,7 +981,7 @@ describe('relay routes', () => {
     const validSponsorBody = {
       txBytes: '0x...',
       userSignature: 'sig',
-      receiptId: 'rcpt-fail',
+      receiptId: RECEIPT_ID,
     };
 
     it('returns on-chain revert as 422 (SponsorOnchainError)', async () => {

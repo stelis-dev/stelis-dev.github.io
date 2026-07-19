@@ -2,12 +2,12 @@
 import { isValidSuiAddress, normalizeSuiAddress } from '@mysten/sui/utils';
 import {
   isValidStudioUserId,
+  isReceiptId,
   MAX_PROMOTION_LEDGER_VALUE_MIST,
   parsePromotionId,
 } from '@stelis/contracts';
 import { canonicalizeIpAddress } from '../clientIp.js';
 
-const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const U64_MAX = (1n << 64n) - 1n;
 const ORDER_ID_MAX_UTF8_BYTES = 128;
@@ -286,7 +286,7 @@ function requireCanonicalReceiptId(
   shapeName: PreparedShapeName,
 ): string {
   const value = requireNonEmptyString(record, 'receiptId', shapeName);
-  if (!RECEIPT_ID_RE.test(value)) {
+  if (!isReceiptId(value)) {
     throw new Error(`${shapeName}.receiptId must be a canonical receipt ID`);
   }
   return value;

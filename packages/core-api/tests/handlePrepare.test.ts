@@ -23,6 +23,7 @@ import { PrepareOverloadError } from '../src/store/prepareErrors.js';
 import { CreditQueryInconsistentStateError } from '@stelis/core-relay';
 import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
 import {
   suiEndpointSnapshotFixture,
   TEST_SUI_TRANSACTION_DIGEST,
@@ -83,6 +84,12 @@ beforeEach(() => {
 
 // ─── Mock HostContext factory ────────────────────────────────────────────
 
+const TEST_ABUSE_BLOCKER = {
+  checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+  checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+  recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+};
+
 function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string } | null }) {
   const onchainConfig = {
     packageId: PACKAGE_ID,
@@ -117,11 +124,7 @@ function makeMockContext(overrides?: { checkoutResult?: { sponsorAddress: string
       vaultsTableId: VAULTS_TABLE_ID,
       deepbookPackageId: DEEPBOOK_PACKAGE_ID,
       rateLimiter: {},
-      abuseBlocker: {
-        checkIp: vi.fn().mockResolvedValue({ blocked: false }),
-        checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
-        recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
-      },
+      abuseBlocker: TEST_ABUSE_BLOCKER,
       prepareRequestNonceStore: {
         claim: vi.fn().mockResolvedValue('ok'),
       },
@@ -191,16 +194,19 @@ async function makeValidTxKindBytes(): Promise<string> {
 }
 
 async function makeParams(overrides?: Partial<PrepareParams>): Promise<PrepareParams> {
-  return withPrepareAuthorization(
-    {
-      txKindBytes: '',
-      senderAddress: TEST_SENDER_ADDR,
-      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
-      clientIp: '127.0.0.1',
-      ...overrides,
-    },
-    { packageId: PACKAGE_ID },
-  );
+  const input = {
+    txKindBytes: '',
+    senderAddress: TEST_SENDER_ADDR,
+    settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+    clientIp: '127.0.0.1' as string | import('../src/abuseBlocking.js').AdmittedClientIp,
+    ...overrides,
+  };
+  return typeof input.clientIp === 'string'
+    ? withPrepareAuthorization(
+        { ...input, clientIp: input.clientIp, abuseBlocker: TEST_ABUSE_BLOCKER },
+        { packageId: PACKAGE_ID },
+      )
+    : withPrepareAuthorization({ ...input, clientIp: input.clientIp }, { packageId: PACKAGE_ID });
 }
 
 async function makeParamsWithRequestShapeOverride(
@@ -222,7 +228,7 @@ async function expectPrepareError(
   expectedCode: string,
 ) {
   try {
-    await handlePrepare(ctx, params, extraCfg);
+    await handlePrepare(ctx, params, extraCfg, ALLOW_PREPARE_REQUEST);
     expect.unreachable('Expected PrepareValidationError');
   } catch (err) {
     expect(err).toBeInstanceOf(PrepareValidationError);
@@ -336,7 +342,9 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow('nonce store error');
+    await expect(handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST)).rejects.toThrow(
+      'nonce store error',
+    );
 
     // Verify checkin was called to release the slot. The second
     // arg is the receiptId the prepare flow generated before checkout, so
@@ -357,7 +365,9 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow();
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST),
+    ).rejects.toThrow();
 
     // Verify releaseNonceReservation was called with the receiptId and sender.
     expect(ctx.sponsoredExecutionStore.releaseNonceReservation).toHaveBeenCalledTimes(1);
@@ -374,7 +384,7 @@ describe('handlePrepare', () => {
     const { ctx } = makeMockContext();
     const params = await makeParams({ txKindBytes: toBase64(new Uint8Array([1, 2, 3])) });
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow(
+    await expect(handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST)).rejects.toThrow(
       PrepareValidationError,
     );
 
@@ -393,7 +403,9 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow('nonce store error');
+    await expect(handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST)).rejects.toThrow(
+      'nonce store error',
+    );
 
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     // receiptId is the lease authenticator. Assert on its
@@ -411,7 +423,9 @@ describe('handlePrepare', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams({ txKindBytes });
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow('mock: no on-chain');
+    await expect(handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST)).rejects.toThrow(
+      'mock: no on-chain',
+    );
 
     // No slot was checked out → checkout never called, checkin never called.
     expect(ctx.sponsorPool.checkout).not.toHaveBeenCalled();
@@ -434,7 +448,7 @@ describe('handlePrepare', () => {
     const params = await makeParams({ txKindBytes, senderAddress: TEST_SENDER_ADDR });
 
     try {
-      await handlePrepare(ctx, params, makeExtraCfg());
+      await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
       expect.unreachable('Expected PrepareValidationError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
@@ -487,7 +501,9 @@ describe('handlePrepare', () => {
 
     // The call will fail in later build work. The key assertion is that the
     // generic handler never invokes the promotion-only user quota.
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toThrow();
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST),
+    ).rejects.toThrow();
     expect(ctx.sponsoredExecutionStore.checkUserQuota).not.toHaveBeenCalled();
   });
 
@@ -505,7 +521,7 @@ describe('handlePrepare', () => {
     const params = await makeParams({ txKindBytes });
 
     try {
-      await handlePrepare(ctx, params, makeExtraCfg());
+      await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
       expect.unreachable('Expected PrepareOverloadError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareOverloadError);
@@ -616,7 +632,7 @@ describe('handlePrepare', () => {
 
     // Will fail in later build work, but should NOT fail at BPS validation.
     try {
-      await handlePrepare(ctx, params, makeExtraCfg());
+      await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
     } catch (err) {
       expect(err).toBeInstanceOf(Error);
       // Must NOT be INVALID_SLIPPAGE_BPS or INVALID_GAS_MARGIN_BPS
@@ -634,7 +650,7 @@ describe('handlePrepare', () => {
 
     // Should NOT fail at BPS validation
     try {
-      await handlePrepare(ctx, params, makeExtraCfg());
+      await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
     } catch (err) {
       if (err instanceof PrepareValidationError) {
         expect(err.code).not.toBe('INVALID_SLIPPAGE_BPS');

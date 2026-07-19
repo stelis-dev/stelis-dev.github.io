@@ -31,6 +31,7 @@ import {
   projectStudioSponsorResult,
 } from '../session/sponsoredExecution/studioExecutionPolicy.js';
 import { runSponsorStateMachine } from '../session/sponsoredExecution/sponsorRunner.js';
+import { readAdmittedClientIp, type AdmittedClientIp } from '../abuseBlocking.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -74,8 +75,8 @@ interface PromotionSponsorParams extends PromotionSponsorRequest {
   promotionId: string;
   /** Pre-verified developer identity (route owns crypto verification). */
   verifiedIdentity: VerifiedDeveloperIdentity;
-  /** Client IP for abuse tracking. */
-  clientIp: string;
+  /** Opaque proof of successful Host IP admission. */
+  clientIp: AdmittedClientIp;
 }
 
 // ─────────────────────────────────────────────
@@ -105,6 +106,7 @@ export async function handlePromotionSponsor(
   ctx: PromotionSponsorContext,
   params: PromotionSponsorParams,
 ): Promise<PromotionSponsorResponse> {
+  const clientIp = readAdmittedClientIp(params.clientIp);
   let txBytes: Uint8Array;
   try {
     txBytes = decodeTxBytes(params.txBytes);
@@ -118,7 +120,7 @@ export async function handlePromotionSponsor(
   const options = {
     context: ctx,
     sponsor: {
-      params,
+      params: { ...params, clientIp },
       txBytes,
       userSignature: params.userSignature,
       errors: {
@@ -148,7 +150,7 @@ export async function handlePromotionSponsor(
       {
         hookContext: {
           receiptId: params.receiptId,
-          clientIp: params.clientIp,
+          clientIp,
         },
         txBytes,
         userSignature: params.userSignature,
@@ -164,7 +166,7 @@ export async function handlePromotionSponsor(
       policy,
       createStudioSponsorReceiptPolicy({
         context: ctx,
-        params,
+        params: options.sponsor.params,
         state,
         errors: options.sponsor.errors,
       }),

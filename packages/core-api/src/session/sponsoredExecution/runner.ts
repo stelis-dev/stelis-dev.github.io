@@ -107,6 +107,8 @@ export interface PrepareDraftPolicyFields {
 export interface PrepareStateMachineRequest<TResult = unknown> {
   readonly senderAddress: string;
   readonly clientIp: string;
+  /** Runs after pure request validation and before any runner-owned domain I/O. */
+  readonly assertSponsorAvailable: () => Promise<void>;
   readonly ledgerAcquireParams?: {
     readonly promotionId: string;
     readonly userId: string;
@@ -198,6 +200,7 @@ export async function runPrepareStateMachine<TResult>(
   try {
     await policy.hooks.Intent(hookContext);
     await policy.hooks.RequestValidation(hookContext);
+    await request.assertSponsorAvailable();
 
     const inflight = new InflightReservationImpl(host.inflightLimiter);
     await inflight.acquire(policy.discriminator);

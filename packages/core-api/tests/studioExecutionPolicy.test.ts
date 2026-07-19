@@ -324,10 +324,12 @@ function seedSponsorState(
   state: StudioExecutionPolicyState,
   overrides: Partial<NonNullable<StudioExecutionPolicyState['sponsor']>> = {},
 ): void {
+  const builtTxForValidation = new Transaction();
+  builtTxForValidation.setSender(SENDER);
   state.sponsor = {
     txSender: SENDER,
     peekedPromotion: makePromotionEntry(),
-    builtTxForValidation: new Transaction(),
+    builtTxForValidation,
     prepared: makePromotionEntry(),
     sponsorResultOutcome: 'internal_error',
     sponsorResultEconomics: { economicsStatus: 'unknown', failureReason: null },
@@ -540,21 +542,13 @@ describe('studio sponsor validation', () => {
     const options = makeSponsorOptions({
       txBytes,
       deps: {
-        validatePromotionPreparedPolicy: vi.fn(async () => ({
-          builtTx: Transaction.from(txBytes),
-        })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreparedPolicy'],
+        verifySenderSignature: vi.fn(async () => undefined),
+        validatePromotionSponsorSubmissionPolicy: vi.fn(async () => undefined),
         recordPromotionAbuseEvent:
           recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
       },
     });
-    const { policy, state } = createStudioExecutionPolicy(options);
-    await createStudioSponsorReceiptPolicy({
-      context: options.context,
-      params: options.sponsor!.params,
-      state,
-      errors: sponsorErrors,
-      deps: options.deps,
-    }).validatePreparedEntry(makePromotionEntry());
+    const { policy } = createStudioExecutionPolicy(options);
 
     await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
     await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
@@ -565,7 +559,7 @@ describe('studio sponsor validation', () => {
       '127.0.0.1',
       { kind: 'studio_user', userId: USER_ID },
       'PROMO_SENDER_SIGNATURE_INVALID',
-      expect.objectContaining({ detail: 'canonical_sender_mismatch' }),
+      expect.objectContaining({ detail: 'verified_identity_sender_mismatch' }),
     );
   });
 
@@ -575,9 +569,6 @@ describe('studio sponsor validation', () => {
     const options = makeSponsorOptions({
       txBytes,
       deps: {
-        validatePromotionPreparedPolicy: vi.fn(async () => ({
-          builtTx: Transaction.from(txBytes),
-        })) as unknown as StudioExecutionPolicyDependencies['validatePromotionPreparedPolicy'],
         verifySenderSignature: vi.fn(async () => {
           throw new SenderSignatureError('bad signature');
         }) as unknown as StudioExecutionPolicyDependencies['verifySenderSignature'],
@@ -585,14 +576,7 @@ describe('studio sponsor validation', () => {
           recordPromotionAbuseEvent as unknown as StudioExecutionPolicyDependencies['recordPromotionAbuseEvent'],
       },
     });
-    const { policy, state } = createStudioExecutionPolicy(options);
-    await createStudioSponsorReceiptPolicy({
-      context: options.context,
-      params: options.sponsor!.params,
-      state,
-      errors: sponsorErrors,
-      deps: options.deps,
-    }).validatePreparedEntry(makePromotionEntry());
+    const { policy } = createStudioExecutionPolicy(options);
 
     await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
     await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
@@ -605,6 +589,58 @@ describe('studio sponsor validation', () => {
       'PROMO_SENDER_SIGNATURE_INVALID',
       expect.objectContaining({ detail: 'sender_signature_invalid' }),
     );
+  });
+
+  test('decodes once and reuses that Transaction for signature, prepared policy, and gas checks', async () => {
+    const txBytes = await buildTxBytes(SENDER);
+    const validatePromotionSponsorSubmissionPolicy = vi.fn<
+      StudioExecutionPolicyDependencies['validatePromotionSponsorSubmissionPolicy']
+    >(async () => undefined);
+    const validatePromotionPreparedPolicy = vi.fn<
+      StudioExecutionPolicyDependencies['validatePromotionPreparedPolicy']
+    >(async () => undefined);
+    const verifySenderSignature = vi.fn<StudioExecutionPolicyDependencies['verifySenderSignature']>(
+      async () => undefined,
+    );
+    const verifyGasOwner = vi.fn<StudioExecutionPolicyDependencies['verifyGasOwner']>(() => ({
+      owner: SPONSOR,
+      budget: RESERVED_GAS,
+    }));
+    const options = makeSponsorOptions({
+      txBytes,
+      deps: {
+        validatePromotionSponsorSubmissionPolicy,
+        validatePromotionPreparedPolicy,
+        verifySenderSignature,
+        verifyGasOwner,
+      },
+    });
+    const { policy, state } = createStudioExecutionPolicy(options);
+    const transactionFrom = vi.spyOn(Transaction, 'from');
+
+    try {
+      await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
+      const decoded = state.sponsor?.builtTxForValidation;
+      expect(decoded).toBeInstanceOf(Transaction);
+
+      await policy.hooks.UserSignatureValidation(makeSubmissionCtx());
+      await createStudioSponsorReceiptPolicy({
+        context: options.context,
+        params: options.sponsor!.params,
+        state,
+        errors: sponsorErrors,
+        deps: options.deps,
+      }).validatePreparedEntry(makePromotionEntry());
+      await policy.hooks.SharedSponsorChecks(makeValidatedCtx());
+
+      expect(transactionFrom).toHaveBeenCalledTimes(1);
+      expect(validatePromotionSponsorSubmissionPolicy.mock.calls[0]?.[2]).toBe(decoded);
+      expect(validatePromotionPreparedPolicy.mock.calls[0]?.[3]).toBe(decoded);
+      expect(verifyGasOwner.mock.calls[0]?.[0]).toBe(decoded);
+      expect(verifySenderSignature).toHaveBeenCalledWith(txBytes, 'mock-user-signature', SENDER);
+    } finally {
+      transactionFrom.mockRestore();
+    }
   });
 });
 

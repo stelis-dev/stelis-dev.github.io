@@ -14,6 +14,7 @@ import { bcs } from '@mysten/sui/bcs';
 import { normalizeSuiAddress, toHex } from '@mysten/sui/utils';
 import type { SuiTransactionWithEventsResult } from '@stelis/core-relay/browser';
 import {
+  parseReceiptId,
   SETTLE_EVENT_FIELDS,
   SETTLE_EVENT_MODULE,
   SETTLE_EVENT_NAME,
@@ -117,7 +118,7 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
   const decoded = parseCanonicalSettleEvent(bcsBytes);
 
   return {
-    receiptId: toHex(decoded.receipt_id),
+    receiptId: parseReceiptId(`0x${toHex(decoded.receipt_id)}`, 'SettleEvent.receiptId'),
     nonce: String(decoded.nonce),
     orderIdHash: toHex(decoded.order_id_hash),
     user: normalizeSuiAddress(decoded.user),

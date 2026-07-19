@@ -9,23 +9,43 @@ hand-maintained JSON Schema.
 
 ## Route Groups
 
-| Prefix      | Purpose                      |
-| ----------- | ---------------------------- |
-| `/health`   | Host health probe            |
-| `/relay/*`  | Public Relay API flow        |
-| `/studio/*` | Developer-JWT promotion flow |
-| `/auth/*`   | Admin session authentication |
-| `/api/*`    | Operator admin routes        |
+| Prefix      | Purpose                      | Available mode     |
+| ----------- | ---------------------------- | ------------------ |
+| `/health`   | Host health probe            | Both modes         |
+| `/relay/*`  | Public Relay API flow        | Both modes         |
+| `/studio/*` | Developer-JWT promotion flow | `relay_and_studio` |
+| `/auth/*`   | Admin session authentication | `relay_and_studio` |
+| `/api/*`    | Operator admin routes        | `relay_and_studio` |
 
 ## GET /health
 
 Returns Host health:
 
 ```json
-{ "status": "ok", "mode": "generic" }
+{ "status": "ok", "mode": "relay_only" }
 ```
 
-`mode` is `generic` or `dual`.
+`mode` is exactly `relay_only` or `relay_and_studio`.
+
+## Request admission
+
+Relay, Studio, Auth, and Admin routes apply the checks relevant to that route
+in this order: Host operating mode, client-IP admission, Origin and
+Content-Type admission, bounded body reading, credential verification,
+authenticated-subject admission, then route-specific work. A failed earlier
+check does not start a later check.
+
+Requests with a JSON body require `Content-Type: application/json`; valid
+media-type parameters such as `charset=utf-8` are accepted. Missing, different,
+or malformed media types are rejected. Admin mutations and the Auth mutations
+that establish, renew, or end an Admin session require an `Origin` that exactly
+matches one configured in `CORS_ORIGINS`.
+
+In `relay_only` mode, Studio routes return `STUDIO_UNAVAILABLE` and Auth/Admin
+routes return `ADMIN_UNAVAILABLE` without performing credential or domain
+work. CORS preflight for the public Studio surface is the transport-level
+exception: it succeeds in both modes so a browser can issue the actual request
+and read the typed `STUDIO_UNAVAILABLE` response.
 
 ## GET /relay/status
 
@@ -144,7 +164,7 @@ Minimal JSON body:
 {
   "txBytes": "<base64 transaction bytes returned by prepare>",
   "userSignature": "<transaction signature>",
-  "receiptId": "0x..."
+  "receiptId": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
 
@@ -201,7 +221,12 @@ Mounted routes:
 - `POST /studio/promotions/:id/prepare`
 - `POST /studio/promotions/:id/sponsor`
 
-Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before the atomic `prepared` to `executing` transition.
+Promotion claim requires `Content-Type: application/json` and the exact request
+body `{}`. Promotion prepare uses `senderAddress` and `txKindBytes`. The
+Promotion `TransactionKind` must contain 1 to 16 commands, all of them
+`MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`;
+the Host adds gas metadata but no commands and revalidates the same range
+before the atomic `prepared` to `executing` transition.
 
 Promotion IDs and list cursors are canonical lowercase UUID-v4 strings. List
 queries default to 50 records and return at most 100. Results are ordered by

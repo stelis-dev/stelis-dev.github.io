@@ -254,7 +254,7 @@ class LifecycleStore implements SponsoredExecutionStoreAdapter {
 
 interface PolicyControl {
   readonly store: LifecycleStore;
-  readonly failAt?: 'Preflight';
+  readonly failAt?: 'UserSignatureValidation' | 'Preflight';
   classifiedResult: ExecResult | null;
   readonly classificationError: Error;
 }
@@ -275,6 +275,12 @@ function assertPrepared(control: PolicyControl, event: string): void {
   expect(control.store.state).toBe('prepared');
 }
 
+function assertBeforePreparedRead(control: PolicyControl, event: string): void {
+  control.store.events.push(event);
+  expect(control.store.events).not.toContain('read');
+  expect(control.store.state).toBe('prepared');
+}
+
 function classify(control: PolicyControl, result: ExecResult): void {
   control.store.events.push('classify');
   control.classifiedResult = result;
@@ -292,8 +298,11 @@ function makeGenericPolicy(control: PolicyControl): SponsoredExecutionPolicy<'ge
     hooks: {
       ...commonPrepareHooks(),
       ChainSnapshot: () => ({ nonceAcquire: { onchainLastNonce: 0n } }),
-      DecodeSponsorSubmission: () => assertPrepared(control, 'decode'),
-      UserSignatureValidation: () => assertPrepared(control, 'signature-validation'),
+      DecodeSponsorSubmission: () => assertBeforePreparedRead(control, 'decode'),
+      UserSignatureValidation: () => {
+        assertBeforePreparedRead(control, 'signature-validation');
+        if (control.failAt === 'UserSignatureValidation') throw new Error('signature rejected');
+      },
       SharedSponsorChecks: () => {
         assertPrepared(control, 'shared-checks');
         return {
@@ -329,8 +338,11 @@ function makePromotionPolicy(control: PolicyControl): SponsoredExecutionPolicy<'
     hooks: {
       ...commonPrepareHooks(),
       ChainSnapshot: () => ({}),
-      DecodeSponsorSubmission: () => assertPrepared(control, 'decode'),
-      UserSignatureValidation: () => assertPrepared(control, 'signature-validation'),
+      DecodeSponsorSubmission: () => assertBeforePreparedRead(control, 'decode'),
+      UserSignatureValidation: () => {
+        assertBeforePreparedRead(control, 'signature-validation');
+        if (control.failAt === 'UserSignatureValidation') throw new Error('signature rejected');
+      },
       SharedSponsorChecks: () => {
         assertPrepared(control, 'shared-checks');
         return {};
@@ -508,7 +520,7 @@ function buildHarness(
 }
 
 describe('runSponsorStateMachine durable lifecycle', () => {
-  test('keeps the prepared record through policy checks, then begins once immediately before signing the identical bytes', async () => {
+  test('authenticates original bytes before reading the prepared record and submits the identical bytes', async () => {
     const harness = buildHarness(GENERIC_PREPARED);
 
     await expect(
@@ -516,9 +528,9 @@ describe('runSponsorStateMachine durable lifecycle', () => {
     ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
 
     expect(harness.store.events).toEqual([
-      'read',
       'decode',
       'signature-validation',
+      'read',
       'shared-checks',
       'policy-checks',
       'preflight',
@@ -535,6 +547,21 @@ describe('runSponsorStateMachine durable lifecycle', () => {
     expect(harness.signAndSubmit.mock.calls[0]?.[2]).toBe(TX_BYTES);
     expect(harness.signAndSubmit.mock.calls[0]?.[4]).toBe(TEST_SUI_TRANSACTION_DIGEST);
     expect(harness.store.finalizeInputs).toHaveLength(1);
+  });
+
+  test('does not read the prepared record when user signature validation fails', async () => {
+    const harness = buildHarness(GENERIC_PREPARED, {
+      failAt: 'UserSignatureValidation',
+    });
+
+    await expect(
+      runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
+    ).rejects.toThrow('signature rejected');
+
+    expect(harness.store.events).toEqual(['decode', 'signature-validation']);
+    expect(harness.host.isSponsorAddressAvailable).not.toHaveBeenCalled();
+    expect(harness.store.beginInputs).toHaveLength(0);
+    expect(harness.signAndSubmit).not.toHaveBeenCalled();
   });
 
   test('keeps the prepared receipt intact when its assigned sponsor is unavailable', async () => {
@@ -562,9 +589,9 @@ describe('runSponsorStateMachine durable lifecycle', () => {
     ).rejects.toThrow('preflight rejected');
 
     expect(harness.store.events).toEqual([
-      'read',
       'decode',
       'signature-validation',
+      'read',
       'shared-checks',
       'policy-checks',
       'preflight',

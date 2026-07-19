@@ -278,6 +278,9 @@ function makeGenericRequest(
   return {
     senderAddress: TEST_SENDER,
     clientIp: TEST_CLIENT_IP,
+    assertSponsorAvailable: async () => {
+      trace.push('request:assertSponsorAvailable');
+    },
     preparedDraftFields: () => {
       trace.push('request:preparedDraftFields');
       return { executionPathKey: 'credit', orderId: null };
@@ -315,6 +318,9 @@ async function makePromotionRequest(
   return {
     senderAddress: TEST_SENDER,
     clientIp: TEST_CLIENT_IP,
+    assertSponsorAvailable: async () => {
+      trace.push('request:assertSponsorAvailable');
+    },
     ledgerAcquireParams: { promotionId: TEST_PROMO, userId: TEST_USER },
     preparedDraftFields: () => {
       trace.push('request:preparedDraftFields');
@@ -346,6 +352,7 @@ describe('runPrepareStateMachine procedural traces', () => {
     expect(trace).toEqual([
       'hook:Intent',
       'hook:RequestValidation',
+      'request:assertSponsorAvailable',
       'port:inflight.acquire',
       'hook:ChainSnapshot',
       'port:sponsor.checkout',
@@ -368,6 +375,7 @@ describe('runPrepareStateMachine procedural traces', () => {
     expect(trace).toEqual([
       'hook:Intent',
       'hook:RequestValidation',
+      'request:assertSponsorAvailable',
       'port:inflight.acquire',
       'hook:ChainSnapshot',
       'port:sponsor.checkout',

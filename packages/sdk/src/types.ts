@@ -91,12 +91,6 @@ export interface StelisConnectOptions {
    */
   pinnedPackageId?: string;
   /**
-   * Declare this endpoint as a studio relay (promotion endpoint).
-   * Required for promotion-specific methods (executePromotionSponsored,
-   * preparePromotionSponsored, sponsorPromotionSponsored).
-   */
-  studioEndpoint?: boolean;
-  /**
    * Optional per-operation HTTP timeout overrides in milliseconds.
    * Applies to SDK calls that go through the internal StelisClient and
    * to /relay/config fetch in connect().

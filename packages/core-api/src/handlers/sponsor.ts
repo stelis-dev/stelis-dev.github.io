@@ -6,6 +6,7 @@
  * public handler signature and error carrier classes consumed by app-api.
  */
 import type { HostContext } from '../context.js';
+import { readAdmittedClientIp, type AdmittedClientIp } from '../abuseBlocking.js';
 import type { RelaySponsorErrorCode, SponsorFailureSubcode } from '@stelis/contracts';
 import {
   decodeTxBytes,
@@ -147,9 +148,10 @@ export { SponsorLeaseExpiredError } from '../store/sponsorPoolErrors.js';
 export async function handleSponsor(
   ctx: HostContext,
   params: SponsorParams,
-  /** Client IP for abuse detection — passed from host route */
-  clientIp: string,
+  /** Opaque proof of successful Host IP admission. */
+  admittedClientIp: AdmittedClientIp,
 ): Promise<SponsorResult> {
+  const clientIp = readAdmittedClientIp(admittedClientIp);
   let txBytes: Uint8Array;
   try {
     txBytes = decodeTxBytes(params.txBytes);
@@ -172,6 +174,7 @@ export async function handleSponsor(
   const options = {
     hostContext: ctx,
     sponsor: {
+      admittedClientIp,
       txBytes,
       userSignature: params.userSignature,
       errors,

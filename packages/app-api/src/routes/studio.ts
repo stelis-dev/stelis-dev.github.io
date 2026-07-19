@@ -8,12 +8,11 @@
  * Auth: All user-facing routes require Authorization: Bearer <developerJwt>
  * verified locally against host-owned trust material (STUDIO_DEVELOPER_JWT_TRUST_JSON).
  *
- * User-facing GET and POST routes share a JWT → block → rate-limit prelude via the `runStudioAuth`
- * helper (packages/app-api/src/middleware/studioAuth.ts), called AFTER the
- * route-local 503 guards so infrastructure failures keep precedence over
- * 401/429.
+ * User-facing GET and POST routes first perform mode, IP, request-shape, and
+ * bounded-body admission. `runStudioAuth` then verifies the credential and
+ * applies authenticated-subject admission before any promotion or sponsor I/O.
  *
- * Only available in dual mode when the studio env set is complete.
+ * Available only when the Host booted in `relay_and_studio` mode.
  */
 import { Hono } from 'hono';
 import {
@@ -29,7 +28,6 @@ import {
   PROMOTION_ABUSE_CODES,
 } from '@stelis/core-api/studio';
 import {
-  readJsonBodyWithLimit,
   MAX_SMALL_REQUEST_BODY_BYTES,
   MAX_PREPARE_REQUEST_BODY_BYTES,
   MAX_SPONSOR_REQUEST_BODY_BYTES,
@@ -41,6 +39,8 @@ import {
   STUDIO_CLAIM_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
+  parsePromotionClaimRequest,
+  parsePromotionId,
   parsePromotionListResponse,
   parsePromotionPageQuery,
   parsePromotionPrepareRequest,
@@ -50,16 +50,26 @@ import {
   type PromotionPrepareResponse,
   type PromotionSponsorResponse,
 } from '@stelis/contracts';
-import type { AppApiContext } from '../context.js';
-import type { ResolveClientIp } from '../clientIp.js';
+import type { RelayAndStudioAppApiContext } from '../context.js';
+import { beginRequestAdmission, type RequestAdmissionDependencies } from '../requestAdmission.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { runStudioAuth } from '../middleware/studioAuth.js';
 import { codedHostError, mapError, respondMapped } from '../errorMap.js';
 import { safeErrorSummary } from '@stelis/core-api/observability';
 
+class StudioPrepareAdmissionError extends Error {
+  constructor(
+    readonly errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' | 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY',
+    readonly headers: Readonly<Record<string, string>>,
+  ) {
+    super(errorCode);
+    this.name = 'StudioPrepareAdmissionError';
+  }
+}
+
 export function createStudioRoutes(
-  contextPromise: Promise<AppApiContext>,
-  resolveClientIp: ResolveClientIp,
+  context: RelayAndStudioAppApiContext,
+  admission: RequestAdmissionDependencies,
 ) {
   const app = new Hono();
 
@@ -74,22 +84,14 @@ export function createStudioRoutes(
   } as const satisfies Record<ClaimFailureReason, (typeof STUDIO_CLAIM_ERROR_CODES)[number]>;
 
   // ── GET /studio/promotions — developer-JWT principal promotion list ──
-  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.get('/promotions', async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(c, codedHostError('STUDIO_UNAVAILABLE', STUDIO_LIST_ERROR_CODES));
-      }
-
-      const auth = await runStudioAuth(c, ctx, resolveClientIp, {
-        rateLimitPrefix: 'promo_list',
+      const admitted = await beginRequestAdmission(c, admission, {
         allowedErrorCodes: STUDIO_LIST_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `promo_list:client-ip:${ip}`,
       });
-      if (!auth.ok) return auth.response;
-      const { identity } = auth;
-      const userId = identity.userId;
-
+      if (!admitted.ok) return admitted.response;
       let pageParams;
       try {
         pageParams = parsePromotionPageQuery(c.req.query());
@@ -99,6 +101,14 @@ export function createStudioRoutes(
         }
         throw err;
       }
+      const ctx = context;
+      const auth = await runStudioAuth(c, ctx, admission, admitted.value, {
+        rateLimitPrefix: 'promo_list',
+        allowedErrorCodes: STUDIO_LIST_ERROR_CODES,
+      });
+      if (!auth.ok) return auth.response;
+      const { identity } = auth;
+      const userId = identity.userId;
 
       const page = await ctx.promotionStore.listPage(pageParams, { status: 'active' });
       const promotionIds = page.promotions.map((promotion) => promotion.promotionId);
@@ -132,23 +142,25 @@ export function createStudioRoutes(
   });
 
   // ── GET /studio/promotions/:id — developer-JWT principal promotion detail ──
-  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.get('/promotions/:id', async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(c, codedHostError('STUDIO_UNAVAILABLE', STUDIO_DETAIL_ERROR_CODES));
-      }
-
-      const auth = await runStudioAuth(c, ctx, resolveClientIp, {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: STUDIO_DETAIL_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `promo_detail:client-ip:${ip}`,
+      });
+      if (!admitted.ok) return admitted.response;
+      const promotionId = parsePromotionId(c.req.param('id'));
+      const ctx = context;
+      const auth = await runStudioAuth(c, ctx, admission, admitted.value, {
         rateLimitPrefix: 'promo_detail',
         allowedErrorCodes: STUDIO_DETAIL_ERROR_CODES,
+        promotionId,
       });
       if (!auth.ok) return auth.response;
       const { identity } = auth;
       const userId = identity.userId;
 
-      const promotionId = c.req.param('id');
       const promotion = await ctx.promotionStore.get(promotionId);
       if (!promotion) {
         return respondMapped(c, codedHostError('PROMOTION_NOT_FOUND', STUDIO_DETAIL_ERROR_CODES));
@@ -171,6 +183,9 @@ export function createStudioRoutes(
       } satisfies PromotionDetailResponse;
       return c.json(response);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return respondMapped(c, codedHostError('BAD_REQUEST', STUDIO_DETAIL_ERROR_CODES));
+      }
       const mapped = mapError(err, STUDIO_DETAIL_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       return respondMapped(c, codedHostError('INTERNAL_ERROR', STUDIO_DETAIL_ERROR_CODES));
@@ -178,28 +193,28 @@ export function createStudioRoutes(
   });
 
   // ── POST /studio/promotions/:id/claim — claim a promotion ────────
-  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.post('/promotions/:id/claim', async (c) => {
     try {
-      const ctx = await contextPromise;
-      // 503 guards first — infrastructure/availability failures outrank
-      // auth and rate-limit.
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(c, codedHostError('STUDIO_UNAVAILABLE', STUDIO_CLAIM_ERROR_CODES));
-      }
-
-      const auth = await runStudioAuth(c, ctx, resolveClientIp, {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: STUDIO_CLAIM_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `promo_claim:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_SMALL_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      parsePromotionClaimRequest(admitted.value.body);
+      const promotionId = parsePromotionId(c.req.param('id'));
+      const ctx = context;
+      const auth = await runStudioAuth(c, ctx, admission, admitted.value, {
         rateLimitPrefix: 'promo_claim',
         allowedErrorCodes: STUDIO_CLAIM_ERROR_CODES,
+        promotionId,
       });
       if (!auth.ok) return auth.response;
       const { identity, ip } = auth;
       const userId = identity.userId;
-      const promotionId = c.req.param('id');
 
       // Body — claim requires no wallet address (ownership = promotionId + userId)
-      await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES);
-
       const result = await handlePromotionClaim(
         { promotionId, userId },
         { catalog: ctx.promotionStore, ledger: ctx.executionLedger },
@@ -233,6 +248,9 @@ export function createStudioRoutes(
       const response = { entitlement: result.entitlement } satisfies PromotionClaimResponse;
       return c.json(response, 201);
     } catch (err) {
+      if (err instanceof HostWireParseError) {
+        return respondMapped(c, codedHostError('BAD_REQUEST', STUDIO_CLAIM_ERROR_CODES));
+      }
       const mapped = mapError(err, STUDIO_CLAIM_ERROR_CODES, 'INTERNAL_ERROR');
       if (mapped) return respondMapped(c, mapped);
       return respondMapped(c, codedHostError('INTERNAL_ERROR', STUDIO_CLAIM_ERROR_CODES));
@@ -240,56 +258,25 @@ export function createStudioRoutes(
   });
 
   // ── POST /studio/promotions/:id/prepare ────────────────────────────
-  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.post('/promotions/:id/prepare', async (c) => {
     try {
-      const ctx = await contextPromise;
-
-      // 503 guards first — infrastructure/availability failures outrank
-      // auth and rate-limit.
-      if (!ctx.studio) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_PREPARE_ERROR_CODES),
-        );
-      }
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_PREPARE_ERROR_CODES),
-        );
-      }
-      if (!ctx.studioGlobalAllowedTargets) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_PREPARE_ERROR_CODES),
-        );
-      }
-
-      const [sponsorOperationsState, slotLeases] = await Promise.all([
-        ctx.sponsorOperations.readState(),
-        ctx.host.sponsorPool.leaseStatus(),
-      ]);
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
-      if (blocked) {
-        for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return respondMapped(
-          c,
-          codedHostError(blocked.errorCode, PROMOTION_PREPARE_ERROR_CODES, {}, blocked.headers),
-        );
-      }
-
-      const auth = await runStudioAuth(c, ctx, resolveClientIp, {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: PROMOTION_PREPARE_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `promo_prepare:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_PREPARE_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      const body = parsePromotionPrepareRequest(admitted.value.body);
+      const promotionId = parsePromotionId(c.req.param('id'));
+      const ctx = context;
+      const auth = await runStudioAuth(c, ctx, admission, admitted.value, {
         rateLimitPrefix: 'promo_prepare',
         allowedErrorCodes: PROMOTION_PREPARE_ERROR_CODES,
+        promotionId,
       });
       if (!auth.ok) return auth.response;
-      const { identity, ip } = auth;
-      const promotionId = c.req.param('id');
-
-      const body = parsePromotionPrepareRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_PREPARE_REQUEST_BODY_BYTES),
-      );
+      const { identity, clientIp } = auth;
 
       const prepareCtx: PromotionPrepareContext = {
         sui: ctx.host.sui,
@@ -302,16 +289,36 @@ export function createStudioRoutes(
         globalAllowedTargets: ctx.studioGlobalAllowedTargets,
       };
 
-      const result: PromotionPrepareResponse = await handlePromotionPrepare(prepareCtx, {
-        promotionId,
-        senderAddress: body.senderAddress,
-        txKindBytes: body.txKindBytes,
-        verifiedIdentity: identity,
-        clientIp: ip,
-      });
+      const result: PromotionPrepareResponse = await handlePromotionPrepare(
+        prepareCtx,
+        {
+          promotionId,
+          senderAddress: body.senderAddress,
+          txKindBytes: body.txKindBytes,
+          verifiedIdentity: identity,
+          clientIp,
+        },
+        {
+          async assertSponsorAvailable() {
+            const [sponsorOperationsState, slotLeases] = await Promise.all([
+              ctx.sponsorAvailability.readState(),
+              ctx.host.sponsorPool.leaseStatus(),
+            ]);
+            const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
+            if (!blocked) return;
+            throw new StudioPrepareAdmissionError(blocked.errorCode, blocked.headers);
+          },
+        },
+      );
 
       return c.json(result);
     } catch (err) {
+      if (err instanceof StudioPrepareAdmissionError) {
+        return respondMapped(
+          c,
+          codedHostError(err.errorCode, PROMOTION_PREPARE_ERROR_CODES, {}, err.headers),
+        );
+      }
       if (err instanceof HostWireParseError) {
         return respondMapped(c, codedHostError('BAD_REQUEST', PROMOTION_PREPARE_ERROR_CODES));
       }
@@ -324,43 +331,25 @@ export function createStudioRoutes(
   });
 
   // ── POST /studio/promotions/:id/sponsor ───────────────────────────
-  // Guard precedence: route-local 503 → shared JWT/block/rate-limit prelude.
   app.post('/promotions/:id/sponsor', async (c) => {
     try {
-      const ctx = await contextPromise;
-
-      // 503 guards first — infrastructure/availability failures outrank
-      // auth and rate-limit.
-      if (!ctx.studio) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_SPONSOR_ERROR_CODES),
-        );
-      }
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_SPONSOR_ERROR_CODES),
-        );
-      }
-      if (!ctx.studioGlobalAllowedTargets) {
-        return respondMapped(
-          c,
-          codedHostError('STUDIO_UNAVAILABLE', PROMOTION_SPONSOR_ERROR_CODES),
-        );
-      }
-
-      const auth = await runStudioAuth(c, ctx, resolveClientIp, {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: PROMOTION_SPONSOR_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `promo_sponsor:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_SPONSOR_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      const body = parsePromotionSponsorRequest(admitted.value.body);
+      const promotionId = parsePromotionId(c.req.param('id'));
+      const ctx = context;
+      const auth = await runStudioAuth(c, ctx, admission, admitted.value, {
         rateLimitPrefix: 'promo_sponsor',
         allowedErrorCodes: PROMOTION_SPONSOR_ERROR_CODES,
+        promotionId,
       });
       if (!auth.ok) return auth.response;
-      const { identity, ip } = auth;
-      const promotionId = c.req.param('id');
-
-      const body = parsePromotionSponsorRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SPONSOR_REQUEST_BODY_BYTES),
-      );
+      const { identity, clientIp } = auth;
 
       const sponsorCtx: PromotionSponsorContext = {
         sui: ctx.host.sui,
@@ -389,7 +378,7 @@ export function createStudioRoutes(
         txBytes: body.txBytes,
         userSignature: body.userSignature,
         verifiedIdentity: identity,
-        clientIp: ip,
+        clientIp,
       });
 
       return c.json(sponsorResult);

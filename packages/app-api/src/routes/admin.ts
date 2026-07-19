@@ -7,10 +7,11 @@
  * Boundary: binds app-api host concerns with core-api admin helpers
  * and the shared admin contracts in @stelis/contracts.
  */
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import {
   ADMIN_BLOCKLIST_READ_ERROR_CODES,
   ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
+  ADMIN_REQUEST_ADMISSION_ERROR_CODES,
   ADMIN_PROMOTION_CREATE_ERROR_CODES,
   ADMIN_PROMOTION_DELETE_ERROR_CODES,
   ADMIN_PROMOTION_LIST_ERROR_CODES,
@@ -18,7 +19,6 @@ import {
   ADMIN_PROMOTION_STATUS_ERROR_CODES,
   ADMIN_PROMOTION_UPDATE_ERROR_CODES,
   ADMIN_READ_ERROR_CODES,
-  ADMIN_SESSION_ERROR_CODES,
   ADMIN_SPONSORED_LOGS_ERROR_CODES,
   ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES,
   ADMIN_WITHDRAWAL_ERROR_CODES,
@@ -38,6 +38,7 @@ import {
   parseAdminPromotionStatusRequest,
   parseAdminPromotionSummaryResponse,
   parseAdminPromotionUpdateRequest,
+  parsePromotionId,
   parseAdminSettlementSwapPathsResponse,
   parseAdminSponsoredLogsQuery,
   parseAdminSponsoredLogsResponse,
@@ -62,8 +63,8 @@ import {
 import {
   AbuseBlockCurrentConflictError,
   AbuseBlockInputError,
-  readJsonBodyWithLimit,
   MAX_SMALL_REQUEST_BODY_BYTES,
+  readAdmittedClientIp,
 } from '@stelis/core-api';
 import {
   computeTotalRequiredBudgetMist,
@@ -82,9 +83,14 @@ import {
 import { redactSensitiveText, safeErrorSummary } from '@stelis/core-api/observability';
 import { calculateSponsorAvailability } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
-import type { AppApiContext } from '../context.js';
+import type { RelayAndStudioAppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
-import type { ResolveClientIp } from '../clientIp.js';
+import {
+  beginRequestAdmission,
+  finishAuthenticatedRequestAdmission,
+  type InitialRequestAdmission,
+  type RequestAdmissionDependencies,
+} from '../requestAdmission.js';
 import { codedHostError, mapError, respondMapped } from '../errorMap.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
@@ -106,11 +112,10 @@ function withDerivedBudget<T extends Promotion>(
 
 /** Compute the current promotion summary from the authoritative store projections. */
 async function computeAdminSummary(
-  ctx: AppApiContext,
+  ctx: RelayAndStudioAppApiContext,
   promotionId: string,
   promotion: Promotion,
-): Promise<import('@stelis/core-api/studio').PromotionAdminSummary | null> {
-  if (!ctx.executionLedger) return null;
+): Promise<import('@stelis/core-api/studio').PromotionAdminSummary> {
   const { computePromotionAdminSummary } = await import('@stelis/core-api/studio');
   const ledgerStatus = await ctx.executionLedger.getPromotionLedgerStatus(promotionId, null);
   return computePromotionAdminSummary(promotion, ledgerStatus.claimedCount, ledgerStatus.budget);
@@ -173,38 +178,74 @@ function withdrawalNonceKey(network: SuiNetwork, nonce: string): string {
   return `${WITHDRAW_NONCE_PREFIX}${network}:${nonce}`;
 }
 
-async function getAdminRedis(contextPromise: Promise<AppApiContext>): Promise<AdminRedisClient> {
-  return createAdminRedisAdapter((await contextPromise).redis);
+function getAdminRedis(context: RelayAndStudioAppApiContext): AdminRedisClient {
+  return createAdminRedisAdapter(context.redis);
 }
 
 export interface AdminRoutesRuntimeInput {
-  readonly resolveClientIp: ResolveClientIp;
+  readonly admission: RequestAdmissionDependencies;
   readonly network: SuiNetwork;
-  readonly adminAddress: string | null;
-  readonly adminJwt: AdminJwtConfig | null;
+  readonly allowedOrigins: readonly string[];
+  readonly admin: {
+    readonly address: string;
+    readonly jwt: AdminJwtConfig;
+  };
+}
+
+interface AdminRouteVariables {
+  readonly requestAdmission: InitialRequestAdmission;
 }
 
 export function createAdminRoutes(
-  contextPromise: Promise<AppApiContext>,
+  context: RelayAndStudioAppApiContext,
   runtime: AdminRoutesRuntimeInput,
 ) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: AdminRouteVariables }>();
 
-  // ── Auth guard middleware — all admin routes require session ───────
-  app.use('*', async (c, next) => {
-    const session = await requireAdminSessionFromContext(c, contextPromise, runtime.adminJwt);
-    if (!session) {
-      return respondMapped(c, codedHostError('ADMIN_UNAUTHORIZED', ADMIN_SESSION_ERROR_CODES));
-    }
-    c.set('adminSession' as never, session as never);
-    await next();
-  });
+  /**
+   * Route-local Admin admission. The body policy is supplied next to the
+   * method, path, and handler below; there is no parallel path registry that
+   * can drift from Hono's route table.
+   */
+  const admitAdminRequest =
+    (jsonBodyLimitBytes?: number): MiddlewareHandler =>
+    async (c, next) => {
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ...(!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
+          ? { requiredOrigins: runtime.allowedOrigins }
+          : {}),
+        ...(jsonBodyLimitBytes === undefined ? {} : { jsonBodyLimitBytes }),
+      });
+      if (!admitted.ok) return admitted.response;
+      const session = await requireAdminSessionFromContext(c, context, runtime.admin.jwt);
+      if (!session) {
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_REQUEST_ADMISSION_ERROR_CODES),
+        );
+      }
+      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+        c,
+        runtime.admission,
+        admitted.value,
+        {
+          allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
+          subject: { kind: 'address', address: session.address },
+        },
+      );
+      if (!subjectAdmission.ok) return subjectAdmission.response;
+      c.set('requestAdmission', subjectAdmission.value);
+      await next();
+    };
 
   // ── GET /api/blocklist ────────────────────────────────────────────
-  app.get('/blocklist', async (c) => {
+  app.get('/blocklist', admitAdminRequest(), async (c) => {
     try {
       const params = parseAdminRequest(c.req.query(), parseAdminBlocklistQuery);
-      const page = await (await contextPromise).abuseStore.listBlocks(params);
+      const ctx = context;
+      const page = await ctx.abuseStore.listBlocks(params);
       return c.json(
         parseAdminBlocklistResponse({
           blocklist: page.blocks.map((block) => ({
@@ -222,16 +263,15 @@ export function createAdminRoutes(
   });
 
   // ── DELETE /api/blocklist ─────────────────────────────────────────
-  app.delete('/blocklist', async (c) => {
+  app.delete('/blocklist', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
       const body = parseAdminRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        c.get('requestAdmission').body,
         parseAdminBlocklistDeleteRequest,
       );
 
-      const removed = await (
-        await contextPromise
-      ).abuseStore.removeBlock({
+      const ctx = context;
+      const removed = await ctx.abuseStore.removeBlock({
         scope: body.scope,
         subject: body.subject,
       });
@@ -242,9 +282,9 @@ export function createAdminRoutes(
   });
 
   // ── GET /api/logs ─────────────────────────────────────────────────
-  app.get('/logs', async (c) => {
+  app.get('/logs', admitAdminRequest(), async (c) => {
     try {
-      const redis = await getAdminRedis(contextPromise);
+      const redis = getAdminRedis(context);
       const entries = await redis.lrange(ADMIN_AUDIT_LOG_KEY, 0, ADMIN_AUDIT_LOG_MAX_ENTRIES - 1);
       return c.json(
         parseAdminAuditLogsResponse({
@@ -261,13 +301,13 @@ export function createAdminRoutes(
   // Sponsored Logs filter dropdown. Reads exact MIST decimal strings
   // from the durable aggregate; never derives lifetime totals from
   // bounded recent rows.
-  app.get('/sponsored-logs/summary', async (c) => {
+  app.get('/sponsored-logs/summary', admitAdminRequest(), async (c) => {
     try {
       const { mode } = parseAdminRequest(
         { mode: c.req.query('mode') },
         parseAdminSponsoredLogsQuery,
       );
-      const ctx = await contextPromise;
+      const ctx = context;
       const summary = await ctx.sponsoredLogsStore.getSummary(mode);
       return c.json(parseAdminSponsoredLogsSummaryResponse({ summary }));
     } catch (err) {
@@ -279,13 +319,13 @@ export function createAdminRoutes(
   // Combined summary + bounded recent entries for the Sponsored Logs
   // page. Numeric fields are exact MIST decimal strings (signed where
   // applicable) or `null` for unknown economics.
-  app.get('/sponsored-logs', async (c) => {
+  app.get('/sponsored-logs', admitAdminRequest(), async (c) => {
     try {
       const { mode, limit } = parseAdminRequest(
         { mode: c.req.query('mode'), limit: c.req.query('limit') },
         parseAdminSponsoredLogsQuery,
       );
-      const ctx = await contextPromise;
+      const ctx = context;
       const [summary, entries] = await Promise.all([
         ctx.sponsoredLogsStore.getSummary(mode),
         ctx.sponsoredLogsStore.getRecent(mode, limit),
@@ -303,9 +343,9 @@ export function createAdminRoutes(
   // can skip it; current health is always derived from Redis-time freshness.
   // `feeConfig` uses `host.getConfig()` which is already TTL-cached in
   // core-api. Other fields are boot-derived constants.
-  app.get('/sponsor-operations', async (c) => {
+  app.get('/sponsor-operations', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const ctx = context;
       const host = ctx.host;
 
       // Admin is not a hot path, so await the bounded observation before
@@ -326,7 +366,7 @@ export function createAdminRoutes(
           lastError: s.lastError === null ? null : redactSensitiveText(s.lastError),
         })),
         sponsorRefillAccount: {
-          address: ctx.sponsorOperations.sponsorRefillAccountAddress,
+          address: ctx.sponsorOperations.settings.sponsorRefillAccountAddress,
           totalBalanceMist: availability.sponsorRefillAccount.totalBalanceMist,
           healthy: availability.sponsorRefillAccount.healthy,
           lastObservedAtMs: availability.sponsorRefillAccount.lastObservedAtMs,
@@ -386,7 +426,6 @@ export function createAdminRoutes(
           vaultRegistryId: host.vaultRegistryId,
           deepbookPackageId: ctx.prepareConfig.deepbookPackageId,
         },
-        studioEnabled: ctx.studio !== null,
         rpcFleet: {
           endpoints: ctx.rpcFleet.endpoints.map((endpoint) => ({ ...endpoint })),
         },
@@ -398,11 +437,11 @@ export function createAdminRoutes(
   });
 
   // ── POST /api/sponsor-refill-account/withdrawal-challenge ────────────────────────────
-  app.post('/sponsor-refill-account/withdrawal-challenge', async (c) => {
+  app.post('/sponsor-refill-account/withdrawal-challenge', admitAdminRequest(), async (c) => {
     let ip: string | null = null;
     try {
-      ip = runtime.resolveClientIp(c);
-      const redis = await getAdminRedis(contextPromise);
+      ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+      const redis = getAdminRedis(context);
       const nonce = `stelis-withdraw:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(
         withdrawalNonceKey(runtime.network, nonce),
@@ -413,7 +452,7 @@ export function createAdminRoutes(
       return c.json(parseSponsorRefillAccountWithdrawalChallengeResponse({ nonce, expiresAt }));
     } catch (err) {
       if (ip !== null) {
-        await writeAdminAuditLog(await getAdminRedis(contextPromise), {
+        await writeAdminAuditLog(getAdminRedis(context), {
           event: 'WITHDRAW_NONCE_ERROR',
           ts: new Date().toISOString(),
           ip,
@@ -425,194 +464,202 @@ export function createAdminRoutes(
   });
 
   // ── POST /api/sponsor-refill-account/withdraw — execute withdrawal ──────────────────
-  app.post('/sponsor-refill-account/withdraw', async (c) => {
-    let ip: string | null = null;
-    try {
-      ip = runtime.resolveClientIp(c);
-      const ts = () => new Date().toISOString();
-      const redis = await getAdminRedis(contextPromise);
-      // Atomic ops rate-limit check at entry
-      const rateCheck = await checkAndIncrementAdminOperationAttempt(redis, ip);
-      if (!rateCheck.allowed) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_RATE_LIMITED',
-          ts: ts(),
-          ip,
-          detail: `429: ${rateCheck.current} attempts`,
-        });
-        return respondMapped(
-          c,
-          codedHostError(
-            'RATE_LIMITED',
-            ADMIN_WITHDRAWAL_ERROR_CODES,
-            {
-              retryAfterMs: rateCheck.retryAfterMs,
-            },
-            {
-              'Retry-After': formatRetryAfterSeconds(rateCheck.retryAfterMs),
-            },
-          ),
-        );
-      }
-
-      // Parse body
-      const body = parseAdminRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-        parseSponsorRefillAccountWithdrawalRequest,
-      );
-      const { amountMist, nonce, signature } = body;
-
-      // Signature verification uses the shared browser/server helper.
-      if (runtime.adminAddress === null) {
-        throw new Error('ADMIN_ADDRESS is not configured');
-      }
-      const adminAddress = runtime.adminAddress;
-      const message = buildSponsorRefillAccountWithdrawMessage(runtime.network, amountMist, nonce);
-      const sigValid = await verifySignedMessage({ message, signature, adminAddress });
-      if (!sigValid) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: '401: bad signature',
-        });
-        return respondMapped(
-          c,
-          codedHostError('WITHDRAWAL_SIGNATURE_INVALID', ADMIN_WITHDRAWAL_ERROR_CODES),
-        );
-      }
-
-      // Signature validation precedes the atomic nonce-consume + durable
-      // operation reservation owned by the shared account spend coordinator.
-      const ctx = await contextPromise;
-      const recipientAddress = adminAddress;
-      const result = await ctx.sponsorOperations.withdraw({
-        destinationAddress: recipientAddress,
-        amountMist,
-        nonceKey: withdrawalNonceKey(runtime.network, nonce),
-      });
-      if (result.status === 'nonce_missing') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: '401: invalid nonce',
-        });
-        return respondMapped(
-          c,
-          codedHostError('WITHDRAWAL_NONCE_MISSING', ADMIN_WITHDRAWAL_ERROR_CODES),
-        );
-      }
-      if (result.status === 'runway_blocked') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_BLOCKED',
-          ts: ts(),
-          ip,
-          detail: redactSensitiveText(result.error),
-        });
-        return respondMapped(
-          c,
-          codedHostError('WITHDRAWAL_RUNWAY_BLOCKED', ADMIN_WITHDRAWAL_ERROR_CODES),
-        );
-      }
-      if (result.status === 'busy') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_NOT_ACCEPTED',
-          ts: ts(),
-          ip,
-          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
-        });
-        return respondMapped(
-          c,
-          codedHostError('WITHDRAWAL_NOT_ACCEPTED', ADMIN_WITHDRAWAL_ERROR_CODES, {
-            operationId: result.operationId,
-            ...(result.digest === null ? {} : { digest: result.digest }),
-          }),
-        );
-      }
-      if (result.status === 'pending') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_PENDING',
-          ts: ts(),
-          ip,
-          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
-        });
-        return respondMapped(
-          c,
-          codedHostError('WITHDRAWAL_PENDING', ADMIN_WITHDRAWAL_ERROR_CODES, {
-            operationId: result.operationId,
-            ...(result.digest === null ? {} : { digest: result.digest }),
-          }),
-        );
-      }
-      if (result.status === 'failed') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: redactSensitiveText(result.error),
-        });
-        return respondMapped(c, codedHostError('WITHDRAWAL_FAILED', ADMIN_WITHDRAWAL_ERROR_CODES));
-      }
-      if (result.status === 'not_needed') {
-        throw new Error('Withdrawal returned a refill-only result');
-      }
-
-      const {
-        digest,
-        amountMist: completedAmountMist,
-        destinationAddress: completedDestinationAddress,
-      } = result;
-
+  app.post(
+    '/sponsor-refill-account/withdraw',
+    admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
+    async (c) => {
+      let ip: string | null = null;
       try {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_SUCCESS',
-          ts: ts(),
-          ip,
-          detail: `${completedAmountMist} MIST → ${completedDestinationAddress} (${digest})`,
-        });
-      } catch (auditError) {
-        // The durable terminal result is already authoritative. Audit storage
-        // failure must not turn a confirmed withdrawal into an HTTP failure.
-        // eslint-disable-next-line no-console
-        console.error(
-          '[sponsor-refill-account/withdraw] Success audit write failed:',
-          safeErrorSummary(auditError),
-        );
-      }
+        ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+        const ts = () => new Date().toISOString();
+        const redis = getAdminRedis(context);
+        // Atomic ops rate-limit check at entry
+        const rateCheck = await checkAndIncrementAdminOperationAttempt(redis, ip);
+        if (!rateCheck.allowed) {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_RATE_LIMITED',
+            ts: ts(),
+            ip,
+            detail: `429: ${rateCheck.current} attempts`,
+          });
+          return respondMapped(
+            c,
+            codedHostError(
+              'RATE_LIMITED',
+              ADMIN_WITHDRAWAL_ERROR_CODES,
+              {
+                retryAfterMs: rateCheck.retryAfterMs,
+              },
+              {
+                'Retry-After': formatRetryAfterSeconds(rateCheck.retryAfterMs),
+              },
+            ),
+          );
+        }
 
-      return c.json(
-        parseSponsorRefillAccountWithdrawalResponse({
+        // Parse body
+        const body = parseAdminRequest(
+          c.get('requestAdmission').body,
+          parseSponsorRefillAccountWithdrawalRequest,
+        );
+        const { amountMist, nonce, signature } = body;
+
+        // Signature verification uses the shared browser/server helper.
+        const adminAddress = runtime.admin.address;
+        const message = buildSponsorRefillAccountWithdrawMessage(
+          runtime.network,
+          amountMist,
+          nonce,
+        );
+        const sigValid = await verifySignedMessage({ message, signature, adminAddress });
+        if (!sigValid) {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: '401: bad signature',
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_SIGNATURE_INVALID', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+
+        // Signature validation precedes the atomic nonce-consume + durable
+        // operation reservation owned by the shared account spend coordinator.
+        const ctx = context;
+        const recipientAddress = adminAddress;
+        const result = await ctx.sponsorOperations.withdraw({
+          destinationAddress: recipientAddress,
+          amountMist,
+          nonceKey: withdrawalNonceKey(runtime.network, nonce),
+        });
+        if (result.status === 'nonce_missing') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: '401: invalid nonce',
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_NONCE_MISSING', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'runway_blocked') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_BLOCKED',
+            ts: ts(),
+            ip,
+            detail: redactSensitiveText(result.error),
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_RUNWAY_BLOCKED', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'busy') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_NOT_ACCEPTED',
+            ts: ts(),
+            ip,
+            detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_NOT_ACCEPTED', ADMIN_WITHDRAWAL_ERROR_CODES, {
+              operationId: result.operationId,
+              ...(result.digest === null ? {} : { digest: result.digest }),
+            }),
+          );
+        }
+        if (result.status === 'pending') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_PENDING',
+            ts: ts(),
+            ip,
+            detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_PENDING', ADMIN_WITHDRAWAL_ERROR_CODES, {
+              operationId: result.operationId,
+              ...(result.digest === null ? {} : { digest: result.digest }),
+            }),
+          );
+        }
+        if (result.status === 'failed') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: redactSensitiveText(result.error),
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_FAILED', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'not_needed') {
+          throw new Error('Withdrawal returned a refill-only result');
+        }
+
+        const {
           digest,
           amountMist: completedAmountMist,
-          recipient: completedDestinationAddress,
-        }),
-      );
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
-      try {
-        if (ip !== null) {
-          const r = await getAdminRedis(contextPromise);
-          await writeAdminAuditLog(r, {
-            event: 'WITHDRAWAL_ERROR',
-            ts: new Date().toISOString(),
+          destinationAddress: completedDestinationAddress,
+        } = result;
+
+        try {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_SUCCESS',
+            ts: ts(),
             ip,
-            detail: safeErrorSummary(err),
+            detail: `${completedAmountMist} MIST → ${completedDestinationAddress} (${digest})`,
           });
+        } catch (auditError) {
+          // The durable terminal result is already authoritative. Audit storage
+          // failure must not turn a confirmed withdrawal into an HTTP failure.
+          // eslint-disable-next-line no-console
+          console.error(
+            '[sponsor-refill-account/withdraw] Success audit write failed:',
+            safeErrorSummary(auditError),
+          );
         }
-      } catch {
-        /* Redis unavailable — audit log best-effort */
+
+        return c.json(
+          parseSponsorRefillAccountWithdrawalResponse({
+            digest,
+            amountMist: completedAmountMist,
+            recipient: completedDestinationAddress,
+          }),
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
+        try {
+          if (ip !== null) {
+            const r = getAdminRedis(context);
+            await writeAdminAuditLog(r, {
+              event: 'WITHDRAWAL_ERROR',
+              ts: new Date().toISOString(),
+              ip,
+              detail: safeErrorSummary(err),
+            });
+          }
+        } catch {
+          /* Redis unavailable — audit log best-effort */
+        }
+        return respondAdminFailure(c, err, ADMIN_WITHDRAWAL_ERROR_CODES);
       }
-      return respondAdminFailure(c, err, ADMIN_WITHDRAWAL_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   // ── GET /api/settlement-swap-paths ────────────────────────────────
   // Operational inspection: returns the active registry loaded at boot.
-  app.get('/settlement-swap-paths', async (c) => {
+  app.get('/settlement-swap-paths', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const ctx = context;
       const settlementSwapPaths = ctx.prepareConfig.supportedSettlementSwapPaths;
       return c.json(
         parseAdminSettlementSwapPathsResponse({
@@ -642,20 +689,13 @@ export function createAdminRoutes(
   });
 
   // ── GET /api/studio ──────────────────────────────────────────────
-  // Studio operational status.
-  // Returns { enabled: false } if studio mode is not active.
-  app.get('/studio', async (c) => {
+  // Studio authentication configuration for this `relay_and_studio` Host.
+  app.get('/studio', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.studio) {
-        return c.json(parseAdminStudioResponse({ enabled: false }), 200);
-      }
-
+      const ctx = context;
       return c.json(
         parseAdminStudioResponse({
-          enabled: true,
           config: {
-            developerJwtTrustConfigured: !!ctx.developerJwtTrustConfig,
             developerJwtVerifyUrlConfigured: !!ctx.developerJwtVerifyUrl,
           },
         }),
@@ -665,15 +705,9 @@ export function createAdminRoutes(
     }
   });
   // ── GET /api/promotions ──────────────────────────────────────────
-  app.get('/promotions', async (c) => {
+  app.get('/promotions', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_LIST_ERROR_CODES),
-        );
-      }
+      const ctx = context;
       const { status, ...pageParams } = parseAdminRequest(
         c.req.query(),
         parseAdminPromotionListQuery,
@@ -695,26 +729,20 @@ export function createAdminRoutes(
   });
 
   // ── POST /api/promotions ─────────────────────────────────────────
-  app.post('/promotions', async (c) => {
+  app.post('/promotions', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     let ip: string | null = null;
     try {
-      ip = runtime.resolveClientIp(c);
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_CREATE_ERROR_CODES),
-        );
-      }
+      ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+      const ctx = context;
       const body = parseAdminRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        c.get('requestAdmission').body,
         parseAdminPromotionCreateRequest,
       );
       const record = await ctx.promotionStore.create(body);
       // Durable admin audit trail: emit the same operation-log event shape used by
       // every other admin write path so `/api/logs` and `app-admin` can
       // attribute promotion creation without bespoke sink wiring.
-      await writeAdminAuditLog(await getAdminRedis(contextPromise), {
+      await writeAdminAuditLog(getAdminRedis(context), {
         event: 'PROMOTION_CREATE',
         ts: new Date().toISOString(),
         ip,
@@ -727,16 +755,10 @@ export function createAdminRoutes(
   });
 
   // ── GET /api/promotions/:id ──────────────────────────────────────
-  app.get('/promotions/:id', async (c) => {
+  app.get('/promotions/:id', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const record = await ctx.promotionStore.get(id);
       if (!record) {
         return respondMapped(
@@ -757,18 +779,12 @@ export function createAdminRoutes(
   });
 
   // ── PUT /api/promotions/:id ──────────────────────────────────────
-  app.put('/promotions/:id', async (c) => {
+  app.put('/promotions/:id', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_UPDATE_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const input = parseAdminRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        c.get('requestAdmission').body,
         parseAdminPromotionUpdateRequest,
       );
 
@@ -786,18 +802,12 @@ export function createAdminRoutes(
   });
 
   // ── POST /api/promotions/:id/status ──────────────────────────────
-  app.post('/promotions/:id/status', async (c) => {
+  app.post('/promotions/:id/status', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_STATUS_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const body = parseAdminRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
+        c.get('requestAdmission').body,
         parseAdminPromotionStatusRequest,
       );
       const record = await ctx.promotionStore.transitionStatus(id, body.status, body.reason);
@@ -814,16 +824,10 @@ export function createAdminRoutes(
   });
 
   // ── DELETE /api/promotions/:id ───────────────────────────────────
-  app.delete('/promotions/:id', async (c) => {
+  app.delete('/promotions/:id', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_DELETE_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const result = await ctx.promotionStore.delete(id);
       if (result.status === 'not_found') {
         return respondMapped(
@@ -844,16 +848,10 @@ export function createAdminRoutes(
   });
 
   // ── GET /api/promotions/:id/summary ──────────────────────────────
-  app.get('/promotions/:id/summary', async (c) => {
+  app.get('/promotions/:id/summary', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const promotion = await ctx.promotionStore.get(id);
       if (!promotion) {
         return respondMapped(
@@ -862,12 +860,6 @@ export function createAdminRoutes(
         );
       }
       const summary = await computeAdminSummary(ctx, id, promotion);
-      if (!summary) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_UNAVAILABLE', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
-      }
       return c.json(parseAdminPromotionSummaryResponse({ promotionId: id, summary }));
     } catch (err) {
       return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);

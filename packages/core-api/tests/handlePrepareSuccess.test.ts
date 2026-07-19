@@ -19,6 +19,8 @@ import {
 } from '@stelis/contracts';
 import { PREPARE_TTL_MS } from '../src/preparePolicy.js';
 import { computePolicyHash } from '../src/policyHash.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 // ─── Module mocks (vi.hoisted ensures availability inside vi.mock factory) ──
 
@@ -235,6 +237,12 @@ function setSettleArgs(args: ExtractedSettleArgs): void {
   MOCK_BUILD_RESULT.settleArgs = args;
 }
 
+const TEST_ABUSE_BLOCKER = {
+  checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+  checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+  recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+};
+
 function makeMockContext() {
   return {
     network: 'testnet' as const,
@@ -250,11 +258,7 @@ function makeMockContext() {
     configId: CONFIG_ID,
     vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
-    abuseBlocker: {
-      checkIp: vi.fn().mockResolvedValue({ blocked: false }),
-      checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
-      recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
-    },
+    abuseBlocker: TEST_ABUSE_BLOCKER,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
@@ -326,16 +330,19 @@ async function makeParams(
   txKindBytes: string,
   overrides: Partial<Omit<PrepareParams, 'txKindBytes'>> = {},
 ): Promise<PrepareParams> {
-  return withPrepareAuthorization(
-    {
-      txKindBytes,
-      senderAddress: TEST_PREPARE_AUTH_SENDER,
-      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
-      clientIp: '127.0.0.1',
-      ...overrides,
-    },
-    { packageId: PACKAGE_ID },
-  );
+  const input = {
+    txKindBytes,
+    senderAddress: TEST_PREPARE_AUTH_SENDER,
+    settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+    clientIp: '127.0.0.1' as string | import('../src/abuseBlocking.js').AdmittedClientIp,
+    ...overrides,
+  };
+  return typeof input.clientIp === 'string'
+    ? withPrepareAuthorization(
+        { ...input, clientIp: input.clientIp, abuseBlocker: TEST_ABUSE_BLOCKER },
+        { packageId: PACKAGE_ID },
+      )
+    : withPrepareAuthorization({ ...input, clientIp: input.clientIp }, { packageId: PACKAGE_ID });
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -384,9 +391,11 @@ describe('handlePrepare — success path', () => {
   it('returns correct cost breakdown with all fee components', async () => {
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
-    const params = await makeParams(txKindBytes, { clientIp: '10.0.0.1' });
+    const params = await makeParams(txKindBytes, {
+      clientIp: await admitTestClientIp(ctx.abuseBlocker, '10.0.0.1'),
+    });
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     // Cost breakdown must include all fee components
     expect(result.cost).toEqual({
@@ -403,9 +412,11 @@ describe('handlePrepare — success path', () => {
   it('commits the exact runner-owned draft to the receipt lifecycle store', async () => {
     const ctx = makeMockContext();
     const txKindBytes = await makeValidTxKindBytes();
-    const params = await makeParams(txKindBytes, { clientIp: '192.168.1.1' });
+    const params = await makeParams(txKindBytes, {
+      clientIp: await admitTestClientIp(ctx.abuseBlocker, '192.168.1.1'),
+    });
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     expect(ctx.sponsoredExecutionStore.commitPreparedReceipt).toHaveBeenCalledTimes(1);
 
@@ -444,7 +455,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     // The committed draft must carry the hash paired with the opaque validated transaction.
     const [storedDraft] = (
@@ -461,7 +472,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     expect(result.profile).toBe('new_user');
     expect(typeof result.quoteTimestampMs).toBe('number');
@@ -482,7 +493,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    await handlePrepare(ctx, params, makeExtraCfg());
+    await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     // runGenericPrepareBuildPipeline should receive settleProfile='new_user'
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
@@ -506,7 +517,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     // runGenericPrepareBuildPipeline should receive settleProfile='credit_general'
     const [, buildInput] = mockPrepareBuildPipeline.mock.calls[0];
@@ -556,7 +567,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes, { orderId: 'test-order-123' });
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
     expect(result.orderId).toBe('test-order-123');
   });
 
@@ -565,7 +576,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
     expect(result.orderId).toBeUndefined();
   });
 
@@ -606,7 +617,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes, { orderId: 'store-test-order' });
 
-    await handlePrepare(ctx, params, makeExtraCfg());
+    await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     const [storedDraft] = (
       ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
@@ -619,7 +630,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
     const params = await makeParams(txKindBytes);
 
-    await handlePrepare(ctx, params, makeExtraCfg());
+    await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     const [storedDraft] = (
       ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
@@ -660,7 +671,7 @@ describe('handlePrepare — success path', () => {
     const txKindBytes = await makeValidTxKindBytes();
 
     await expect(
-      handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg()),
+      handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg(), ALLOW_PREPARE_REQUEST),
     ).rejects.toMatchObject({
       code: 'L2_EXTRACT_FAILED',
       meta: { subcode: 'payment_input_source_mismatch' },
@@ -696,7 +707,12 @@ describe('handlePrepare — success path', () => {
 
     let caught: unknown;
     try {
-      await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg());
+      await handlePrepare(
+        ctx,
+        await makeParams(txKindBytes),
+        makeExtraCfg(),
+        ALLOW_PREPARE_REQUEST,
+      );
       expect.unreachable('Expected SPONSOR_LEASE_COMMIT_FAILED');
     } catch (err) {
       caught = err;

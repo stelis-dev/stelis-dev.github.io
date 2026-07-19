@@ -10,6 +10,7 @@ import {
   PREPARE_AUTHORIZATION_TTL_MS,
 } from '../src/prepare/prepareAuthorization.js';
 import { PrepareOverloadError } from '../src/store/prepareErrors.js';
+import type { AbuseBlockerAdapter } from '../src/store/abuseBlockTypes.js';
 import {
   TEST_PREPARE_AUTH_PACKAGE_ID,
   TEST_PREPARE_AUTH_SENDER,
@@ -22,6 +23,11 @@ const PAYOUT_ADDRESS = `0x${'44'.repeat(32)}`;
 const DEEPBOOK_PACKAGE_ID = `0x${'55'.repeat(32)}`;
 const POOL_ID = `0x${'66'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'77'.repeat(32)}::deep::DEEP`;
+const SIGNATURE_ONLY_ABUSE_BLOCKER = {
+  checkIp: async () => ({ blocked: false as const }),
+  checkSubject: async () => ({ blocked: false as const }),
+  recordSponsorFailure: async () => undefined,
+};
 
 async function makeValidTxKindBytes(): Promise<string> {
   const tx = new Transaction();
@@ -29,30 +35,35 @@ async function makeValidTxKindBytes(): Promise<string> {
   return toBase64(await tx.build({ onlyTransactionKind: true }));
 }
 
-async function makeSignedParams(overrides: Partial<PrepareParams> = {}): Promise<PrepareParams> {
+async function makeSignedParams(
+  overrides: Partial<PrepareParams> = {},
+  abuseBlocker: AbuseBlockerAdapter = SIGNATURE_ONLY_ABUSE_BLOCKER,
+): Promise<PrepareParams> {
   const {
+    clientIp: clientIpOverride,
     txKindBytesHash,
     prepareAuthorizationTimestampMs,
     prepareAuthorizationRequestNonce,
     prepareAuthorizationSignature,
     ...inputOverrides
   } = overrides;
-  return withPrepareAuthorization(
-    {
-      txKindBytes: await makeValidTxKindBytes(),
-      senderAddress: TEST_PREPARE_AUTH_SENDER,
-      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
-      clientIp: '127.0.0.1',
-      ...inputOverrides,
-    },
-    {
-      txKindBytesHash,
-      prepareAuthorizationTimestampMs,
-      prepareAuthorizationRequestNonce,
-      prepareAuthorizationSignature,
-      packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
-    },
-  );
+  const input = {
+    txKindBytes: await makeValidTxKindBytes(),
+    senderAddress: TEST_PREPARE_AUTH_SENDER,
+    settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+    ...inputOverrides,
+  };
+  const clientIp = clientIpOverride ?? '127.0.0.1';
+  const authorization = {
+    txKindBytesHash,
+    prepareAuthorizationTimestampMs,
+    prepareAuthorizationRequestNonce,
+    prepareAuthorizationSignature,
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+  };
+  return typeof clientIp === 'string'
+    ? withPrepareAuthorization({ ...input, clientIp, abuseBlocker }, authorization)
+    : withPrepareAuthorization({ ...input, clientIp }, authorization);
 }
 
 function makeContext(options: { nonceClaim?: 'ok' | 'duplicate' } = {}) {
@@ -126,9 +137,13 @@ function makeExtraCfg(): PrepareHandlerConfig {
 
 async function expectAuthError(params: PrepareParams, expectedCode: string): Promise<void> {
   const ctx = makeContext();
-  await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toMatchObject({
+  const assertSponsorAvailable = vi.fn().mockResolvedValue(undefined);
+  await expect(
+    handlePrepare(ctx, params, makeExtraCfg(), { assertSponsorAvailable }),
+  ).rejects.toMatchObject({
     code: expectedCode,
   });
+  expect(assertSponsorAvailable).not.toHaveBeenCalled();
   expect(ctx.prepareInflightLimiter.tryAcquire).not.toHaveBeenCalled();
 }
 
@@ -148,6 +163,7 @@ describe('prepare authorization boundary', () => {
         senderAddress: TEST_PREPARE_AUTH_SENDER,
         settlementTokenType: SETTLEMENT_TOKEN_TYPE,
         clientIp: '127.0.0.1',
+        abuseBlocker: SIGNATURE_ONLY_ABUSE_BLOCKER,
       },
       { keypair: wrongKeypair, packageId: TEST_PREPARE_AUTH_PACKAGE_ID },
     );
@@ -175,22 +191,37 @@ describe('prepare authorization boundary', () => {
 
   it('rejects a reused prepare request nonce before in-flight admission', async () => {
     const ctx = makeContext({ nonceClaim: 'duplicate' });
-    const params = await makeSignedParams();
+    const params = await makeSignedParams({}, ctx.abuseBlocker);
+    const assertSponsorAvailable = vi.fn().mockResolvedValue(undefined);
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toMatchObject({
-      code: 'PREPARE_AUTH_NONCE_REUSED',
-    });
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), { assertSponsorAvailable }),
+    ).rejects.toMatchObject({ code: 'PREPARE_AUTH_NONCE_REUSED' });
+    expect(assertSponsorAvailable).not.toHaveBeenCalled();
     expect(ctx.prepareInflightLimiter.tryAcquire).not.toHaveBeenCalled();
   });
 
   it('admits a valid authorization into the prepare state machine', async () => {
     const ctx = makeContext();
-    const params = await makeSignedParams();
+    const params = await makeSignedParams({}, ctx.abuseBlocker);
+    const assertSponsorAvailable = vi.fn().mockResolvedValue(undefined);
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toBeInstanceOf(
-      PrepareOverloadError,
-    );
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), { assertSponsorAvailable }),
+    ).rejects.toBeInstanceOf(PrepareOverloadError);
+    expect(assertSponsorAvailable).toHaveBeenCalledTimes(1);
     expect(ctx.prepareInflightLimiter.tryAcquire).toHaveBeenCalledTimes(1);
+    expect(ctx.abuseBlocker.checkIp).toHaveBeenCalledTimes(1);
+    expect(ctx.abuseBlocker.checkIp).toHaveBeenCalledWith('127.0.0.1');
+    expect(vi.mocked(ctx.prepareRequestNonceStore.claim).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ctx.abuseBlocker.checkSubject).mock.invocationCallOrder[0],
+    );
+    expect(vi.mocked(ctx.abuseBlocker.checkSubject).mock.invocationCallOrder[0]).toBeLessThan(
+      assertSponsorAvailable.mock.invocationCallOrder[0],
+    );
+    expect(assertSponsorAvailable.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ctx.prepareInflightLimiter.tryAcquire).mock.invocationCallOrder[0],
+    );
   });
 
   it('returns ABUSE_BLOCKED only after sender authorization succeeds', async () => {
@@ -199,11 +230,33 @@ describe('prepare authorization boundary', () => {
       blocked: true,
       retryAfterMs: 10_000,
     });
-    const params = await makeSignedParams();
+    const params = await makeSignedParams({}, ctx.abuseBlocker);
+    const assertSponsorAvailable = vi.fn().mockResolvedValue(undefined);
 
-    await expect(handlePrepare(ctx, params, makeExtraCfg())).rejects.toMatchObject({
-      code: 'ABUSE_BLOCKED',
-    });
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), { assertSponsorAvailable }),
+    ).rejects.toMatchObject({ code: 'ABUSE_BLOCKED' });
+    expect(assertSponsorAvailable).not.toHaveBeenCalled();
     expect(ctx.prepareInflightLimiter.tryAcquire).not.toHaveBeenCalled();
+  });
+
+  it('stops before prepare domain work when sponsor-capacity admission rejects', async () => {
+    const ctx = makeContext();
+    const params = await makeSignedParams({}, ctx.abuseBlocker);
+    const admissionError = new Error('sponsor capacity unavailable');
+    const assertSponsorAvailable = vi.fn().mockRejectedValue(admissionError);
+
+    await expect(
+      handlePrepare(ctx, params, makeExtraCfg(), { assertSponsorAvailable }),
+    ).rejects.toBe(admissionError);
+
+    expect(ctx.prepareRequestNonceStore.claim).toHaveBeenCalledTimes(1);
+    expect(ctx.abuseBlocker.checkIp).toHaveBeenCalledTimes(1);
+    expect(ctx.abuseBlocker.checkIp).toHaveBeenCalledWith('127.0.0.1');
+    expect(ctx.abuseBlocker.checkSubject).toHaveBeenCalledTimes(1);
+    expect(assertSponsorAvailable).toHaveBeenCalledTimes(1);
+    expect(ctx.prepareInflightLimiter.tryAcquire).not.toHaveBeenCalled();
+    expect(ctx.sponsorPool.checkout).not.toHaveBeenCalled();
+    expect(ctx.getConfig).not.toHaveBeenCalled();
   });
 });

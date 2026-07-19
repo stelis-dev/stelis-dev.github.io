@@ -4,6 +4,9 @@ import { fromBase64 } from '@mysten/sui/utils';
 import { encodePrepareAuthorizationMessage } from '@stelis/core-relay';
 import type { SuiNetwork } from '@stelis/contracts';
 import type { PrepareParams } from '../src/handlers/prepare.js';
+import type { AdmittedClientIp } from '../src/abuseBlocking.js';
+import type { AbuseBlockerAdapter } from '../src/store/abuseBlockTypes.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 export const TEST_PREPARE_AUTH_KEYPAIR = Ed25519Keypair.generate();
 export const TEST_PREPARE_AUTH_SENDER = TEST_PREPARE_AUTH_KEYPAIR.getPublicKey().toSuiAddress();
@@ -19,7 +22,11 @@ type PrepareAuthFields = Pick<
   | 'prepareAuthorizationSignature'
 >;
 
-type PrepareAuthInput = Omit<PrepareParams, keyof PrepareAuthFields>;
+type PrepareAuthInput = Omit<PrepareParams, keyof PrepareAuthFields | 'clientIp'> &
+  (
+    | { clientIp: string; abuseBlocker: AbuseBlockerAdapter }
+    | { clientIp: AdmittedClientIp; abuseBlocker?: never }
+  );
 
 interface PrepareAuthorizationOptions extends Partial<PrepareAuthFields> {
   keypair?: Ed25519Keypair;
@@ -50,9 +57,18 @@ export async function withPrepareAuthorization(
     requestNonce,
   });
   const { signature } = await keypair.signPersonalMessage(message);
+  let clientIp: AdmittedClientIp;
+  if (typeof input.clientIp === 'string') {
+    if (!input.abuseBlocker) throw new Error('String clientIp requires the exercised blocker');
+    clientIp = await admitTestClientIp(input.abuseBlocker, input.clientIp);
+  } else {
+    clientIp = input.clientIp;
+  }
+  const { abuseBlocker: _abuseBlocker, ...requestInput } = input;
 
   return {
-    ...input,
+    ...requestInput,
+    clientIp,
     txKindBytesHash,
     prepareAuthorizationTimestampMs: timestampMs,
     prepareAuthorizationRequestNonce: requestNonce,

@@ -2,6 +2,9 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   isPromotionId,
+  isReceiptId,
+  PROMOTION_ID_FORMAT,
+  RECEIPT_ID_FORMAT,
   NODE_TIMER_MAX_DELAY_MS,
   PROMOTION_PAGE_MAX_LIMIT,
 } from '@stelis/contracts';
@@ -40,7 +43,7 @@ const DEVELOPER_JWT = z
   .describe('Developer JWT for Studio promotion endpoints. Kept request-local.');
 const PROMOTION_PAGE_CURSOR = z
   .string()
-  .refine(isPromotionId, 'cursor must be a canonical lowercase UUID-v4')
+  .refine(isPromotionId, `cursor must be ${PROMOTION_ID_FORMAT}`)
   .optional()
   .describe('Exclusive cursor returned as nextCursor by the preceding Promotion page.');
 const PROMOTION_PAGE_LIMIT = z
@@ -50,7 +53,10 @@ const PROMOTION_PAGE_LIMIT = z
   .max(PROMOTION_PAGE_MAX_LIMIT)
   .optional()
   .describe(`Maximum Promotions to return, from 1 through ${PROMOTION_PAGE_MAX_LIMIT}.`);
-const PROMOTION_ID = z.string().min(1).describe('Promotion ID.');
+const PROMOTION_ID = z
+  .string()
+  .refine(isPromotionId, `promotionId must be ${PROMOTION_ID_FORMAT}`)
+  .describe(`Promotion ID in ${PROMOTION_ID_FORMAT} form.`);
 const SUI_ADDRESS = z
   .string()
   .regex(/^0x[0-9a-fA-F]+$/)
@@ -58,8 +64,8 @@ const SUI_ADDRESS = z
 const BASE64_BYTES = z.string().min(1).describe('Base64-encoded transaction bytes.');
 const RECEIPT_ID = z
   .string()
-  .regex(/^0x[0-9a-fA-F]+$/)
-  .describe('Receipt ID returned by prepare.');
+  .refine(isReceiptId, `receiptId must be ${RECEIPT_ID_FORMAT}`)
+  .describe(`Receipt ID returned by prepare: ${RECEIPT_ID_FORMAT}.`);
 
 export function registerStelisTools(server: McpServer, config: StelisMcpServerConfig): void {
   server.registerTool(

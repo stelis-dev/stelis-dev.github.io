@@ -119,6 +119,7 @@ vi.mock('@mysten/sui/transactions', async (importOriginal) => {
 
 import type { PrepareParams, PrepareHandlerConfig } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
 import type { ExtractedSettleArgs } from '../src/prepare/extractSettleArgs.js';
 import type { PreparedTxDraft } from '../src/store/prepareTypes.js';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
@@ -388,13 +389,17 @@ function requirePaymentInputTrace(settleArgs: ExtractedSettleArgs): PaymentInput
   return settleArgs.paymentInputTrace;
 }
 
-const NEW_USER_PARAMS = (txKindBytes: string): Promise<PrepareParams> =>
+const NEW_USER_PARAMS = (
+  txKindBytes: string,
+  abuseBlocker: Parameters<typeof handlePrepare>[0]['abuseBlocker'],
+): Promise<PrepareParams> =>
   withPrepareAuthorization(
     {
       txKindBytes,
       senderAddress: TEST_PREPARE_AUTH_SENDER,
       settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       clientIp: '10.0.0.1',
+      abuseBlocker,
     },
     { packageId: PACKAGE_ID },
   );
@@ -419,8 +424,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     mockSettleArgs(COIN_OBJECT_PAYMENT_EVIDENCE);
 
     const ctx = makeMockContext();
-    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes(), ctx.abuseBlocker);
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     // Effective profile in response
     expect(result.profile).toBe('new_user');
@@ -468,8 +473,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     mockSettleArgs(ADDRESS_BALANCE_PAYMENT_EVIDENCE);
 
     const ctx = makeMockContext();
-    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes(), ctx.abuseBlocker);
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     expect(result.profile).toBe('with_vault');
     expect(result.cost.executionCostClaim).toBe('1800000');
@@ -509,8 +514,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     mockSettleArgs(CREDIT_ONLY_PAYMENT_EVIDENCE);
 
     const ctx = makeMockContext();
-    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes(), ctx.abuseBlocker);
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     expect(result.profile).toBe('credit_general');
     expect(result.cost.executionCostClaim).toBe('1800000');
@@ -549,8 +554,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     mockSettleArgs(COIN_OBJECT_PAYMENT_EVIDENCE);
 
     const ctx = makeMockContext();
-    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
-    await handlePrepare(ctx, params, makeExtraCfg());
+    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes(), ctx.abuseBlocker);
+    await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     const [storedDraft] = (
       ctx.sponsoredExecutionStore.commitPreparedReceipt as ReturnType<typeof vi.fn>
@@ -589,8 +594,8 @@ describe('Handler wiring: handlePrepare boundary-crossing snapshots', () => {
     mockSettleArgs(COIN_OBJECT_PAYMENT_EVIDENCE);
 
     const ctx = makeMockContext();
-    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes());
-    const result = await handlePrepare(ctx, params, makeExtraCfg());
+    const params = await NEW_USER_PARAMS(await makeValidTxKindBytes(), ctx.abuseBlocker);
+    const result = await handlePrepare(ctx, params, makeExtraCfg(), ALLOW_PREPARE_REQUEST);
 
     expect(Object.keys(result.cost).sort()).toEqual([
       'executionCostClaim',

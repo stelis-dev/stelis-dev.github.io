@@ -19,10 +19,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mock state ────────────────────────────────────────────────────────────
 
-let mockSendCommand: ((args: string[]) => Promise<unknown>) | undefined;
+let mockSendCommand:
+  | ((args: string[], options?: { readonly signal?: AbortSignal }) => Promise<unknown>)
+  | undefined;
 let mockHasSendCommand = true;
 let mockMissingRuntimeMethod: string | null = null;
-/** Captures the last mock client created by createClient for quit() assertions. */
+let mockConnectWaitsForSocketAbort = false;
+let lastCreateClientOptions: { readonly socket?: { readonly signal?: AbortSignal } } | undefined;
+/** Captures the last mock client created by createClient for lifecycle assertions. */
 let lastMockClient: Record<string, unknown> | null = null;
 
 /** Realistic INFO server response for standalone Redis. */
@@ -37,34 +41,48 @@ const NO_MODE_INFO = `# Server\r\nredis_version:7.2.0\r\nos:Linux\r\n`;
 // ── Mock the redis package ────────────────────────────────────────────────
 
 vi.mock('redis', () => ({
-  createClient: vi.fn().mockImplementation(() => {
-    const client: Record<string, unknown> = {
-      isOpen: false,
-      connect: vi.fn().mockImplementation(async () => {
-        client.isOpen = true;
-      }),
-      quit: vi.fn().mockImplementation(async () => {
-        client.isOpen = false;
-      }),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn().mockResolvedValue('OK'),
-      del: vi.fn().mockResolvedValue(0),
-      eval: vi.fn().mockResolvedValue(null),
-      hGetAll: vi.fn().mockResolvedValue({}),
-      lRange: vi.fn().mockResolvedValue([]),
-      lPush: vi.fn().mockResolvedValue(1),
-      lTrim: vi.fn().mockResolvedValue(undefined),
-    };
-    // sendCommand is conditionally present based on test scenario
-    if (mockHasSendCommand) {
-      client.sendCommand = (...args: unknown[]) => mockSendCommand!(...(args as [string[]]));
-    }
-    if (mockMissingRuntimeMethod !== null) {
-      delete client[mockMissingRuntimeMethod];
-    }
-    lastMockClient = client;
-    return client;
-  }),
+  createClient: vi
+    .fn()
+    .mockImplementation((options: { readonly socket?: { readonly signal?: AbortSignal } }) => {
+      lastCreateClientOptions = options;
+      const client: Record<string, unknown> = {
+        isOpen: false,
+        on: vi.fn().mockReturnThis(),
+        connect: vi.fn().mockImplementation(async () => {
+          client.isOpen = true;
+          if (!mockConnectWaitsForSocketAbort) return;
+          await new Promise<never>((_resolve, reject) => {
+            const signal = lastCreateClientOptions?.socket?.signal;
+            if (signal?.aborted) {
+              reject(signal.reason);
+              return;
+            }
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        }),
+        disconnect: vi.fn().mockImplementation(async () => {
+          client.isOpen = false;
+        }),
+        get: vi.fn().mockResolvedValue(null),
+        set: vi.fn().mockResolvedValue('OK'),
+        del: vi.fn().mockResolvedValue(0),
+        eval: vi.fn().mockResolvedValue(null),
+        hGetAll: vi.fn().mockResolvedValue({}),
+        lRange: vi.fn().mockResolvedValue([]),
+        lPush: vi.fn().mockResolvedValue(1),
+        lTrim: vi.fn().mockResolvedValue(undefined),
+      };
+      // sendCommand is conditionally present based on test scenario
+      if (mockHasSendCommand) {
+        client.sendCommand = (...args: unknown[]) =>
+          mockSendCommand!(...(args as [string[], { readonly signal?: AbortSignal } | undefined]));
+      }
+      if (mockMissingRuntimeMethod !== null) {
+        delete client[mockMissingRuntimeMethod];
+      }
+      lastMockClient = client;
+      return client;
+    }),
 }));
 
 // ── Import after mock ─────────────────────────────────────────────────────
@@ -77,6 +95,8 @@ describe('Redis topology probe (createRedisClient)', () => {
   beforeEach(() => {
     mockHasSendCommand = true;
     mockMissingRuntimeMethod = null;
+    mockConnectWaitsForSocketAbort = false;
+    lastCreateClientOptions = undefined;
     mockSendCommand = vi.fn().mockResolvedValue(STANDALONE_INFO);
     lastMockClient = null;
   });
@@ -87,8 +107,45 @@ describe('Redis topology probe (createRedisClient)', () => {
     const client = await createRedisClient('redis://localhost');
     expect(client).toBeDefined();
     expect(client.get).toBeDefined();
+    expect(lastMockClient!.on).toHaveBeenCalledWith('error', expect.any(Function));
     expect(mockSendCommand).toHaveBeenCalledWith(['INFO', 'server']);
     await client.dispose();
+  });
+
+  it('disconnects the private raw client when startup aborts during the topology probe', async () => {
+    const controller = new AbortController();
+    mockSendCommand = vi.fn(
+      async (_args: string[], options?: { readonly signal?: AbortSignal }) =>
+        await new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+
+    const clientTask = createRedisClient('redis://localhost', controller.signal);
+    await vi.waitFor(() => expect(mockSendCommand).toHaveBeenCalledOnce());
+    const reason = new Error('startup aborted');
+    controller.abort(reason);
+
+    await expect(clientTask).rejects.toBe(reason);
+    expect(lastMockClient!.disconnect).toHaveBeenCalled();
+  });
+
+  it('binds startup cancellation to the pending Redis socket connection', async () => {
+    const controller = new AbortController();
+    mockConnectWaitsForSocketAbort = true;
+
+    const clientTask = createRedisClient('redis://localhost', controller.signal);
+    await vi.waitFor(() => expect(lastMockClient!.connect).toHaveBeenCalledOnce());
+    expect(lastCreateClientOptions?.socket?.signal).toBe(controller.signal);
+
+    const reason = new Error('startup connection aborted');
+    controller.abort(reason);
+
+    await expect(clientTask).rejects.toBe(reason);
+    expect(mockSendCommand).not.toHaveBeenCalled();
+    expect(lastMockClient!.disconnect).toHaveBeenCalled();
   });
 
   it('reconnects and re-probes before commands when the cached client was closed', async () => {
@@ -142,7 +199,7 @@ describe('Redis topology probe (createRedisClient)', () => {
     await expect(createRedisClient('redis://localhost')).rejects.toThrow(
       /Unsupported Redis topology: redis_mode:cluster.*standalone Redis data endpoint/s,
     );
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('redis_mode:sentinel → fail-closed + client cleaned up', async () => {
@@ -151,7 +208,7 @@ describe('Redis topology probe (createRedisClient)', () => {
     await expect(createRedisClient('redis://localhost')).rejects.toThrow(
       /Unsupported Redis topology: redis_mode:sentinel.*standalone Redis data endpoint/s,
     );
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('sendCommand missing → fails before connecting a partial client', async () => {
@@ -176,7 +233,7 @@ describe('Redis topology probe (createRedisClient)', () => {
     mockSendCommand = vi.fn().mockResolvedValue(42); // number, not string
 
     await expect(createRedisClient('redis://localhost')).rejects.toThrow('topology probe failed');
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('redis_mode field missing → fail-closed + client cleaned up', async () => {
@@ -185,13 +242,13 @@ describe('Redis topology probe (createRedisClient)', () => {
     await expect(createRedisClient('redis://localhost')).rejects.toThrow(
       'did not contain redis_mode',
     );
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('sendCommand rejects → fail-closed + client cleaned up', async () => {
     mockSendCommand = vi.fn().mockRejectedValue(new Error('NOPERM'));
 
     await expect(createRedisClient('redis://localhost')).rejects.toThrow('topology probe failed');
-    expect(lastMockClient!.quit).toHaveBeenCalledTimes(1);
+    expect(lastMockClient!.disconnect).toHaveBeenCalledTimes(1);
   });
 });

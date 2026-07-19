@@ -36,7 +36,7 @@ function sha256Bytes(input: string): Uint8Array {
   return new Uint8Array(buf);
 }
 
-const RECEIPT_ID_HEX = 'aabbccdd' + '00'.repeat(28);
+const RECEIPT_ID_HEX = '0x' + 'aabbccdd' + '00'.repeat(28);
 const ORDER_ID = 'ord_001';
 const USER_ADDR = '0x' + '0'.repeat(56) + '1234abcd'; // TEST_USER
 const TREASURY_ADDR = '0x' + 'ff'.repeat(32);
@@ -228,12 +228,12 @@ describe('verifySettleEventAgainstExpected', () => {
     expect(result.orderIdHash).toBe(createHash('sha256').update(ORDER_ID).digest('hex'));
   });
 
-  it('accepts an optional 0x prefix on exact 32-byte receipt and order hashes', async () => {
+  it('accepts an optional 0x prefix on the exact 32-byte order hash', async () => {
     const orderIdHash = createHash('sha256').update(ORDER_ID).digest('hex');
     const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
 
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
-      receiptId: `0x${RECEIPT_ID_HEX}`,
+      receiptId: RECEIPT_ID_HEX,
       orderIdHash: `0x${orderIdHash}`,
       user: USER_ADDR,
     });
@@ -295,7 +295,7 @@ describe('verifySettleEventAgainstExpected', () => {
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
-        receiptId: 'ff'.repeat(32),
+        receiptId: `0x${'ff'.repeat(32)}`,
       }),
     ).rejects.toThrow('receiptId');
   });
@@ -356,7 +356,7 @@ describe('verifySettleEventAgainstExpected', () => {
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         orderId: ORDER_ID,
-        receiptId: 'ff'.repeat(32),
+        receiptId: `0x${'ff'.repeat(32)}`,
         user: '0x' + 'ab'.repeat(32),
       }),
     ).rejects.toThrow(/receiptId.*user/s);
@@ -382,7 +382,7 @@ describe('verifySettleEventAgainstExpected', () => {
         ...EXPECTED_BASE,
         receiptId: '0x',
       }),
-    ).rejects.toThrow('expected.receiptId must be a 32-byte hex string');
+    ).rejects.toThrow('expected.receiptId must be 0x followed by 64 lowercase hex digits');
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {

@@ -456,8 +456,8 @@ export function DashboardPage() {
         <h1 className="admin-page-title">Dashboard</h1>
         <p className="admin-page-sub">Loading…</p>
         {error && <p style={{ color: '#f87171' }}>{error}</p>}
-        <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          {['Server Mode', 'Network', 'Sponsor Slots'].map((label) => (
+        <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+          {['Network', 'Sponsor Slots'].map((label) => (
             <div className="admin-stat" key={label}>
               <div className="admin-stat-label">{label}</div>
               <div
@@ -513,36 +513,7 @@ export function DashboardPage() {
       {error && <p style={{ color: '#f87171', marginBottom: 20 }}>{error}</p>}
 
       {/* Stat grid */}
-      <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-        <div className="admin-stat">
-          <div className="admin-stat-label">Server Mode</div>
-          <div
-            className="admin-stat-value"
-            style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            <span
-              style={{
-                display: 'inline-block',
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: data.studioEnabled ? '#a78bfa' : '#22c55e',
-                boxShadow: data.studioEnabled
-                  ? '0 0 8px rgba(167,139,250,0.5)'
-                  : '0 0 8px rgba(34,197,94,0.4)',
-              }}
-            />
-            <span
-              style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: data.studioEnabled ? '#a78bfa' : '#22c55e',
-              }}
-            >
-              {data.studioEnabled ? 'Studio' : 'Relay'}
-            </span>
-          </div>
-        </div>
+      <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
         <div className="admin-stat">
           <div className="admin-stat-label">Network</div>
           <div className="admin-stat-value" style={{ fontSize: 18 }}>

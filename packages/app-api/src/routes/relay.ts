@@ -10,8 +10,6 @@ import {
   handleStatus,
   handlePrepare,
   handleSponsor,
-  checkBlockedRequest,
-  readJsonBodyWithLimit,
   MAX_PREPARE_REQUEST_BODY_BYTES,
   MAX_SPONSOR_REQUEST_BODY_BYTES,
   SponsorBlockedError,
@@ -33,7 +31,7 @@ import {
 } from '@stelis/contracts';
 
 import type { AppApiContext } from '../context.js';
-import type { ResolveClientIp } from '../clientIp.js';
+import { beginRequestAdmission, type RequestAdmissionDependencies } from '../requestAdmission.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { canonicalizeAddress } from '@stelis/core-api';
 import { codedHostError, mapError, respondMapped } from '../errorMap.js';
@@ -41,15 +39,27 @@ import { safeBigintToNumber } from '../wireNumbers.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
 import { safeErrorSummary } from '@stelis/core-api/observability';
 
-export function createRelayRoutes(
-  contextPromise: Promise<AppApiContext>,
-  resolveClientIp: ResolveClientIp,
-) {
+class RelayPrepareAdmissionError extends Error {
+  constructor(
+    readonly errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' | 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY',
+    readonly headers: Readonly<Record<string, string>>,
+  ) {
+    super(errorCode);
+    this.name = 'RelayPrepareAdmissionError';
+  }
+}
+
+export function createRelayRoutes(context: AppApiContext, admission: RequestAdmissionDependencies) {
   const app = new Hono();
 
   // ── GET /relay/status ─────────────────────────────────────────────
   app.get('/status', async (c) => {
     try {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: RELAY_STATUS_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+      });
+      if (!admitted.ok) return admitted.response;
       const result = await handleStatus();
       return c.json(result);
     } catch {
@@ -60,7 +70,12 @@ export function createRelayRoutes(
   // ── GET /relay/config ─────────────────────────────────────────────
   app.get('/config', async (c) => {
     try {
-      const ctx = await contextPromise;
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+        unexpectedFailureCode: 'CONFIG_UNAVAILABLE',
+      });
+      if (!admitted.ok) return admitted.response;
+      const ctx = context;
       const host = ctx.host;
       const config = await host.getConfig();
 
@@ -93,62 +108,16 @@ export function createRelayRoutes(
   // ── POST /relay/prepare ───────────────────────────────────────────
   app.post('/prepare', async (c) => {
     try {
-      const ip = resolveClientIp(c);
-      const ctx = await contextPromise;
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: RELAY_PREPARE_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `prepare:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_PREPARE_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      const body = parseRelayPrepareRequest(admitted.value.body);
+      const ctx = context;
       const host = ctx.host;
-
-      // Sponsor operations gate check — shared-state read + pure derivation.
-      // Bootstrap has already populated the state before HTTP listen, so
-      // the decision is synchronous after bounded Redis reads. Prepare
-      // admission also requires one healthy sponsor slot that is not
-      // currently leased; sponsor submission does not, because it completes
-      // an existing lease.
-      const [sponsorOperationsState, slotLeases] = await Promise.all([
-        ctx.sponsorOperations.readState(),
-        host.sponsorPool.leaseStatus(),
-      ]);
-      const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
-      if (blocked) {
-        for (const [k, v] of Object.entries(blocked.headers)) c.header(k, v);
-        return respondMapped(
-          c,
-          codedHostError(blocked.errorCode, RELAY_PREPARE_ERROR_CODES, {}, blocked.headers),
-        );
-      }
-
-      // IP-level block check
-      const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
-      if (blockedByIp.blocked) {
-        return respondMapped(
-          c,
-          codedHostError(
-            'ABUSE_BLOCKED',
-            RELAY_PREPARE_ERROR_CODES,
-            blockedByIp.retryAfterMs === undefined
-              ? {}
-              : { retryAfterMs: blockedByIp.retryAfterMs },
-            { 'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs) },
-          ),
-        );
-      }
-
-      // Rate limit
-      const rl = await host.rateLimiter.check(`prepare:client-ip:${ip}`);
-      if (!rl.allowed) {
-        return respondMapped(
-          c,
-          codedHostError(
-            'RATE_LIMITED',
-            RELAY_PREPARE_ERROR_CODES,
-            { retryAfterMs: rl.retryAfterMs },
-            { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
-          ),
-        );
-      }
-
-      const body = parseRelayPrepareRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_PREPARE_REQUEST_BODY_BYTES),
-      );
 
       // Canonical sender boundary — normalize once, use everywhere downstream.
       let canonicalSender: string;
@@ -203,12 +172,29 @@ export function createRelayRoutes(
           prepareAuthorizationTimestampMs: body.prepareAuthorizationTimestampMs,
           prepareAuthorizationRequestNonce: body.prepareAuthorizationRequestNonce,
           prepareAuthorizationSignature: body.prepareAuthorizationSignature,
-          clientIp: ip,
+          clientIp: admitted.value.clientIp,
         },
         ctx.prepareConfig,
+        {
+          async assertSponsorAvailable() {
+            const [sponsorOperationsState, slotLeases] = await Promise.all([
+              ctx.sponsorAvailability.readState(),
+              host.sponsorPool.leaseStatus(),
+            ]);
+            const blocked = buildSponsorUnavailableResponse(sponsorOperationsState, slotLeases);
+            if (blocked) throw new RelayPrepareAdmissionError(blocked.errorCode, blocked.headers);
+          },
+        },
       );
       return c.json(result);
     } catch (err) {
+      if (err instanceof RelayPrepareAdmissionError) {
+        for (const [key, value] of Object.entries(err.headers)) c.header(key, value);
+        return respondMapped(
+          c,
+          codedHostError(err.errorCode, RELAY_PREPARE_ERROR_CODES, {}, err.headers),
+        );
+      }
       if (err instanceof HostWireParseError) {
         return respondMapped(c, codedHostError('BAD_REQUEST', RELAY_PREPARE_ERROR_CODES));
       }
@@ -223,43 +209,16 @@ export function createRelayRoutes(
   // ── POST /relay/sponsor ───────────────────────────────────────────
   app.post('/sponsor', async (c) => {
     try {
-      const ip = resolveClientIp(c);
-      const ctx = await contextPromise;
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: RELAY_SPONSOR_ERROR_CODES,
+        unexpectedFailureCode: 'SPONSOR_FAILED',
+        ipRateLimitKey: (ip) => `sponsor:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_SPONSOR_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      const { txBytes, userSignature, receiptId } = parseRelaySponsorRequest(admitted.value.body);
+      const ctx = context;
       const host = ctx.host;
-
-      // IP-level block check
-      const blockedByIp = await checkBlockedRequest(host.abuseBlocker, ip);
-      if (blockedByIp.blocked) {
-        return respondMapped(
-          c,
-          codedHostError(
-            'ABUSE_BLOCKED',
-            RELAY_SPONSOR_ERROR_CODES,
-            blockedByIp.retryAfterMs === undefined
-              ? {}
-              : { retryAfterMs: blockedByIp.retryAfterMs },
-            { 'Retry-After': formatRetryAfterSeconds(blockedByIp.retryAfterMs) },
-          ),
-        );
-      }
-
-      // Rate limit
-      const rl = await host.rateLimiter.check(`sponsor:client-ip:${ip}`);
-      if (!rl.allowed) {
-        return respondMapped(
-          c,
-          codedHostError(
-            'RATE_LIMITED',
-            RELAY_SPONSOR_ERROR_CODES,
-            { retryAfterMs: rl.retryAfterMs },
-            { 'Retry-After': formatRetryAfterSeconds(rl.retryAfterMs) },
-          ),
-        );
-      }
-
-      const { txBytes, userSignature, receiptId } = parseRelaySponsorRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SPONSOR_REQUEST_BODY_BYTES),
-      );
 
       // handleSponsor routes through the sponsor runner:
       // validate prepared receipt and submitted bytes → atomically enter executing
@@ -269,7 +228,7 @@ export function createRelayRoutes(
       const sponsorResult: RelaySponsorResponse = await handleSponsor(
         host,
         { txBytes, userSignature, receiptId },
-        ip,
+        admitted.value.clientIp,
       );
 
       return c.json(sponsorResult);

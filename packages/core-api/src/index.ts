@@ -2,7 +2,13 @@
 
 // Client IP resolution
 export { ClientIpResolutionError, resolveClientIp, parseTrustedProxyHops } from './clientIp.js';
-export { BlockCheckUnavailableError, checkBlockedRequest } from './abuseBlocking.js';
+export {
+  admitClientIp,
+  BlockCheckUnavailableError,
+  checkBlockedSubject,
+  readAdmittedClientIp,
+} from './abuseBlocking.js';
+export type { AdmittedClientIp } from './abuseBlocking.js';
 
 // Context
 export { createHostContext } from './context.js';

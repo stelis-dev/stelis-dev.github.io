@@ -20,7 +20,12 @@
  *     carries a zero fee; otherwise it is the exact MIST decimal string.
  */
 
-import { isValidStudioUserId, parsePromotionId } from '@stelis/contracts';
+import {
+  isReceiptId,
+  isValidStudioUserId,
+  parsePromotionId,
+  RECEIPT_ID_FORMAT,
+} from '@stelis/contracts';
 import {
   isValidSuiAddress,
   isValidTransactionDigest,
@@ -114,7 +119,6 @@ const SPONSORED_EXECUTION_LOG_KEYS = [
 
 const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
 const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
-const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const U64_MAX = (1n << 64n) - 1n;
 
@@ -272,8 +276,8 @@ export function parseSponsoredExecutionLogEntry(value: unknown): SponsoredExecut
   }
 
   const receiptId = requireString(source.receiptId, 'receiptId');
-  if (!RECEIPT_ID_RE.test(receiptId)) {
-    throw new Error('sponsoredLogs: receiptId must be 0x followed by 64 lowercase hex digits');
+  if (!isReceiptId(receiptId)) {
+    throw new Error(`sponsoredLogs: receiptId must be ${RECEIPT_ID_FORMAT}`);
   }
   const digest = requireNullableString(source.digest, 'digest');
   if (digest !== null && !isValidTransactionDigest(digest)) {

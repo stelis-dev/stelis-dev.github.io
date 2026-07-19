@@ -24,7 +24,7 @@ export interface AdminCookieRuntimeConfig {
 }
 
 export interface AdminAuthRuntimeConfig {
-  readonly jwt: AdminJwtConfig | null;
+  readonly jwt: AdminJwtConfig;
   readonly cookie: AdminCookieRuntimeConfig;
 }
 

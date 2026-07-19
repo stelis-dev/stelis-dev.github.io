@@ -3,7 +3,7 @@ import {
   isValidTransactionDigest,
   normalizeSuiAddress,
 } from '@mysten/sui/utils';
-import { isValidStudioUserId, parsePromotionId } from '@stelis/contracts';
+import { isReceiptId, isValidStudioUserId, parsePromotionId } from '@stelis/contracts';
 import type {
   SponsorExecutionStage,
   SponsorResultEconomics,
@@ -12,7 +12,6 @@ import type {
   SponsorResultRoute,
 } from '../handlers/sponsorResult.js';
 
-const RECEIPT_ID_RE = /^0x[0-9a-f]{64}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
 const SIGNED_DECIMAL_RE = /^(?:0|-?[1-9]\d*)$/;
@@ -229,7 +228,7 @@ function safeTime(value: unknown, label: string): number {
 
 function receiptId(value: unknown, label: string): string {
   const parsed = string(value, label);
-  if (!RECEIPT_ID_RE.test(parsed)) {
+  if (!isReceiptId(parsed)) {
     throw new SponsoredExecutionRecordCorruptionError(`${label} must be a canonical receipt ID`);
   }
   return parsed;

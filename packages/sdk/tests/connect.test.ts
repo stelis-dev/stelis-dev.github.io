@@ -5,7 +5,6 @@
  * - pinnedPackageId validation (S-16 step 2)
  * - rogue Host packageId rejection (S-16 step 1)
  * - consumption and bigint conversion of StelisClient's validated config
- * - studioEndpoint mode guard
  *
  * connect() now takes a required endpoint string. There is no canonical fallback,
  * no reconnect(), no allowCanonicalFallback, and no endpoint-switch callbacks.
@@ -13,11 +12,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
+import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
 
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
-const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<RelayPrepareResponse>>();
 const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
 
 vi.mock('../src/client.js', () => ({
@@ -25,7 +23,7 @@ vi.mock('../src/client.js', () => ({
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
       getConfig: mockGetConfig,
-      prepare: mockPrepare,
+      prepare: vi.fn(),
       sponsor: vi.fn(),
       endpoint,
     };
@@ -93,7 +91,6 @@ function stubConfig(config: RelayConfigResponse): void {
 
 beforeEach(() => {
   mockGetConfig.mockReset();
-  mockPrepare.mockReset();
 });
 
 // ─────────────────────────────────────────────
@@ -128,31 +125,5 @@ describe('StelisSDK.connect — pinnedPackageId policy', () => {
     await expect(
       StelisSDK.connect('http://primary/api', { pinnedPackageId: CANONICAL_PKG }),
     ).rejects.toThrow('Relay config packageId mismatch');
-  });
-});
-
-// ─────────────────────────────────────────────
-// connect — studioEndpoint mode guard
-// ─────────────────────────────────────────────
-
-describe('StelisSDK.connect — studioEndpoint mode guard', () => {
-  it('connects to explicit endpoint in studio mode', async () => {
-    stubConfig(makeConfig());
-    const sdk = await StelisSDK.connect('http://studio.local/api', { studioEndpoint: true });
-    expect(sdk).toBeDefined();
-  });
-
-  it('promotion methods throw when not in studio mode', async () => {
-    stubConfig(makeConfig());
-    const sdk = await StelisSDK.connect('http://primary/api');
-    // preparePromotionSponsored requires studioEndpoint: true
-    await expect(
-      sdk.preparePromotionSponsored({} as import('@mysten/sui/transactions').Transaction, {
-        client: {} as import('@mysten/sui/grpc').SuiGrpcClient,
-        promotionId: 'p1',
-        addr: '0x1',
-        developerJwt: 'jwt',
-      }),
-    ).rejects.toThrow('studioEndpoint: true');
   });
 });

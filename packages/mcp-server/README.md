@@ -43,9 +43,9 @@ Tools also accept `relayApiUrl`, which overrides `STELIS_RELAY_API_URL` for that
 
 ## Environment
 
-| Variable                    | Required | Description                                                |
-| --------------------------- | -------- | ---------------------------------------------------------- |
-| `STELIS_RELAY_API_URL`      | optional | Default Relay API endpoint, ending in `/relay`.            |
+| Variable                    | Required | Description                                                                           |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------- |
+| `STELIS_RELAY_API_URL`      | optional | Default Relay API endpoint, ending in `/relay`.                                       |
 | `STELIS_REQUEST_TIMEOUT_MS` | optional | Default HTTP timeout from `1` through `2147483647` milliseconds. Defaults to `20000`. |
 
 ## Tool Model
@@ -64,10 +64,10 @@ The server never stores developer JWTs, user signatures, transaction bytes, or p
 ## Studio Promotion Pages
 
 `stelis_list_promotions` returns one deterministic page of active Promotions. It accepts an
-optional `limit` from 1 through 100 and an optional canonical lowercase UUID-v4 `cursor`, such as
-`00000000-0000-4000-8000-000000000001`. A non-null response `nextCursor` is the exclusive cursor
-for the next call; `nextCursor: null` means the final page has been reached. The developer JWT
-remains request-local and is sent only in the Host authorization header.
+optional `limit` from 1 through 100 and an optional canonical lowercase UUID-v4 `cursor`. Pass a
+non-null `nextCursor` from the previous response as the exclusive cursor for the next call;
+`nextCursor: null` means the final page has been reached. The developer JWT remains request-local
+and is sent only in the Host authorization header.
 
 ## Generic Tool Flow
 

@@ -40,19 +40,49 @@ interface PromotionPolicyInput {
   verifiedIdentity: VerifiedDeveloperIdentity;
 }
 
+/** Validate transaction-only Promotion policy on the one decoded Transaction. */
+export async function validatePromotionSponsorSubmissionPolicy(
+  ctx: PromotionPolicyContext,
+  input: PromotionPolicyInput,
+  builtTx: Transaction,
+): Promise<void> {
+  const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
+
+  // S1 — PTB structure. Sponsor path does NOT repeat the sponsor-withdrawal
+  // check; the runner's hash gate must prove these bytes are the exact
+  // prepare-time transaction before signing can occur.
+  const ptbFailure = validatePromotionPtbStructure(normalizedCommands);
+  if (ptbFailure) {
+    await recordSponsorAbuseForPtbStructure(ctx, input, ptbFailure);
+    throw sponsorPolicyErrorForPtbStructure(ptbFailure);
+  }
+
+  // S2 — allowed targets.
+  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalAllowedTargets);
+  if (targetFailure) {
+    await recordSponsorAbuseForTargetPolicy(ctx, input, targetFailure);
+    throw sponsorPolicyErrorForTargetPolicy(targetFailure);
+  }
+
+  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
+  if (commandCountFailure) {
+    throw new PromotionSponsorPolicyError(
+      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
+      'BAD_REQUEST',
+    );
+  }
+}
+
 /**
- * Validate Promotion-specific policy before durable execution begins.
- *
- * Caller (Promotion SponsoredExecutionPolicy) owns route-level discrimination: mode guard and
- * promotionId match happen before this function is called. This function receives
- * an already-narrowed PromotionPreparedTxEntry.
+ * Validate prepared-record identity and Promotion eligibility using the exact
+ * Transaction instance decoded before the record was read.
  */
 export async function validatePromotionPreparedPolicy(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
   peeked: PromotionPreparedTxEntry,
-  txBytes: Uint8Array,
-): Promise<{ builtTx: Transaction }> {
+  builtTx: Transaction,
+): Promise<void> {
   if (input.verifiedIdentity.senderAddress !== peeked.senderAddress) {
     throw new PromotionSponsorPolicyError(
       'Verified identity senderAddress does not match prepared senderAddress',
@@ -65,51 +95,13 @@ export async function validatePromotionPreparedPolicy(
       'USER_ID_MISMATCH',
     );
   }
-
-  // Parse the submitted `txBytes` into a Transaction. `decodeTxBytes` at the
-  // route boundary already validated base64; BCS deserialization can still
-  // fail on malformed TransactionData. The sponsor runner separately binds
-  // these bytes to the prepared-record hash before durable execution begins.
-  // Classify this parse failure as
-  // `BAD_REQUEST` / 400 so route-level 500 `SPONSOR_FAILED` cannot mask a
-  // client-visible input error. The rejection happens before the durable
-  // prepared-to-executing transition, so the prepared receipt remains current.
-  let builtTx: Transaction;
-  try {
-    builtTx = Transaction.from(txBytes);
-  } catch (err) {
+  if (builtTx.getData().sender !== peeked.senderAddress) {
     throw new PromotionSponsorPolicyError(
-      `Malformed txBytes — cannot deserialize TransactionKind: ${err instanceof Error ? err.message : String(err)}`,
-      'BAD_REQUEST',
-    );
-  }
-  const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
-
-  // S1 — PTB structure. Sponsor path does NOT repeat the sponsor-withdrawal
-  // check; the runner's hash gate must prove these bytes are the exact
-  // prepare-time transaction before signing can occur.
-  const ptbFailure = validatePromotionPtbStructure(normalizedCommands);
-  if (ptbFailure) {
-    await recordSponsorAbuseForPtbStructure(ctx, input, peeked, ptbFailure);
-    throw sponsorPolicyErrorForPtbStructure(ptbFailure);
-  }
-
-  // S2 — allowed targets.
-  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalAllowedTargets);
-  if (targetFailure) {
-    await recordSponsorAbuseForTargetPolicy(ctx, input, peeked, targetFailure);
-    throw sponsorPolicyErrorForTargetPolicy(targetFailure);
-  }
-
-  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
-  if (commandCountFailure) {
-    throw new PromotionSponsorPolicyError(
-      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
-      'BAD_REQUEST',
+      'canonical tx.sender does not match prepared senderAddress',
+      'SENDER_SIGNATURE_INVALID',
     );
   }
 
-  // S3 — eligibility (promotion active + claimed + use-window).
   const promotion = await ctx.promotionStore.get(input.promotionId);
   const entitlement = promotion
     ? await ctx.executionLedger.getEntitlement(input.promotionId, input.verifiedIdentity.userId)
@@ -118,8 +110,6 @@ export async function validatePromotionPreparedPolicy(
   if (eligibilityFailure) {
     throw sponsorPolicyErrorForEligibility(eligibilityFailure);
   }
-
-  return { builtTx };
 }
 
 // ─────────────────────────────────────────────
@@ -174,7 +164,6 @@ function sponsorPolicyErrorForEligibility(f: EligibilityFailure): PromotionSpons
 async function recordSponsorAbuseForPtbStructure(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
-  peeked: PromotionPreparedTxEntry,
   f: PtbStructureFailure,
 ): Promise<void> {
   const common = {
@@ -186,7 +175,7 @@ async function recordSponsorAbuseForPtbStructure(
       await recordPromotionAbuseEvent(
         ctx.abuseBlocker,
         input.clientIp,
-        { kind: 'studio_user', userId: peeked.userId },
+        { kind: 'studio_user', userId: input.verifiedIdentity.userId },
         PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
         { ...common, kind: f.kind },
       );
@@ -195,7 +184,7 @@ async function recordSponsorAbuseForPtbStructure(
       await recordPromotionAbuseEvent(
         ctx.abuseBlocker,
         input.clientIp,
-        { kind: 'studio_user', userId: peeked.userId },
+        { kind: 'studio_user', userId: input.verifiedIdentity.userId },
         PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
         common,
       );
@@ -205,13 +194,12 @@ async function recordSponsorAbuseForPtbStructure(
 async function recordSponsorAbuseForTargetPolicy(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
-  peeked: PromotionPreparedTxEntry,
   f: TargetPolicyFailure,
 ): Promise<void> {
   await recordPromotionAbuseEvent(
     ctx.abuseBlocker,
     input.clientIp,
-    { kind: 'studio_user', userId: peeked.userId },
+    { kind: 'studio_user', userId: input.verifiedIdentity.userId },
     PROMOTION_ABUSE_CODES.DISALLOWED_TARGET,
     {
       promotionId: input.promotionId,
