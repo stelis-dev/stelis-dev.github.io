@@ -34,6 +34,10 @@ import type {
 } from './reservationHandles.js';
 import type { ExecResult } from '../sessionTypes.js';
 import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
+import type {
+  AuthenticatedSponsorSubmission,
+  SponsorSubmissionAuthenticationResult,
+} from './sponsorSubmissionAuthentication.js';
 
 type MaybePromise<T> = Promise<T> | T;
 
@@ -131,13 +135,13 @@ export type PrepareChainSnapshot<D extends PolicyDiscriminator = PolicyDiscrimin
       : never;
 
 /**
- * Request identity supplied while the submitted transaction and user signature
- * are checked. The runner has read the current prepared record but has not
- * mutated receipt or lease state.
+ * Route-specific admission supplied after the runner has authenticated the
+ * submitted transaction and before any prepared-record read.
  */
 export interface SponsorSubmissionContext {
   readonly receiptId: string;
   readonly clientIp: string;
+  readonly authentication: SponsorSubmissionAuthenticationResult;
 }
 
 /**
@@ -156,6 +160,7 @@ export interface SponsorSubmissionContext {
 export interface SponsorValidatedContext {
   readonly receiptId: string;
   readonly clientIp: string;
+  readonly authenticatedSubmission: AuthenticatedSponsorSubmission;
   /** Runner-owned irreversible execution boundary; never inferred by a policy. */
   readonly executionStage: SponsorExecutionStage;
   readonly sponsorSlot: SponsorSlotReservationHandle;
@@ -210,12 +215,11 @@ export interface StateHookSignatures<D extends PolicyDiscriminator = PolicyDiscr
     ctx: PreparePolicyHookContext,
     input: GasBoundBuildInput,
   ) => Promise<GasBoundBuildResult> | GasBoundBuildResult;
-  // Submission hooks run before the atomic prepared -> executing transition.
-  // `txSender` is still attacker-choosable until the prepared bytes match, so abuse attribution is
-  // IP-only (generic) or studio-user (promotion, via the route-verified
-  // developer JWT principal).
-  readonly DecodeSponsorSubmission: (ctx: SponsorSubmissionContext) => Promise<void> | void;
-  readonly UserSignatureValidation: (ctx: SponsorSubmissionContext) => Promise<void> | void;
+  // The runner owns decoding and signature verification. This one route hook
+  // maps the closed authentication result and performs route-specific subject
+  // admission before any prepared-record read. A rejected authentication must
+  // throw; the runner fails closed if the hook returns.
+  readonly SponsorSubmissionAdmission: (ctx: SponsorSubmissionContext) => Promise<void> | void;
   // These checks run after the submitted bytes have been matched to the
   // current prepared record, but before the atomic prepared -> executing
   // transition. They must not mutate receipt, lease, or Promotion state.

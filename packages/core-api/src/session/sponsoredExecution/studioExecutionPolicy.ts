@@ -82,13 +82,10 @@ import {
 import { recordSponsorFailureForAbuse } from '../../abuseBlocking.js';
 import { mist, type Mist } from '../../internal/brand.js';
 import {
-  extractTxSender,
   GasOwnerMismatchError,
   runPreflight,
-  SenderSignatureError,
   signAndSubmit,
   verifyGasOwner,
-  verifySenderSignature,
 } from '../sessionPrimitives.js';
 import type { ExecResult, GasUsedFields } from '../sessionTypes.js';
 import type { SignAndSubmitPort, SponsorReceiptPolicyAdapter } from './sponsorRunner.js';
@@ -104,6 +101,7 @@ import type {
   SponsorSubmissionContext,
   SharedSponsorReconstruction,
 } from './executionPolicy.js';
+import { readAuthenticatedSponsorSubmission } from './sponsorSubmissionAuthentication.js';
 import type { PrepareDraftPolicyFields, PrepareResponseProjectionInput } from './runner.js';
 
 // -------------------------------------------------------------
@@ -163,8 +161,6 @@ export interface StudioExecutionPolicyOptions {
   };
   readonly sponsor?: {
     readonly params: StudioSponsorPolicyParams;
-    readonly txBytes: Uint8Array;
-    readonly userSignature: string;
     readonly errors: StudioSponsorErrorFactory;
   };
   readonly deps?: Partial<StudioExecutionPolicyDependencies>;
@@ -180,7 +176,6 @@ export interface StudioExecutionPolicyDependencies {
   readonly validatePromotionPreparedPolicy: typeof validatePromotionPreparedPolicy;
   readonly validatePromotionSponsorSubmissionPolicy: typeof validatePromotionSponsorSubmissionPolicy;
   readonly verifyGasOwner: typeof verifyGasOwner;
-  readonly verifySenderSignature: typeof verifySenderSignature;
 }
 
 export interface StudioExecutionPolicyState {
@@ -195,9 +190,7 @@ export interface StudioPrepareRuntimeState {
 }
 
 export interface StudioSponsorRuntimeState {
-  txSender?: string;
   peekedPromotion?: PromotionPreparedTxEntry;
-  builtTxForValidation?: Transaction;
   prepared?: PromotionPreparedTxEntry;
   sponsorResultOutcome: SponsorResultOutcome;
   sponsorResultDigest?: string;
@@ -229,7 +222,6 @@ const DEFAULT_DEPS: StudioExecutionPolicyDependencies = {
   validatePromotionPreparedPolicy,
   validatePromotionSponsorSubmissionPolicy,
   verifyGasOwner,
-  verifySenderSignature,
 };
 
 // -------------------------------------------------------------
@@ -275,8 +267,7 @@ export function createStudioExecutionPolicy(options: StudioExecutionPolicyOption
       RequestValidation: async () => runStudioRequestValidation(options, state),
       ChainSnapshot: async () => runStudioChainSnapshot(options, state),
       GasBoundBuild: async (_ctx, input) => runStudioGasBoundBuild(options, state, input),
-      DecodeSponsorSubmission: async (ctx) => runStudioDecodeSponsorSubmission(options, state, ctx),
-      UserSignatureValidation: async (ctx) => runStudioUserSignatureValidation(options, state, ctx),
+      SponsorSubmissionAdmission: async (ctx) => runStudioSponsorSubmissionAdmission(options, ctx),
       SharedSponsorChecks: async (ctx) => runStudioSharedSponsorChecks(options, state, ctx),
       PolicySponsorChecks: async (ctx) => runStudioPolicySponsorChecks(options, state, ctx),
       Preflight: async (ctx) => runStudioPreflight(options, state, ctx),
@@ -627,57 +618,38 @@ async function runStudioGasBoundBuild(
 // Sponsor hooks
 // -------------------------------------------------------------
 
-async function runStudioDecodeSponsorSubmission(
+async function runStudioSponsorSubmissionAdmission(
   options: StudioExecutionPolicyOptions,
-  runtime: StudioExecutionPolicyState,
   ctx: SponsorSubmissionContext,
 ): Promise<void> {
   const sponsor = requireSponsor(options);
-  const state = requireSponsorState(runtime);
-  try {
-    state.builtTxForValidation = Transaction.from(sponsor.txBytes);
-    state.txSender = extractTxSender(state.builtTxForValidation);
-  } catch (err) {
-    throw sponsor.errors.sponsor(
-      `Malformed txBytes — cannot deserialize TransactionData: ${err instanceof Error ? err.message : String(err)}`,
-      'BAD_REQUEST',
-    );
-  }
-  void ctx;
-}
-
-async function runStudioUserSignatureValidation(
-  options: StudioExecutionPolicyOptions,
-  runtime: StudioExecutionPolicyState,
-  ctx: SponsorSubmissionContext,
-): Promise<void> {
-  const sponsor = requireSponsor(options);
-  const state = requireSponsorState(runtime);
   const d = getDeps(options);
   const sponsorContext = requirePromotionPolicyContext(options.context);
-  const builtTx = requireValue(state.builtTxForValidation, 'studio builtTxForValidation');
   const identity = sponsor.params.verifiedIdentity;
-  const txSender = requireValue(state.txSender, 'tx sender');
-
-  try {
-    await d.verifySenderSignature(sponsor.txBytes, sponsor.userSignature, txSender);
-  } catch (err) {
-    if (err instanceof SenderSignatureError) {
-      await d.recordPromotionAbuseEvent(
-        sponsorContext.abuseBlocker,
-        ctx.clientIp,
-        { kind: 'studio_user', userId: identity.userId },
-        'PROMO_SENDER_SIGNATURE_INVALID',
-        {
-          promotionId: sponsor.params.promotionId,
-          userId: identity.userId,
-          detail: 'sender_signature_invalid',
-        },
+  if (ctx.authentication.outcome === 'rejected') {
+    if (ctx.authentication.reason === 'malformed_transaction') {
+      throw sponsor.errors.sponsor(
+        `Malformed txBytes — cannot deserialize TransactionData: ${ctx.authentication.message}`,
+        'BAD_REQUEST',
       );
-      throw sponsor.errors.sponsor(err.message, 'SENDER_SIGNATURE_INVALID');
     }
-    throw err;
+    await d.recordPromotionAbuseEvent(
+      sponsorContext.abuseBlocker,
+      ctx.clientIp,
+      { kind: 'studio_user', userId: identity.userId },
+      'PROMO_SENDER_SIGNATURE_INVALID',
+      {
+        promotionId: sponsor.params.promotionId,
+        userId: identity.userId,
+        detail: 'sender_signature_invalid',
+      },
+    );
+    throw sponsor.errors.sponsor(ctx.authentication.message, 'SENDER_SIGNATURE_INVALID');
   }
+
+  const { transaction: builtTx, senderAddress: txSender } = readAuthenticatedSponsorSubmission(
+    ctx.authentication.submission,
+  );
 
   if (txSender !== identity.senderAddress) {
     await d.recordPromotionAbuseEvent(
@@ -726,7 +698,7 @@ async function runStudioSharedSponsorChecks(
   const sponsorContext = requirePromotionPolicyContext(options.context);
   const prepared = requireValue(state.prepared, 'consumed promotion prepared entry');
   const peekedPromotion = requireValue(state.peekedPromotion, 'peeked promotion prepared entry');
-  const builtTx = requireValue(state.builtTxForValidation, 'studio builtTxForValidation');
+  const { transaction: builtTx } = readAuthenticatedSponsorSubmission(ctx.authenticatedSubmission);
 
   try {
     await d.validatePromotionPreparedPolicy(
@@ -838,9 +810,11 @@ async function runStudioPreflight(
   const sponsorContext = requireSponsorPolicyContext(options.context);
   const prepared = requireValue(state.prepared, 'consumed promotion prepared entry');
   const peekedPromotion = requireValue(state.peekedPromotion, 'peeked promotion prepared entry');
-  const builtTx = requireValue(state.builtTxForValidation, 'validated promotion transaction');
+  const { transaction: builtTx, txBytes } = readAuthenticatedSponsorSubmission(
+    ctx.authenticatedSubmission,
+  );
   const commands = convertSdkCommands(builtTx.getData().commands as unknown[]);
-  const preflight = await d.runPreflight(options.context.sui, sponsor.txBytes);
+  const preflight = await d.runPreflight(options.context.sui, txBytes);
 
   if (!preflight.success) {
     const failureMessage = suiExecutionErrorMessage(preflight.error);
@@ -881,7 +855,7 @@ async function classifyStudioSponsorResult(
   const sponsorContext = requireSponsorPolicyContext(options.context);
   const prepared = requireValue(state.prepared, 'consumed promotion prepared entry');
   const peekedPromotion = requireValue(state.peekedPromotion, 'peeked promotion prepared entry');
-  const builtTx = requireValue(state.builtTxForValidation, 'validated promotion transaction');
+  const { transaction: builtTx } = readAuthenticatedSponsorSubmission(ctx.authenticatedSubmission);
   const commands = convertSdkCommands(builtTx.getData().commands as unknown[]);
   const identity = sponsor.params.verifiedIdentity;
 

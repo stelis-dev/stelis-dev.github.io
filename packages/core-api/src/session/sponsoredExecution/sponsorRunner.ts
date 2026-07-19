@@ -4,13 +4,10 @@ import type { SponsorResultCallback, SponsorResultMetadata } from '../../handler
 import type { PreparedTxEntry } from '../../store/prepareTypes.js';
 import type {
   ExecutingSponsoredExecutionRecord,
-  FinalSponsoredExecutionRecord,
   SponsoredExecutionRecoveryContext,
 } from '../../store/sponsoredExecutionRecords.js';
-import {
-  sponsorResultMetadata,
-  storedSponsorResultMatchesMetadata,
-} from '../../store/sponsoredExecutionRecords.js';
+import { storedSponsorResultMatchesMetadata } from '../../store/sponsoredExecutionRecords.js';
+import { attemptSponsorResultDelivery } from '../../store/sponsorResultDelivery.js';
 import type {
   PromotionReceiptFinalization,
   SponsoredExecutionStoreAdapter,
@@ -28,6 +25,7 @@ import type {
 import { reconstructReservationHandles } from './reservationHandles.js';
 import type { ExecResult } from '../sessionTypes.js';
 import { SponsorPostSignatureUncertaintyError } from '../sessionPrimitives.js';
+import { authenticateSponsorSubmission } from './sponsorSubmissionAuthentication.js';
 
 /** The only side-effecting execution port. It receives the original validated bytes. */
 export type SignAndSubmitPort = (
@@ -58,7 +56,7 @@ export interface SponsorResultSnapshot {
 }
 
 export interface SponsorStateMachineRequest<TResult> {
-  readonly hookContext: SponsorSubmissionContext;
+  readonly hookContext: Pick<SponsorSubmissionContext, 'receiptId' | 'clientIp'>;
   readonly txBytes: Uint8Array;
   readonly userSignature: string;
   readonly buildRecoveryContext: () => SponsoredExecutionRecoveryContext;
@@ -129,25 +127,6 @@ function promotionFinalization(
     : { operation: 'consume', chargedMist: prepared.reservedGasMist };
 }
 
-async function deliverFinalResult(
-  host: SponsorStateMachineHost,
-  record: FinalSponsoredExecutionRecord,
-): Promise<void> {
-  if (record.callbackDelivery === 'delivered') return;
-  try {
-    await host.onSponsorResult(sponsorResultMetadata(record.result));
-  } catch {
-    return;
-  }
-  try {
-    await host.store.markCallbackDelivered(record);
-  } catch {
-    // The durable final record remains pending and recovery retries this
-    // acknowledgement. A delivery-marker failure cannot replace the primary
-    // sponsored-execution result, which is already final at this point.
-  }
-}
-
 async function finalize<TResult>(
   host: SponsorStateMachineHost,
   request: SponsorStateMachineRequest<TResult>,
@@ -169,7 +148,11 @@ async function finalize<TResult>(
   ) {
     throw request.stateChangedError();
   }
-  await deliverFinalResult(host, outcome.record);
+  await attemptSponsorResultDelivery({
+    record: outcome.record,
+    callback: host.onSponsorResult,
+    store: host.store,
+  });
 }
 
 async function discard<TResult>(
@@ -189,7 +172,11 @@ async function discard<TResult>(
   ) {
     throw request.stateChangedError();
   }
-  await deliverFinalResult(host, outcome.record);
+  await attemptSponsorResultDelivery({
+    record: outcome.record,
+    callback: host.onSponsorResult,
+    store: host.store,
+  });
 }
 
 /**
@@ -207,12 +194,20 @@ export async function runSponsorStateMachine<TResult>(
   receiptPolicy: SponsorReceiptPolicyAdapter,
 ): Promise<TResult> {
   const receiptId = request.hookContext.receiptId;
-  // The submitted TransactionData and its user signature are authenticated
-  // before any prepared-record, SponsorAvailability, or lease-backed I/O.
-  // Policies retain the one decoded representation and the runner preserves
-  // the original Uint8Array through signAndSubmit.
-  await policy.hooks.DecodeSponsorSubmission(request.hookContext);
-  await policy.hooks.UserSignatureValidation(request.hookContext);
+  const authentication = await authenticateSponsorSubmission({
+    txBytes: request.txBytes,
+    userSignature: request.userSignature,
+  });
+  await policy.hooks.SponsorSubmissionAdmission({
+    ...request.hookContext,
+    authentication,
+  });
+  if (authentication.outcome === 'rejected') {
+    throw new RunnerSponsorPolicyContractError(
+      'SponsorSubmissionAdmission returned after rejected authentication',
+    );
+  }
+  const authenticatedSubmission = authentication.submission;
 
   let prepared: PreparedTxEntry;
   let current: PreparedTxEntry | null;
@@ -241,6 +236,7 @@ export async function runSponsorStateMachine<TResult>(
   const context = (): SponsorValidatedContext => ({
     receiptId,
     clientIp: request.hookContext.clientIp,
+    authenticatedSubmission,
     executionStage: 'before_sponsor_signature',
     sponsorSlot,
     nonce,

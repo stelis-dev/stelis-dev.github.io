@@ -99,8 +99,7 @@ function makeMockHooks(trace: Trace, options: PolicyOptions = {}): PolicyHooks<'
       recordHook(trace, 'GasBoundBuild', options.failAtHook);
       return buildResult;
     },
-    DecodeSponsorSubmission: () => {},
-    UserSignatureValidation: () => {},
+    SponsorSubmissionAdmission: () => {},
     SharedSponsorChecks: () => ({}),
     PolicySponsorChecks: () => ({}),
     Preflight: () => {},

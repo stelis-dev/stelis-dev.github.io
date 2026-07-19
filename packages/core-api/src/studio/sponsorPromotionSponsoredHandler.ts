@@ -121,8 +121,6 @@ export async function handlePromotionSponsor(
     context: ctx,
     sponsor: {
       params: { ...params, clientIp },
-      txBytes,
-      userSignature: params.userSignature,
       errors: {
         sponsor: (
           message: string,

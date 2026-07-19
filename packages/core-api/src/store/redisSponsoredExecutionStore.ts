@@ -31,7 +31,6 @@ import {
   materializeExecutingSponsoredExecutionRecord,
   SPONSORED_EXECUTION_REDIS_KEY_PREFIX,
   serializeSponsoredExecutionRecord,
-  sponsorResultMetadata,
   SponsoredExecutionRecordCorruptionError,
   storeSponsorResult,
   storedSponsorResultMatchesMetadata,
@@ -1484,9 +1483,4 @@ export class RedisSponsoredExecutionStore implements SponsoredExecutionStoreAdap
   }
 
   async dispose(): Promise<void> {}
-
-  /** Metadata exposed only to the recovery task after strict record decoding. */
-  static callbackMetadata(record: FinalSponsoredExecutionRecord): SponsorResultMetadata {
-    return sponsorResultMetadata(record.result);
-  }
 }
