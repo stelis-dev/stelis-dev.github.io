@@ -2,7 +2,7 @@
  * [app-api] Boot/instrumentation — runs before the server starts.
  *
  * Validates all required env vars and determines the Host operating mode
- * (`relay_only` or `relay_and_studio`). Runtime resources are created only after
+ * from the complete Admin and Studio capability groups. Runtime resources are created only after
  * every boot input and Sui endpoint has qualified.
  *
  * Shared references:
@@ -13,8 +13,8 @@
  *   - STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId → @stelis/contracts
  *
  * Admin session keyspace → stelis:app-api:admin:not_before
- * Any mode-specific setting selects `relay_and_studio`; partial configuration
- * fails before runtime resources are created.
+ * Any setting in a capability group selects that group; partial configuration
+ * and Studio without complete Admin fail before runtime resources are created.
  */
 import {
   parseSponsorKey,
@@ -56,9 +56,11 @@ import { canonicalizePromotionTarget, parseDeveloperJwtTrustConfig } from '@stel
 import { parseDuration } from '@stelis/core-api/admin';
 import { parseHostFeeEnv } from '@stelis/core-api/prepareConfig';
 import type {
+  AdminContextRuntimeInput,
   ContextRuntimeInput,
-  RelayAndStudioContextRuntimeInput,
   RelayOnlyContextRuntimeInput,
+  RelayWithAdminAndStudioContextRuntimeInput,
+  RelayWithAdminContextRuntimeInput,
 } from './context.js';
 import type { AdminAuthRuntimeConfig } from './adminAuth.js';
 import { createSponsorOperationsSettings } from './sponsor-operations/settings.js';
@@ -71,14 +73,25 @@ interface AppRuntimeInputBase<TContext extends ContextRuntimeInput> {
 
 export type RelayOnlyAppRuntimeInput = AppRuntimeInputBase<RelayOnlyContextRuntimeInput>;
 
-export type RelayAndStudioAppRuntimeInput =
-  AppRuntimeInputBase<RelayAndStudioContextRuntimeInput> & {
-    readonly corsAllowedOrigins: readonly string[];
-    readonly adminAddress: string;
-    readonly adminAuth: AdminAuthRuntimeConfig;
-  };
+interface AdminAppRuntimeInputBase<
+  TContext extends AdminContextRuntimeInput,
+> extends AppRuntimeInputBase<TContext> {
+  readonly corsAllowedOrigins: readonly string[];
+  readonly adminAddress: string;
+  readonly adminAuth: AdminAuthRuntimeConfig;
+}
 
-export type AppRuntimeInput = RelayOnlyAppRuntimeInput | RelayAndStudioAppRuntimeInput;
+export type RelayWithAdminAppRuntimeInput =
+  AdminAppRuntimeInputBase<RelayWithAdminContextRuntimeInput>;
+
+export type RelayWithAdminAndStudioAppRuntimeInput =
+  AdminAppRuntimeInputBase<RelayWithAdminAndStudioContextRuntimeInput>;
+
+export type AdminAppRuntimeInput =
+  | RelayWithAdminAppRuntimeInput
+  | RelayWithAdminAndStudioAppRuntimeInput;
+
+export type AppRuntimeInput = RelayOnlyAppRuntimeInput | AdminAppRuntimeInput;
 
 export function resolveTrustedProxyHopsForBoot(input: {
   trustedProxyHops: string | null | undefined;
@@ -162,29 +175,28 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
     return value;
   };
 
-  const relayAndStudioRequiredKeys = [
-    'ADMIN_ADDRESS',
-    'ADMIN_JWT_SECRET',
-    'CORS_ORIGINS',
-    'STUDIO_ALLOWED_TARGETS',
-    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
-  ] as const;
-  const relayAndStudioOptionalKeys = [
-    'ADMIN_SESSION_EXPIRY',
-    'COOKIE_DOMAIN',
-    'STUDIO_DEVELOPER_JWT_VERIFY_URL',
-  ] as const;
-  const configuredHostModeKeys = [
-    ...relayAndStudioRequiredKeys,
-    ...relayAndStudioOptionalKeys,
-  ].filter((name) => !!environment[name]?.trim());
-  const mode: HostOperatingMode =
-    configuredHostModeKeys.length === 0 ? 'relay_only' : 'relay_and_studio';
-  if (mode === 'relay_and_studio') {
-    const missing = relayAndStudioRequiredKeys.filter((name) => !environment[name]?.trim());
+  const adminRequiredKeys = ['ADMIN_ADDRESS', 'ADMIN_JWT_SECRET', 'CORS_ORIGINS'] as const;
+  const adminOptionalKeys = ['ADMIN_SESSION_EXPIRY', 'COOKIE_DOMAIN'] as const;
+  const studioRequiredKeys = ['STUDIO_ALLOWED_TARGETS', 'STUDIO_DEVELOPER_JWT_TRUST_JSON'] as const;
+  const studioOptionalKeys = ['STUDIO_DEVELOPER_JWT_VERIFY_URL'] as const;
+  const hasAnyConfiguredKey = (names: readonly string[]): boolean =>
+    names.some((name) => !!environment[name]?.trim());
+  const adminSelected = hasAnyConfiguredKey([...adminRequiredKeys, ...adminOptionalKeys]);
+  const studioSelected = hasAnyConfiguredKey([...studioRequiredKeys, ...studioOptionalKeys]);
+  const mode: HostOperatingMode = studioSelected
+    ? 'relay_with_admin_and_studio'
+    : adminSelected
+      ? 'relay_with_admin'
+      : 'relay_only';
+  if (mode !== 'relay_only') {
+    const requiredKeys =
+      mode === 'relay_with_admin_and_studio'
+        ? [...adminRequiredKeys, ...studioRequiredKeys]
+        : adminRequiredKeys;
+    const missing = requiredKeys.filter((name) => !environment[name]?.trim());
     if (missing.length > 0) {
       throw new Error(
-        `[app-api] \`relay_and_studio\` configuration is incomplete. Missing: ${missing.join(', ')}`,
+        `[app-api] \`${mode}\` configuration is incomplete. Missing: ${missing.join(', ')}`,
       );
     }
   }
@@ -372,7 +384,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
   });
 
   // ── 9. Admin env validation ──────────────────────────────────────────────
-  const adminAddrRaw = mode === 'relay_and_studio' ? requireBootEnv('ADMIN_ADDRESS') : undefined;
+  const adminAddrRaw = mode !== 'relay_only' ? requireBootEnv('ADMIN_ADDRESS') : undefined;
   let adminAddress: string | null = null;
   if (adminAddrRaw) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(adminAddrRaw)) {
@@ -389,7 +401,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
       );
     }
   }
-  const adminJwtSecret = mode === 'relay_and_studio' ? requireBootEnv('ADMIN_JWT_SECRET') : null;
+  const adminJwtSecret = mode !== 'relay_only' ? requireBootEnv('ADMIN_JWT_SECRET') : null;
   if (adminJwtSecret) {
     if (adminJwtSecret.length < 32) {
       throw new Error('[app-api] ADMIN_JWT_SECRET must be at least 32 characters');
@@ -403,7 +415,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
   }
   const cookieDomain = parseCookieDomain(environment.COOKIE_DOMAIN);
   const adminAuth: AdminAuthRuntimeConfig | null =
-    mode === 'relay_and_studio'
+    mode !== 'relay_only'
       ? {
           jwt: {
             jwtSecret: adminJwtSecret!,
@@ -436,18 +448,18 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
   });
 
   const corsAllowedOrigins =
-    mode === 'relay_and_studio' ? parseCorsAllowedOrigins(environment.CORS_ORIGINS) : [];
-  if (mode === 'relay_and_studio' && corsAllowedOrigins.length === 0) {
+    mode !== 'relay_only' ? parseCorsAllowedOrigins(environment.CORS_ORIGINS) : [];
+  if (mode !== 'relay_only' && corsAllowedOrigins.length === 0) {
     throw new Error('[app-api] CORS_ORIGINS must contain at least one Admin origin');
   }
 
-  // ── 10. `relay_and_studio` configuration ────────────────────────────────
+  // ── 10. Studio configuration ────────────────────────────────────────────
   // Validate every local Studio input before any Sui endpoint qualification.
   let studioRuntimeInput:
-    | Extract<ContextRuntimeInput, { readonly mode: 'relay_and_studio' }>['studio']
+    | Extract<ContextRuntimeInput, { readonly mode: 'relay_with_admin_and_studio' }>['studio']
     | null = null;
 
-  if (mode === 'relay_and_studio') {
+  if (mode === 'relay_with_admin_and_studio') {
     // STUDIO_ALLOWED_TARGETS — comma-separated pkg::mod::fn, at least one entry
     const targetsRaw = requireBootEnv('STUDIO_ALLOWED_TARGETS');
     const targets = targetsRaw
@@ -586,24 +598,38 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
       settings: sponsorOperationsSettings,
     },
   } as const;
-  const runtimeInput: AppRuntimeInput =
-    mode === 'relay_and_studio'
-      ? {
-          context: {
-            ...contextBase,
-            mode,
-            rpcFleet: qualifiedSui.adminSnapshot,
-            studio: studioRuntimeInput!,
-          },
-          trustedProxyHops,
-          corsAllowedOrigins,
-          adminAddress: adminAddress!,
-          adminAuth: adminAuth!,
-        }
-      : {
-          context: { ...contextBase, mode },
-          trustedProxyHops,
-        };
+  let runtimeInput: AppRuntimeInput;
+  if (mode === 'relay_with_admin_and_studio') {
+    runtimeInput = {
+      context: {
+        ...contextBase,
+        mode,
+        rpcFleet: qualifiedSui.adminSnapshot,
+        studio: studioRuntimeInput!,
+      },
+      trustedProxyHops,
+      corsAllowedOrigins,
+      adminAddress: adminAddress!,
+      adminAuth: adminAuth!,
+    };
+  } else if (mode === 'relay_with_admin') {
+    runtimeInput = {
+      context: {
+        ...contextBase,
+        mode,
+        rpcFleet: qualifiedSui.adminSnapshot,
+      },
+      trustedProxyHops,
+      corsAllowedOrigins,
+      adminAddress: adminAddress!,
+      adminAuth: adminAuth!,
+    };
+  } else {
+    runtimeInput = {
+      context: { ...contextBase, mode },
+      trustedProxyHops,
+    };
+  }
 
   return runtimeInput;
 }

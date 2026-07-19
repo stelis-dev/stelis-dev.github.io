@@ -1,8 +1,8 @@
 # @stelis/app-api
 
 Deployable Host API for sponsoring Sui transactions and enforcing settlement
-policy. It runs in exactly one of two modes: `relay_only`, or
-`relay_and_studio` with Relay API, Auth, Admin, and Studio routes available.
+policy. It runs in exactly one of three modes: `relay_only`,
+`relay_with_admin`, or `relay_with_admin_and_studio`.
 
 - Built for: Host operators deploying the provided Host runtime, plus maintainers changing it.
 - Use for: running the Relay API, admin API, auth routes, and promotion routes.
@@ -17,7 +17,7 @@ This Host runtime does not deploy contracts itself. It uses only the selected
 network's current package, config, and vault IDs from the shipped code and docs.
 
 - Host Operator: start with [docs/getting-started.md](../../docs/getting-started.md), then [docs/operations.md](../../docs/operations.md).
-- Promotion operator: start with [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations).
+- Promotion operator: start with [docs/operations.md → `relay_with_admin_and_studio` Operations](../../docs/operations.md#relay_with_admin_and_studio-operations).
 - API route and field reference: [docs/api.md](../../docs/api.md).
 - User transaction constraints: [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
 
@@ -25,13 +25,13 @@ This README is an entry point for the package. It does not replace the route and
 
 ## Mounted Endpoints
 
-| Prefix      | Purpose                                                                                            | Available mode     |
-| ----------- | -------------------------------------------------------------------------------------------------- | ------------------ |
-| `/health`   | Root health probe returning `{ status: 'ok', mode }`                                               | Both modes         |
-| `/relay/*`  | Public Relay API endpoints: status, config, prepare, sponsor                                       | Both modes         |
-| `/studio/*` | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | `relay_and_studio` |
-| `/auth/*`   | Admin session authentication (nonce, verify, renew, logout, session)                               | `relay_and_studio` |
-| `/api/*`    | Admin dashboard, sponsor pool operations, blocklist, auth audit, studio status, promotions         | `relay_and_studio` |
+| Prefix      | Purpose                                                                                            | Available modes                                   |
+| ----------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `/health`   | Root health probe returning `{ status: 'ok', mode }`                                               | All modes                                         |
+| `/relay/*`  | Public Relay API endpoints: status, config, prepare, sponsor                                       | All modes                                         |
+| `/studio/*` | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | `relay_with_admin_and_studio`                     |
+| `/auth/*`   | Admin session authentication (nonce, verify, renew, logout, session)                               | `relay_with_admin`, `relay_with_admin_and_studio` |
+| `/api/*`    | Admin dashboard, sponsor pool operations, blocklist, auth audit, Studio status, promotions         | `relay_with_admin`, `relay_with_admin_and_studio` |
 
 ## Runtime Role
 
@@ -46,6 +46,20 @@ This README is an entry point for the package. It does not replace the route and
 
 The exact operating-mode settings and ordered shutdown behavior are documented
 in [docs/operations.md](../../docs/operations.md).
+
+## Capability Configuration
+
+With no Admin or Studio setting, the Host runs as `relay_only`. The complete
+Admin group consists of `ADMIN_ADDRESS`, `ADMIN_JWT_SECRET`, and
+`CORS_ORIGINS`; with that group and no Studio setting, the Host runs as
+`relay_with_admin`. The complete Studio group consists of
+`STUDIO_ALLOWED_TARGETS` and `STUDIO_DEVELOPER_JWT_TRUST_JSON` and requires the
+complete Admin group; that Host runs as `relay_with_admin_and_studio`.
+
+`ADMIN_SESSION_EXPIRY` and `COOKIE_DOMAIN` belong to the Admin group.
+`STUDIO_DEVELOPER_JWT_VERIFY_URL` belongs to the Studio group. Setting any value
+in a group selects that group, and boot fails when its required settings are
+incomplete.
 
 ## Quick Start
 
@@ -110,10 +124,12 @@ This is not a serverless-native Host runtime. It still uses the normal Host boot
 
 For this temporary Vercel path, set `TRUSTED_PROXY_HOPS=0`. The Vercel adapter supplies the client public IP from Vercel's overwritten `x-forwarded-for` header as the Host's direct client-IP source. Do not use a guessed proxy-hop count for Vercel.
 
-Use Vercel only as a temporary demo path. Move stable API hosting to Cloud Run or another long-running Node/OCI host, then remove the root `index.js` file, `packages/app-api/src/vercel.ts`, and `packages/app-api/src/vercelClientIp.ts`.
+The Vercel adapter exposes the request/response Host surface. A Vercel
+deployment is not evidence that SponsorOperations background work runs
+continuously between requests.
 
 For a full local Host bring-up, follow [docs/getting-started.md](../../docs/getting-started.md).
-For operator policy, sponsor management, `relay_and_studio` operation, and
+For operator policy, sponsor management, Admin and Studio operation, and
 incident handling, use [docs/operations.md](../../docs/operations.md).
 
 ## Related Documents
@@ -122,5 +138,5 @@ incident handling, use [docs/operations.md](../../docs/operations.md).
 - [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules) - generic prepare transaction constraints
 - [docs/getting-started.md](../../docs/getting-started.md) - Host entry path
 - [docs/operations.md](../../docs/operations.md) - baseline Host Operator runbook
-- [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations) - Studio Operator runbook section
+- [docs/operations.md → `relay_with_admin_and_studio` Operations](../../docs/operations.md#relay_with_admin_and_studio-operations) - Studio Operator runbook section
 - [docs/repository-structure.md](../../docs/repository-structure.md) - package dependency map

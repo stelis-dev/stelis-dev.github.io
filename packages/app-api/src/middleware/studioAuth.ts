@@ -33,7 +33,7 @@ import {
 } from '@stelis/core-api/studio';
 import { readAdmittedClientIp, type AdmittedClientIp } from '@stelis/core-api';
 import type { HostErrorCode } from '@stelis/contracts';
-import type { RelayAndStudioAppApiContext } from '../context.js';
+import type { RelayWithAdminAndStudioAppApiContext } from '../context.js';
 import {
   finishAuthenticatedRequestAdmission,
   type InitialRequestAdmission,
@@ -84,7 +84,7 @@ export type StudioAuthResult =
 
 export async function verifyDeveloperJwtFromRequest(
   request: Request,
-  ctx: RelayAndStudioAppApiContext,
+  ctx: RelayWithAdminAndStudioAppApiContext,
 ): Promise<VerifiedDeveloperIdentity> {
   const authResult = extractBearerToken(request);
   if (authResult.status === 'absent') {
@@ -123,7 +123,7 @@ export async function verifyDeveloperJwtFromRequest(
  */
 export async function runStudioAuth(
   c: Context,
-  ctx: RelayAndStudioAppApiContext,
+  ctx: RelayWithAdminAndStudioAppApiContext,
   admissionDependencies: RequestAdmissionDependencies,
   initialAdmission: InitialRequestAdmission,
   opts: StudioAuthOptions,

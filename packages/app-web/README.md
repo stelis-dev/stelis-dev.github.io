@@ -48,14 +48,14 @@ Network is auto-detected from the Relay API, and the sample page selects the mat
 
 ## Pages
 
-| Route         | Description                                                                             |
-| ------------- | --------------------------------------------------------------------------------------- |
-| `/`           | Home — project overview                                                                 |
-| `/status`     | Live Host status                                                                        |
-| `/docs`       | Public API and capability reference UI for deployed Hosts                               |
-| `/playground` | Interactive request runner for direct Host calls                                        |
-| `/sandbox`    | Full transaction sandbox with wallet integration                                        |
-| `/promotion`  | `relay_and_studio` promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
+| Route         | Description                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| `/`           | Home — project overview                                                                            |
+| `/status`     | Live Host status                                                                                   |
+| `/docs`       | Public API and capability reference UI for deployed Hosts                                          |
+| `/playground` | Interactive request runner for direct Host calls                                                   |
+| `/sandbox`    | Full transaction sandbox with wallet integration                                                   |
+| `/promotion`  | `relay_with_admin_and_studio` promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
 
 The `/promotion` test transaction calls `0x2::coin::zero` and
 `0x2::coin::destroy_zero`. A Host operator must include both raw targets in
@@ -63,8 +63,8 @@ The `/promotion` test transaction calls `0x2::coin::zero` and
 developer JWT do not change this Host-wide policy.
 
 The page does not enable Studio through an SDK connection option. Promotion calls
-use the Host's Studio routes directly; a `relay_only` Host returns the current
-`STUDIO_UNAVAILABLE` Host error.
+use the Host's Studio routes directly; `relay_only` and `relay_with_admin` Hosts
+return the current `STUDIO_UNAVAILABLE` Host error.
 
 ## Handoff
 

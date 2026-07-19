@@ -10,8 +10,10 @@
  *
  */
 import { useEffect, useState } from 'react';
-import { getSponsorOperations, getStudio } from '../api/client';
-import type { AdminSponsorOperationsResponse, AdminStudioResponse } from '@stelis/contracts';
+import { useOutletContext } from 'react-router-dom';
+import { getSponsorOperations } from '../api/client';
+import type { AdminSponsorOperationsResponse } from '@stelis/contracts';
+import type { AdminLayoutContext } from '../components/AdminLayout';
 import { mistToSui, truncateId, CopyButton } from '../utils';
 
 function SuiAmount({ mist }: { mist: string }) {
@@ -31,19 +33,17 @@ function formatBpsPercent(bps: number): string {
 }
 
 export function ConfigPage() {
+  const { studioAvailability, refreshStudioAvailability } = useOutletContext<AdminLayoutContext>();
   const [data, setData] = useState<AdminSponsorOperationsResponse | null>(null);
-  const [studioStatus, setStudioStatus] = useState<AdminStudioResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  async function poll() {
+  async function poll(refreshStudio: boolean = false) {
     try {
-      const [sponsorOperationsJson, studioJson] = await Promise.all([
-        getSponsorOperations(),
-        getStudio(),
-      ]);
+      const sponsorOperationsJson = refreshStudio
+        ? (await Promise.all([getSponsorOperations(), refreshStudioAvailability()]))[0]
+        : await getSponsorOperations();
       setData(sponsorOperationsJson);
-      setStudioStatus(studioJson);
       setLastUpdated(new Date());
       setError(null);
     } catch (e) {
@@ -64,7 +64,7 @@ export function ConfigPage() {
         <button
           className="admin-btn admin-btn-primary"
           style={{ marginLeft: 'auto' }}
-          onClick={() => void poll()}
+          onClick={() => void poll(true)}
         >
           Refresh
         </button>
@@ -251,34 +251,42 @@ export function ConfigPage() {
       )}
 
       {/* ═══════════════ §3: Studio Settings ═══════════════ */}
-      {studioStatus && (
-        <>
-          <div
+      <>
+        <div
+          style={{
+            marginTop: 32,
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <span
             style={{
-              marginTop: 32,
-              marginBottom: 16,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
+              display: 'inline-block',
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background:
+                studioAvailability.status === 'available'
+                  ? '#a78bfa'
+                  : studioAvailability.status === 'failed'
+                    ? '#f87171'
+                    : '#64748b',
+              boxShadow:
+                studioAvailability.status === 'available'
+                  ? '0 0 8px rgba(167,139,250,0.5)'
+                  : 'none',
             }}
-          >
-            <span
-              style={{
-                display: 'inline-block',
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: '#a78bfa',
-                boxShadow: '0 0 8px rgba(167,139,250,0.5)',
-              }}
-            />
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#a78bfa' }}>
-              Studio Settings
-            </h2>
-          </div>
+          />
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#a78bfa' }}>
+            Studio Settings
+          </h2>
+        </div>
 
-          <div className="admin-card">
-            <div className="admin-card-title">Studio Config</div>
+        <div className="admin-card">
+          <div className="admin-card-title">Studio Config</div>
+          {studioAvailability.status === 'available' ? (
             <table className="admin-table">
               <tbody>
                 <tr>
@@ -291,13 +299,13 @@ export function ConfigPage() {
                   <td>
                     <span
                       style={{
-                        color: studioStatus.config.developerJwtVerifyUrlConfigured
+                        color: studioAvailability.config.developerJwtVerifyUrlConfigured
                           ? '#22c55e'
                           : '#64748b',
                         fontWeight: 600,
                       }}
                     >
-                      {studioStatus.config.developerJwtVerifyUrlConfigured
+                      {studioAvailability.config.developerJwtVerifyUrlConfigured
                         ? '● Configured'
                         : '○ Not set (optional)'}
                     </span>
@@ -305,9 +313,15 @@ export function ConfigPage() {
                 </tr>
               </tbody>
             </table>
-          </div>
-        </>
-      )}
+          ) : studioAvailability.status === 'loading' ? (
+            <p style={{ color: '#94a3b8' }}>Loading Studio availability…</p>
+          ) : studioAvailability.status === 'unavailable' ? (
+            <p style={{ color: '#94a3b8' }}>Studio is not enabled for this Host.</p>
+          ) : (
+            <p style={{ color: '#f87171' }}>{studioAvailability.error}</p>
+          )}
+        </div>
+      </>
 
       {/* ═══════════════ §4: Supported Settlement Swap Paths ═══════════════ */}
       {data?.supportedSettlementSwapPaths && data.supportedSettlementSwapPaths.length > 0 && (

@@ -11,7 +11,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { AuthGuard } from '../src/components/AuthGuard';
+import { AppRoutes } from '../src/App';
 import { buildSponsorRefillAccountWithdrawMessage } from '@stelis/contracts';
+import type { AdminStudioResponse } from '@stelis/contracts';
+import type { StudioAvailability } from '../src/components/AdminLayout';
 
 const { mockGetWallets } = vi.hoisted(() => ({
   mockGetWallets: vi.fn(),
@@ -42,6 +45,38 @@ const VALID_SESSION = {
   exp: Math.floor(Date.now() / 1000) + 3600,
   iat: Math.floor(Date.now() / 1000),
 };
+
+const STUDIO_AVAILABLE_STATUS = {
+  enabled: true,
+  config: { developerJwtVerifyUrlConfigured: false },
+} as const satisfies AdminStudioResponse;
+
+const STUDIO_UNAVAILABLE_STATUS = {
+  enabled: false,
+} as const;
+
+const STUDIO_AVAILABLE_AVAILABILITY = {
+  status: 'available',
+  config: STUDIO_AVAILABLE_STATUS.config,
+} as const satisfies StudioAvailability;
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function jsonResponse(value: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(value),
+  };
+}
 
 const SPONSOR_OPERATIONS_DATA = {
   network: 'testnet',
@@ -125,11 +160,26 @@ const SPONSOR_OPERATIONS_DATA = {
 };
 
 /** Outlet wrapper that provides auth context directly (bypasses AuthGuard→AdminLayout chain). */
-function DirectOutletProvider({ element }: { element: React.ReactNode }) {
+function DirectOutletProvider({
+  element,
+  studioAvailability = STUDIO_AVAILABLE_AVAILABILITY,
+  refreshStudioAvailability = async () => {},
+}: {
+  element: React.ReactNode;
+  studioAvailability?: StudioAvailability;
+  refreshStudioAvailability?: () => Promise<void>;
+}) {
   return (
     <MemoryRouter initialEntries={['/test']}>
       <Routes>
-        <Route element={<ProvideOutletContext />}>
+        <Route
+          element={
+            <ProvideOutletContext
+              studioAvailability={studioAvailability}
+              refreshStudioAvailability={refreshStudioAvailability}
+            />
+          }
+        >
           <Route path="/test" element={element} />
         </Route>
       </Routes>
@@ -137,8 +187,23 @@ function DirectOutletProvider({ element }: { element: React.ReactNode }) {
   );
 }
 
-function ProvideOutletContext() {
-  return <Outlet context={{ session: VALID_SESSION, refreshSession: vi.fn() }} />;
+function ProvideOutletContext({
+  studioAvailability = STUDIO_AVAILABLE_AVAILABILITY,
+  refreshStudioAvailability = async () => {},
+}: {
+  studioAvailability?: StudioAvailability;
+  refreshStudioAvailability?: () => Promise<void>;
+}) {
+  return (
+    <Outlet
+      context={{
+        session: VALID_SESSION,
+        refreshSession: vi.fn(),
+        studioAvailability,
+        refreshStudioAvailability,
+      }}
+    />
+  );
 }
 
 afterEach(() => {
@@ -1510,7 +1575,6 @@ describe('ConfigPage integration', () => {
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': sponsorOperationsDataWith1hop,
-        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 
@@ -1531,7 +1595,6 @@ describe('ConfigPage integration', () => {
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
-        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 
@@ -1544,6 +1607,151 @@ describe('ConfigPage integration', () => {
 
     expect(screen.queryByText('RPC Endpoints (2 qualified)')).toBeNull();
     expect(screen.queryByText('Sponsor Operations Gate')).toBeNull();
+  });
+});
+
+describe('Admin Studio availability integration', () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps a direct Promotion URL closed until the parsed Host response reports availability', async () => {
+    const studioResponse = deferred<unknown>();
+    let promotionReads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/api/studio') {
+          return studioResponse.promise.then((value) => jsonResponse(value));
+        }
+        if (url === '/api/promotions') {
+          promotionReads += 1;
+          return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    let currentPath = '/promotions';
+    function LocationTracker() {
+      currentPath = useLocation().pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/promotions']}>
+        <AppRoutes />
+        <LocationTracker />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Loading Studio availability…')).toBeDefined());
+    expect(screen.queryByRole('link', { name: 'Promotions' })).toBeNull();
+    expect(promotionReads).toBe(0);
+
+    studioResponse.resolve(STUDIO_UNAVAILABLE_STATUS);
+    await waitFor(() => {
+      expect(screen.getByText('Studio is not enabled for this Host.')).toBeDefined();
+    });
+    expect(currentPath).toBe('/promotions');
+    expect(screen.queryByRole('link', { name: 'Promotions' })).toBeNull();
+    expect(promotionReads).toBe(0);
+  });
+
+  it('retries the shared Host request and mounts Promotions only after availability', async () => {
+    let studioReads = 0;
+    let promotionReads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/api/studio') {
+          studioReads += 1;
+          return studioReads === 1
+            ? Promise.reject(new Error('Studio status request failed'))
+            : Promise.resolve(jsonResponse(STUDIO_AVAILABLE_STATUS));
+        }
+        if (url === '/api/promotions') {
+          promotionReads += 1;
+          return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+    render(
+      <MemoryRouter initialEntries={['/promotions']}>
+        <AppRoutes />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Studio status request failed')).toBeDefined());
+    expect(promotionReads).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByText('No promotions found.')).toBeDefined());
+    expect(screen.getByRole('link', { name: 'Promotions' })).toBeDefined();
+    expect(studioReads).toBe(2);
+    expect(promotionReads).toBe(1);
+  });
+
+  it('joins refreshes, aborts the owned request on unmount, and ignores its late completion', async () => {
+    const firstStudioResponse = deferred<unknown>();
+    const secondStudioResponse = deferred<unknown>();
+    const studioSignals: AbortSignal[] = [];
+    let studioReads = 0;
+    let promotionReads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/api/sponsor-operations') {
+          return Promise.resolve(jsonResponse(SPONSOR_OPERATIONS_DATA));
+        }
+        if (url === '/api/studio') {
+          studioReads += 1;
+          if (init?.signal) studioSignals.push(init.signal);
+          return (
+            studioReads === 1 ? firstStudioResponse.promise : secondStudioResponse.promise
+          ).then((value) => jsonResponse(value));
+        }
+        if (url === '/api/promotions') {
+          promotionReads += 1;
+          return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    const firstMount = render(
+      <MemoryRouter initialEntries={['/config']}>
+        <AppRoutes />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(studioReads).toBe(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(studioReads).toBe(1);
+
+    firstMount.unmount();
+    expect(studioSignals[0]?.aborted).toBe(true);
+
+    render(
+      <MemoryRouter initialEntries={['/promotions']}>
+        <AppRoutes />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(studioReads).toBe(2));
+    await waitFor(() => expect(screen.getByText('Loading Studio availability…')).toBeDefined());
+
+    firstStudioResponse.resolve(STUDIO_AVAILABLE_STATUS);
+    await Promise.resolve();
+    expect(screen.getByText('Loading Studio availability…')).toBeDefined();
+    expect(promotionReads).toBe(0);
+
+    secondStudioResponse.resolve(STUDIO_AVAILABLE_STATUS);
+    await waitFor(() => expect(screen.getByText('No promotions found.')).toBeDefined());
+    expect(promotionReads).toBe(1);
   });
 });
 

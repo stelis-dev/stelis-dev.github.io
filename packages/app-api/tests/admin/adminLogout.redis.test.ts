@@ -8,7 +8,7 @@ import {
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
 import { startRealRedis, type RealRedisHandle } from '@stelis/core-api/testing/redis';
-import type { RelayAndStudioAppApiContext } from '../../src/context.js';
+import type { AdminAppApiContext } from '../../src/context.js';
 import { createAdminRedisAdapter } from '../../src/adminRedis.js';
 import type { RedisClient } from '../../src/redisClient.js';
 import { requireAdminSession } from '../../src/requireAdminSession.js';
@@ -67,7 +67,7 @@ describe('admin auth durability — real Redis and production adapters', () => {
   it('the logout route rejects its JWT and accepts a session issued after the cutoff', async () => {
     const redis = appRedis(real!);
     const adminRedis = createAdminRedisAdapter(redis);
-    const context = { redis } as RelayAndStudioAppApiContext;
+    const context = { redis } as AdminAppApiContext;
     const app = new Hono();
     app.route(
       '/auth',

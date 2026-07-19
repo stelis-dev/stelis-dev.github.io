@@ -4,12 +4,27 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Outlet, useNavigate, useLocation, useOutletContext } from 'react-router-dom';
 import { RenewModal } from './RenewModal';
-import { logoutAdminSession } from '../api/client';
+import { getStudio, logoutAdminSession } from '../api/client';
 import type { AuthContext } from './AuthGuard';
+import type { AdminStudioResponse } from '@stelis/contracts';
 
 const RENEW_WARNING_SECONDS = 60;
 const RENEW_GRACE_SECONDS = 15;
 const TICK_FAST_THRESHOLD = 90;
+
+type StudioConfig = Extract<AdminStudioResponse, { enabled: true }>['config'];
+
+export type StudioAvailability =
+  | { readonly status: 'loading' }
+  | { readonly status: 'available'; readonly config: StudioConfig }
+  | { readonly status: 'unavailable' }
+  | { readonly status: 'failed'; readonly error: string };
+
+interface ActiveStudioRequest {
+  readonly id: number;
+  readonly controller: AbortController;
+  readonly task: Promise<void>;
+}
 
 function formatRemaining(seconds: number): string {
   if (seconds <= 0) return 'Expired';
@@ -32,6 +47,53 @@ export function AdminLayout() {
   const isRenewingRef = useRef(false);
   const graceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [fastTick, setFastTick] = useState(false);
+  const [studioAvailability, setStudioAvailability] = useState<StudioAvailability>({
+    status: 'loading',
+  });
+  const mountedRef = useRef(false);
+  const nextStudioRequestIdRef = useRef(0);
+  const activeStudioRequestRef = useRef<ActiveStudioRequest | null>(null);
+
+  const refreshStudioAvailability = useCallback((): Promise<void> => {
+    const active = activeStudioRequestRef.current;
+    if (active !== null) return active.task;
+
+    const id = ++nextStudioRequestIdRef.current;
+    const controller = new AbortController();
+    setStudioAvailability({ status: 'loading' });
+    const task = getStudio(controller.signal)
+      .then((response) => {
+        if (!mountedRef.current || activeStudioRequestRef.current?.id !== id) return;
+        setStudioAvailability(
+          response.enabled
+            ? { status: 'available', config: response.config }
+            : { status: 'unavailable' },
+        );
+      })
+      .catch((error: unknown) => {
+        if (!mountedRef.current || activeStudioRequestRef.current?.id !== id) return;
+        setStudioAvailability({
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Failed to load Studio availability',
+        });
+      })
+      .finally(() => {
+        if (activeStudioRequestRef.current?.id === id) activeStudioRequestRef.current = null;
+      });
+    activeStudioRequestRef.current = { id, controller, task };
+    return task;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void refreshStudioAvailability();
+    return () => {
+      mountedRef.current = false;
+      const active = activeStudioRequestRef.current;
+      activeStudioRequestRef.current = null;
+      active?.controller.abort();
+    };
+  }, [refreshStudioAvailability]);
 
   // Sync session exp
   useEffect(() => {
@@ -114,7 +176,9 @@ export function AdminLayout() {
 
   const navItems = [
     { path: '/dashboard', label: 'Dashboard' },
-    { path: '/promotions', label: 'Promotions' },
+    ...(studioAvailability.status === 'available'
+      ? [{ path: '/promotions', label: 'Promotions' }]
+      : []),
     { path: '/sponsored-logs', label: 'Sponsored Logs' },
     { path: '/security', label: 'Security' },
     { path: '/config', label: 'Config' },
@@ -164,7 +228,14 @@ export function AdminLayout() {
           </div>
         </aside>
         <main className="admin-main">
-          <Outlet context={{ session, refreshSession }} />
+          <Outlet
+            context={{
+              session,
+              refreshSession,
+              studioAvailability,
+              refreshStudioAvailability,
+            }}
+          />
         </main>
 
         {showRenewModal && expAt !== null && session?.address && (
@@ -185,3 +256,8 @@ export function AdminLayout() {
     </div>
   );
 }
+
+export type AdminLayoutContext = AuthContext & {
+  studioAvailability: StudioAvailability;
+  refreshStudioAvailability: () => Promise<void>;
+};

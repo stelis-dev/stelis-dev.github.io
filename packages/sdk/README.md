@@ -15,7 +15,9 @@ Use it when your app already builds a Sui transaction and wants a Host to sponso
 
 ## Start Here
 
-Use this README when you are integrating against an existing `relay_only` or `relay_and_studio` Host and do **not** want to operate your own Host.
+Use this README when you are integrating against an existing `relay_only`,
+`relay_with_admin`, or `relay_with_admin_and_studio` Host and do **not** want to
+operate your own Host.
 
 If your product lets users complete transactions without managing gas, this is the default entry path.
 Start by connecting to an existing Host.
@@ -32,7 +34,7 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 - Need to call a deployed Host directly without the SDK? Start with [docs/api.md](../../docs/api.md).
 - Need the transaction constraints enforced before prepare? Start with [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
 - Integrating against the Studio promotion flow? Pair this README with [docs/payment-platform.md](../../docs/payment-platform.md).
-- Operating a `relay_and_studio` Host? Use [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations).
+- Operating a `relay_with_admin_and_studio` Host? Use [docs/operations.md → `relay_with_admin_and_studio` Operations](../../docs/operations.md#relay_with_admin_and_studio-operations).
 - Need product-owned settlement token support because your selected Host is missing your token? Move to [docs/payment-platform.md](../../docs/payment-platform.md) and [docs/operations.md -> Settlement Token Onboarding Procedure](../../docs/operations.md#settlement-token-onboarding-procedure).
 - Need an interactive browser flow? Use [packages/app-web](../app-web/README.md).
 
@@ -320,9 +322,9 @@ This keeps wallet custody, policy, and approval logic on your side while using t
 ### Host Studio Availability
 
 Promotion methods call the connected Host's `/studio/*` routes directly. There is no
-client-side option that enables Studio. A `relay_only` Host returns
-`STUDIO_UNAVAILABLE`; the SDK preserves that response as a `StelisApiException` with
-HTTP status `503`.
+client-side option that enables Studio. `relay_only` and `relay_with_admin`
+Hosts return `STUDIO_UNAVAILABLE`; the SDK preserves that response as a
+`StelisApiException` with HTTP status `503`.
 
 ```typescript
 const sdk = await StelisSDK.connect('https://host.example/relay', {

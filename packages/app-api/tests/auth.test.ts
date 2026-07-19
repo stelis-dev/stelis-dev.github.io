@@ -59,7 +59,7 @@ vi.mock('../src/requireAdminSession.js', () => ({
 }));
 
 import { createAuthRoutes, type AuthRoutesRuntime } from '../src/routes/auth.js';
-import type { RelayAndStudioAppApiContext } from '../src/context.js';
+import type { AdminAppApiContext } from '../src/context.js';
 import { requireAdminSessionFromContext } from '../src/requireAdminSession.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
 
@@ -126,12 +126,12 @@ function codedError(code: HostErrorCode, meta: Record<string, unknown> = {}) {
 
 describe('auth routes', () => {
   let app: Hono;
-  let mountedContext: RelayAndStudioAppApiContext;
+  let mountedContext: AdminAppApiContext;
 
   function mountAuthRoutes(
-    context: RelayAndStudioAppApiContext = {
+    context: AdminAppApiContext = {
       redis: mockRedis,
-    } as unknown as RelayAndStudioAppApiContext,
+    } as unknown as AdminAppApiContext,
     runtime: AuthRoutesRuntime = AUTH_RUNTIME,
   ): void {
     mountedContext = context;

@@ -12,7 +12,7 @@
  * bounded-body admission. `runStudioAuth` then verifies the credential and
  * applies authenticated-subject admission before any promotion or sponsor I/O.
  *
- * Available only when the Host booted in `relay_and_studio` mode.
+ * Available only when the Host booted in `relay_with_admin_and_studio` mode.
  */
 import { Hono } from 'hono';
 import {
@@ -50,7 +50,7 @@ import {
   type PromotionPrepareResponse,
   type PromotionSponsorResponse,
 } from '@stelis/contracts';
-import type { RelayAndStudioAppApiContext } from '../context.js';
+import type { RelayWithAdminAndStudioAppApiContext } from '../context.js';
 import { beginRequestAdmission, type RequestAdmissionDependencies } from '../requestAdmission.js';
 import { buildSponsorUnavailableResponse } from '../sponsor-operations/gateResponse.js';
 import { runStudioAuth } from '../middleware/studioAuth.js';
@@ -68,7 +68,7 @@ class StudioPrepareAdmissionError extends Error {
 }
 
 export function createStudioRoutes(
-  context: RelayAndStudioAppApiContext,
+  context: RelayWithAdminAndStudioAppApiContext,
   admission: RequestAdmissionDependencies,
 ) {
   const app = new Hono();

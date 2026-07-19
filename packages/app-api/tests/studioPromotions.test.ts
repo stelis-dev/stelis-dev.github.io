@@ -37,7 +37,7 @@ vi.mock('../src/developerJwtVerifyCallback.js', async () => {
 
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
-import type { RelayAndStudioAppApiContext } from '../src/context.js';
+import type { RelayWithAdminAndStudioAppApiContext } from '../src/context.js';
 import type { RequestAdmissionDependencies } from '../src/requestAdmission.js';
 import {
   MemoryPromotionStore,
@@ -63,12 +63,12 @@ const BASE_PROMO: AdminPromotionCreateRequest = {
 };
 
 function createFullCtx(
-  overrides: Partial<RelayAndStudioAppApiContext> = {},
-): RelayAndStudioAppApiContext {
+  overrides: Partial<RelayWithAdminAndStudioAppApiContext> = {},
+): RelayWithAdminAndStudioAppApiContext {
   const promotionStore = new MemoryPromotionStore();
 
   return {
-    mode: 'relay_and_studio',
+    mode: 'relay_with_admin_and_studio',
     host: {
       rateLimiter: { check: vi.fn().mockResolvedValue({ allowed: true }) },
       abuseBlocker: {
@@ -105,7 +105,7 @@ function createFullCtx(
 }
 
 function createRequestAdmissionDependencies(
-  ctx: RelayAndStudioAppApiContext,
+  ctx: RelayWithAdminAndStudioAppApiContext,
   overrides: Partial<RequestAdmissionDependencies> = {},
 ): RequestAdmissionDependencies {
   return {
@@ -116,7 +116,7 @@ function createRequestAdmissionDependencies(
 }
 
 function mountApp(
-  ctx: RelayAndStudioAppApiContext,
+  ctx: RelayWithAdminAndStudioAppApiContext,
   admission = createRequestAdmissionDependencies(ctx),
 ): Hono {
   const routes = createStudioRoutes(ctx, admission);
@@ -128,7 +128,7 @@ function mountApp(
 // ── Tests ───────────────────────────────────────────────────────────────
 
 describe('studio promotion routes', () => {
-  let ctx: RelayAndStudioAppApiContext;
+  let ctx: RelayWithAdminAndStudioAppApiContext;
   let app: Hono;
 
   beforeEach(() => {

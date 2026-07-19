@@ -9,13 +9,15 @@ Stelis admin single-page app - Vite + React dashboard for Host operators.
 ## Start Here
 
 Use this package when you need the operator-facing dashboard for a running
-`@stelis/app-api` Host in `relay_and_studio` mode. A `relay_only` Host does not
-provide Admin authentication or operator routes.
+`@stelis/app-api` Host in `relay_with_admin` or
+`relay_with_admin_and_studio` mode. A `relay_only` Host does not provide Admin
+authentication or operator routes. Studio promotion operations require
+`relay_with_admin_and_studio`.
 External Host operators use this dashboard as part of the provided Stelis Host release.
 Changing dashboard, Host, SDK, or contract source code is a maintainer-only workflow.
 This dashboard does not publish or upgrade contracts; it only displays and operates against the configured IDs and runtime state exposed by the backing Host.
 
-- Promotion operation path: [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations)
+- Promotion operation path: [docs/operations.md → `relay_with_admin_and_studio` Operations](../../docs/operations.md#relay_with_admin_and_studio-operations)
 - Baseline runbook: [docs/operations.md](../../docs/operations.md)
 - Backing Host package: [packages/app-api/README.md](../app-api/README.md)
 
@@ -25,7 +27,7 @@ This dashboard does not publish or upgrade contracts; it only displays and opera
 | ----------------- | ---------------------------------------------------------------------------------- |
 | `/login`          | Wallet-based admin login                                                           |
 | `/dashboard`      | Runtime summary, pool state, withdrawal actions, and sponsored-execution KPI cards |
-| `/promotions`     | Promotion inventory, detail, and operator actions                                  |
+| `/promotions`     | Studio promotion inventory, detail, and operator actions                           |
 | `/sponsored-logs` | Generic + promotion sponsored execution KPI cards, mode filter, recent log table   |
 | `/security`       | Abuse blocklist management and auth audit review                                   |
 | `/config`         | On-chain IDs, supported settlement swap paths, and fee/config views                |
@@ -37,8 +39,12 @@ This dashboard does not publish or upgrade contracts; it only displays and opera
 - `/auth/*` admin session flows
 - `/api/*` operator data and controls
 
-Configure the UI and a `relay_and_studio` Host together when deploying the
-operator dashboard.
+Configure the UI with a `relay_with_admin` or
+`relay_with_admin_and_studio` Host when deploying the operator dashboard.
+The dashboard does not require Studio configuration; a `relay_with_admin` Host
+uses only the complete Admin environment group.
+The dashboard reads `GET /api/studio` as the Studio availability authority and
+does not enable Promotion operations when that response is disabled.
 
 ## Quick Start
 
@@ -71,7 +77,7 @@ matching public Sui RPC endpoint internally.
 
 ## Related Documents
 
-- [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations) - Studio Operator runbook section
+- [docs/operations.md → `relay_with_admin_and_studio` Operations](../../docs/operations.md#relay_with_admin_and_studio-operations) - Studio Operator runbook section
 - [docs/operations.md](../../docs/operations.md) - baseline Host Operator procedures
 - [packages/app-api/README.md](../app-api/README.md) - backing Host entry
 - [docs/repository-structure.md](../../docs/repository-structure.md) - package and dependency map

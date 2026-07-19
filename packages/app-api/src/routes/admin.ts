@@ -83,7 +83,7 @@ import {
 import { redactSensitiveText, safeErrorSummary } from '@stelis/core-api/observability';
 import { calculateSponsorAvailability } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
-import type { RelayAndStudioAppApiContext } from '../context.js';
+import type { AdminAppApiContext, RelayWithAdminAndStudioAppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
 import {
   beginRequestAdmission,
@@ -112,7 +112,7 @@ function withDerivedBudget<T extends Promotion>(
 
 /** Compute the current promotion summary from the authoritative store projections. */
 async function computeAdminSummary(
-  ctx: RelayAndStudioAppApiContext,
+  ctx: RelayWithAdminAndStudioAppApiContext,
   promotionId: string,
   promotion: Promotion,
 ): Promise<import('@stelis/core-api/studio').PromotionAdminSummary> {
@@ -178,7 +178,7 @@ function withdrawalNonceKey(network: SuiNetwork, nonce: string): string {
   return `${WITHDRAW_NONCE_PREFIX}${network}:${nonce}`;
 }
 
-function getAdminRedis(context: RelayAndStudioAppApiContext): AdminRedisClient {
+function getAdminRedis(context: AdminAppApiContext): AdminRedisClient {
   return createAdminRedisAdapter(context.redis);
 }
 
@@ -194,12 +194,10 @@ export interface AdminRoutesRuntimeInput {
 
 interface AdminRouteVariables {
   readonly requestAdmission: InitialRequestAdmission;
+  readonly studioContext: RelayWithAdminAndStudioAppApiContext;
 }
 
-export function createAdminRoutes(
-  context: RelayAndStudioAppApiContext,
-  runtime: AdminRoutesRuntimeInput,
-) {
+export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRoutesRuntimeInput) {
   const app = new Hono<{ Variables: AdminRouteVariables }>();
 
   /**
@@ -237,6 +235,16 @@ export function createAdminRoutes(
       );
       if (!subjectAdmission.ok) return subjectAdmission.response;
       c.set('requestAdmission', subjectAdmission.value);
+      await next();
+    };
+
+  const requireStudioContext =
+    (allowedCodes: readonly HostErrorCode[]): MiddlewareHandler =>
+    async (c, next) => {
+      if (context.mode !== 'relay_with_admin_and_studio') {
+        return respondMapped(c, codedHostError('STUDIO_UNAVAILABLE', allowedCodes));
+      }
+      c.set('studioContext', context);
       await next();
     };
 
@@ -689,182 +697,223 @@ export function createAdminRoutes(
   });
 
   // ── GET /api/studio ──────────────────────────────────────────────
-  // Studio authentication configuration for this `relay_and_studio` Host.
+  // Single Admin-facing authority for Studio availability.
   app.get('/studio', admitAdminRequest(), async (c) => {
     try {
-      const ctx = context;
       return c.json(
-        parseAdminStudioResponse({
-          config: {
-            developerJwtVerifyUrlConfigured: !!ctx.developerJwtVerifyUrl,
-          },
-        }),
+        parseAdminStudioResponse(
+          context.mode === 'relay_with_admin_and_studio'
+            ? {
+                enabled: true,
+                config: {
+                  developerJwtVerifyUrlConfigured: !!context.developerJwtVerifyUrl,
+                },
+              }
+            : { enabled: false },
+        ),
       );
     } catch (err) {
       return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
     }
   });
+
   // ── GET /api/promotions ──────────────────────────────────────────
-  app.get('/promotions', admitAdminRequest(), async (c) => {
-    try {
-      const ctx = context;
-      const { status, ...pageParams } = parseAdminRequest(
-        c.req.query(),
-        parseAdminPromotionListQuery,
-      );
-      const page = await ctx.promotionStore.listPage(
-        pageParams,
-        status === undefined ? undefined : { status },
-      );
-      const enriched = page.promotions.map(withDerivedBudget);
-      return c.json(
-        parseAdminPromotionListResponse({
-          promotions: enriched,
-          nextCursor: page.nextCursor,
-        }),
-      );
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_LIST_ERROR_CODES);
-    }
-  });
+  app.get(
+    '/promotions',
+    admitAdminRequest(),
+    requireStudioContext(ADMIN_PROMOTION_LIST_ERROR_CODES),
+    async (c) => {
+      try {
+        const { status, ...pageParams } = parseAdminRequest(
+          c.req.query(),
+          parseAdminPromotionListQuery,
+        );
+        const page = await c
+          .get('studioContext')
+          .promotionStore.listPage(pageParams, status === undefined ? undefined : { status });
+        const enriched = page.promotions.map(withDerivedBudget);
+        return c.json(
+          parseAdminPromotionListResponse({
+            promotions: enriched,
+            nextCursor: page.nextCursor,
+          }),
+        );
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_LIST_ERROR_CODES);
+      }
+    },
+  );
 
   // ── POST /api/promotions ─────────────────────────────────────────
-  app.post('/promotions', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
-    let ip: string | null = null;
-    try {
-      ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
-      const ctx = context;
-      const body = parseAdminRequest(
-        c.get('requestAdmission').body,
-        parseAdminPromotionCreateRequest,
-      );
-      const record = await ctx.promotionStore.create(body);
-      // Durable admin audit trail: emit the same operation-log event shape used by
-      // every other admin write path so `/api/logs` and `app-admin` can
-      // attribute promotion creation without bespoke sink wiring.
-      await writeAdminAuditLog(getAdminRedis(context), {
-        event: 'PROMOTION_CREATE',
-        ts: new Date().toISOString(),
-        ip,
-        detail: `201: promotionId=${record.promotionId}, maxParticipants=${record.maxParticipants}, perUserGasAllowanceMist=${record.perUserGasAllowanceMist}`,
-      }).catch(() => undefined);
-      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }), 201);
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_CREATE_ERROR_CODES);
-    }
-  });
+  app.post(
+    '/promotions',
+    admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
+    requireStudioContext(ADMIN_PROMOTION_CREATE_ERROR_CODES),
+    async (c) => {
+      let ip: string | null = null;
+      try {
+        ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+        const body = parseAdminRequest(
+          c.get('requestAdmission').body,
+          parseAdminPromotionCreateRequest,
+        );
+        const record = await c.get('studioContext').promotionStore.create(body);
+        // Durable admin audit trail: emit the same operation-log event shape used by
+        // every other admin write path so `/api/logs` and `app-admin` can
+        // attribute promotion creation without bespoke sink wiring.
+        await writeAdminAuditLog(getAdminRedis(context), {
+          event: 'PROMOTION_CREATE',
+          ts: new Date().toISOString(),
+          ip,
+          detail: `201: promotionId=${record.promotionId}, maxParticipants=${record.maxParticipants}, perUserGasAllowanceMist=${record.perUserGasAllowanceMist}`,
+        }).catch(() => undefined);
+        return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }), 201);
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_CREATE_ERROR_CODES);
+      }
+    },
+  );
 
   // ── GET /api/promotions/:id ──────────────────────────────────────
-  app.get('/promotions/:id', admitAdminRequest(), async (c) => {
-    try {
-      const ctx = context;
-      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
-      const record = await ctx.promotionStore.get(id);
-      if (!record) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
+  app.get(
+    '/promotions/:id',
+    admitAdminRequest(),
+    requireStudioContext(ADMIN_PROMOTION_READ_ERROR_CODES),
+    async (c) => {
+      try {
+        const studioContext = c.get('studioContext');
+        const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+        const record = await studioContext.promotionStore.get(id);
+        if (!record) {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
+          );
+        }
+        const summary = await computeAdminSummary(studioContext, id, record);
+        return c.json(
+          parseAdminPromotionDetailResponse({
+            promotion: withDerivedBudget(record),
+            summary,
+          }),
         );
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
       }
-      const summary = await computeAdminSummary(ctx, id, record);
-      return c.json(
-        parseAdminPromotionDetailResponse({
-          promotion: withDerivedBudget(record),
-          summary,
-        }),
-      );
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   // ── PUT /api/promotions/:id ──────────────────────────────────────
-  app.put('/promotions/:id', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
-    try {
-      const ctx = context;
-      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
-      const input = parseAdminRequest(
-        c.get('requestAdmission').body,
-        parseAdminPromotionUpdateRequest,
-      );
-
-      const record = await ctx.promotionStore.update(id, input);
-      if (!record) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_UPDATE_ERROR_CODES),
+  app.put(
+    '/promotions/:id',
+    admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
+    requireStudioContext(ADMIN_PROMOTION_UPDATE_ERROR_CODES),
+    async (c) => {
+      try {
+        const studioContext = c.get('studioContext');
+        const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+        const input = parseAdminRequest(
+          c.get('requestAdmission').body,
+          parseAdminPromotionUpdateRequest,
         );
+
+        const record = await studioContext.promotionStore.update(id, input);
+        if (!record) {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_UPDATE_ERROR_CODES),
+          );
+        }
+        return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_UPDATE_ERROR_CODES);
       }
-      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_UPDATE_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   // ── POST /api/promotions/:id/status ──────────────────────────────
-  app.post('/promotions/:id/status', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
-    try {
-      const ctx = context;
-      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
-      const body = parseAdminRequest(
-        c.get('requestAdmission').body,
-        parseAdminPromotionStatusRequest,
-      );
-      const record = await ctx.promotionStore.transitionStatus(id, body.status, body.reason);
-      if (!record) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_STATUS_ERROR_CODES),
+  app.post(
+    '/promotions/:id/status',
+    admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
+    requireStudioContext(ADMIN_PROMOTION_STATUS_ERROR_CODES),
+    async (c) => {
+      try {
+        const studioContext = c.get('studioContext');
+        const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+        const body = parseAdminRequest(
+          c.get('requestAdmission').body,
+          parseAdminPromotionStatusRequest,
         );
+        const record = await studioContext.promotionStore.transitionStatus(
+          id,
+          body.status,
+          body.reason,
+        );
+        if (!record) {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_STATUS_ERROR_CODES),
+          );
+        }
+        return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_STATUS_ERROR_CODES);
       }
-      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_STATUS_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   // ── DELETE /api/promotions/:id ───────────────────────────────────
-  app.delete('/promotions/:id', admitAdminRequest(), async (c) => {
-    try {
-      const ctx = context;
-      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
-      const result = await ctx.promotionStore.delete(id);
-      if (result.status === 'not_found') {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_DELETE_ERROR_CODES),
-        );
+  app.delete(
+    '/promotions/:id',
+    admitAdminRequest(),
+    requireStudioContext(ADMIN_PROMOTION_DELETE_ERROR_CODES),
+    async (c) => {
+      try {
+        const studioContext = c.get('studioContext');
+        const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+        const result = await studioContext.promotionStore.delete(id);
+        if (result.status === 'not_found') {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_DELETE_ERROR_CODES),
+          );
+        }
+        if (result.status === 'not_deletable') {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_CONFLICT', ADMIN_PROMOTION_DELETE_ERROR_CODES),
+          );
+        }
+        return c.json(parseAdminPromotionDeleteResponse({ ok: true }));
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_DELETE_ERROR_CODES);
       }
-      if (result.status === 'not_deletable') {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_CONFLICT', ADMIN_PROMOTION_DELETE_ERROR_CODES),
-        );
-      }
-      return c.json(parseAdminPromotionDeleteResponse({ ok: true }));
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_DELETE_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   // ── GET /api/promotions/:id/summary ──────────────────────────────
-  app.get('/promotions/:id/summary', admitAdminRequest(), async (c) => {
-    try {
-      const ctx = context;
-      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
-      const promotion = await ctx.promotionStore.get(id);
-      if (!promotion) {
-        return respondMapped(
-          c,
-          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
-        );
+  app.get(
+    '/promotions/:id/summary',
+    admitAdminRequest(),
+    requireStudioContext(ADMIN_PROMOTION_READ_ERROR_CODES),
+    async (c) => {
+      try {
+        const studioContext = c.get('studioContext');
+        const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+        const promotion = await studioContext.promotionStore.get(id);
+        if (!promotion) {
+          return respondMapped(
+            c,
+            codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
+          );
+        }
+        const summary = await computeAdminSummary(studioContext, id, promotion);
+        return c.json(parseAdminPromotionSummaryResponse({ promotionId: id, summary }));
+      } catch (err) {
+        return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
       }
-      const summary = await computeAdminSummary(ctx, id, promotion);
-      return c.json(parseAdminPromotionSummaryResponse({ promotionId: id, summary }));
-    } catch (err) {
-      return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
-    }
-  });
+    },
+  );
 
   return app;
 }

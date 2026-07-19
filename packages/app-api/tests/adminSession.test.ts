@@ -225,9 +225,9 @@ describe('not_before enforcement', () => {
     expect(res.status).toBe(200);
   });
 
-  it('rejects session when iatMs < not_before (server restarted)', async () => {
+  it('rejects session when iatMs is older than an explicit global cutoff', async () => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
-    // not_before is in the future → session issued before restart
+    // not_before is in the future → the session predates explicit invalidation
     mockRedis.get.mockImplementation(async (key: string) => {
       if (key === ADMIN_SESSION_NOT_BEFORE_KEY) return String(Date.now() + 60000);
       return null;
@@ -254,9 +254,12 @@ describe('not_before enforcement', () => {
     expect(getCall).toBeDefined();
   });
 
-  it('rejects unsafe integer not_before values', async () => {
+  it.each([
+    { name: 'an unsafe integer', value: '9007199254740993' },
+    { name: 'a non-canonical integer', value: '01' },
+  ])('rejects $name in not_before', async ({ value }) => {
     const token = await signAdminJwt('0xADMIN', TEST_JWT_CONFIG);
-    mockRedis.get.mockResolvedValue('9007199254740993');
+    mockRedis.get.mockResolvedValue(value);
 
     const res = await app.request('/test-session', {
       headers: { cookie: `stelis_admin=${token}` },

@@ -114,7 +114,7 @@ Rejected Redis topology:
 - Instance-specific Redis databases, region-specific Redis databases, or split keyspaces for one sponsor account set.
 - Replica reads for admission, signing, refill dispatch, abuse decisions, admin sessions, or Studio budget decisions.
 
-At boot, `@stelis/app-api` probes `INFO server` through `REDIS_URL`. If Redis does not report `redis_mode:standalone`, or if the topology cannot be probed, the Host fails closed before it accepts requests. The boot flow also writes the admin `not_before` key, so a read-only endpoint fails before startup completes.
+At boot, `@stelis/app-api` probes `INFO server` through `REDIS_URL`. If Redis does not report `redis_mode:standalone`, or if the topology cannot be probed, the Host fails closed before it accepts requests. Admin-capable startup atomically initializes a missing admin `not_before` key and validates an existing value without changing it, so a read-only endpoint or malformed shared value fails before startup completes. Explicit Admin logout is the operation that advances the deployment-wide cutoff.
 
 This policy matches current Redis key usage. Sponsored execution transitions update receipt, lease, deadline, and Promotion records in multi-key Lua scripts. Sponsor operation reads, refill locks, abuse decisions, and Promotion ledgers also rely on one authoritative write path for their keys.
 
@@ -211,39 +211,59 @@ An admin withdrawal `503` with code `WITHDRAWAL_PENDING` is an uncertain outcome
 
 State writers use Redis server time for `lastObservedAtMs`. Sponsor Refill Account observations compare the sampled operation ID, spend sequence, and account write sequence. General slot observations compare the sampled slot write sequence and cannot write while a refill operation is active. Spend transitions compare operation ID and spend sequence; their account-balance projection is applied only when its sampled account write sequence is still current, so ordinary observations cannot starve the transaction state machine or be overwritten by an older sample. Terminal refill slot projection also compares the owning operation and slot write sequence. Each accepted observation advances its sequence, so a late RPC or submit result cannot overwrite a newer operation or observation.
 
-## `relay_and_studio` Operations
+## Host Capability Configuration
 
-Studio promotion routes are available when the Host boots with all required Studio configuration:
+The Host boots in exactly one current mode:
 
-- `ADMIN_JWT_SECRET`
+| Mode                          | Admin       | Studio      |
+| ----------------------------- | ----------- | ----------- |
+| `relay_only`                  | unavailable | unavailable |
+| `relay_with_admin`            | available   | unavailable |
+| `relay_with_admin_and_studio` | available   | available   |
+
+Admin configuration is one complete group. Its required settings are:
+
 - `ADMIN_ADDRESS`
+- `ADMIN_JWT_SECRET`
 - `CORS_ORIGINS`
+
+`ADMIN_SESSION_EXPIRY` and `COOKIE_DOMAIN` are optional after the required Admin
+group is complete. Any Admin setting selects this group, so partial Admin
+configuration fails boot.
+
+Studio configuration is a second complete group. It requires complete Admin
+configuration plus:
+
 - `STUDIO_ALLOWED_TARGETS`
 - `STUDIO_DEVELOPER_JWT_TRUST_JSON`
 
-`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional.
+`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional after the required Studio group
+is complete. Any Studio setting selects this group, so partial Studio
+configuration and Studio configuration without complete Admin configuration
+fail boot. Every local Admin and Studio setting is parsed and validated before
+the Host starts Sui endpoint qualification.
 
-The Host has exactly two operating modes. With all required Studio configuration it runs in `relay_and_studio` mode and exposes both Relay API and Studio routes. With none of the Studio or Admin configuration it runs in `relay_only` mode and exposes only the Relay API. A partial Studio or Admin configuration fails boot. Every local `relay_and_studio` setting is parsed and validated before the Host starts Sui endpoint qualification.
+## Admin Operations
+
+`@stelis/app-admin` uses `/auth/*` for Admin sessions and `/api/*` for operator
+actions. It operates against `relay_with_admin` and
+`relay_with_admin_and_studio` Hosts. A `relay_with_admin` Host provides the
+dashboard, sponsored-execution logs, SponsorOperations, withdrawals, security
+controls, and Host configuration without enabling Studio promotion operations.
+
+Boot validation requires `ADMIN_JWT_SECRET` to be at least 32 characters. The
+Sponsor Refill Account address must differ from `ADMIN_ADDRESS`.
+
+## `relay_with_admin_and_studio` Operations
+
+Studio promotion routes are available only with the complete Admin and Studio
+groups described above.
 
 `STUDIO_ALLOWED_TARGETS` is a comma-separated list of `package::module::function` entries. Boot validation canonicalizes package addresses and rejects an empty list, malformed entries, and canonical duplicates. Promotion prepare and sponsor requests compare every MoveCall with that same boot-time set.
 
 `STUDIO_DEVELOPER_JWT_TRUST_JSON` is a single trusted issuer definition. The verifier supports `RS256` and `ES256`, checks issuer, audience, signature, expiry, optional `iat`/`nbf`, and extracts `userId` plus `senderAddress` from configured claim paths. If `STUDIO_DEVELOPER_JWT_VERIFY_URL` is set, the Host calls it after local JWT verification succeeds. The callback URL must use HTTPS. HTTP is accepted only when its parsed hostname is exactly `localhost`, `127.0.0.1`, or `[::1]`; subdomains, other `127/8` addresses, and IPv4-mapped IPv6 addresses are rejected. Embedded username or password credentials and URL fragments are rejected. The Host sends the JWT only to that validated URL, omits ambient credentials, and never follows a redirect response. The callback response is the closed current shape `{ "valid": boolean, "reason"?: string }`: an explicit `false` is `AUTH_JWT_INVALID`, while a redirect, transport failure, or malformed/non-current response is `AUTH_UNAVAILABLE`. Both fail closed.
 
 Promotion execution uses Redis-backed promotion records and one promotion execution ledger. The ledger owns Promotion accounting, entitlements, reservations, permanent final operation results, and the reservation deadline index. It reserves gas allowance at promotion prepare time, then consumes or releases the reservation at promotion sponsor time. Ledger settings are listed in [`TTL Constants`](./parameters.md#ttl-constants) and [`Studio Ledger Limits`](./parameters.md#studio-ledger-limits).
-
-## Admin Operations
-
-`@stelis/app-admin` uses `/auth/*` for admin sessions and `/api/*` for operator actions.
-
-Admin dashboard operation requires a `relay_and_studio` Host, including the
-five required settings listed above.
-
-Optional admin settings:
-
-- `ADMIN_SESSION_EXPIRY`
-- `COOKIE_DOMAIN`
-
-Boot validation requires `ADMIN_JWT_SECRET` to be at least 32 characters when it is configured. If `ADMIN_ADDRESS` is configured, the sponsor refill account address must be different from the admin address.
 
 ## Host process shutdown
 

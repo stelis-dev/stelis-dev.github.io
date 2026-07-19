@@ -27,7 +27,7 @@ import {
   parseAdminSessionResponse,
   type HostErrorCode,
 } from '@stelis/contracts';
-import type { RelayAndStudioAppApiContext } from '../context.js';
+import type { AdminAppApiContext } from '../context.js';
 import { createAdminRedisAdapter } from '../adminRedis.js';
 import {
   signAdminJwt,
@@ -57,7 +57,7 @@ export interface AuthRoutesRuntime {
   };
 }
 
-function getAdminRedis(context: RelayAndStudioAppApiContext): AdminRedisClient {
+function getAdminRedis(context: AdminAppApiContext): AdminRedisClient {
   return createAdminRedisAdapter(context.redis);
 }
 
@@ -90,7 +90,7 @@ function respondAuthFailure(
   return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
 }
 
-export function createAuthRoutes(context: RelayAndStudioAppApiContext, runtime: AuthRoutesRuntime) {
+export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoutesRuntime) {
   const app = new Hono();
 
   // ── POST /auth/nonce ───────────────────────────────────────────────
