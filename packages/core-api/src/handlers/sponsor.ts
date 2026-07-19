@@ -1,11 +1,12 @@
 /**
  * POST /sponsor — public adapter over the SponsoredExecution sponsor runner.
  *
- * The runner owns consume ordering, reservation handle reconstruction, submit dispatch,
- * sponsor result policy, and finally slot checkin. This module keeps the stable
+ * The runner owns the prepared-to-executing transition, reservation reconstruction,
+ * one submit, final accounting, and callback delivery. This module keeps the stable
  * public handler signature and error carrier classes consumed by app-api.
  */
 import type { HostContext } from '../context.js';
+import { readAdmittedClientIp, type AdmittedClientIp } from '../abuseBlocking.js';
 import type { RelaySponsorErrorCode, SponsorFailureSubcode } from '@stelis/contracts';
 import {
   decodeTxBytes,
@@ -16,7 +17,9 @@ import type { GasUsedFields } from '../session/sessionTypes.js';
 import {
   createGenericExecutionPolicy,
   createGenericSignAndSubmitPort,
-  createGenericSponsorConsumeAdapter,
+  createGenericSponsorReceiptPolicy,
+  buildGenericExecutionRecoveryContext,
+  buildGenericSponsorResultMetadata,
   projectGenericSponsorResult,
   type GenericSponsorErrorFactory,
 } from '../session/sponsoredExecution/genericExecutionPolicy.js';
@@ -96,8 +99,8 @@ export class SponsorOnchainError extends Error {
   constructor(
     public readonly digest: string,
     public readonly onchainError: string,
-    public readonly subcode?: SponsorFailureSubcode,
-    public readonly gasUsed?: GasUsedFields | null,
+    public readonly subcode: SponsorFailureSubcode | undefined,
+    public readonly gasUsed: GasUsedFields,
   ) {
     super(`Transaction reverted on-chain: ${onchainError}`);
     this.name = 'SponsorOnchainError';
@@ -115,19 +118,6 @@ export class SponsorCongestionError extends Error {
   ) {
     super(message);
     this.name = 'SponsorCongestionError';
-  }
-}
-
-/** Known on-chain success whose Host-side terminal processing could not complete. */
-export class SponsorTerminalProcessingError extends Error {
-  readonly code = 'GAS_EFFECTS_MISSING' as const;
-
-  constructor(
-    message: string,
-    public readonly digest: string,
-  ) {
-    super(message);
-    this.name = 'SponsorTerminalProcessingError';
   }
 }
 
@@ -158,9 +148,10 @@ export { SponsorLeaseExpiredError } from '../store/sponsorPoolErrors.js';
 export async function handleSponsor(
   ctx: HostContext,
   params: SponsorParams,
-  /** Client IP for abuse detection — passed from host route */
-  clientIp: string,
+  /** Opaque proof of successful Host IP admission. */
+  admittedClientIp: AdmittedClientIp,
 ): Promise<SponsorResult> {
+  const clientIp = readAdmittedClientIp(admittedClientIp);
   let txBytes: Uint8Array;
   try {
     txBytes = decodeTxBytes(params.txBytes);
@@ -178,13 +169,12 @@ export async function handleSponsor(
     sponsorOnchain: (digest, reason, subcode, gasUsed) =>
       new SponsorOnchainError(digest, reason, subcode, gasUsed),
     sponsorCongestion: (message, digest) => new SponsorCongestionError(message, digest),
-    sponsorTerminalProcessing: (message, digest) =>
-      new SponsorTerminalProcessingError(message, digest),
   };
 
   const options = {
     hostContext: ctx,
     sponsor: {
+      admittedClientIp,
       txBytes,
       userSignature: params.userSignature,
       errors,
@@ -195,9 +185,11 @@ export async function handleSponsor(
   try {
     return await runSponsorStateMachine(
       {
-        prepareStore: ctx.prepareStore,
-        sponsorPool: ctx.sponsorPool,
+        store: ctx.sponsoredExecutionStore,
         signAndSubmit: createGenericSignAndSubmitPort(options, state),
+        endpointCount: ctx.sui.endpointCount,
+        onSponsorResult: ctx.onSponsorResult,
+        isSponsorAddressAvailable: ctx.isSponsorAddressAvailable,
       },
       {
         hookContext: {
@@ -206,10 +198,17 @@ export async function handleSponsor(
         },
         txBytes,
         userSignature: params.userSignature,
+        buildRecoveryContext: () => buildGenericExecutionRecoveryContext(state),
+        buildResultMetadata: (stage) => buildGenericSponsorResultMetadata(state, stage),
+        stateChangedError: () =>
+          new SponsorValidationError(
+            'REPREPARE_REQUIRED',
+            'Prepared receipt state changed — retry /prepare',
+          ),
         projectResult: () => projectGenericSponsorResult(options, state),
       },
       policy,
-      createGenericSponsorConsumeAdapter({
+      createGenericSponsorReceiptPolicy({
         hostContext: ctx,
         clientIp,
         state,

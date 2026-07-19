@@ -24,10 +24,20 @@ import {
   SLIPPAGE_CAP_BPS,
   SUI_CHAIN_IDENTIFIERS,
 } from '@stelis/contracts';
-import { parseCurrentSuiTerminalForDigest } from '@stelis/core-api';
-import { computeExecutionCostClaim, DEFAULT_SLIPPAGE_BPS } from '@stelis/core-relay';
-import { queryUserCredit, StelisApiException, StelisSDK } from '@stelis/sdk';
-import { verifySettleEventInTransaction } from '@stelis/sdk/server';
+import {
+  assertSuiNetwork,
+  buildSuiTransaction,
+  computeExecutionCostClaim,
+  createSuiEndpointSnapshot,
+  DEFAULT_SLIPPAGE_BPS,
+  executeSuiTransaction,
+  getSuiBalance,
+  getSuiTransactionBalanceChanges,
+  getSuiTransactionEffects,
+  getSuiTransactionEvents,
+} from '@stelis/core-relay';
+import { StelisApiException, StelisSDK } from '@stelis/sdk';
+import { verifySettleEventResultAgainstExpected } from '@stelis/sdk/server';
 import {
   classifyVaultSnapshots,
   classifySponsorPostOutcome,
@@ -332,9 +342,9 @@ function resolveOutputPaths({ fileEnv, cli, runId }) {
   };
 }
 
-async function getSpendableBalanceRaw(client, owner, coinType) {
-  const res = await client.getBalance({ owner, coinType });
-  return parseSpendableBalanceRaw(res?.balance, coinType);
+async function getSpendableBalanceRaw(endpoints, owner, coinType) {
+  const balance = await getSuiBalance(endpoints, { owner, coinType });
+  return parseSpendableBalanceRaw(balance, coinType);
 }
 
 function formatDecimal(raw, decimals, fractionDigits = Math.min(decimals, 6)) {
@@ -353,8 +363,8 @@ function formatMist(mist) {
   return `${formatDecimal(mist, 9, 9)} SUI`;
 }
 
-async function getUserVaultStatus(client, vaultRegistryId, address) {
-  const credit = await queryUserCredit(client, vaultRegistryId, address);
+async function getUserVaultStatus(sdk, client, address) {
+  const credit = await sdk.queryUserCredit(client, address);
   return {
     vaultObjectId: credit.vaultObjectId,
     needsCreate: credit.needsCreate,
@@ -365,14 +375,6 @@ async function getUserVaultStatus(client, vaultRegistryId, address) {
 
 function gasNetMist(gasUsed) {
   return computeExecutionCostClaim(gasUsed).simGas;
-}
-
-function requireCurrentTransactionResult(result, expectedDigest, label) {
-  const parsed = parseCurrentSuiTerminalForDigest(result, expectedDigest);
-  if (!parsed) {
-    throw new Error(`${label} is not a canonical current Sui result for ${expectedDigest}`);
-  }
-  return parsed;
 }
 
 function isRecord(value) {
@@ -447,7 +449,7 @@ function parseRetryAfterMs(value) {
 }
 
 function rateLimitRetryAfterMs(err) {
-  if (!(err instanceof StelisApiException) || err.status !== 429 || err.code !== 'UNKNOWN') {
+  if (!(err instanceof StelisApiException) || err.status !== 429 || err.code !== 'RATE_LIMITED') {
     return null;
   }
   return parseRetryAfterMs(err.meta?.retryAfterMs);
@@ -502,13 +504,14 @@ async function postRelaySponsor(apiUrl, body) {
     let apiError;
     try {
       apiError = parseHostErrorResponse(data, RELAY_SPONSOR_ERROR_CODES, res.status);
-    } catch {
-      apiError = undefined;
+    } catch (error) {
+      throw new Error(
+        `Relay API /sponsor returned a non-current error response (HTTP ${res.status}; ${summarizeHttpBody(raw)})`,
+        { cause: error },
+      );
     }
-    const code = apiError?.code ?? 'UNKNOWN';
-    const message =
-      apiError?.error ??
-      `Relay API /sponsor returned a non-current error response (HTTP ${res.status}; ${summarizeHttpBody(raw)})`;
+    const code = apiError.code;
+    const message = apiError.error;
     const extra = projectBenchmarkErrorMeta(apiError);
     throw new StelisApiException(
       code,
@@ -581,9 +584,9 @@ function benchmarkProvenance(ctx) {
   };
 }
 
-async function recoverActiveAttempt(journal, client) {
+async function recoverActiveAttempt(journal, endpoints) {
   const resolved = await recoverBenchmarkAttempt(journal, async (digest) => {
-    return client.getTransaction({ digest, include: { effects: true } });
+    return getSuiTransactionEffects(endpoints, { digest });
   });
   if (resolved === null) return false;
 
@@ -636,18 +639,15 @@ async function signSponsoredPreparation(prepared, keypair) {
   };
 }
 
-async function waitForTransactionByDigest(client, digest) {
-  return client.waitForTransaction({
-    digest,
-    include: { effects: true, events: true, balanceChanges: true },
-  });
+async function getTransactionWithEvents(endpoints, digest) {
+  return getSuiTransactionEvents(endpoints, { digest });
 }
 
-async function prepareDirectEmptyTransaction({ client, keypair, address, directGasBudgetMist }) {
+async function prepareDirectEmptyTransaction({ endpoints, keypair, address, directGasBudgetMist }) {
   const tx = new Transaction();
   tx.setSender(address);
   tx.setGasBudget(directGasBudgetMist.toString());
-  const txBytes = await tx.build({ client });
+  const txBytes = await buildSuiTransaction(endpoints, { transaction: tx });
   const expectedDigest = await Transaction.from(txBytes).getDigest();
   const { signature } = await keypair.signTransaction(txBytes);
   return { txBytes, signature, expectedDigest };
@@ -791,11 +791,11 @@ function assertSponsorEffectsMatchTerminal(sponsorEffects, terminal) {
   ) {
     throw new Error('Sponsor response effects do not carry a successful current status');
   }
-  if (!isRecord(sponsorEffects.gasUsed) || !terminal.gasUsed) {
+  if (!isRecord(sponsorEffects.gasUsed)) {
     throw new Error('Sponsor response effects do not carry canonical gasUsed');
   }
   for (const field of ['computationCost', 'storageCost', 'storageRebate']) {
-    if (sponsorEffects.gasUsed[field] !== terminal.gasUsed[field]) {
+    if (sponsorEffects.gasUsed[field] !== terminal.effects.gasUsed[field]) {
       throw new Error(
         `Sponsor response effects gasUsed.${field} does not match the on-chain terminal result`,
       );
@@ -845,19 +845,23 @@ function assertVerifiedSettleEconomics(event, prepared) {
 
 async function readInitialWalletSnapshot(ctx) {
   const [sui, settlementToken, vault] = await Promise.all([
-    observe(() => getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG)),
+    observe(() => getSpendableBalanceRaw(ctx.endpoints, ctx.address, SUI_TYPE_ARG)),
     observe(() =>
-      getSpendableBalanceRaw(ctx.client, ctx.address, ctx.settlementSwapPath.settlementTokenType),
+      getSpendableBalanceRaw(
+        ctx.endpoints,
+        ctx.address,
+        ctx.settlementSwapPath.settlementTokenType,
+      ),
     ),
-    observe(() => getUserVaultStatus(ctx.client, ctx.sdk.config.vaultRegistryId, ctx.address)),
+    observe(() => getUserVaultStatus(ctx.sdk, ctx.client, ctx.address)),
   ]);
   return { sui, settlementToken, vault };
 }
 
 async function readSponsoredDiagnosticSnapshot(ctx) {
   const [sui, vault] = await Promise.all([
-    observe(() => getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG)),
-    observe(() => getUserVaultStatus(ctx.client, ctx.sdk.config.vaultRegistryId, ctx.address)),
+    observe(() => getSpendableBalanceRaw(ctx.endpoints, ctx.address, SUI_TYPE_ARG)),
+    observe(() => getUserVaultStatus(ctx.sdk, ctx.client, ctx.address)),
   ]);
   return { sui, vault };
 }
@@ -917,7 +921,6 @@ async function runSponsoredPhase(ctx) {
         orderId,
         receiptId: prepared.receiptId,
         executedContractPackageId: ctx.packageId,
-        vaultId: prepared.vaultId,
       };
       await appendBenchmarkRecord(ctx, {
         ...preparationFields,
@@ -957,13 +960,9 @@ async function runSponsoredPhase(ctx) {
           let loaded;
           let terminal;
           try {
-            loaded = await waitForTransactionByDigest(ctx.client, expectedDigest);
-            terminal = requireCurrentTransactionResult(
-              loaded,
-              expectedDigest,
-              `${runLabel} Host-reported on-chain failure`,
-            );
-            if (terminal.kind !== 'failure') {
+            loaded = await getTransactionWithEvents(ctx.endpoints, expectedDigest);
+            terminal = loaded;
+            if (terminal.outcome !== 'failure') {
               throw new Error(
                 `${runLabel} Host-reported on-chain failure was not proven by the matching failed Sui terminal result`,
               );
@@ -989,7 +988,7 @@ async function runSponsoredPhase(ctx) {
             recordType: 'terminal',
             outcome: 'submitted_failed',
             digest: terminal.digest,
-            gasMist: terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null,
+            gasMist: gasNetMist(terminal.effects.gasUsed),
             error: terminal.error,
             hostError: describeError(err),
           });
@@ -1043,7 +1042,7 @@ async function runSponsoredPhase(ctx) {
 
       let loaded;
       try {
-        loaded = await waitForTransactionByDigest(ctx.client, sponsorResponse.digest);
+        loaded = await getTransactionWithEvents(ctx.endpoints, sponsorResponse.digest);
       } catch (err) {
         activeAttempt = await ctx.journal.markUncertain(activeAttempt);
         await appendSubmittedUnverified(
@@ -1055,25 +1054,9 @@ async function runSponsoredPhase(ctx) {
         throw err;
       }
 
-      let terminal;
-      try {
-        terminal = requireCurrentTransactionResult(
-          loaded,
-          expectedDigest,
-          `${runLabel} terminal result`,
-        );
-      } catch (err) {
-        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
-        await appendSubmittedUnverified(
-          ctx,
-          { ...baseFields, digest: sponsorResponse.digest },
-          err,
-          activeAttempt,
-        );
-        throw err;
-      }
-      if (terminal.kind === 'failure') {
-        const actualGasMist = terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null;
+      const terminal = loaded;
+      if (terminal.outcome === 'failure') {
+        const actualGasMist = gasNetMist(terminal.effects.gasUsed);
         await ctx.journal.resolveSubmittedResult(activeAttempt, loaded);
         activeAttempt = null;
         await appendBenchmarkRecord(ctx, {
@@ -1086,23 +1069,11 @@ async function runSponsoredPhase(ctx) {
         });
         throw new Error(`${runLabel} failed on-chain: ${JSON.stringify(terminal.error)}`);
       }
-      if (!terminal.gasUsed) {
-        const err = new Error(`${runLabel} succeeded without canonical gasUsed`);
-        activeAttempt = await ctx.journal.markUncertain(activeAttempt);
-        await appendSubmittedUnverified(
-          ctx,
-          { ...baseFields, digest: terminal.digest },
-          err,
-          activeAttempt,
-        );
-        throw err;
-      }
-
       let verifiedEvent;
       let economics;
       try {
         assertSponsorEffectsMatchTerminal(sponsorResponse.effects, terminal);
-        verifiedEvent = verifySettleEventInTransaction(loaded, terminal.digest, {
+        verifiedEvent = verifySettleEventResultAgainstExpected(terminal, terminal.digest, {
           receiptId: prepared.receiptId,
           user: ctx.address,
           orderId,
@@ -1122,10 +1093,11 @@ async function runSponsoredPhase(ctx) {
         throw err;
       }
 
-      const transactionPayload =
-        isRecord(loaded) && isRecord(loaded.Transaction) ? loaded.Transaction : null;
+      const transactionBalanceChanges = await getSuiTransactionBalanceChanges(ctx.endpoints, {
+        digest: terminal.digest,
+      });
       const tokenMeasurement = measureSettlementTokenBalanceChanges(
-        transactionPayload?.balanceChanges,
+        transactionBalanceChanges.balanceChanges,
         ctx.address,
         ctx.settlementSwapPath.settlementTokenType,
       );
@@ -1134,7 +1106,7 @@ async function runSponsoredPhase(ctx) {
         beforeSnapshot.vault,
         afterSnapshot.vault,
       );
-      const actualGasMist = gasNetMist(terminal.gasUsed);
+      const actualGasMist = gasNetMist(terminal.effects.gasUsed);
       const hostMarginMist = economics.payoutMist - actualGasMist;
 
       await ctx.journal.resolveSubmittedResult(activeAttempt, loaded);
@@ -1218,7 +1190,7 @@ async function runDirectPhase(ctx) {
   let i = 1;
   let duplicateRetriesForRun = 0;
   while (i <= ctx.directMaxRuns) {
-    const beforeSui = await getSpendableBalanceRaw(ctx.client, ctx.address, SUI_TYPE_ARG);
+    const beforeSui = await getSpendableBalanceRaw(ctx.endpoints, ctx.address, SUI_TYPE_ARG);
     const requiredDirectBalanceMist = ctx.minSuiReserveMist + ctx.directGasBudgetMist;
     if (beforeSui < requiredDirectBalanceMist) {
       const stopReason = {
@@ -1283,10 +1255,10 @@ async function runDirectPhase(ctx) {
 
     let result;
     try {
-      result = await ctx.client.executeTransaction({
+      result = await executeSuiTransaction(ctx.endpoints, {
         transaction: prepared.txBytes,
         signatures: [prepared.signature],
-        include: { effects: true },
+        expectedDigest: prepared.expectedDigest,
       });
     } catch (err) {
       activeAttempt = await ctx.journal.markUncertain(activeAttempt);
@@ -1301,20 +1273,9 @@ async function runDirectPhase(ctx) {
       throw err;
     }
 
-    let terminal;
-    try {
-      terminal = requireCurrentTransactionResult(
-        result,
-        prepared.expectedDigest,
-        `Direct #${i} terminal result`,
-      );
-    } catch (err) {
-      activeAttempt = await ctx.journal.markUncertain(activeAttempt);
-      await appendSubmittedUnverified(ctx, baseFields, err, activeAttempt);
-      throw err;
-    }
-    if (terminal.kind === 'failure') {
-      const actualGasMist = terminal.gasUsed ? gasNetMist(terminal.gasUsed) : null;
+    const terminal = result;
+    if (terminal.outcome === 'failure') {
+      const actualGasMist = gasNetMist(terminal.effects.gasUsed);
       await ctx.journal.resolveSubmittedResult(activeAttempt, result);
       activeAttempt = null;
       await appendBenchmarkRecord(ctx, {
@@ -1327,19 +1288,7 @@ async function runDirectPhase(ctx) {
       });
       throw new Error(`Direct #${i} failed on-chain: ${JSON.stringify(terminal.error)}`);
     }
-    if (!terminal.gasUsed) {
-      const err = new Error(`Direct #${i} succeeded without canonical gasUsed`);
-      activeAttempt = await ctx.journal.markUncertain(activeAttempt);
-      await appendSubmittedUnverified(
-        ctx,
-        { ...baseFields, digest: terminal.digest },
-        err,
-        activeAttempt,
-      );
-      throw err;
-    }
-
-    const actualGasMist = gasNetMist(terminal.gasUsed);
+    const actualGasMist = gasNetMist(terminal.effects.gasUsed);
     await ctx.journal.resolveSubmittedResult(activeAttempt, result);
     activeAttempt = null;
 
@@ -1596,18 +1545,18 @@ async function main() {
 
 async function runWithSession({ cli, fileEnv, keypair, address, grpcBaseUrl, journal }) {
   const client = new SuiGrpcClient({ network: 'testnet', baseUrl: grpcBaseUrl });
-  const chainIdentity = await client.core.getChainIdentifier();
-  if (chainIdentity.chainIdentifier !== SUI_CHAIN_IDENTIFIERS.testnet) {
-    throw new Error(
-      `Sui gRPC endpoint is not testnet: expected ${SUI_CHAIN_IDENTIFIERS.testnet}, got ${chainIdentity.chainIdentifier}`,
-    );
-  }
+  const endpoints = createSuiEndpointSnapshot([client]);
+  await assertSuiNetwork(endpoints, {
+    network: 'testnet',
+    chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+  });
+  const chainIdentity = { chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet };
   console.log(`Wallet: ${address}`);
   console.log(`Sui gRPC: ${redactEndpointUrl(grpcBaseUrl)}`);
   console.log(`Chain identifier: ${chainIdentity.chainIdentifier}`);
   console.log(`Machine journal: ${journal.root}`);
 
-  if (await recoverActiveAttempt(journal, client)) return;
+  if (await recoverActiveAttempt(journal, endpoints)) return;
 
   const apiUrl = normalizeRelayApiUrl(
     requireValue(
@@ -1701,6 +1650,7 @@ async function runWithSession({ cli, fileEnv, keypair, address, grpcBaseUrl, jou
     sdk,
     apiUrl,
     client,
+    endpoints,
     keypair,
     address,
     journal,

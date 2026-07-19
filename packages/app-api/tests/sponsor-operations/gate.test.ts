@@ -1,38 +1,45 @@
 import { describe, expect, it } from 'vitest';
 import type { SponsorSlotLeaseSummary } from '@stelis/contracts';
 import {
-  deriveSponsorAvailabilitySummary,
+  calculateSponsorAvailability,
   evaluateSponsorAvailability,
   type SponsorAvailabilityView,
 } from '../../src/sponsor-operations/gate.js';
+import { createTestSponsorOperationsSettings } from './settingsFixture.js';
+
+const SLOT = `0x${'11'.repeat(32)}`;
+const SETTINGS = createTestSponsorOperationsSettings({
+  sponsorAddresses: [SLOT],
+  warnMist: 5_000_000_000n,
+  refillTargetMist: 10_000_000_000n,
+  runwayTargetMist: 10_000_000_000n,
+});
 
 function view(overrides: Partial<SponsorAvailabilityView> = {}): SponsorAvailabilityView {
   return {
+    settings: SETTINGS,
     slots: [
       {
-        address: '0xslot1',
+        address: SLOT,
         state: 'healthy',
-        balanceMist: '10000000000',
+        addressBalanceMist: '10000000000',
         lastObservedAtMs: 1_700_000_000_000,
         lastError: null,
         writeSeq: 1,
-        pendingRefillDigest: null,
-        refillAttemptedAmountMist: null,
-        refillObservedBalanceMist: null,
-        refillReconciliationResult: null,
         refillOperationId: null,
         refillOperationSequence: null,
         refillOperationState: null,
         refillRequiredSourceBalanceMist: null,
+        observationFresh: true,
       },
     ],
     sponsorRefillAccount: {
-      balanceMist: '20000000000',
+      totalBalanceMist: '20000000000',
       healthy: true,
-      refillsRemaining: 2,
       lastObservedAtMs: 1_700_000_000_000,
       lastError: null,
       writeSeq: 1,
+      observationFresh: true,
     },
     ...overrides,
   };
@@ -48,29 +55,22 @@ function leases(slots: SponsorSlotLeaseSummary['slots']): SponsorSlotLeaseSummar
 }
 
 describe('sponsor operations gate', () => {
-  it('keeps the summary health-based for admin status', () => {
-    expect(deriveSponsorAvailabilitySummary(view())).toEqual({
-      availableSlots: 1,
+  it('uses the same current state and lease snapshot for public status and admission', () => {
+    const current = calculateSponsorAvailability(view(), leases([{ address: SLOT, leased: true }]));
+    expect(current).toMatchObject({
+      healthySlots: 1,
       degradedSlots: 0,
-      gateErrorCode: null,
+      gateErrorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+      slots: [{ state: 'healthy' }],
+      sponsorRefillAccount: { healthy: true },
     });
   });
 
-  it('admits sponsor-path health checks even when the healthy slot is leased', () => {
-    expect(
-      evaluateSponsorAvailability(view(), {
-        slotLeases: leases([{ address: '0xslot1', leased: true }]),
-      }),
-    ).toEqual({ allowed: true });
-  });
-
   it('blocks prepare admission when every healthy sponsor slot is already leased', () => {
-    expect(
-      evaluateSponsorAvailability(view(), {
-        requireFreeSponsorSlot: true,
-        slotLeases: leases([{ address: '0xslot1', leased: true }]),
-      }),
-    ).toEqual({ allowed: false, errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' });
+    expect(evaluateSponsorAvailability(view(), leases([{ address: SLOT, leased: true }]))).toEqual({
+      allowed: false,
+      errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+    });
   });
 
   it('does not admit a slot whose durable refill operation is active even if its balance projection says healthy', () => {
@@ -85,27 +85,18 @@ describe('sponsor operations gate', () => {
         },
       ],
     });
-    expect(evaluateSponsorAvailability(active)).toEqual({
-      allowed: false,
-      errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
-    });
+    expect(evaluateSponsorAvailability(active, leases([{ address: SLOT, leased: false }]))).toEqual(
+      {
+        allowed: false,
+        errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+      },
+    );
   });
 
   it('admits prepare admission when a healthy sponsor slot is free', () => {
-    expect(
-      evaluateSponsorAvailability(view(), {
-        requireFreeSponsorSlot: true,
-        slotLeases: leases([{ address: '0xslot1', leased: false }]),
-      }),
-    ).toEqual({ allowed: true });
-  });
-
-  it('blocks prepare admission when lease data is required but absent', () => {
-    expect(
-      evaluateSponsorAvailability(view(), {
-        requireFreeSponsorSlot: true,
-      }),
-    ).toEqual({ allowed: false, errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' });
+    expect(evaluateSponsorAvailability(view(), leases([{ address: SLOT, leased: false }]))).toEqual(
+      { allowed: true },
+    );
   });
 
   it('keeps sponsor refill account unhealthy precedence when no slot is healthy', () => {
@@ -114,36 +105,52 @@ describe('sponsor operations gate', () => {
         view({
           slots: [
             {
-              address: '0xslot1',
+              address: SLOT,
               state: 'rpc_unreachable',
-              balanceMist: null,
+              addressBalanceMist: null,
               lastObservedAtMs: 1_700_000_000_000,
               lastError: 'rpc down',
               writeSeq: 1,
-              pendingRefillDigest: null,
-              refillAttemptedAmountMist: null,
-              refillObservedBalanceMist: null,
-              refillReconciliationResult: null,
               refillOperationId: null,
               refillOperationSequence: null,
               refillOperationState: null,
               refillRequiredSourceBalanceMist: null,
+              observationFresh: false,
             },
           ],
           sponsorRefillAccount: {
-            balanceMist: null,
+            totalBalanceMist: null,
             healthy: false,
-            refillsRemaining: null,
             lastObservedAtMs: 1_700_000_000_000,
             lastError: 'sponsor refill account rpc down',
             writeSeq: 1,
+            observationFresh: false,
           },
         }),
-        {
-          requireFreeSponsorSlot: true,
-          slotLeases: leases([{ address: '0xslot1', leased: false }]),
-        },
+        leases([{ address: SLOT, leased: false }]),
       ),
     ).toEqual({ allowed: false, errorCode: 'SPONSOR_REFILL_ACCOUNT_UNHEALTHY' });
+  });
+
+  it('rejects a healthy stored slot after its Redis-time observation expires', () => {
+    const base = view();
+    const current = calculateSponsorAvailability(
+      {
+        ...base,
+        slots: [{ ...base.slots[0]!, observationFresh: false }],
+      },
+      leases([{ address: SLOT, leased: false }]),
+    );
+    expect(current.slots[0]?.state).toBe('rpc_unreachable');
+    expect(current.healthySlots).toBe(0);
+    expect(
+      evaluateSponsorAvailability(
+        {
+          ...base,
+          slots: [{ ...base.slots[0]!, observationFresh: false }],
+        },
+        leases([{ address: SLOT, leased: false }]),
+      ),
+    ).toEqual({ allowed: false, errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE' });
   });
 });

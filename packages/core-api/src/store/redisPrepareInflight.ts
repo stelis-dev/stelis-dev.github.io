@@ -47,7 +47,7 @@ const PREPARE_INFLIGHT_TTL_GRACE_MS = 5_000;
  *
  * Uses Redis server time (TIME command) for both prune cutoff and token score,
  * so clock drift between application instances does not affect admission accuracy.
- * Same pattern as RedisPrepareStore Lua scripts.
+ * Uses Redis server time inside the Lua script.
  *
  * Returns:
  *   negative value  — capacity exhausted; absolute value is authoritative ZCARD (e.g. -5 means 5 active)
@@ -62,7 +62,7 @@ local token = ARGV[1]
 local ttlMs = tonumber(ARGV[2])
 local capacity = tonumber(ARGV[3])
 
--- Use Redis server time (same pattern as RedisPrepareStore)
+-- Use Redis server time as the expiry authority.
 local timeResult = redis.call('TIME')
 local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
 

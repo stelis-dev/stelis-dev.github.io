@@ -5,9 +5,31 @@
  * success trace observes both policy hooks and the host ports that acquire,
  * commit, store, and release resources.
  */
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { toHex } from '@mysten/sui/utils';
+import type { AddressBalanceGasTransaction } from '@stelis/core-relay/server';
+
+const { testGasTransactions } = vi.hoisted(() => ({
+  testGasTransactions: new WeakMap<object, { bytes: Uint8Array; txBytesHash: string }>(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@stelis/core-relay/server')>();
+  return {
+    ...original,
+    getAddressBalanceGasTransactionBytes: (transaction: object) => {
+      const contents = testGasTransactions.get(transaction);
+      if (!contents) throw new TypeError('unknown test gas transaction');
+      return contents.bytes.slice();
+    },
+    getAddressBalanceGasTransactionTxBytesHash: (transaction: object) => {
+      const contents = testGasTransactions.get(transaction);
+      if (!contents) throw new TypeError('unknown test gas transaction');
+      return contents.txBytesHash;
+    },
+  };
+});
 import {
   runPrepareStateMachine,
   RunnerHostMisconfiguredError,
@@ -21,20 +43,27 @@ import type {
   PolicyHooks,
   SponsoredExecutionPolicy,
 } from '../src/session/sponsoredExecution/executionPolicy.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import { MemorySponsoredExecutionStore } from '../src/store/memorySponsoredExecutionStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
+import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { SponsorPool } from '../src/context.js';
 
 const SPONSOR_KP = Ed25519Keypair.generate();
 const TEST_HMAC_SECRET = 'unit-8-prepare-runner-test-hmac-secret';
 const TEST_SENDER = `0x${'be'.repeat(32)}`;
-const TEST_PROMO = 'unit-8-promotion';
+const TEST_PROMO = '00000000-0000-4000-8000-000000000208';
 const TEST_USER = 'unit-8-user';
 const TEST_CLIENT_IP = '127.0.0.1';
+const TEST_TX_BYTES = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
+const TEST_TX_BYTES_HASH = 'a'.repeat(64);
+const TEST_GAS_TRANSACTION = Object.freeze({}) as AddressBalanceGasTransaction;
+testGasTransactions.set(TEST_GAS_TRANSACTION, {
+  bytes: TEST_TX_BYTES,
+  txBytesHash: TEST_TX_BYTES_HASH,
+});
 const TEST_BUILD_RESULT: GasBoundBuildResult = {
-  txBytes: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]),
-  txBytesHash: 'a'.repeat(64),
+  addressBalanceGasTransaction: TEST_GAS_TRANSACTION,
   measuredGasMist: 1_400_000n,
 };
 
@@ -62,33 +91,20 @@ function makeMockHooks(trace: Trace, options: PolicyOptions = {}): PolicyHooks<'
   return {
     Intent: hook('Intent'),
     RequestValidation: hook('RequestValidation'),
-    InflightAdmission: hook('InflightAdmission'),
     ChainSnapshot: () => {
       recordHook(trace, 'ChainSnapshot', options.failAtHook);
       return {};
     },
-    ExecutionPolicySelected: hook('ExecutionPolicySelected'),
-    SlotFreePlan: hook('SlotFreePlan'),
-    SponsorSlotReservationAcquired: hook('SponsorSlotReservationAcquired'),
-    RouteReservationBeforeBuild: hook('RouteReservationBeforeBuild'),
     GasBoundBuild: () => {
       recordHook(trace, 'GasBoundBuild', options.failAtHook);
       return buildResult;
     },
-    RouteReservationAfterBuild: hook('RouteReservationAfterBuild'),
-    SelfCheck: hook('SelfCheck'),
-    SponsorLeaseCommitted: hook('SponsorLeaseCommitted'),
     DecodeSponsorSubmission: () => {},
     UserSignatureValidation: () => {},
-    Consume: () => {},
-    SharedPostconsumeChecks: () => ({}),
-    PolicyPostconsumeChecks: () => ({}),
+    SharedSponsorChecks: () => ({}),
+    PolicySponsorChecks: () => ({}),
     Preflight: () => {},
-    PolicyApproval: () => {},
-    SponsorSign: () => {},
-    Submit: () => {},
     ClassifySponsorResult: () => {},
-    Release: () => {},
   };
 }
 
@@ -152,27 +168,33 @@ function makeAllReservationPolicy(trace: Trace): SponsoredExecutionPolicy {
 interface HostBuild {
   readonly host: PrepareStateMachineHost;
   readonly inflight: MemoryPrepareInflight;
-  readonly prepareStore: MemoryPrepareStore;
+  readonly sponsoredExecutionStore: MemorySponsoredExecutionStore;
   readonly ledger: MemoryPromotionExecutionLedger;
+  readonly promotionStore: MemoryPromotionStore;
   readonly sponsorPool: SponsorPool;
   readonly observedReceiptIds: {
     readonly checkout: string[];
-    readonly commit: string[];
     readonly nonce: string[];
     readonly store: string[];
   };
 }
 
-function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = {}): HostBuild {
+function makeHost(
+  trace: Trace = [],
+  options: { readonly commitPreparedReceiptError?: Error } = {},
+): HostBuild {
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
-  const ledger = new MemoryPromotionExecutionLedger();
+  class FixedPromotionStore extends MemoryPromotionStore {
+    protected override generateId(): string {
+      return TEST_PROMO;
+    }
+  }
+  const promotionStore = new FixedPromotionStore();
+  const ledger = new MemoryPromotionExecutionLedger(promotionStore);
+  const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, ledger);
   const inflight = new MemoryPrepareInflight(8);
   const observedReceiptIds = {
     checkout: [] as string[],
-    commit: [] as string[],
     nonce: [] as string[],
     store: [] as string[],
   };
@@ -196,33 +218,28 @@ function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = 
     observedReceiptIds.checkout.push(receiptId);
     return originalCheckout(receiptId);
   };
-  const originalCommit = sponsorPool.commit.bind(sponsorPool);
-  sponsorPool.commit = async (sponsorAddress, receiptId, txBytesHash) => {
-    trace.push('port:sponsor.commit');
-    observedReceiptIds.commit.push(receiptId);
-    await originalCommit(sponsorAddress, receiptId, txBytesHash);
-  };
   const originalCheckin = sponsorPool.checkin.bind(sponsorPool);
-  sponsorPool.checkin = async (sponsorAddress, receiptId, txBytesHash) => {
+  sponsorPool.checkin = async (sponsorAddress, receiptId) => {
     trace.push('port:sponsor.checkin');
-    await originalCheckin(sponsorAddress, receiptId, txBytesHash);
+    await originalCheckin(sponsorAddress, receiptId);
   };
 
-  const originalStore = prepareStore.store.bind(prepareStore);
-  prepareStore.store = async (draft) => {
-    trace.push('port:store');
+  const originalStore = sponsoredExecutionStore.commitPreparedReceipt.bind(sponsoredExecutionStore);
+  sponsoredExecutionStore.commitPreparedReceipt = async (draft) => {
+    trace.push('port:commitPreparedReceipt');
     observedReceiptIds.store.push(draft.receiptId);
-    if (options.storeError) throw options.storeError;
+    if (options.commitPreparedReceiptError) throw options.commitPreparedReceiptError;
     return originalStore(draft);
   };
-  const originalReserveNonce = prepareStore.reserveNonce.bind(prepareStore);
-  prepareStore.reserveNonce = async (senderAddress, onchainLastNonce, reservationId) => {
+  const originalReserveNonce = sponsoredExecutionStore.reserveNonce.bind(sponsoredExecutionStore);
+  sponsoredExecutionStore.reserveNonce = async (senderAddress, onchainLastNonce, reservationId) => {
     trace.push('port:nonce.reserve');
     observedReceiptIds.nonce.push(reservationId);
     return originalReserveNonce(senderAddress, onchainLastNonce, reservationId);
   };
-  const originalReleaseReservation = prepareStore.releaseReservation.bind(prepareStore);
-  prepareStore.releaseReservation = async (reservationId, senderAddress) => {
+  const originalReleaseReservation =
+    sponsoredExecutionStore.releaseNonceReservation.bind(sponsoredExecutionStore);
+  sponsoredExecutionStore.releaseNonceReservation = async (reservationId, senderAddress) => {
     trace.push('port:nonce.release');
     await originalReleaseReservation(reservationId, senderAddress);
   };
@@ -242,12 +259,13 @@ function makeHost(trace: Trace = [], options: { readonly storeError?: Error } = 
     host: {
       inflightLimiter: inflight,
       sponsorPool,
-      prepareStore,
+      sponsoredExecutionStore,
       executionLedger: ledger,
     },
     inflight,
-    prepareStore,
+    sponsoredExecutionStore,
     ledger,
+    promotionStore,
     sponsorPool,
     observedReceiptIds,
   };
@@ -260,6 +278,9 @@ function makeGenericRequest(
   return {
     senderAddress: TEST_SENDER,
     clientIp: TEST_CLIENT_IP,
+    assertSponsorAvailable: async () => {
+      trace.push('request:assertSponsorAvailable');
+    },
     preparedDraftFields: () => {
       trace.push('request:preparedDraftFields');
       return { executionPathKey: 'credit', orderId: null };
@@ -284,14 +305,22 @@ async function makePromotionRequest(
     readonly projectionError?: Error;
   } = {},
 ): Promise<PrepareStateMachineRequest<TestPrepareResponse>> {
-  await host.ledger.claim(TEST_PROMO, TEST_USER, {
+  const promotion = await host.promotionStore.create({
+    type: 'gas_sponsorship',
+    displayName: 'Prepare runner promotion',
     maxParticipants: 16,
     perUserGasAllowanceMist: options.allowanceMist ?? '100000000',
+  });
+  await host.promotionStore.transitionStatus(promotion.promotionId, 'active');
+  await host.ledger.claim(TEST_PROMO, TEST_USER, {
     useUntilAt: null,
   });
   return {
     senderAddress: TEST_SENDER,
     clientIp: TEST_CLIENT_IP,
+    assertSponsorAvailable: async () => {
+      trace.push('request:assertSponsorAvailable');
+    },
     ledgerAcquireParams: { promotionId: TEST_PROMO, userId: TEST_USER },
     preparedDraftFields: () => {
       trace.push('request:preparedDraftFields');
@@ -323,22 +352,15 @@ describe('runPrepareStateMachine procedural traces', () => {
     expect(trace).toEqual([
       'hook:Intent',
       'hook:RequestValidation',
+      'request:assertSponsorAvailable',
       'port:inflight.acquire',
-      'hook:InflightAdmission',
       'hook:ChainSnapshot',
-      'hook:ExecutionPolicySelected',
-      'hook:SlotFreePlan',
       'port:sponsor.checkout',
-      'hook:SponsorSlotReservationAcquired',
       'port:nonce.reserve',
-      'hook:RouteReservationBeforeBuild',
       'hook:GasBoundBuild',
-      'hook:SelfCheck',
       'request:preparedDraftFields',
       'request:projectResponse',
-      'port:sponsor.commit',
-      'hook:SponsorLeaseCommitted',
-      'port:store',
+      'port:commitPreparedReceipt',
       'port:inflight.release',
     ]);
   });
@@ -353,28 +375,22 @@ describe('runPrepareStateMachine procedural traces', () => {
     expect(trace).toEqual([
       'hook:Intent',
       'hook:RequestValidation',
+      'request:assertSponsorAvailable',
       'port:inflight.acquire',
-      'hook:InflightAdmission',
       'hook:ChainSnapshot',
-      'hook:ExecutionPolicySelected',
-      'hook:SlotFreePlan',
       'port:sponsor.checkout',
-      'hook:SponsorSlotReservationAcquired',
       'hook:GasBoundBuild',
       'port:ledger.reserve',
-      'hook:RouteReservationAfterBuild',
-      'hook:SelfCheck',
       'request:preparedDraftFields',
       'request:projectResponse',
-      'port:sponsor.commit',
-      'hook:SponsorLeaseCommitted',
-      'port:store',
+      'port:commitPreparedReceipt',
       'port:inflight.release',
     ]);
-    await expect(host.prepareStore.peek(response.receiptId)).resolves.toMatchObject({
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(response.receiptId),
+    ).resolves.toMatchObject({
       mode: 'promotion',
       receiptId: response.receiptId,
-      nonce: 0n,
       promotionId: TEST_PROMO,
       userId: TEST_USER,
       reservedGasMist: TEST_BUILD_RESULT.measuredGasMist,
@@ -401,13 +417,14 @@ describe('runPrepareStateMachine commit boundary', () => {
     expect(response.draftReceiptId).toBe(response.receiptId);
     expect(host.observedReceiptIds).toEqual({
       checkout: [response.receiptId],
-      commit: [response.receiptId],
       nonce: [response.receiptId],
       store: [response.receiptId],
     });
-    await expect(host.prepareStore.peek(response.receiptId)).resolves.toMatchObject({
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(response.receiptId),
+    ).resolves.toMatchObject({
       receiptId: response.receiptId,
-      txBytesHash: TEST_BUILD_RESULT.txBytesHash,
+      txBytesHash: TEST_TX_BYTES_HASH,
     });
     expect(host.inflight.inflight).toBe(0);
   });
@@ -423,7 +440,7 @@ describe('runPrepareStateMachine commit boundary', () => {
       runPrepareStateMachine(host.host, request, makeAllReservationPolicy(trace)),
     ).rejects.toThrow('response projection failed');
 
-    expect(trace).not.toContain('port:store');
+    expect(trace).not.toContain('port:commitPreparedReceipt');
     expect(trace.slice(-5)).toEqual([
       'request:projectResponse',
       'port:ledger.release',
@@ -431,16 +448,18 @@ describe('runPrepareStateMachine commit boundary', () => {
       'port:sponsor.checkin',
       'port:inflight.release',
     ]);
-    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(host.observedReceiptIds.checkout[0]!),
+    ).resolves.toBeNull();
     await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
       activeReservationReceiptId: null,
       activeReservationAmountMist: null,
     });
     expect(host.inflight.inflight).toBe(0);
-    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-projection')).resolves.toBe(
-      1n,
-    );
-    await host.prepareStore.releaseReservation('after-projection', TEST_SENDER);
+    await expect(
+      host.sponsoredExecutionStore.reserveNonce(TEST_SENDER, 0n, 'after-projection'),
+    ).resolves.toBe(1n);
+    await host.sponsoredExecutionStore.releaseNonceReservation('after-projection', TEST_SENDER);
     await expect(host.sponsorPool.checkout(alternateReceipt(0xb1))).resolves.not.toBeNull();
   });
 
@@ -468,36 +487,46 @@ describe('runPrepareStateMachine commit boundary', () => {
     ).rejects.toBeInstanceOf(TypeError);
 
     expect(trace).not.toContain('port:sponsor.commit');
-    expect(trace).not.toContain('port:store');
-    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
-    await expect(host.prepareStore.peek(alternateReceipt(0xc1))).resolves.toBeNull();
+    expect(trace).not.toContain('port:commitPreparedReceipt');
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(host.observedReceiptIds.checkout[0]!),
+    ).resolves.toBeNull();
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(alternateReceipt(0xc1)),
+    ).resolves.toBeNull();
     expect(host.inflight.inflight).toBe(0);
   });
 
-  test('store failure reverse-releases every acquired handle after the committed lease', async () => {
+  test('prepared-receipt commit failure reverse-releases every acquired handle', async () => {
     const trace: Trace = [];
-    const host = makeHost(trace, { storeError: new Error('prepare store failed') });
+    const host = makeHost(trace, {
+      commitPreparedReceiptError: new Error('prepared receipt commit failed'),
+    });
     const request = await makePromotionRequest(host, trace);
 
     await expect(
       runPrepareStateMachine(host.host, request, makeAllReservationPolicy(trace)),
-    ).rejects.toThrow('prepare store failed');
+    ).rejects.toThrow('prepared receipt commit failed');
 
     expect(trace.slice(-5)).toEqual([
-      'port:store',
+      'port:commitPreparedReceipt',
       'port:ledger.release',
       'port:nonce.release',
       'port:sponsor.checkin',
       'port:inflight.release',
     ]);
-    await expect(host.prepareStore.peek(host.observedReceiptIds.store[0]!)).resolves.toBeNull();
+    await expect(
+      host.sponsoredExecutionStore.readPreparedReceipt(host.observedReceiptIds.store[0]!),
+    ).resolves.toBeNull();
     await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
       activeReservationReceiptId: null,
       activeReservationAmountMist: null,
     });
     expect(host.inflight.inflight).toBe(0);
-    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-store')).resolves.toBe(1n);
-    await host.prepareStore.releaseReservation('after-store', TEST_SENDER);
+    await expect(
+      host.sponsoredExecutionStore.reserveNonce(TEST_SENDER, 0n, 'after-store'),
+    ).resolves.toBe(1n);
+    await host.sponsoredExecutionStore.releaseNonceReservation('after-store', TEST_SENDER);
     await expect(host.sponsorPool.checkout(alternateReceipt(0xb2))).resolves.not.toBeNull();
   });
 });
@@ -515,29 +544,14 @@ describe('runPrepareStateMachine cleanup and admission failures', () => {
     ).rejects.toThrow('policy fault at GasBoundBuild');
 
     expect(host.inflight.inflight).toBe(0);
-    await expect(host.prepareStore.peek(host.observedReceiptIds.checkout[0]!)).resolves.toBeNull();
-    await expect(host.prepareStore.reserveNonce(TEST_SENDER, 0n, 'after-build')).resolves.toBe(1n);
-    await host.prepareStore.releaseReservation('after-build', TEST_SENDER);
-    await expect(host.sponsorPool.checkout(alternateReceipt(0xbc))).resolves.not.toBeNull();
-  });
-
-  test('promotion SelfCheck failure releases its ledger reservation', async () => {
-    const host = makeHost();
-    const request = await makePromotionRequest(host);
-
     await expect(
-      runPrepareStateMachine(
-        host.host,
-        request,
-        makePromotionPolicy([], { failAtHook: 'SelfCheck' }),
-      ),
-    ).rejects.toThrow('policy fault at SelfCheck');
-
-    await expect(host.ledger.getEntitlement(TEST_PROMO, TEST_USER)).resolves.toMatchObject({
-      activeReservationReceiptId: null,
-      activeReservationAmountMist: null,
-    });
-    expect(host.inflight.inflight).toBe(0);
+      host.sponsoredExecutionStore.readPreparedReceipt(host.observedReceiptIds.checkout[0]!),
+    ).resolves.toBeNull();
+    await expect(
+      host.sponsoredExecutionStore.reserveNonce(TEST_SENDER, 0n, 'after-build'),
+    ).resolves.toBe(1n);
+    await host.sponsoredExecutionStore.releaseNonceReservation('after-build', TEST_SENDER);
+    await expect(host.sponsorPool.checkout(alternateReceipt(0xbc))).resolves.not.toBeNull();
   });
 
   test('an early ChainSnapshot failure still releases inflight admission', async () => {
@@ -569,7 +583,7 @@ describe('runPrepareStateMachine cleanup and admission failures', () => {
     const hostWithoutLedger: PrepareStateMachineHost = {
       inflightLimiter: host.host.inflightLimiter,
       sponsorPool: host.host.sponsorPool,
-      prepareStore: host.host.prepareStore,
+      sponsoredExecutionStore: host.host.sponsoredExecutionStore,
     };
 
     await expect(

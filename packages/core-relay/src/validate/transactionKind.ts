@@ -4,6 +4,7 @@ import { convertSdkCommands } from '../convert.js';
 import type { HostValidationEnv, ValidationResult } from '../types.js';
 import { fail, ok } from '../types.js';
 import { validatePtbStructure, validateUserCommands } from './static.js';
+import { SuiTransactionShapeError } from '../sui/suiTransactionShape.js';
 
 /**
  * Validate a user-supplied generic TransactionKind before Stelis appends settlement.
@@ -19,18 +20,20 @@ export function validateGenericUserTransactionKind(
 ): ValidationResult {
   const data = tx.getData();
 
-  if (containsSponsorWithdrawal(tx)) {
-    return fail(
-      'P1_SPONSOR_WITHDRAWAL_FORBIDDEN',
-      'User TX contains FundsWithdrawal(Sponsor) — rejected to protect sponsor funds',
-    );
-  }
+  try {
+    if (containsSponsorWithdrawal(tx)) {
+      return fail(
+        'P1_SPONSOR_WITHDRAWAL_FORBIDDEN',
+        'User TX contains FundsWithdrawal(Sponsor) — rejected to protect sponsor funds',
+      );
+    }
 
-  const withdrawalResult = extractPrefixWithdrawals(tx, settlementTokenType);
-  if (withdrawalResult.unaccountable) {
+    extractPrefixWithdrawals(tx, settlementTokenType);
+  } catch (error) {
+    if (!(error instanceof SuiTransactionShapeError)) throw error;
     return fail(
       'UNACCOUNTABLE_WITHDRAWAL',
-      'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
+      'Transaction contains an input outside the exact current Sui transaction shape.',
     );
   }
 

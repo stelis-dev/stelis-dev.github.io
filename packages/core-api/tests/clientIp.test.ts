@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalizeIpAddress,
   ClientIpResolutionError,
   parseTrustedProxyHops,
   resolveClientIp,
@@ -15,6 +16,19 @@ function headers(xForwardedFor?: string) {
 }
 
 describe('clientIp helper', () => {
+  it('uses one canonical IPv6 identity without socket-local zone identifiers', () => {
+    expect(canonicalizeIpAddress('2001:0DB8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    expect(canonicalizeIpAddress('fe80:0:0:0:0:0:0:1%lo0')).toBe('fe80::1');
+    expect(canonicalizeIpAddress('fe80:0:0:0:0:0:0:1%en0')).toBe('fe80::1');
+    expect(canonicalizeIpAddress(`fe80::1%${'z'.repeat(400)}`)).toBe('fe80::1');
+    expect(
+      resolveClientIp(headers(), {
+        directIp: 'fe80:0:0:0:0:0:0:1%lo0',
+        trustedProxyHops: 0,
+      }),
+    ).toBe('fe80::1');
+  });
+
   it('uses the direct IP when no trusted proxy hops are configured', () => {
     expect(
       resolveClientIp(headers('198.51.100.10, 10.0.0.5'), {
@@ -36,6 +50,12 @@ describe('clientIp helper', () => {
         trustedProxyHops: 2,
       }),
     ).toBe('203.0.113.10');
+
+    expect(
+      resolveClientIp(headers('fe80:0:0:0:0:0:0:1%proxy-zone, 10.0.0.5'), {
+        trustedProxyHops: 1,
+      }),
+    ).toBe('fe80::1');
   });
 
   it('fails closed when no direct socket IP is available', () => {

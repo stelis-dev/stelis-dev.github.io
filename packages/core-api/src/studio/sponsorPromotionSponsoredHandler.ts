@@ -2,7 +2,7 @@
  * sponsorPromotionSponsoredHandler — public Studio sponsor adapter over the
  * SponsoredExecution sponsor runner.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { ChainBoundSuiEndpointSnapshot } from '@stelis/core-relay';
 import type { SponsorResultCallback } from '../handlers/sponsorResult.js';
 import type { GasUsedFields } from '../session/sessionTypes.js';
 import {
@@ -12,19 +12,26 @@ import {
 } from '../session/sessionPrimitives.js';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
-import type { PromotionUsageStoreAdapter } from './promotionUsageStore.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../store/sponsoredExecutionStore.js';
 import type { AbuseBlockerAdapter } from '../store/abuseBlockTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
-import type { PromotionSponsorErrorCode, SponsorFailureSubcode } from '@stelis/contracts';
+import type {
+  PromotionSponsorErrorCode,
+  PromotionSponsorRequest,
+  PromotionSponsorResponse,
+  SponsorFailureSubcode,
+} from '@stelis/contracts';
 import {
   createStudioExecutionPolicy,
   createStudioSignAndSubmitPort,
-  createStudioSponsorConsumeAdapter,
+  createStudioSponsorReceiptPolicy,
+  buildStudioExecutionRecoveryContext,
+  buildStudioSponsorResultMetadata,
   projectStudioSponsorResult,
 } from '../session/sponsoredExecution/studioExecutionPolicy.js';
 import { runSponsorStateMachine } from '../session/sponsoredExecution/sponsorRunner.js';
+import { readAdmittedClientIp, type AdmittedClientIp } from '../abuseBlocking.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -32,8 +39,8 @@ import { runSponsorStateMachine } from '../session/sponsoredExecution/sponsorRun
 
 /** Dependencies injected by the host (app-api context). */
 export interface PromotionSponsorContext {
-  /** Sui gRPC client for preflight simulation + TX submission. */
-  sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for preflight simulation + TX submission. */
+  sui: ChainBoundSuiEndpointSnapshot;
   /**
    * Trusted Stelis package ID for the active network.
    *
@@ -50,42 +57,26 @@ export interface PromotionSponsorContext {
   executionLedger: PromotionExecutionLedger;
   /** Sponsor pool — sign TX + checkin. */
   sponsorPool: SponsorPoolAdapter;
-  /** Prepare store — consume receipt. */
-  prepareStore: PrepareStoreAdapter;
+  /** Fresh availability check for the sponsor already assigned to the receipt. */
+  isSponsorAddressAvailable(sponsorAddress: string): Promise<boolean>;
+  /** Receipt store — owns prepared, executing, and final state. */
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /** Abuse blocker — for recording sponsor failures. */
   abuseBlocker: AbuseBlockerAdapter;
-  /** Usage store — record completed sponsor events. */
-  usageStore?: PromotionUsageStoreAdapter | null;
   /** Canonical STUDIO_ALLOWED_TARGETS entries for Host-level MoveCall enforcement. */
   globalAllowedTargets: ReadonlySet<string>;
-  /** Optional host-provided sponsor result callback. */
-  onSponsorResult?: SponsorResultCallback;
+  /** Host-provided sponsor result callback. */
+  onSponsorResult: SponsorResultCallback;
 }
 
 /** Request parameters for promotion sponsor. */
-export interface PromotionSponsorParams {
+interface PromotionSponsorParams extends PromotionSponsorRequest {
   /** Promotion ID (from path parameter). */
   promotionId: string;
-  /** Receipt ID from promotion prepare response. */
-  receiptId: string;
-  /** Full transaction bytes (base64). */
-  txBytes: string;
-  /** User's signature (base64). */
-  userSignature: string;
   /** Pre-verified developer identity (route owns crypto verification). */
   verifiedIdentity: VerifiedDeveloperIdentity;
-  /** Client IP for abuse tracking. */
-  clientIp: string;
-}
-
-/** Successful promotion sponsor result. */
-export interface PromotionSponsorResult {
-  /** Transaction digest. */
-  digest: string;
-  /** Transaction effects. */
-  effects: unknown;
-  /** Actual gas consumed (MIST). */
-  actualGasMist: string;
+  /** Opaque proof of successful Host IP admission. */
+  clientIp: AdmittedClientIp;
 }
 
 // ─────────────────────────────────────────────
@@ -97,7 +88,7 @@ export class PromotionSponsorError extends Error {
     message: string,
     public readonly code: PromotionSponsorErrorCode,
     public readonly meta: {
-      readonly gasUsed?: GasUsedFields | null;
+      readonly gasUsed?: GasUsedFields;
       readonly digest?: string;
       readonly subcode?: SponsorFailureSubcode;
     } = {},
@@ -114,7 +105,8 @@ export class PromotionSponsorError extends Error {
 export async function handlePromotionSponsor(
   ctx: PromotionSponsorContext,
   params: PromotionSponsorParams,
-): Promise<PromotionSponsorResult> {
+): Promise<PromotionSponsorResponse> {
+  const clientIp = readAdmittedClientIp(params.clientIp);
   let txBytes: Uint8Array;
   try {
     txBytes = decodeTxBytes(params.txBytes);
@@ -128,7 +120,7 @@ export async function handlePromotionSponsor(
   const options = {
     context: ctx,
     sponsor: {
-      params,
+      params: { ...params, clientIp },
       txBytes,
       userSignature: params.userSignature,
       errors: {
@@ -136,7 +128,7 @@ export async function handlePromotionSponsor(
           message: string,
           code: PromotionSponsorErrorCode,
           meta?: {
-            readonly gasUsed?: GasUsedFields | null;
+            readonly gasUsed?: GasUsedFields;
             readonly digest?: string;
             readonly subcode?: SponsorFailureSubcode;
           },
@@ -149,24 +141,32 @@ export async function handlePromotionSponsor(
   try {
     return await runSponsorStateMachine(
       {
-        prepareStore: ctx.prepareStore,
-        sponsorPool: ctx.sponsorPool,
-        executionLedger: ctx.executionLedger,
+        store: ctx.sponsoredExecutionStore,
         signAndSubmit: createStudioSignAndSubmitPort(options, state),
+        endpointCount: ctx.sui.endpointCount,
+        onSponsorResult: ctx.onSponsorResult,
+        isSponsorAddressAvailable: ctx.isSponsorAddressAvailable,
       },
       {
         hookContext: {
           receiptId: params.receiptId,
-          clientIp: params.clientIp,
+          clientIp,
         },
         txBytes,
         userSignature: params.userSignature,
+        buildRecoveryContext: () => buildStudioExecutionRecoveryContext(state),
+        buildResultMetadata: (stage) => buildStudioSponsorResultMetadata(state, stage),
+        stateChangedError: () =>
+          new PromotionSponsorError(
+            'Prepared receipt state changed - retry promotion prepare',
+            'REPREPARE_REQUIRED',
+          ),
         projectResult: () => projectStudioSponsorResult(options, state),
       },
       policy,
-      createStudioSponsorConsumeAdapter({
+      createStudioSponsorReceiptPolicy({
         context: ctx,
-        params,
+        params: options.sponsor.params,
         state,
         errors: options.sponsor.errors,
       }),

@@ -20,7 +20,7 @@ function makeForm(overrides: Partial<CreateFormState> = {}): CreateFormState {
     description: '',
     maxParticipants: '100',
     perUserGasAllowanceMist: '1000000',
-    postClaimUseWindowDays: '0',
+    postClaimUseWindowMs: '0',
     claimDeadlineAt: '',
     ...overrides,
   };
@@ -68,11 +68,11 @@ describe('validatePromotionForm — accept', () => {
     expect(result.payload.postClaimUseWindowMs).toBe(0);
   });
 
-  it('accepts postClaimUseWindowDays > 0 with safe-integer product', () => {
-    const result = validatePromotionForm(makeForm({ postClaimUseWindowDays: '7' }));
+  it('accepts an exact millisecond window', () => {
+    const result = validatePromotionForm(makeForm({ postClaimUseWindowMs: '604800001' }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.payload.postClaimUseWindowMs).toBe(7 * 86_400_000);
+    expect(result.payload.postClaimUseWindowMs).toBe(604800001);
   });
 
   it('accepts claimDeadlineAt in ISO form', () => {
@@ -139,29 +139,21 @@ describe('validatePromotionForm — reject', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('rejects decimal postClaimUseWindowDays', () => {
-    const result = validatePromotionForm(makeForm({ postClaimUseWindowDays: '3.5' }));
+  it('rejects decimal postClaimUseWindowMs', () => {
+    const result = validatePromotionForm(makeForm({ postClaimUseWindowMs: '3.5' }));
     expect(result.ok).toBe(false);
   });
 
-  it('rejects negative postClaimUseWindowDays', () => {
-    const result = validatePromotionForm(makeForm({ postClaimUseWindowDays: '-1' }));
+  it('rejects negative postClaimUseWindowMs', () => {
+    const result = validatePromotionForm(makeForm({ postClaimUseWindowMs: '-1' }));
     expect(result.ok).toBe(false);
   });
 
-  it('rejects unsafe-integer postClaimUseWindowDays (rounded on Number conversion)', () => {
-    const result = validatePromotionForm(makeForm({ postClaimUseWindowDays: '9007199254740993' }));
+  it('rejects unsafe-integer postClaimUseWindowMs (rounded on Number conversion)', () => {
+    const result = validatePromotionForm(makeForm({ postClaimUseWindowMs: '9007199254740993' }));
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.message).toMatch(/safe integer/i);
-  });
-
-  it('rejects postClaimUseWindowDays that overflows when multiplied by 86_400_000', () => {
-    // Safe as an integer by itself, but 200_000_000 * 86_400_000 = 1.728e16 > MAX_SAFE_INTEGER.
-    const result = validatePromotionForm(makeForm({ postClaimUseWindowDays: '200000000' }));
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.message).toMatch(/overflow|safe integer/i);
   });
 
   it('rejects malformed claimDeadlineAt', () => {

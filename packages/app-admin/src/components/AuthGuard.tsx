@@ -7,11 +7,12 @@
  */
 import { useEffect, useState, useCallback } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { getSession, type Session, ApiError } from '../api/client';
+import { getSession, ApiError } from '../api/client';
+import type { AdminSessionResponse } from '@stelis/contracts';
 
 export function AuthGuard() {
   const navigate = useNavigate();
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<AdminSessionResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   const checkSession = useCallback(async () => {
@@ -58,6 +59,6 @@ export function AuthGuard() {
 }
 
 export type AuthContext = {
-  session: Session;
+  session: AdminSessionResponse;
   refreshSession: () => Promise<void>;
 };

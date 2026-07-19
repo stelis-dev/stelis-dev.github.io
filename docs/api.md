@@ -2,27 +2,50 @@
 
 This document lists the public relay and Studio routes, plus the mounted auth and admin route groups currently exposed by `@stelis/app-api`.
 
-The schema file [`schemas/relay-api.schema.json`](./schemas/relay-api.schema.json) covers the relay and promotion request/response shapes that are locked by tests.
+The runtime parsers exported by `@stelis/contracts` are the executable schema
+for Relay API, Studio, Auth, and Admin request and response bodies. Host
+producers and current clients consume those parsers; there is no parallel
+hand-maintained JSON Schema.
 
 ## Route Groups
 
-| Prefix      | Purpose                      |
-| ----------- | ---------------------------- |
-| `/health`   | Host health probe            |
-| `/relay/*`  | Public Relay API flow        |
-| `/studio/*` | Developer-JWT promotion flow |
-| `/auth/*`   | Admin session authentication |
-| `/api/*`    | Operator admin routes        |
+| Prefix      | Purpose                      | Available mode     |
+| ----------- | ---------------------------- | ------------------ |
+| `/health`   | Host health probe            | Both modes         |
+| `/relay/*`  | Public Relay API flow        | Both modes         |
+| `/studio/*` | Developer-JWT promotion flow | `relay_and_studio` |
+| `/auth/*`   | Admin session authentication | `relay_and_studio` |
+| `/api/*`    | Operator admin routes        | `relay_and_studio` |
 
 ## GET /health
 
 Returns Host health:
 
 ```json
-{ "status": "ok", "mode": "generic" }
+{ "status": "ok", "mode": "relay_only" }
 ```
 
-`mode` is `generic` or `dual`.
+`mode` is exactly `relay_only` or `relay_and_studio`.
+
+## Request admission
+
+Relay, Studio, Auth, and Admin routes apply the checks relevant to that route
+in this order: Host operating mode, client-IP admission, Origin and
+Content-Type admission, bounded body reading, credential verification,
+authenticated-subject admission, then route-specific work. A failed earlier
+check does not start a later check.
+
+Requests with a JSON body require `Content-Type: application/json`; valid
+media-type parameters such as `charset=utf-8` are accepted. Missing, different,
+or malformed media types are rejected. Admin mutations and the Auth mutations
+that establish, renew, or end an Admin session require an `Origin` that exactly
+matches one configured in `CORS_ORIGINS`.
+
+In `relay_only` mode, Studio routes return `STUDIO_UNAVAILABLE` and Auth/Admin
+routes return `ADMIN_UNAVAILABLE` without performing credential or domain
+work. CORS preflight for the public Studio surface is the transport-level
+exception: it succeeds in both modes so a browser can issue the actual request
+and read the typed `STUDIO_UNAVAILABLE` response.
 
 ## GET /relay/status
 
@@ -96,7 +119,7 @@ The user-supplied `User TransactionKind` must satisfy these rules:
 - A malformed same-token `FundsWithdrawal(Sender)` is rejected with `UNACCOUNTABLE_WITHDRAWAL`.
 - A bounded same-token `FundsWithdrawal(Sender)` is allowed and is subtracted from address-balance funding.
 
-Funding resolution considers both coin object provenance and `FundsWithdrawal(Sender)` address-balance accounting. The current funding source outcomes are `coin_object`, `address_balance`, and `mixed_topup`. The current funding failure codes are `INSUFFICIENT_BALANCE` and `PAYMENT_COIN_CONFLICT`.
+Funding resolution considers both Coin object provenance and `FundsWithdrawal(Sender)` address-balance accounting. The Host reads at most 50 settlement-token Coin objects for one prepare operation and never treats a partial read as wallet exhaustion. The current funding source outcomes are `coin_object`, `address_balance`, and `mixed_topup`. The current funding failure codes are `INSUFFICIENT_BALANCE`, `PAYMENT_COIN_CONFLICT`, and `PAYMENT_COIN_LIMIT_EXCEEDED`. `PAYMENT_COIN_CONFLICT` means the transaction's settlement-token payment could not be resolved safely; it is not proof of insufficient balance. `PAYMENT_COIN_LIMIT_EXCEEDED` is an HTTP 422 response that instructs the caller to consolidate settlement-token Coin objects and retry; it is also not an insufficient-balance result.
 
 The response includes transaction bytes for user signing and a `receiptId` for sponsor submission.
 The response cost fields include `executionCostClaim`, which is the gas-recovery claim embedded in the settlement arguments. It is not the full settlement payout; on-chain settlement pays `executionCostClaim + quotedHostFeeMist` to `settlementPayoutRecipient`.
@@ -141,32 +164,32 @@ Minimal JSON body:
 {
   "txBytes": "<base64 transaction bytes returned by prepare>",
   "userSignature": "<transaction signature>",
-  "receiptId": "0x..."
+  "receiptId": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
 
 The route validates the prepared record, checks the transaction again, adds the sponsor signature, and submits.
 
-The submitted `txBytes` must match the prepared record bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, consumes the prepared record once, and then re-parses settlement fields from the stored-hash-verified transaction bytes.
+The submitted `txBytes` SHA-256 must match the prepared hash bound to `receiptId`. The route verifies the user's transaction signature, checks that `tx.sender` matches the sender proven at prepare time, re-parses settlement fields from the hash-matched transaction bytes, and atomically changes the receipt from `prepared` to `executing` immediately before the sponsor signature.
 The submitted `txBytes` is the final Host-built transaction. It must contain exactly one allowed settlement call and at most `MAX_FINAL_COMMANDS = 16` commands. This final transaction validation is separate from the user-supplied `User TransactionKind` validation performed during `POST /relay/prepare`.
 The `executionCostClaim` returned by this route is the transaction-derived gas-recovery claim from the settlement arguments.
 
 ## Error Responses
 
-Every public Relay API and Studio error response contains an `error` string. Domain failures also
-contain a `code` from the current route-specific error enum. Transport-level
-failures may omit `code`; rate-limit responses contain `retryAfterMs` and a
-`Retry-After` header instead. The current error body is closed: the only
-optional fields are `code`, `retryAfterMs`, `subcode`, `digest`,
-`minSettleMist`, `requiredTotalIn`, and `isEstimate`. Clients must reject a
-response with another field or a value outside the documented type instead of
-preserving an arbitrary server diagnostic dictionary. Treat `code` and the
-typed optional fields as the machine-readable contract; `error` is a stable
-human summary and does not carry internal or upstream error text.
+Every current Relay, Studio, Auth, and Admin error response contains an `error`
+string and a `code` from the current route error vocabulary. Rate limiting uses
+`RATE_LIMITED` together with `retryAfterMs` and a `Retry-After` header. The
+current error body is closed: the only optional metadata fields are
+`retryAfterMs`, `subcode`, `digest`, `operationId`, `minSettleMist`,
+`requiredTotalIn`, and `isEstimate`. Clients must reject a response with
+another field or a value outside the documented type instead of preserving an
+arbitrary server diagnostic dictionary. Treat `code` and the typed optional
+fields as the machine-readable contract. The `error` summary comes from the
+same contracts-owned authority and does not carry internal or upstream text.
 
 Each current `code` has one HTTP status and one metadata policy owned by
 `@stelis/contracts`. Producers do not override status per call, and consumers
-reject a code/status mismatch. Known submitted transactions retain `digest` on
+reject a code/status or code/message mismatch. Known submitted transactions retain `digest` on
 on-chain revert, congestion, and post-submit terminal-processing failures so a
 caller can reconcile the exact transaction. If the Host issued the sponsor
 signature but cannot prove a current terminal Sui result, it returns
@@ -174,11 +197,9 @@ signature but cannot prove a current terminal Sui result, it returns
 Callers reconcile that digest instead of assuming the transaction was never
 submitted or blindly rebuilding it. Every one of these codes requires
 `digest`.
-Use the route-specific `*HostError` definition in
-[`schemas/relay-api.schema.json`](./schemas/relay-api.schema.json) when
-validating a response body; the common `hostError` definition closes metadata
-relationships, while the runtime parser additionally binds the body code to
-the HTTP status because status is not part of JSON.
+Use `parseHostErrorResponse` with the route-specific code list exported by
+`@stelis/contracts` when validating a response body. The parser closes metadata
+relationships and binds the body code to the HTTP status.
 
 `CLIENT_IP_UNRESOLVED` is a current shared route-boundary error code. Relay
 prepare/sponsor and Studio routes can return it before admission state is
@@ -194,13 +215,25 @@ Authorization: Bearer <developerJwt>
 
 Mounted routes:
 
-- `GET /studio/promotions`
+- `GET /studio/promotions?cursor=<promotionId>&limit=<1..100>`
 - `GET /studio/promotions/:id`
 - `POST /studio/promotions/:id/claim`
 - `POST /studio/promotions/:id/prepare`
 - `POST /studio/promotions/:id/sponsor`
 
-Promotion prepare uses `senderAddress` and `txKindBytes`. The Promotion `TransactionKind` must contain 1 to 16 commands, all of them `MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`; the Host adds gas metadata but no commands and revalidates the same range before consume.
+Promotion claim requires `Content-Type: application/json` and the exact request
+body `{}`. Promotion prepare uses `senderAddress` and `txKindBytes`. The
+Promotion `TransactionKind` must contain 1 to 16 commands, all of them
+`MoveCall`. Promotion sponsor uses `receiptId`, `txBytes`, and `userSignature`;
+the Host adds gas metadata but no commands and revalidates the same range
+before the atomic `prepared` to `executing` transition.
+
+Promotion IDs and list cursors are canonical lowercase UUID-v4 strings. List
+queries default to 50 records and return at most 100. Results are ordered by
+ascending Promotion ID and the response is `{ promotions, nextCursor }`.
+`nextCursor` is the final returned ID only when another page exists; pass it as
+the next request's exclusive cursor. The cursor remains valid as a position
+even if that Promotion is later deleted or changes status.
 
 ## Auth Routes
 
@@ -217,10 +250,15 @@ Mounted auth routes:
 ## Admin Routes
 
 `/api/*` routes are operator routes. SDK and MCP clients must not depend on them.
+Auth and Admin request and response bodies use the current parsers exported by
+`@stelis/contracts`; `@stelis/app-admin` rejects uncoded errors and malformed
+success responses. `/api/logs` returns structured audit entries with `ts`,
+`event`, and `ip`, plus the current optional `address`, `reason`, `error`, and
+`detail` fields.
 
 Mounted admin routes:
 
-- `GET /api/blocklist`
+- `GET /api/blocklist?cursor=<opaqueCursor>&limit=<1..100>`
 - `DELETE /api/blocklist`
 - `GET /api/logs`
 - `GET /api/sponsored-logs/summary`
@@ -230,14 +268,21 @@ Mounted admin routes:
 - `POST /api/sponsor-refill-account/withdraw`
 - `GET /api/settlement-swap-paths`
 - `GET /api/studio`
-- `GET /api/promotions`
+- `GET /api/promotions?status=<status>&cursor=<promotionId>&limit=<1..100>`
 - `POST /api/promotions`
 - `GET /api/promotions/:id`
 - `PUT /api/promotions/:id`
 - `POST /api/promotions/:id/status`
 - `DELETE /api/promotions/:id`
-- `GET /api/promotions/:id/users`
 - `GET /api/promotions/:id/summary`
+
+The Admin Promotion list uses the same bounded cursor contract as the Studio
+list. `status` is optional and accepts the current Promotion status values.
+
+The blocklist route returns a bounded page of typed `ip`, `address`, and
+`studio_user` identities with their reason and expiry time. Its cursor is
+opaque. Deletion accepts the same typed identity and does not expose Redis
+keys or TTL sentinel values.
 
 ## MCP Boundary
 

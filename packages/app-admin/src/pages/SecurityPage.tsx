@@ -2,48 +2,36 @@
  * SecurityPage — abuse blocklist management and admin audit review.
  */
 import { useEffect, useState, useCallback } from 'react';
-import { getAuditLogs, getBlocklist, removeBlocklistEntry, type BlockEntry } from '../api/client';
+import { getAuditLogs, getBlocklist, removeBlocklistEntry } from '../api/client';
+import type { AdminAuditLogEntry, AdminBlocklistEntry } from '@stelis/contracts';
 import { truncateAddress } from '../utils';
-
-interface AuditLogEntry {
-  ts?: string;
-  event?: string;
-  level?: string;
-  ip?: string;
-  address?: string;
-  [key: string]: unknown;
-}
-
-function parseAuditEntry(raw: string): AuditLogEntry | null {
-  try {
-    return JSON.parse(raw) as AuditLogEntry;
-  } catch {
-    return null;
-  }
-}
 
 const AUDIT_PAGE_SIZE = 15;
 
 export function SecurityPage() {
-  const [blocklist, setBlocklist] = useState<BlockEntry[]>([]);
-  const [auditLogs, setAuditLogs] = useState<string[]>([]);
+  const [blocklist, setBlocklist] = useState<AdminBlocklistEntry[]>([]);
+  const [blockCursor, setBlockCursor] = useState<string | null>(null);
+  const [previousBlockCursors, setPreviousBlockCursors] = useState<(string | null)[]>([]);
+  const [nextBlockCursor, setNextBlockCursor] = useState<string | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AdminAuditLogEntry[]>([]);
   const [auditPage, setAuditPage] = useState(0);
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(false);
 
   const loadBlocklist = useCallback(async () => {
     try {
-      const json = await getBlocklist();
-      setBlocklist(json.blocklist ?? []);
-    } catch {
-      /* ignore */
+      const json = await getBlocklist(blockCursor === null ? {} : { cursor: blockCursor });
+      setBlocklist(json.blocklist);
+      setNextBlockCursor(json.nextCursor);
+    } catch (err) {
+      setMsg(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
     }
-  }, []);
+  }, [blockCursor]);
 
   const loadAuditLogs = useCallback(async () => {
     try {
       const json = await getAuditLogs();
-      setAuditLogs(json.logs ?? []);
+      setAuditLogs(json.logs);
       setAuditPage(0);
     } catch (err) {
       setMsg(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
@@ -52,21 +40,46 @@ export function SecurityPage() {
 
   useEffect(() => {
     void loadBlocklist();
-    void loadAuditLogs();
-  }, [loadAuditLogs, loadBlocklist]);
+  }, [loadBlocklist]);
 
-  async function unblock(key: string) {
+  useEffect(() => {
+    void loadAuditLogs();
+  }, [loadAuditLogs]);
+
+  async function unblock(entry: AdminBlocklistEntry) {
     setLoading(true);
     setMsg('');
     try {
-      await removeBlocklistEntry(key);
-      setMsg(`Unblocked: ${key}`);
+      const result = await removeBlocklistEntry({
+        scope: entry.scope,
+        subject: entry.subject,
+      });
+      setMsg(
+        result.removed
+          ? `Unblocked: ${entry.scope} ${entry.subject}`
+          : `Already unblocked: ${entry.scope} ${entry.subject}`,
+      );
       await loadBlocklist();
     } catch (err) {
       setMsg(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
     } finally {
       setLoading(false);
     }
+  }
+
+  function showNextBlockPage() {
+    if (nextBlockCursor === null) return;
+    setPreviousBlockCursors((current) => [...current, blockCursor]);
+    setBlockCursor(nextBlockCursor);
+    setNextBlockCursor(null);
+  }
+
+  function showPreviousBlockPage() {
+    const previous = previousBlockCursors[previousBlockCursors.length - 1];
+    if (previous === undefined) return;
+    setPreviousBlockCursors((current) => current.slice(0, -1));
+    setBlockCursor(previous);
+    setNextBlockCursor(null);
   }
 
   return (
@@ -105,23 +118,25 @@ export function SecurityPage() {
           <table className="admin-table" style={{ tableLayout: 'fixed', width: '100%' }}>
             <thead>
               <tr>
-                <th style={{ width: '60%' }}>Key</th>
-                <th style={{ width: '20%' }}>TTL (s)</th>
-                <th style={{ width: '20%', textAlign: 'right' }}>Action</th>
+                <th>Scope</th>
+                <th>Subject</th>
+                <th>Reason</th>
+                <th>Blocked until</th>
+                <th style={{ textAlign: 'right' }}>Action</th>
               </tr>
             </thead>
             <tbody>
               {blocklist.map((entry) => (
-                <tr key={entry.key}>
-                  <td style={{ wordBreak: 'break-all', fontSize: 12, fontFamily: 'monospace' }}>
-                    {entry.key}
-                  </td>
-                  <td>{entry.ttl}</td>
+                <tr key={`${entry.scope}:${entry.subject}`}>
+                  <td>{entry.scope}</td>
+                  <td style={{ wordBreak: 'break-all', fontSize: 12 }}>{entry.subject}</td>
+                  <td>{entry.reason}</td>
+                  <td>{new Date(entry.blockedUntilMs).toLocaleString()}</td>
                   <td style={{ textAlign: 'right' }}>
                     <button
                       className="admin-btn admin-btn-danger"
                       disabled={loading}
-                      onClick={() => void unblock(entry.key)}
+                      onClick={() => void unblock(entry)}
                     >
                       Unblock
                     </button>
@@ -131,6 +146,22 @@ export function SecurityPage() {
             </tbody>
           </table>
         )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <button
+            className="admin-btn"
+            disabled={previousBlockCursors.length === 0 || loading}
+            onClick={showPreviousBlockPage}
+          >
+            Previous
+          </button>
+          <button
+            className="admin-btn"
+            disabled={nextBlockCursor === null || loading}
+            onClick={showNextBlockPage}
+          >
+            Next
+          </button>
+        </div>
       </div>
 
       <div className="admin-card">
@@ -153,12 +184,9 @@ export function SecurityPage() {
           <p style={{ color: '#64748b', margin: 0 }}>No audit events recorded.</p>
         ) : (
           (() => {
-            const parsed = auditLogs
-              .map((raw, i) => ({ raw, i, entry: parseAuditEntry(raw) }))
-              .filter((x) => x.entry);
-            const totalPages = Math.max(1, Math.ceil(parsed.length / AUDIT_PAGE_SIZE));
+            const totalPages = Math.max(1, Math.ceil(auditLogs.length / AUDIT_PAGE_SIZE));
             const safePage = Math.min(auditPage, totalPages - 1);
-            const paged = parsed.slice(
+            const paged = auditLogs.slice(
               safePage * AUDIT_PAGE_SIZE,
               (safePage + 1) * AUDIT_PAGE_SIZE,
             );
@@ -174,20 +202,14 @@ export function SecurityPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {paged.map(({ i, entry }) => {
-                      if (!entry) return null;
-                      const isWarn = entry.level === 'warn';
+                    {paged.map((entry, index) => {
                       return (
-                        <tr key={i} style={isWarn ? { color: '#fbbf24' } : undefined}>
-                          <td style={{ fontSize: 13 }}>
-                            {entry.ts ? new Date(entry.ts).toLocaleString() : '—'}
-                          </td>
+                        <tr key={`${entry.ts}:${entry.event}:${index}`}>
+                          <td style={{ fontSize: 13 }}>{new Date(entry.ts).toLocaleString()}</td>
                           <td>
-                            <span className={`badge ${isWarn ? 'badge-yellow' : 'badge-green'}`}>
-                              {entry.event ?? '—'}
-                            </span>
+                            <span className="badge badge-green">{entry.event}</span>
                           </td>
-                          <td>{entry.ip ?? '—'}</td>
+                          <td>{entry.ip}</td>
                           <td style={{ fontFamily: 'monospace', fontSize: 13 }}>
                             {entry.address ? truncateAddress(entry.address) : '—'}
                           </td>

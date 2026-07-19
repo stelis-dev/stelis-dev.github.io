@@ -29,6 +29,12 @@ import {
 } from '@stelis/contracts';
 import { findSettleCommand } from './settleCommand.js';
 import { decodeExactPureU64Base64 } from './decodeU64.js';
+import {
+  parseSuiArgument,
+  parseSuiCallArg,
+  projectSuiCallArgObjectId,
+  SuiTransactionShapeError,
+} from './sui/suiTransactionShape.js';
 
 // ─────────────────────────────────────────────
 // Error type
@@ -86,7 +92,7 @@ export interface ArgIndexMap {
  * Derive ArgIndexMap from one compiled production settlement function.
  * Covers every field in SETTLE_FIELD_SCHEMA so
  * that sponsor-side logic can derive all execution-critical values from the
- * submitted `txBytes` instead of the off-chain prepare store.
+ * submitted `txBytes` instead of a separately stored interpretation.
  */
 function deriveArgIndexMap(functionName: string): ArgIndexMap {
   const entry = (
@@ -151,73 +157,60 @@ interface InputRef {
 }
 
 function isInputRef(arg: unknown): arg is InputRef {
-  if (typeof arg !== 'object' || arg === null) return false;
-  const r = arg as Record<string, unknown>;
-  return r.$kind === 'Input' && typeof r.Input === 'number';
+  try {
+    const current = parseSuiArgument(arg);
+    return current.$kind === 'Input';
+  } catch {
+    return false;
+  }
 }
 
 function resolveObjectId(arg: unknown, inputs: unknown[]): string {
   if (!isInputRef(arg)) {
     throw new ParseSettleArgsError('Expected Input reference for Object arg');
   }
-  const input = inputs[arg.Input];
-  if (typeof input !== 'object' || input === null) {
+  if (arg.Input >= inputs.length) {
     throw new ParseSettleArgsError(`Input[${arg.Input}] is not an object`);
   }
-  const i = input as Record<string, unknown>;
-
-  // Resolved Object: { $kind: 'Object', Object: { $kind: 'SharedObject' | 'ImmOrOwnedObject', ... } }
-  if (i.$kind === 'Object' && typeof i.Object === 'object' && i.Object !== null) {
-    const obj = i.Object as Record<string, unknown>;
-    if (
-      obj.$kind === 'SharedObject' &&
-      typeof obj.SharedObject === 'object' &&
-      obj.SharedObject !== null
-    ) {
-      const shared = obj.SharedObject as Record<string, unknown>;
-      if (typeof shared.objectId === 'string') return shared.objectId;
+  try {
+    const current = parseSuiCallArg(inputs[arg.Input], `inputs[${arg.Input}]`);
+    const objectId = projectSuiCallArgObjectId(current);
+    if (objectId) return objectId;
+  } catch (error) {
+    if (error instanceof SuiTransactionShapeError) {
+      throw new ParseSettleArgsError(error.message);
     }
-    if (
-      obj.$kind === 'ImmOrOwnedObject' &&
-      typeof obj.ImmOrOwnedObject === 'object' &&
-      obj.ImmOrOwnedObject !== null
-    ) {
-      const imm = obj.ImmOrOwnedObject as Record<string, unknown>;
-      if (typeof imm.objectId === 'string') return imm.objectId;
-    }
-  }
-
-  // Pre-build UnresolvedObject: { $kind: 'UnresolvedObject', UnresolvedObject: { objectId } }
-  if (
-    i.$kind === 'UnresolvedObject' &&
-    typeof i.UnresolvedObject === 'object' &&
-    i.UnresolvedObject !== null
-  ) {
-    const unresolved = i.UnresolvedObject as Record<string, unknown>;
-    if (typeof unresolved.objectId === 'string') return unresolved.objectId;
+    throw error;
   }
 
   throw new ParseSettleArgsError(`Input[${arg.Input}] could not be resolved to an object ID`);
 }
 
-function decodePureU64(arg: unknown, inputs: unknown[]): bigint {
+function resolvePureBytesBase64(arg: unknown, inputs: unknown[], label: string): string {
   if (!isInputRef(arg)) {
-    throw new ParseSettleArgsError('Expected Input reference for Pure u64');
+    throw new ParseSettleArgsError(`Expected Input reference for ${label}`);
   }
-  const input = inputs[arg.Input];
-  if (typeof input !== 'object' || input === null) {
+  if (arg.Input >= inputs.length) {
     throw new ParseSettleArgsError(`Input[${arg.Input}] is not an object`);
   }
-  const i = input as Record<string, unknown>;
-  if (i.$kind !== 'Pure' || typeof i.Pure !== 'object' || i.Pure === null) {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] is not a Pure arg`);
-  }
-  const pure = i.Pure as Record<string, unknown>;
-  if (typeof pure.bytes !== 'string') {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] Pure has no bytes`);
-  }
   try {
-    return decodeExactPureU64Base64(pure.bytes);
+    const input = parseSuiCallArg(inputs[arg.Input], `inputs[${arg.Input}]`);
+    if (input.$kind !== 'Pure') {
+      throw new ParseSettleArgsError(`Input[${arg.Input}] is not a Pure arg`);
+    }
+    return input.Pure.bytes;
+  } catch (error) {
+    if (error instanceof ParseSettleArgsError) throw error;
+    if (error instanceof SuiTransactionShapeError) {
+      throw new ParseSettleArgsError(error.message);
+    }
+    throw error;
+  }
+}
+
+function decodePureU64(arg: unknown, inputs: unknown[]): bigint {
+  try {
+    return decodeExactPureU64Base64(resolvePureBytesBase64(arg, inputs, 'Pure u64'));
   } catch (error) {
     throw new ParseSettleArgsError(error instanceof Error ? error.message : String(error));
   }
@@ -270,22 +263,7 @@ function decodeCanonicalUleb128Length(decoded: Uint8Array): { length: number; of
 }
 
 function decodePureVectorU8(arg: unknown, inputs: unknown[]): Uint8Array {
-  if (!isInputRef(arg)) {
-    throw new ParseSettleArgsError('Expected Input reference for Pure vector<u8>');
-  }
-  const input = inputs[arg.Input];
-  if (typeof input !== 'object' || input === null) {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] is not an object`);
-  }
-  const i = input as Record<string, unknown>;
-  if (i.$kind !== 'Pure' || typeof i.Pure !== 'object' || i.Pure === null) {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] is not a Pure arg`);
-  }
-  const pure = i.Pure as Record<string, unknown>;
-  if (typeof pure.bytes !== 'string') {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] Pure has no bytes`);
-  }
-  const decoded = fromBase64(pure.bytes);
+  const decoded = fromBase64(resolvePureBytesBase64(arg, inputs, 'Pure vector<u8>'));
   // BCS vector<u8>: ULEB128 length prefix + raw bytes
   if (decoded.length === 0) {
     throw new ParseSettleArgsError('Pure vector<u8> is empty (missing length prefix)');
@@ -300,22 +278,7 @@ function decodePureVectorU8(arg: unknown, inputs: unknown[]): Uint8Array {
 }
 
 function decodePureAddress(arg: unknown, inputs: unknown[]): string {
-  if (!isInputRef(arg)) {
-    throw new ParseSettleArgsError('Expected Input reference for Pure address');
-  }
-  const input = inputs[arg.Input];
-  if (typeof input !== 'object' || input === null) {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] is not an object`);
-  }
-  const i = input as Record<string, unknown>;
-  if (i.$kind !== 'Pure' || typeof i.Pure !== 'object' || i.Pure === null) {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] is not a Pure arg`);
-  }
-  const pure = i.Pure as Record<string, unknown>;
-  if (typeof pure.bytes !== 'string') {
-    throw new ParseSettleArgsError(`Input[${arg.Input}] Pure has no bytes`);
-  }
-  const decoded = fromBase64(pure.bytes);
+  const decoded = fromBase64(resolvePureBytesBase64(arg, inputs, 'Pure address'));
   if (decoded.length !== 32) {
     throw new ParseSettleArgsError(`Pure address needs 32 bytes, got ${decoded.length}`);
   }

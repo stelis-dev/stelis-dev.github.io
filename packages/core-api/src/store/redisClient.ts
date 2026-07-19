@@ -1,6 +1,3 @@
-import { logStructuredEvent } from '../structuredEventLog.js';
-import { REDIS_SCAN_UNAVAILABLE } from '../observability/events.js';
-
 export interface RedisSetOptions {
   nx?: boolean;
   xx?: boolean;
@@ -19,10 +16,6 @@ export interface RedisClientLike {
   eval(script: string, keys: string[], args: string[]): Promise<unknown>;
   /** HGETALL — returns the hash as `{field: value}`. Empty hash returns `{}`. */
   hgetall(key: string): Promise<Record<string, string>>;
-  /** SCAN with MATCH pattern. Returns all matching keys (cursor handled internally). */
-  scan(pattern: string, count?: number): Promise<string[]>;
-  ping?(): Promise<string>;
-  quit?(): Promise<void>;
 }
 
 // ── Raw redis v4 client adapter ──────────────────────────────────────
@@ -40,10 +33,6 @@ export interface RawRedisClient {
   del(...keys: string[]): Promise<number>;
   eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
   hGetAll(key: string): Promise<Record<string, string>>;
-  /** Raw redis v4 SCAN — returns { cursor, keys }. */
-  scanIterator?(options: { MATCH: string; COUNT?: number }): AsyncIterable<string>;
-  ping?(): Promise<string>;
-  quit?(): Promise<void>;
 }
 
 /**
@@ -75,27 +64,5 @@ export function wrapRedisClient(raw: RawRedisClient): RedisClientLike {
     hgetall(key) {
       return raw.hGetAll(key);
     },
-    async scan(pattern, count = 100) {
-      if (raw.scanIterator) {
-        const results: string[] = [];
-        for await (const key of raw.scanIterator({ MATCH: pattern, COUNT: count })) {
-          results.push(key);
-        }
-        return results;
-      }
-      // Fallback: no scanIterator available — warn and return empty.
-      // This effectively disables the reaper. Monitoring should alert on this.
-      logStructuredEvent(
-        REDIS_SCAN_UNAVAILABLE,
-        {
-          pattern,
-          reason: 'raw client has no scanIterator — reaper is degraded',
-        },
-        'warn',
-      );
-      return [];
-    },
-    ping: raw.ping ? () => raw.ping!() : undefined,
-    quit: raw.quit ? () => raw.quit!() : undefined,
   };
 }

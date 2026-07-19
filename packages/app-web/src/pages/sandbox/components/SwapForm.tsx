@@ -1,7 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useCurrentAccount, useCurrentClient, useDAppKit } from '@mysten/dapp-kit-react';
 import { Transaction } from '@mysten/sui/transactions';
-import { bindCurrentSuiResultToBytes, SUI_CLOCK_OBJECT_ID } from '@stelis/core-relay/browser';
+import {
+  buildSuiTransaction,
+  createSuiEndpointSnapshot,
+  simulateSuiTransaction,
+  SUI_CLOCK_OBJECT_ID,
+  suiExecutionErrorMessage,
+} from '@stelis/core-relay/browser';
 import { useSDK } from '../hooks/useSDK';
 import { TransactionStatus } from './TransactionStatus';
 import {
@@ -201,30 +207,21 @@ export function SwapForm({ onTxSuccess, settlementSwapPathIndex = 0 }: SwapFormP
           minOutputSmallest: directSwapQuote.minOutput,
         });
         tx.setSender(account.address);
-        const txBytes = await tx.build({ client });
-        const simResult = await client.simulateTransaction({
+        const endpoints = createSuiEndpointSnapshot([client]);
+        const txBytes = await buildSuiTransaction(endpoints, { transaction: tx });
+        const simResult = await simulateSuiTransaction(endpoints, {
           transaction: txBytes,
-          include: { effects: true },
         });
         if (cancelled) return;
-        interface SimGasUsed {
-          computationCost: string;
-          storageCost: string;
-          storageRebate: string;
+        if (simResult.outcome !== 'success') {
+          throw new Error(`Gas simulation failed: ${suiExecutionErrorMessage(simResult.error)}`);
         }
-        const bound = bindCurrentSuiResultToBytes(simResult, txBytes);
-        if (!bound || bound.outcome !== 'success') {
-          throw new Error('Gas simulation returned a malformed, mismatched, or failed result');
-        }
-        const effects = bound.transaction.effects as { gasUsed?: SimGasUsed } | undefined;
-        const costs = effects?.gasUsed;
-        if (costs) {
-          const net =
-            parseDecimalIntegerToBigInt(costs.computationCost, 'computationCost') +
-            parseDecimalIntegerToBigInt(costs.storageCost, 'storageCost') -
-            parseDecimalIntegerToBigInt(costs.storageRebate, 'storageRebate');
-          setGasEstimate(formatSmallestUnitDecimal(net > 0n ? net : 0n, SUI_DECIMALS, 5));
-        }
+        const costs = simResult.effects.gasUsed;
+        const net =
+          parseDecimalIntegerToBigInt(costs.computationCost, 'computationCost') +
+          parseDecimalIntegerToBigInt(costs.storageCost, 'storageCost') -
+          parseDecimalIntegerToBigInt(costs.storageRebate, 'storageRebate');
+        setGasEstimate(formatSmallestUnitDecimal(net > 0n ? net : 0n, SUI_DECIMALS, 5));
       } catch {
         // best-effort — user may not have enough SUI for simulation
       }

@@ -22,13 +22,33 @@
  */
 
 // ── Constants (browser-safe, core-relay-interior) ───────────────────────────
-export { SUI_CLOCK_OBJECT_ID, SUI_ZERO_ADDRESS } from './constants.js';
+export { SUI_CLOCK_OBJECT_ID } from './constants.js';
 
 // ── Hash utilities (browser-safe, uses SubtleCrypto) ────────────────────────
 export { sha256Bytes } from './hash.js';
 
-// ── Sui RPC request/result identity binding ─────────────────────────────────
-export { bindCurrentSuiResultToBytes, bindCurrentSuiResultToDigest } from './suiResultBinding.js';
+// ── Exact current Sui operation authority ──────────────────────────────────
+export { SuiOperationError, createSuiEndpointSnapshot } from './sui/suiOperation.js';
+export type { SuiEndpointSnapshot } from './sui/suiOperation.js';
+export {
+  executeSuiTransaction,
+  getSuiTransactionEvents,
+  simulateSuiTransaction,
+} from './sui/suiTransactionGateways.js';
+export { buildSuiTransaction } from './sui/suiTransactionResolution.js';
+export { suiExecutionErrorMessage } from './sui/suiTransactionShape.js';
+export type {
+  SuiSimulationResult,
+  SuiTransactionWithEventsResult,
+} from './sui/suiTransactionShape.js';
+export {
+  assertSuiNetwork,
+  getSuiBalance,
+  MAX_SUI_COIN_OBJECTS_PER_OPERATION,
+  readBoundedSuiCoins,
+} from './sui/suiStateGateways.js';
+export type { SuiCoinReadResult } from './sui/suiStateGateways.js';
+export { selectSuiCoinSubset } from './sui/suiCoinSelection.js';
 
 // ── Prepare authorization message (browser-safe) ────────────────────────────
 export { encodePrepareAuthorizationMessage } from './prepareAuthorization.js';
@@ -36,8 +56,6 @@ export { encodePrepareAuthorizationMessage } from './prepareAuthorization.js';
 // ── Validation ──────────────────────────────────────────────────────────────
 export { isMoveCall } from './validate/static.js';
 export { validateGenericUserTransactionKind } from './validate/transactionKind.js';
-
-export { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from './ptb/builders.js';
 
 // ── Gas estimation ──────────────────────────────────────────────────────────
 export { computeExecutionCostClaim, DEFAULT_GAS_MARGIN_BPS } from './gasEstimate.js';
@@ -48,17 +66,13 @@ export { queryUserCredit, CreditQueryInconsistentStateError } from './creditQuer
 export type { CreditResult } from './creditQuery.js';
 
 // ── DeepBook utilities ──────────────────────────────────────────────────────
-// `getQuantityOut`, `getHopMidPriceRaw`, and `getInputForTargetOutput` are
-// intentionally not re-exported here. None has a verified browser/SDK consumer
-// in this repo: `getQuantityOut` and `getInputForTargetOutput` are wrapped by
-// `MarketQuotePort` server-side, and `getHopMidPriceRaw` is reached only as an
-// internal shortcut inside `batchGetHopMidPrices` for 1-hop pools. SDK + server
-// consumers (sdk.ts, swap.ts, core-api/prepare/build.ts) call
-// `batchGetHopMidPrices` directly.
-export { batchGetHopMidPrices } from './deepbook.js';
+// SDK consumes batch mid-prices; app-web consumes the exact quantity-out view
+// rather than maintaining a second DeepBook ABI decoder.
+export { batchGetHopMidPrices, getQuantityOut } from './deepbook.js';
 
 // ── SDK command conversion (S-16 integrity) ─────────────────────────────────
 export { convertSdkCommands } from './convert.js';
+export { projectSuiInputIdentity } from './sui/suiTransactionShape.js';
 
 // ── Structural command comparator (S-16 integrity) ──────────────────────────
 // Used by SDK integrity verification.
@@ -66,13 +80,6 @@ export { integrityCompare } from './integrityCompare.js';
 
 // ── GasCoin reference detection (S-15/S-16) ─────────────────────────────────
 export { containsGasCoinReference } from './validate/static.js';
-
-// ── PTB input object ID extraction (integrity + prefix value tracing) ────────
-export { extractObjectIdFromInput } from './ptbInputUtils.js';
-
-// ── Canonical BCS scalar decoding ──────────────────────────────────────────
-// App-web consumes this exact-width authority for DeepBook view results.
-export { decodeExactU64Bytes } from './decodeU64.js';
 
 // ── tx gas preset guard ─────────────────────────────────────────────────────
 export { assertNoGasPreset } from './validate/txGuard.js';

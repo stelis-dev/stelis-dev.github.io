@@ -9,22 +9,34 @@ import {
   SponsorOnchainError,
   SponsorPreflightError,
   SponsorSubmissionUncertainError,
-  SponsorTerminalProcessingError,
   SponsorValidationError,
 } from '@stelis/core-api';
 import { PromotionPrepareError, PromotionSponsorError } from '@stelis/core-api/studio';
+import { SuiOperationError } from '@stelis/core-relay';
 import {
+  hostErrorPublicMessage,
+  parseHostErrorResponse,
   PROMOTION_PREPARE_ERROR_CODES,
   PROMOTION_SPONSOR_ERROR_CODES,
   RELAY_PREPARE_ERROR_CODES,
   RELAY_SPONSOR_ERROR_CODES,
 } from '@stelis/contracts';
-import { codedHostError, mapError, uncodedHostError } from '../src/errorMap.js';
+import { codedHostError, mapError } from '../src/errorMap.js';
 
-const mapRelayPrepare = (error: unknown) => mapError(error, RELAY_PREPARE_ERROR_CODES);
-const mapRelaySponsor = (error: unknown) => mapError(error, RELAY_SPONSOR_ERROR_CODES);
-const mapPromotionPrepare = (error: unknown) => mapError(error, PROMOTION_PREPARE_ERROR_CODES);
-const mapPromotionSponsor = (error: unknown) => mapError(error, PROMOTION_SPONSOR_ERROR_CODES);
+const GAS_USED = {
+  computationCost: '10',
+  storageCost: '2',
+  storageRebate: '1',
+};
+
+const mapRelayPrepare = (error: unknown) =>
+  mapError(error, RELAY_PREPARE_ERROR_CODES, 'INTERNAL_ERROR');
+const mapRelaySponsor = (error: unknown) =>
+  mapError(error, RELAY_SPONSOR_ERROR_CODES, 'SPONSOR_FAILED');
+const mapPromotionPrepare = (error: unknown) =>
+  mapError(error, PROMOTION_PREPARE_ERROR_CODES, 'INTERNAL_ERROR');
+const mapPromotionSponsor = (error: unknown) =>
+  mapError(error, PROMOTION_SPONSOR_ERROR_CODES, 'SPONSOR_FAILED');
 
 describe('contracts-owned Host error projection', () => {
   it('derives statuses from current codes across error classes', () => {
@@ -62,8 +74,42 @@ describe('contracts-owned Host error projection', () => {
       mapError(
         new PrepareValidationError('INSUFFICIENT_BALANCE', 'prepare only'),
         RELAY_SPONSOR_ERROR_CODES,
+        'SPONSOR_FAILED',
       ),
     ).toBeNull();
+  });
+
+  it('keeps aggregate refill-account health errors on prepare routes only', () => {
+    expect(RELAY_PREPARE_ERROR_CODES).toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(PROMOTION_PREPARE_ERROR_CODES).toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(RELAY_SPONSOR_ERROR_CODES).not.toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+    expect(PROMOTION_SPONSOR_ERROR_CODES).not.toContain('SPONSOR_REFILL_ACCOUNT_UNHEALTHY');
+  });
+
+  it('projects the bounded Coin object read rejection through the Relay prepare boundary', () => {
+    expect(
+      mapRelayPrepare(
+        new PrepareValidationError(
+          'PAYMENT_COIN_LIMIT_EXCEEDED',
+          'internal Coin discovery details must not escape',
+        ),
+      ),
+    ).toEqual({
+      status: 422,
+      body: {
+        error: hostErrorPublicMessage('PAYMENT_COIN_LIMIT_EXCEEDED'),
+        code: 'PAYMENT_COIN_LIMIT_EXCEEDED',
+      },
+    });
+  });
+
+  it('keeps payment-funding guidance independent from the status fallback', () => {
+    expect(hostErrorPublicMessage('PAYMENT_COIN_CONFLICT')).toBe(
+      'Settlement-token payment could not be resolved safely',
+    );
+    expect(hostErrorPublicMessage('PAYMENT_COIN_LIMIT_EXCEEDED')).toBe(
+      'Consolidate settlement-token Coin objects and try again',
+    );
   });
 });
 
@@ -115,32 +161,25 @@ describe('code-bound metadata', () => {
   });
 
   it('requires and preserves a digest for every known post-signature terminal error', () => {
-    expect(mapRelaySponsor(new SponsorOnchainError('0xdigest', 'MoveAbort'))?.body).toMatchObject({
+    expect(
+      mapRelaySponsor(new SponsorOnchainError('0xdigest', 'MoveAbort', undefined, GAS_USED))?.body,
+    ).toMatchObject({
       code: 'SPONSOR_ONCHAIN_FAILED',
       digest: '0xdigest',
     });
     expect(
       mapRelaySponsor(new SponsorCongestionError('shared-object congestion', '0xcongestion'))?.body,
     ).toEqual({
-      error: 'Internal server error',
+      error: 'Service temporarily unavailable',
       code: 'SPONSOR_CONGESTION',
       digest: '0xcongestion',
-    });
-    expect(
-      mapRelaySponsor(
-        new SponsorTerminalProcessingError('effects missing', '0xsuccessful-terminal'),
-      )?.body,
-    ).toEqual({
-      error: 'Internal server error',
-      code: 'GAS_EFFECTS_MISSING',
-      digest: '0xsuccessful-terminal',
     });
     expect(
       mapRelaySponsor(
         new SponsorSubmissionUncertainError('0xsubmitted-unknown', new Error('rpc timeout')),
       )?.body,
     ).toEqual({
-      error: 'Internal server error',
+      error: 'Service temporarily unavailable',
       code: 'SPONSOR_SUBMISSION_UNCERTAIN',
       digest: '0xsubmitted-unknown',
     });
@@ -165,20 +204,6 @@ describe('code-bound metadata', () => {
     ).toMatchObject({ code: 'SPONSOR_CONGESTION', digest: '0xpromotion-congestion' });
     expect(
       mapPromotionSponsor(
-        new PromotionSponsorError('effects missing', 'GAS_EFFECTS_MISSING', {
-          digest: '0xpromotion-success',
-        }),
-      )?.body,
-    ).toMatchObject({ code: 'GAS_EFFECTS_MISSING', digest: '0xpromotion-success' });
-    expect(
-      mapPromotionSponsor(
-        new PromotionSponsorError('consume failed', 'CONSUME_FAILED', {
-          digest: '0xpromotion-consume',
-        }),
-      )?.body,
-    ).toMatchObject({ code: 'CONSUME_FAILED', digest: '0xpromotion-consume' });
-    expect(
-      mapPromotionSponsor(
         new PromotionSponsorError('submission uncertain', 'SPONSOR_SUBMISSION_UNCERTAIN', {
           digest: '0xpromotion-unknown',
         }),
@@ -189,51 +214,73 @@ describe('code-bound metadata', () => {
     });
   });
 
-  it.each([
-    'ONCHAIN_REVERT',
-    'SPONSOR_CONGESTION',
-    'SPONSOR_SUBMISSION_UNCERTAIN',
-    'GAS_EFFECTS_MISSING',
-    'CONSUME_FAILED',
-  ] as const)('rejects %s without its required digest', (code) => {
-    expect(mapPromotionSponsor(new PromotionSponsorError('terminal failure', code))).toBeNull();
-  });
+  it.each(['ONCHAIN_REVERT', 'SPONSOR_CONGESTION', 'SPONSOR_SUBMISSION_UNCERTAIN'] as const)(
+    'rejects %s without its required digest',
+    (code) => {
+      expect(mapPromotionSponsor(new PromotionSponsorError('terminal failure', code))).toBeNull();
+    },
+  );
 });
 
 describe('direct Host response serializer', () => {
   it('derives coded status and rejects route overreach', () => {
-    expect(
-      codedHostError(
-        { error: 'not found', code: 'PROMOTION_NOT_FOUND' },
-        PROMOTION_PREPARE_ERROR_CODES,
-      ).status,
-    ).toBe(404);
-    expect(() =>
-      codedHostError(
-        { error: 'not found', code: 'PROMOTION_NOT_FOUND' },
-        RELAY_SPONSOR_ERROR_CODES,
-      ),
-    ).toThrow(/not valid for this route/);
+    expect(codedHostError('PROMOTION_NOT_FOUND', PROMOTION_PREPARE_ERROR_CODES).status).toBe(404);
+    expect(() => codedHostError('PROMOTION_NOT_FOUND', RELAY_SPONSOR_ERROR_CODES)).toThrow(
+      /not valid for this route/,
+    );
   });
 
-  it('allows uncoded transport failures but not uncoded domain statuses', () => {
-    expect(uncodedHostError({ error: 'unavailable' }, RELAY_PREPARE_ERROR_CODES, 503)).toEqual({
-      status: 503,
-      body: { error: 'unavailable' },
+  it('binds rate-limit metadata to a current code and message', () => {
+    expect(
+      codedHostError('RATE_LIMITED', RELAY_PREPARE_ERROR_CODES, { retryAfterMs: 5000 }),
+    ).toEqual({
+      status: 429,
+      body: {
+        error: 'Request temporarily blocked',
+        code: 'RATE_LIMITED',
+        retryAfterMs: 5000,
+      },
     });
+  });
+
+  it('rejects a coded response whose message drifts from the contracts authority', () => {
     expect(() =>
-      // The cast deliberately probes the runtime boundary.
-      uncodedHostError({ error: 'not found' }, RELAY_PREPARE_ERROR_CODES, 404 as 500),
-    ).toThrow(/domain-status response must carry a current code/);
+      parseHostErrorResponse(
+        { error: 'Promotion not found', code: 'PROMOTION_NOT_FOUND' },
+        PROMOTION_PREPARE_ERROR_CODES,
+        404,
+      ),
+    ).toThrow(/error does not match the current code/);
+    expect(hostErrorPublicMessage('PROMOTION_NOT_FOUND')).toBe('Resource not found');
   });
 });
 
 describe('unknown internal errors', () => {
+  it('maps typed Sui failures to the route-owned existing internal code', () => {
+    const error = new SuiOperationError('transport_unavailable', {
+      operation: 'simulate_transaction',
+      attempt: 2,
+      maxAttempts: 2,
+      rpcCode: 'UNAVAILABLE',
+    });
+
+    expect(mapRelayPrepare(error)).toEqual({
+      status: 500,
+      body: { error: 'Internal server error', code: 'INTERNAL_ERROR' },
+    });
+    expect(mapPromotionPrepare(error)?.body.code).toBe('INTERNAL_ERROR');
+    expect(mapRelaySponsor(error)?.body.code).toBe('SPONSOR_FAILED');
+    expect(mapPromotionSponsor(error)?.body.code).toBe('SPONSOR_FAILED');
+    expect(JSON.stringify(mapRelayPrepare(error))).not.toContain('UNAVAILABLE');
+    expect(JSON.stringify(mapRelayPrepare(error))).not.toContain('simulate_transaction');
+  });
+
   it('does not publish internal diagnostic codes or arbitrary values', () => {
     expect(
       mapRelayPrepare(new PrepareValidationError('INVALID_AMOUNT', 'internal invariant')),
     ).toBeNull();
     expect(mapRelayPrepare(new Error('unexpected'))).toBeNull();
+    expect(mapRelayPrepare(new TypeError('invalid local Sui request'))).toBeNull();
     expect(mapRelayPrepare({ code: 'FAKE' })).toBeNull();
   });
 });

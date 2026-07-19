@@ -12,7 +12,9 @@
 
 import { bcs } from '@mysten/sui/bcs';
 import { normalizeSuiAddress, toHex } from '@mysten/sui/utils';
+import type { SuiTransactionWithEventsResult } from '@stelis/core-relay/browser';
 import {
+  parseReceiptId,
   SETTLE_EVENT_FIELDS,
   SETTLE_EVENT_MODULE,
   SETTLE_EVENT_NAME,
@@ -57,7 +59,8 @@ const settlementContractIds = STELIS_CONTRACT_IDS[SETTLEMENT_CONTRACT_NETWORK];
 if (!settlementContractIds) {
   throw new Error(`[Stelis] ${SETTLEMENT_CONTRACT_NETWORK} contract IDs are unavailable`);
 }
-export const SETTLE_EVENT_TYPE = `${settlementContractIds.packageId}::${SETTLE_EVENT_MODULE}::${SETTLE_EVENT_NAME}`;
+const settlementPackageId = settlementContractIds.packageId;
+export const SETTLE_EVENT_TYPE = `${settlementPackageId}::${SETTLE_EVENT_MODULE}::${SETTLE_EVENT_NAME}`;
 
 // ─────────────────────────────────────────────
 // Types
@@ -78,6 +81,8 @@ export interface DecodedSettleEvent {
   configVersion: string;
   execTimestampMs: string;
 }
+
+type SuiEvent = Extract<SuiTransactionWithEventsResult, { outcome: 'success' }>['events'][number];
 
 // ─────────────────────────────────────────────
 // Decoder
@@ -113,7 +118,7 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
   const decoded = parseCanonicalSettleEvent(bcsBytes);
 
   return {
-    receiptId: toHex(decoded.receipt_id),
+    receiptId: parseReceiptId(`0x${toHex(decoded.receipt_id)}`, 'SettleEvent.receiptId'),
     nonce: String(decoded.nonce),
     orderIdHash: toHex(decoded.order_id_hash),
     user: normalizeSuiAddress(decoded.user),
@@ -125,4 +130,29 @@ export function decodeSettleEvent(bcsBytes: Uint8Array): DecodedSettleEvent {
     configVersion: String(decoded.config_version),
     execTimestampMs: String(decoded.exec_timestamp_ms),
   };
+}
+
+/**
+ * Decode the one current settlement event identity.
+ *
+ * A different event type is not a settlement event. Once an envelope claims
+ * the generated settlement event type, however, its redundant package/module
+ * metadata and sender must agree with the same compiled-contract identity and
+ * decoded payload. A contradictory envelope is malformed rather than absent.
+ *
+ * This helper is intentionally internal to the SDK server implementation. It
+ * is the shared identity authority for verification and batch reconciliation.
+ */
+export function decodeCanonicalSettleEvent(event: SuiEvent): DecodedSettleEvent | null {
+  if (event.eventType !== SETTLE_EVENT_TYPE) return null;
+
+  if (event.packageId !== settlementPackageId || event.module !== SETTLE_EVENT_MODULE) {
+    throw new Error(`[Stelis] SettleEvent envelope identity does not match ${SETTLE_EVENT_TYPE}`);
+  }
+
+  const decoded = decodeSettleEvent(event.bcs);
+  if (event.sender !== decoded.user) {
+    throw new Error('[Stelis] SettleEvent sender does not match the decoded user');
+  }
+  return decoded;
 }

@@ -2,21 +2,36 @@
  * RedisPromotionStore — unit tests using FakeRedisClient.
  *
  * Proves the Redis adapter contract: Lua-based atomic index maintenance,
- * status transitions with activation guard, and delete policy.
+ * status transitions with the shared ledger-budget guard, and delete policy.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { AdminPromotionCreateRequest } from '@stelis/contracts';
 import {
   RedisPromotionStore,
   InvalidStatusTransitionError,
   PromotionFieldImmutableError,
   PromotionCurrentConflictError,
-  type CreatePromotionInput,
+  type PromotionStoreAdapter,
+  type PromotionStoreFilter,
 } from '../src/studio/promotionStore.js';
 import { FakeRedisClient } from './helpers/fakeRedisClient.js';
 
+const PAGE_ALL = { cursor: null, limit: 100 } as const;
+const ID_A = '00000000-0000-4000-8000-000000000001';
+const ID_B = '00000000-0000-4000-8000-000000000002';
+const ID_C = '00000000-0000-4000-8000-000000000003';
+const ID_D = '00000000-0000-4000-8000-000000000004';
+const MISSING_ID = 'ffffffff-ffff-4fff-bfff-ffffffffffff';
+
+async function listRecords(store: PromotionStoreAdapter, filter?: PromotionStoreFilter) {
+  return (await store.listPage(PAGE_ALL, filter)).promotions;
+}
+
 // ── Fixtures ────────────────────────────────────────────────────────────
 
-function makeInput(overrides: Partial<CreatePromotionInput> = {}): CreatePromotionInput {
+function makeInput(
+  overrides: Partial<AdminPromotionCreateRequest> = {},
+): AdminPromotionCreateRequest {
   return {
     type: 'gas_sponsorship',
     displayName: 'Redis Promo',
@@ -72,8 +87,8 @@ describe('RedisPromotionStore', () => {
       } satisfies Partial<PromotionCurrentConflictError>);
 
       expect(await store.get(fixedId)).toEqual(original);
-      expect(await store.list()).toEqual([original]);
-      expect(await store.list({ status: 'draft' })).toEqual([original]);
+      expect(await listRecords(store)).toEqual([original]);
+      expect(await listRecords(store, { status: 'draft' })).toEqual([original]);
     } finally {
       randomUuid.mockRestore();
     }
@@ -85,7 +100,7 @@ describe('RedisPromotionStore', () => {
     await store.create(makeInput({ displayName: 'A' }));
     await store.create(makeInput({ displayName: 'B' }));
 
-    const all = await store.list();
+    const all = await listRecords(store);
     expect(all).toHaveLength(2);
     const names = all.map((r) => r.displayName).sort();
     expect(names).toEqual(['A', 'B']);
@@ -96,18 +111,63 @@ describe('RedisPromotionStore', () => {
     const p2 = await store.create(makeInput({ displayName: 'Active' }));
     await store.transitionStatus(p2.promotionId, 'active');
 
-    const drafts = await store.list({ status: 'draft' });
+    const drafts = await listRecords(store, { status: 'draft' });
     expect(drafts).toHaveLength(1);
     expect(drafts[0].displayName).toBe('Draft');
 
-    const actives = await store.list({ status: 'active' });
+    const actives = await listRecords(store, { status: 'active' });
     expect(actives).toHaveLength(1);
     expect(actives[0].displayName).toBe('Active');
   });
 
   it('returns empty array when no promotions exist', async () => {
-    const all = await store.list();
+    const all = await listRecords(store);
     expect(all).toEqual([]);
+  });
+
+  it('pages non-insertion IDs in ascending ASCII order with one-record lookahead', async () => {
+    const randomUuid = vi
+      .spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(ID_C)
+      .mockReturnValueOnce(ID_A)
+      .mockReturnValueOnce(ID_D)
+      .mockReturnValueOnce(ID_B);
+    try {
+      for (const displayName of ['C', 'A', 'D', 'B']) {
+        await store.create(makeInput({ displayName }));
+      }
+
+      const first = await store.listPage({ cursor: null, limit: 2 });
+      expect(first.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_A, ID_B]);
+      expect(first.nextCursor).toBe(ID_B);
+
+      const second = await store.listPage({ cursor: first.nextCursor, limit: 2 });
+      expect(second.promotions.map((promotion) => promotion.promotionId)).toEqual([ID_C, ID_D]);
+      expect(second.nextCursor).toBeNull();
+    } finally {
+      randomUuid.mockRestore();
+    }
+  });
+
+  it('fails closed when an indexed record is missing', async () => {
+    const created = await store.create(makeInput());
+    await redis.del(`stelis:promo:${created.promotionId}`);
+
+    await expect(store.listPage(PAGE_ALL)).rejects.toThrow(
+      `Promotion index references missing record ${created.promotionId}`,
+    );
+  });
+
+  it('fails closed when an indexed record has a different identity', async () => {
+    const created = await store.create(makeInput());
+    await redis.set(
+      `stelis:promo:${created.promotionId}`,
+      JSON.stringify({ ...created, promotionId: ID_D }),
+    );
+
+    await expect(store.listPage(PAGE_ALL)).rejects.toThrow(
+      `Promotion index identity mismatch for ${created.promotionId}`,
+    );
   });
 
   // ── update ────────────────────────────────────────────────────
@@ -208,21 +268,21 @@ describe('RedisPromotionStore', () => {
     const p = await store.create(makeInput());
 
     // draft index has it
-    let drafts = await store.list({ status: 'draft' });
+    let drafts = await listRecords(store, { status: 'draft' });
     expect(drafts).toHaveLength(1);
 
     // activate → moves to active index
     await store.transitionStatus(p.promotionId, 'active');
-    drafts = await store.list({ status: 'draft' });
+    drafts = await listRecords(store, { status: 'draft' });
     expect(drafts).toHaveLength(0);
-    let actives = await store.list({ status: 'active' });
+    let actives = await listRecords(store, { status: 'active' });
     expect(actives).toHaveLength(1);
 
     // archive → moves to archived index
     await store.transitionStatus(p.promotionId, 'archived');
-    actives = await store.list({ status: 'active' });
+    actives = await listRecords(store, { status: 'active' });
     expect(actives).toHaveLength(0);
-    const archived = await store.list({ status: 'archived' });
+    const archived = await listRecords(store, { status: 'archived' });
     expect(archived).toHaveLength(1);
   });
 
@@ -257,8 +317,8 @@ describe('RedisPromotionStore', () => {
     } satisfies Partial<PromotionCurrentConflictError>);
 
     expect(await store.get(created.promotionId)).toEqual(winner);
-    expect(await store.list({ status: 'draft' })).toEqual([winner]);
-    expect(await store.list({ status: 'active' })).toEqual([]);
+    expect(await listRecords(store, { status: 'draft' })).toEqual([winner]);
+    expect(await listRecords(store, { status: 'active' })).toEqual([]);
   });
 
   // ── delete ────────────────────────────────────────────────────
@@ -266,13 +326,13 @@ describe('RedisPromotionStore', () => {
   it('deletes a draft promotion', async () => {
     const created = await store.create(makeInput());
     const result = await store.delete(created.promotionId);
-    expect(result).toBe(true);
+    expect(result).toEqual({ status: 'deleted' });
 
     const found = await store.get(created.promotionId);
     expect(found).toBeNull();
 
     // Removed from indexes
-    const all = await store.list();
+    const all = await listRecords(store);
     expect(all).toHaveLength(0);
   });
 
@@ -281,15 +341,15 @@ describe('RedisPromotionStore', () => {
     await store.transitionStatus(created.promotionId, 'active');
 
     const result = await store.delete(created.promotionId);
-    expect(result).toBe(false);
+    expect(result).toEqual({ status: 'not_deletable' });
 
     const found = await store.get(created.promotionId);
     expect(found).not.toBeNull();
   });
 
-  it('returns false for non-existent delete', async () => {
-    const result = await store.delete('nope');
-    expect(result).toBe(false);
+  it('distinguishes a non-existent delete', async () => {
+    const result = await store.delete(MISSING_ID);
+    expect(result).toEqual({ status: 'not_found' });
   });
 
   it('rejects delete when activation wins after the draft read', async () => {
@@ -307,8 +367,8 @@ describe('RedisPromotionStore', () => {
     } satisfies Partial<PromotionCurrentConflictError>);
 
     expect(await store.get(created.promotionId)).toEqual(activated);
-    expect(await store.list({ status: 'draft' })).toEqual([]);
-    expect(await store.list({ status: 'active' })).toEqual([activated]);
+    expect(await listRecords(store, { status: 'draft' })).toEqual([]);
+    expect(await listRecords(store, { status: 'active' })).toEqual([activated]);
   });
 });
 

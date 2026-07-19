@@ -124,12 +124,6 @@ describe('shouldCarveOutNonIpCounter', () => {
     );
   });
 
-  it('does not carve out SLIPPAGE_QUERY_FAILED (prepare-time only)', () => {
-    expect(
-      shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'SLIPPAGE_QUERY_FAILED' }),
-    ).toBe(false);
-  });
-
   it('does not carve out other subcodes', () => {
     expect(
       shouldCarveOutNonIpCounter('PREFLIGHT_FAILED', { subcode: 'CLAIM_WOULD_EXCEED_MAX' }),
@@ -185,7 +179,7 @@ describe('emitSponsorDriftObserved', () => {
       .filter((ev): ev is Record<string, unknown> => ev?.['event'] === 'SPONSOR_DRIFT_OBSERVED');
   }
 
-  it('emits SPONSOR_DRIFT_OBSERVED at info level for typical post-consume drift', () => {
+  it('emits SPONSOR_DRIFT_OBSERVED at info level for typical post-execution drift', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -477,6 +471,13 @@ describe('subjectCounterFamily — storage-tier mapping', () => {
 });
 
 describe('getFailurePolicy — runtime policy consumption', () => {
+  it('does not charge callers for the current combined quote-acquisition failure', () => {
+    expect(getFailurePolicy('MARKET_QUOTE_UNAVAILABLE')).toMatchObject({
+      classification: 'infra',
+      abuseImpact: { ip: 'skip', subject: 'skip' },
+    });
+  });
+
   it('keeps generic public result codes as transport projections only', () => {
     expect(getFailurePolicy('SPONSOR_PREFLIGHT_FAILED')).toMatchObject({
       classification: 'normal',
@@ -489,6 +490,10 @@ describe('getFailurePolicy — runtime policy consumption', () => {
   });
 
   it('returns the policy for normal rows without storage family (IP_ONLY)', () => {
+    expect(getFailurePolicy('PAYMENT_COIN_LIMIT_EXCEEDED')).toMatchObject({
+      classification: 'normal',
+      abuseImpact: { ip: 'count', subject: 'skip' },
+    });
     expect(getFailurePolicy('L2_POLICY_HASH_MISMATCH')).toMatchObject({
       classification: 'normal',
       abuseImpact: { ip: 'count', subject: 'skip' },

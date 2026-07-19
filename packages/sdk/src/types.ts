@@ -1,4 +1,4 @@
-import { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { RelayConfigResponse, RelayPrepareResponse } from '@stelis/contracts';
 
 export type {
@@ -12,6 +12,7 @@ export type {
   RelaySponsorRequest,
   RelaySponsorResponse,
   PromotionUnavailableReason,
+  PromotionPageQuery,
   PromotionListItem,
   PromotionListResponse,
   UserPromotionDetail,
@@ -27,7 +28,7 @@ export interface StelisClientConfig {
   endpoint: string;
   /**
    * Optional per-operation HTTP timeout overrides in milliseconds.
-   * Each field must be a positive integer when provided.
+   * Each field must be an integer from 1 through 2,147,483,647 when provided.
    */
   requestTimeouts?: StelisRequestTimeouts;
 }
@@ -90,12 +91,6 @@ export interface StelisConnectOptions {
    */
   pinnedPackageId?: string;
   /**
-   * Declare this endpoint as a studio relay (promotion endpoint).
-   * Required for promotion-specific methods (executePromotionSponsored,
-   * preparePromotionSponsored, sponsorPromotionSponsored).
-   */
-  studioEndpoint?: boolean;
-  /**
    * Optional per-operation HTTP timeout overrides in milliseconds.
    * Applies to SDK calls that go through the internal StelisClient and
    * to /relay/config fetch in connect().
@@ -157,8 +152,6 @@ export interface ExecuteSponsoredResult {
   effects: unknown;
   /** Cost breakdown from /prepare */
   cost: RelayPrepareResponse['cost'];
-  /** Vault object ID if user has one, null if new user */
-  vaultId: string | null;
   /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */
@@ -187,8 +180,6 @@ export interface PrepareSponsoredResult {
   cost: RelayPrepareResponse['cost'];
   /** Effective settle path for prepared tx — 'credit_general' | 'with_vault' | 'new_user' */
   profile: SettleProfile;
-  /** Vault object ID if user has one (null = new user, vault will be created on-chain) */
-  vaultId: string | null;
   /** Total cost in MIST (executionCostClaim + quotedHostFee + protocolFee) */
   totalCostMist: bigint;
   /** Total cost in SUI, human-readable (e.g. '0.005370') */

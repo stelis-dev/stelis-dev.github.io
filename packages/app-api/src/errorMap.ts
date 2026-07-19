@@ -1,21 +1,16 @@
 /**
- * errorMap — host-side error-to-HTTP renderer for `relay.ts` and
- * `studio.ts`.
+ * errorMap — host-side error-to-HTTP renderer for every current Host route.
  *
  * Each known error class carries only a contracts-owned current code and
  * dynamic evidence. `@stelis/contracts` is the sole authority for HTTP status
  * and the metadata fields each code may expose.
  *
- * Route handlers keep ownership of:
- *   - dynamic responses (`SponsorBlockedError` retry-after computed
- *     from `retryAfterMs`, rate-limit body shape,
- *     `buildSponsorUnavailableResponse`),
- *   - inline body-validation bad-request responses,
- *   - the 500 fallback (each route has a distinct fallback `code` —
- *     `INTERNAL_ERROR`, `SPONSOR_FAILED`, or plain message).
+ * Route handlers keep ownership only of the code and typed dynamic metadata
+ * selected by the current operation. Public messages, statuses, and permitted
+ * metadata fields come from `@stelis/contracts`.
  *
  * `mapError` returns `null` for unknown types so callers can fall
- * through to their route-specific 500 response.
+ * through to their route-specific coded 500 response.
  *
  * Policy
  * ------
@@ -42,14 +37,15 @@ import {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
-  SponsorTerminalProcessingError,
   SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from '@stelis/core-api';
 import { PromotionPrepareError, PromotionSponsorError } from '@stelis/core-api/studio';
+import { SuiOperationError } from '@stelis/core-relay';
 import {
   HOST_ERROR_HTTP_STATUS,
   HOST_ERROR_META_POLICY,
+  hostErrorPublicMessage,
   isHostErrorCode,
   isHostErrorSubcode,
   parseHostErrorResponse,
@@ -64,9 +60,10 @@ import {
 // Types
 // ─────────────────────────────────────────────
 
-export type MappedErrorBody = HostErrorResponse & { code: HostErrorCode };
+type MappedErrorBody = HostErrorResponse;
+type HostInternalFailureCode = Extract<HostErrorCode, 'INTERNAL_ERROR' | 'SPONSOR_FAILED'>;
 
-export interface MappedErrorResponse {
+interface MappedErrorResponse {
   status: number;
   headers?: Record<string, string>;
   body: HostErrorResponse;
@@ -150,9 +147,6 @@ function extractHints(err: Error): ExtractedHints | null {
   if (err instanceof SponsorCongestionError) {
     return { code: 'SPONSOR_CONGESTION', digest: err.digest };
   }
-  if (err instanceof SponsorTerminalProcessingError) {
-    return { code: err.code, digest: err.digest };
-  }
   // The transaction was signed and may have reached Sui, but the Host could
   // not prove a current terminal result. Preserve the derived transaction
   // identity so clients can reconcile instead of retrying as if submission
@@ -202,9 +196,11 @@ function extractHints(err: Error): ExtractedHints | null {
 export function mapError(
   err: unknown,
   allowedCodes: readonly HostErrorCode[],
+  internalFailureCode: HostInternalFailureCode,
 ): MappedErrorResponse | null {
   if (!(err instanceof Error)) return null;
-  const hints = extractHints(err);
+  const hints: ExtractedHints | null =
+    err instanceof SuiOperationError ? { code: internalFailureCode } : extractHints(err);
   if (!hints) return null;
   if (!allowedCodes.includes(hints.code)) return null;
 
@@ -221,49 +217,24 @@ export function mapError(
 }
 
 function buildPublicBody(hints: ExtractedHints, status: number): MappedErrorBody {
-  if (status >= 500) {
-    return requireCodedHostError(
-      {
-        error: 'Internal server error',
-        code: hints.code,
-        ...projectPublicBodyFields(HOST_ERROR_META_POLICY[hints.code]?.allowed ?? [], hints),
-      },
-      hints.code,
-      status,
-    );
-  }
-
   return requireCodedHostError(
-    {
-      error: publicErrorMessage(status),
-      code: hints.code,
-      ...projectPublicBodyFields(HOST_ERROR_META_POLICY[hints.code]?.allowed ?? [], hints),
-    },
     hints.code,
     status,
+    projectPublicBodyFields(HOST_ERROR_META_POLICY[hints.code]?.allowed ?? [], hints),
   );
 }
 
-function publicErrorMessage(status: number): string {
-  if (status === 400) return 'Invalid request';
-  if (status === 401) return 'Authentication failed';
-  if (status === 403) return 'Request forbidden';
-  if (status === 404) return 'Resource not found';
-  if (status === 409) return 'Request conflicts with current state';
-  if (status === 410) return 'Resource expired';
-  if (status === 413) return 'Request body too large';
-  if (status === 429) return 'Request temporarily blocked';
-  return 'Request rejected';
-}
-
 function requireCodedHostError(
-  value: HostErrorResponse,
   code: HostErrorCode,
   status: number,
+  meta: HostErrorMeta = {},
 ): MappedErrorBody {
-  const parsed = parseHostErrorResponse(value, [code], status);
-  if (parsed.code === undefined) throw new Error('Mapped Host error must carry a code');
-  return { ...parsed, code: parsed.code };
+  const value: HostErrorResponse = {
+    error: hostErrorPublicMessage(code),
+    code,
+    ...meta,
+  };
+  return parseHostErrorResponse(value, [code], status);
 }
 
 function projectPublicBodyFields(
@@ -272,26 +243,45 @@ function projectPublicBodyFields(
 ): HostErrorMeta {
   const projected: HostErrorMeta = {};
   for (const field of fields) {
-    if (field === 'digest') {
-      if (hints.digest !== undefined) projected.digest = hints.digest;
-      continue;
-    }
-    if (field === 'subcode') {
-      const value = hints.subcode ?? hints.meta?.subcode;
-      if (isHostErrorSubcode(value)) projected.subcode = value;
-      continue;
-    }
-    if (field === 'isEstimate') {
-      if (typeof hints.meta?.isEstimate === 'boolean') {
-        projected.isEstimate = hints.meta.isEstimate;
+    switch (field) {
+      case 'retryAfterMs': {
+        const value = hints.meta?.retryAfterMs;
+        if (typeof value === 'number') projected.retryAfterMs = value;
+        break;
       }
-      continue;
+      case 'subcode': {
+        const value = hints.subcode ?? hints.meta?.subcode;
+        if (isHostErrorSubcode(value)) projected.subcode = value;
+        break;
+      }
+      case 'digest':
+        if (hints.digest !== undefined) projected.digest = hints.digest;
+        break;
+      case 'operationId': {
+        const value = hints.meta?.operationId;
+        if (typeof value === 'string') projected.operationId = value;
+        break;
+      }
+      case 'minSettleMist': {
+        const value = hints.meta?.minSettleMist;
+        if (typeof value === 'string') projected.minSettleMist = value;
+        break;
+      }
+      case 'requiredTotalIn': {
+        const value = hints.meta?.requiredTotalIn;
+        if (typeof value === 'string') projected.requiredTotalIn = value;
+        break;
+      }
+      case 'isEstimate': {
+        const value = hints.meta?.isEstimate;
+        if (typeof value === 'boolean') projected.isEstimate = value;
+        break;
+      }
+      default: {
+        const exhaustive: never = field;
+        return exhaustive;
+      }
     }
-
-    const value = hints.meta?.[field];
-    if (typeof value !== 'string') continue;
-    if (field === 'minSettleMist') projected.minSettleMist = value;
-    else projected.requiredTotalIn = value;
   }
   return projected;
 }
@@ -320,27 +310,18 @@ export function respondMapped(c: HonoJsonContext, mapped: MappedErrorResponse): 
   return c.json(mapped.body, mapped.status as never);
 }
 
-/** Build a coded Host error without giving the caller an HTTP-status choice. */
+/** Build a coded Host error from the contracts-owned message and status authorities. */
 export function codedHostError(
-  body: HostErrorResponse & { code: HostErrorCode },
+  code: HostErrorCode,
   allowedCodes: readonly HostErrorCode[],
+  meta: HostErrorMeta = {},
   headers?: Record<string, string>,
 ): MappedErrorResponse {
-  const status = HOST_ERROR_HTTP_STATUS[body.code];
-  const parsed = parseHostErrorResponse(body, allowedCodes, status);
-  return headers ? { status, headers, body: parsed } : { status, body: parsed };
-}
-
-/**
- * Build a transport-only Host error. Domain failures cannot use this path;
- * uncoded responses are limited by the shared parser to 429/500/503.
- */
-export function uncodedHostError(
-  body: Omit<HostErrorResponse, 'code'> & { code?: never },
-  allowedCodes: readonly HostErrorCode[],
-  status: 429 | 500 | 503,
-  headers?: Record<string, string>,
-): MappedErrorResponse {
-  const parsed = parseHostErrorResponse(body, allowedCodes, status);
+  const status = HOST_ERROR_HTTP_STATUS[code];
+  const parsed = parseHostErrorResponse(
+    { error: hostErrorPublicMessage(code), code, ...meta },
+    allowedCodes,
+    status,
+  );
   return headers ? { status, headers, body: parsed } : { status, body: parsed };
 }

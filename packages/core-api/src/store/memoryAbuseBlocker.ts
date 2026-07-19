@@ -1,4 +1,5 @@
 import { DEFAULT_ABUSE_BLOCKER_CONFIG } from '../abuseBlocking.js';
+import type { AbuseBlockReason } from '@stelis/contracts';
 import {
   getFailurePolicy,
   isManipulationAttemptCode,
@@ -6,13 +7,25 @@ import {
   shouldIgnoreSponsorFailureForAbuse,
   subjectCounterFamily,
 } from '../failures.js';
-import type {
-  AbuseBlockStatus,
-  AbuseBlockerAdapter,
-  AbuseBlockerConfig,
-  AbuseSubject,
-} from './abuseBlockTypes.js';
-import { ensureBoundedCapacity } from './boundedMapEvict.js';
+import type { AbuseBlockStatus, AbuseBlockerConfig, AbuseSubject } from './abuseBlockTypes.js';
+import {
+  AbuseBlockStorageCorruptionError,
+  abuseBlockIdentityFromSubject,
+  cloneAbuseBlockRecord,
+  compareAbuseBlockPosition,
+  decodeAbuseBlockCursor,
+  decideAbuseBlockRemoval,
+  decideAbuseBlockWrite,
+  encodeAbuseBlockCursor,
+  isLiveAbuseBlock,
+  normalizeAbuseBlockIdentity,
+  validateAbuseBlockPageParams,
+  type AbuseBlockIdentity,
+  type AbuseBlockPage,
+  type AbuseBlockPageParams,
+  type AbuseBlockRecord,
+  type AbuseBlockStore,
+} from './abuseBlockStore.js';
 import { type Clock, systemClock } from '../clock.js';
 import { validateAbuseBlockerConfig } from './abuseBlockConfig.js';
 
@@ -21,27 +34,16 @@ interface CounterEntry {
   expiresAt: number;
 }
 
-interface BlockEntry {
-  reason: string;
-  expiresAt: number;
-}
-
-/** Maximum tracked keys per counter Map (memory DoS prevention). */
-const MAX_COUNTER_KEYS = 50_000;
-
-/** Maximum tracked keys per block Map (memory DoS prevention). */
-const MAX_BLOCK_KEYS = 100_000;
-
-export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
+export class MemoryAbuseBlocker implements AbuseBlockStore {
   private readonly _config: AbuseBlockerConfig;
   private readonly _ipFailures = new Map<string, CounterEntry>();
   private readonly _addressDryRunFailures = new Map<string, CounterEntry>();
   private readonly _addressOnchainRevertFailures = new Map<string, CounterEntry>();
   private readonly _studioUserDryRunFailures = new Map<string, CounterEntry>();
   private readonly _studioUserOnchainRevertFailures = new Map<string, CounterEntry>();
-  private readonly _ipBlocks = new Map<string, BlockEntry>();
-  private readonly _addressBlocks = new Map<string, BlockEntry>();
-  private readonly _studioUserBlocks = new Map<string, BlockEntry>();
+  private readonly _ipBlocks = new Map<string, AbuseBlockRecord>();
+  private readonly _addressBlocks = new Map<string, AbuseBlockRecord>();
+  private readonly _studioUserBlocks = new Map<string, AbuseBlockRecord>();
   private readonly _clock: Clock;
 
   constructor(config: Partial<AbuseBlockerConfig> = {}, clock: Clock = systemClock) {
@@ -50,14 +52,13 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
   }
 
   async checkIp(ip: string): Promise<AbuseBlockStatus> {
-    return this.checkBlockMap(this._ipBlocks, ip, 'ip');
+    const identity = normalizeAbuseBlockIdentity({ scope: 'ip', subject: ip });
+    return this.checkBlockMap(this._ipBlocks, identity.subject, 'ip');
   }
 
   async checkSubject(subject: AbuseSubject): Promise<AbuseBlockStatus> {
-    if (subject.kind === 'address') {
-      return this.checkBlockMap(this._addressBlocks, subject.address, 'address');
-    }
-    return this.checkBlockMap(this._studioUserBlocks, subject.userId, 'studio_user');
+    const identity = abuseBlockIdentityFromSubject(subject);
+    return this.checkBlockMap(this.blockMap(identity.scope), identity.subject, identity.scope);
   }
 
   async recordSponsorFailure(
@@ -66,26 +67,23 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
     code: string,
     meta?: import('./abuseBlockTypes.js').SponsorFailureMeta,
   ): Promise<void> {
-    const now = this._clock.nowMs();
-
     if (shouldIgnoreSponsorFailureForAbuse(code)) {
       return;
     }
 
+    const now = this._clock.nowMs();
+    const ipKey = normalizeAbuseBlockIdentity({ scope: 'ip', subject: ip }).subject;
+
     if (isManipulationAttemptCode(code)) {
       this.setBlock(
-        this._ipBlocks,
-        ip,
-        `manipulation:${code}`,
+        { scope: 'ip', subject: ipKey },
+        'manipulation',
         now + this._config.manipulationBlockDurationMs,
       );
       if (subject) {
-        const { blocks } = this.subjectStore(subject);
-        const subjectKey = subjectKeyOf(subject);
         this.setBlock(
-          blocks,
-          subjectKey,
-          `manipulation:${code}`,
+          abuseBlockIdentityFromSubject(subject),
+          'manipulation',
           now + this._config.manipulationBlockDurationMs,
         );
       }
@@ -101,12 +99,11 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
     const subjectImpact = policy?.abuseImpact.subject ?? 'count';
 
     if (ipImpact === 'count') {
-      this.recordCounter(this._ipFailures, ip, this._config.ipFailureWindowMs, now);
-      const ipFailureCount = this._ipFailures.get(ip)?.count ?? 0;
+      this.recordCounter(this._ipFailures, ipKey, this._config.ipFailureWindowMs, now);
+      const ipFailureCount = this._ipFailures.get(ipKey)?.count ?? 0;
       if (ipFailureCount > this._config.ipFailureThreshold) {
         this.setBlock(
-          this._ipBlocks,
-          ip,
+          { scope: 'ip', subject: ipKey },
           'sponsor_failure_threshold',
           now + this._config.ipBlockDurationMs,
         );
@@ -127,22 +124,22 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
       family !== null &&
       !shouldCarveOutNonIpCounter(code, meta)
     ) {
+      const currentSubject = abuseBlockIdentityFromSubject(subject);
       if (family === 'sim_tier') {
-        const { dryRunFailures, blocks } = this.subjectStore(subject);
-        const subjectKey = subjectKeyOf(subject);
+        const { dryRunFailures } = this.subjectStore(subject);
+        const subjectKey = currentSubject.subject;
         this.recordCounter(dryRunFailures, subjectKey, this._config.addressDryRunWindowMs, now);
         const dryRunCount = dryRunFailures.get(subjectKey)?.count ?? 0;
         if (dryRunCount > this._config.addressDryRunThreshold) {
           this.setBlock(
-            blocks,
-            subjectKey,
+            currentSubject,
             'dry_run_failure_threshold',
             now + this._config.addressBlockDurationMs,
           );
         }
       } else if (family === 'revert') {
-        const { onchainRevertFailures, blocks } = this.subjectStore(subject);
-        const subjectKey = subjectKeyOf(subject);
+        const { onchainRevertFailures } = this.subjectStore(subject);
+        const subjectKey = currentSubject.subject;
         this.recordCounter(
           onchainRevertFailures,
           subjectKey,
@@ -152,8 +149,7 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
         const revertCount = onchainRevertFailures.get(subjectKey)?.count ?? 0;
         if (revertCount > this._config.addressOnchainRevertThreshold) {
           this.setBlock(
-            blocks,
-            subjectKey,
+            currentSubject,
             'onchain_revert_threshold',
             now + this._config.addressBlockDurationMs,
           );
@@ -163,40 +159,37 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
   }
 
   /**
-   * Resolve the per-kind counter and block maps for the typed subject. The
-   * address kind owns address-keyed maps; the studio_user kind owns
-   * studio-user-keyed maps. Counters and blocks are isolated by kind so a
+   * Resolve the per-kind counter maps for the typed subject. The address kind
+   * owns address-keyed maps; the studio_user kind owns studio-user-keyed maps.
+   * Counters are isolated by kind so a
    * studio-user subject's counter cannot increment an address bucket and
    * vice versa.
    */
   private subjectStore(subject: AbuseSubject): {
     dryRunFailures: Map<string, CounterEntry>;
     onchainRevertFailures: Map<string, CounterEntry>;
-    blocks: Map<string, BlockEntry>;
   } {
     if (subject.kind === 'address') {
       return {
         dryRunFailures: this._addressDryRunFailures,
         onchainRevertFailures: this._addressOnchainRevertFailures,
-        blocks: this._addressBlocks,
       };
     }
     return {
       dryRunFailures: this._studioUserDryRunFailures,
       onchainRevertFailures: this._studioUserOnchainRevertFailures,
-      blocks: this._studioUserBlocks,
     };
   }
 
   private checkBlockMap(
-    blocks: Map<string, BlockEntry>,
+    blocks: Map<string, AbuseBlockRecord>,
     key: string,
-    scope: 'ip' | 'address' | 'studio_user',
+    scope: AbuseBlockIdentity['scope'],
   ): AbuseBlockStatus {
     const now = this._clock.nowMs();
-    const entry = blocks.get(key);
+    const entry = this.currentBlock(blocks, key, scope);
     if (!entry) return { blocked: false };
-    if (entry.expiresAt <= now) {
+    if (!isLiveAbuseBlock(entry, now)) {
       blocks.delete(key);
       return { blocked: false };
     }
@@ -204,7 +197,7 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
       blocked: true,
       scope,
       reason: entry.reason,
-      retryAfterMs: Math.max(entry.expiresAt - now, 0),
+      retryAfterMs: entry.blockedUntilMs - now,
     };
   }
 
@@ -216,79 +209,117 @@ export class MemoryAbuseBlocker implements AbuseBlockerAdapter {
   ): void {
     const existing = counters.get(key);
     if (!existing || existing.expiresAt <= now) {
-      // Bounded eviction: expired first → oldest live evict.
-      // Never skips tracking — prevents fail-open under saturation.
-      if (!existing) {
-        ensureBoundedCapacity(
-          counters,
-          MAX_COUNTER_KEYS,
-          (v) => v.expiresAt <= now,
-          (v) => v.expiresAt,
-        );
-      }
       counters.set(key, { count: 1, expiresAt: now + windowMs });
       return;
     }
     existing.count += 1;
   }
 
-  /**
-   * Set or update a block entry with bounded memory protection.
-   *
-   * When at capacity:
-   *   1. Evict expired entries
-   *   2. If still full, replace the entry closest to expiry (evict-oldest)
-   *
-   * Never skips a new block — prevents security inversion (fail-open).
-   */
   private setBlock(
-    blocks: Map<string, BlockEntry>,
-    key: string,
-    reason: string,
-    expiresAt: number,
+    identity: AbuseBlockIdentity,
+    reason: AbuseBlockReason,
+    blockedUntilMs: number,
   ): void {
-    // Existing key update — no growth, always allowed
-    if (blocks.has(key)) {
-      blocks.set(key, { reason, expiresAt });
-      return;
-    }
+    const currentIdentity = normalizeAbuseBlockIdentity(identity);
+    const blocks = this.blockMap(currentIdentity.scope);
+    const current = this.currentBlock(blocks, currentIdentity.subject, currentIdentity.scope);
+    const decision = decideAbuseBlockWrite(current, {
+      identity: currentIdentity,
+      reason,
+      blockedUntilMs,
+    });
+    if (decision.kind === 'preserved') return;
 
-    // New key — check capacity
-    if (blocks.size >= MAX_BLOCK_KEYS) {
-      const now = this._clock.nowMs();
-      this.evictExpiredBlocks(blocks, now);
-
-      // Still full — evict the entry closest to expiry to make room
-      if (blocks.size >= MAX_BLOCK_KEYS) {
-        this.evictOldestBlock(blocks);
-      }
-    }
-
-    blocks.set(key, { reason, expiresAt });
+    blocks.set(currentIdentity.subject, decision.record);
   }
 
-  private evictExpiredBlocks(blocks: Map<string, BlockEntry>, now: number): void {
-    for (const [key, entry] of blocks) {
-      if (entry.expiresAt <= now) {
-        blocks.delete(key);
+  async listBlocks(params: AbuseBlockPageParams): Promise<AbuseBlockPage> {
+    validateAbuseBlockPageParams(params);
+    const now = this._clock.nowMs();
+    const rows: Array<{
+      identity: AbuseBlockIdentity;
+      reason: AbuseBlockReason;
+      blockedUntilMs: number;
+    }> = [];
+    this.collectBlocks(rows, this._ipBlocks, 'ip', now);
+    this.collectBlocks(rows, this._addressBlocks, 'address', now);
+    this.collectBlocks(rows, this._studioUserBlocks, 'studio_user', now);
+    rows.sort(compareAbuseBlockPosition);
+    const cursor =
+      params.cursor === null
+        ? null
+        : (() => {
+            const decoded = decodeAbuseBlockCursor(params.cursor);
+            return {
+              identity: { scope: decoded.scope, subject: decoded.subject } as AbuseBlockIdentity,
+              blockedUntilMs: decoded.blockedUntilMs,
+            };
+          })();
+    const afterCursor = rows.filter(
+      (row) => cursor === null || compareAbuseBlockPosition(row, cursor) > 0,
+    );
+    const examined = afterCursor.slice(0, params.limit);
+    const hasMore = afterCursor.length > params.limit;
+    return {
+      blocks: examined,
+      nextCursor:
+        hasMore && examined.length > 0
+          ? encodeAbuseBlockCursor(examined[examined.length - 1]!)
+          : null,
+    };
+  }
+
+  async removeBlock(identity: AbuseBlockIdentity): Promise<boolean> {
+    const current = normalizeAbuseBlockIdentity(identity);
+    const blocks = this.blockMap(current.scope);
+    const record = this.currentBlock(blocks, current.subject, current.scope);
+    const decision = decideAbuseBlockRemoval(record, this._clock.nowMs());
+    if (record !== null) blocks.delete(current.subject);
+    return decision === 'removed';
+  }
+
+  async stop(): Promise<void> {}
+
+  private collectBlocks(
+    output: Array<{
+      identity: AbuseBlockIdentity;
+      reason: AbuseBlockReason;
+      blockedUntilMs: number;
+    }>,
+    blocks: Map<string, AbuseBlockRecord>,
+    scope: AbuseBlockIdentity['scope'],
+    now: number,
+  ): void {
+    for (const subject of [...blocks.keys()]) {
+      const record = this.currentBlock(blocks, subject, scope);
+      if (record === null) continue;
+      if (!isLiveAbuseBlock(record, now)) {
+        blocks.delete(subject);
+        continue;
       }
+      output.push(record);
     }
   }
 
-  /** Remove the block entry with the earliest expiresAt (closest to expiry). */
-  private evictOldestBlock(blocks: Map<string, BlockEntry>): void {
-    let oldestKey: string | null = null;
-    let oldestExpiresAt = Infinity;
-    for (const [key, entry] of blocks) {
-      if (entry.expiresAt < oldestExpiresAt) {
-        oldestKey = key;
-        oldestExpiresAt = entry.expiresAt;
-      }
-    }
-    if (oldestKey) blocks.delete(oldestKey);
+  private blockMap(scope: AbuseBlockIdentity['scope']): Map<string, AbuseBlockRecord> {
+    if (scope === 'ip') return this._ipBlocks;
+    if (scope === 'address') return this._addressBlocks;
+    return this._studioUserBlocks;
   }
-}
 
-function subjectKeyOf(subject: AbuseSubject): string {
-  return subject.kind === 'address' ? subject.address : subject.userId;
+  private currentBlock(
+    blocks: Map<string, AbuseBlockRecord>,
+    subject: string,
+    scope: AbuseBlockIdentity['scope'],
+  ): AbuseBlockRecord | null {
+    const stored = blocks.get(subject);
+    if (stored === undefined) return null;
+    const record = cloneAbuseBlockRecord(stored);
+    if (record.identity.scope !== scope || record.identity.subject !== subject) {
+      throw new AbuseBlockStorageCorruptionError(
+        'Memory abuse block record does not match its storage key',
+      );
+    }
+    return record;
+  }
 }

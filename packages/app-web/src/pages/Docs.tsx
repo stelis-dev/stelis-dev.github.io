@@ -65,7 +65,7 @@ const endpoints: EndpointOverview[] = [
     highlights: [
       'Required body: txKindBytes, senderAddress, settlementTokenType, txKindBytesHash, and the three prepare-authorization fields',
       'Optional body: slippageBps, gasMarginBps, orderId',
-      'Dry-run rejections return 422 domain codes such as DRY_RUN_FAILED and DRY_RUN_NO_GAS',
+      'Dry-run transaction rejections return the 422 domain code DRY_RUN_FAILED',
     ],
     docHref: docAnchor(API_DOC_URL, 'post-relay-prepare'),
   },
@@ -368,9 +368,9 @@ export function DocsPage() {
           {'{ "error": "<message>", "code": "<ERROR_CODE>" }'}
         </code>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          Every error includes <code>error</code>. Domain errors also include <code>code</code>;
-          rate-limit responses may instead include <code>retryAfterMs</code>. See{' '}
-          <code>docs/api.md</code> for route-specific semantics.
+          Every current error includes a route-owned <code>code</code> and its canonical public{' '}
+          <code>error</code> message. Rate-limit errors also include <code>retryAfterMs</code>. See{' '}
+          <code>docs/api.md</code> for route-specific codes and metadata.
         </span>
       </div>
 

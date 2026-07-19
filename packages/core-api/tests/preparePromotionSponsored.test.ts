@@ -13,27 +13,65 @@
  *   - Use window expiry
  */
 import { describe, test, expect, vi } from 'vitest';
+import { SUI_CHAIN_IDENTIFIERS, type AdminPromotionCreateRequest } from '@stelis/contracts';
 import { canonicalizePromotionTarget } from '../src/studio/promotionTargetPolicy.js';
 import {
-  handlePromotionPrepare,
+  handlePromotionPrepare as handlePromotionPrepareCore,
   PromotionPrepareError,
   type PromotionPrepareContext,
 } from '../src/studio/preparePromotionSponsoredHandler.js';
-import { MemoryPromotionStore, type CreatePromotionInput } from '../src/studio/promotionStore.js';
+import { MemoryPromotionStore } from '../src/studio/promotionStore.js';
 import { MemoryPromotionExecutionLedger } from '../src/studio/executionLedgerMemory.js';
-import { MemoryPrepareStore } from '../src/store/memoryPrepareStore.js';
+import { MemorySponsoredExecutionStore } from '../src/store/memorySponsoredExecutionStore.js';
 import { MemoryPrepareInflight } from '../src/store/memoryPrepareInflight.js';
 import { PrepareOverloadError, PrepareStudioUserQuotaError } from '../src/store/prepareErrors.js';
 import { SponsorPool } from '../src/context.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
-import { toBase64 } from '@mysten/sui/utils';
+import { fromBase64, normalizeSuiAddress, toBase64 } from '@mysten/sui/utils';
+import { createHash } from 'node:crypto';
+import type { ChainBoundSuiEndpointSnapshot, SuiSimulationResult } from '@stelis/core-relay';
+import type {
+  AddressBalanceGasTransaction,
+  buildAddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
 import type { VerifiedDeveloperIdentity } from '../src/studio/developerJwtVerifier.js';
 import {
-  bindGrpcResultToTransactionBytes,
-  grpcSimulationSuccess,
-} from './helpers/suiGrpcExecutionFixtures.js';
+  addressBalanceGasTransactionBytesFixture,
+  suiEndpointSnapshotFixture,
+  suiSimulationSuccess,
+} from './helpers/suiGatewayResultFixtures.js';
+import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
+
+type BuildAddressBalanceGasTransactionOptions = Parameters<
+  typeof buildAddressBalanceGasTransaction
+>[1];
+
+const {
+  addressBalanceGasTransactionContents,
+  buildAddressBalanceGasTransactionMock,
+  getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHashMock,
+  simulateAddressBalanceGasTransactionMock,
+} = vi.hoisted(() => ({
+  addressBalanceGasTransactionContents: new WeakMap<
+    object,
+    { readonly bytes: Uint8Array; readonly txBytesHash: string }
+  >(),
+  buildAddressBalanceGasTransactionMock: vi.fn(),
+  getAddressBalanceGasTransactionBytesMock: vi.fn(),
+  getAddressBalanceGasTransactionTxBytesHashMock: vi.fn(),
+  simulateAddressBalanceGasTransactionMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay/server')>()),
+  buildAddressBalanceGasTransaction: buildAddressBalanceGasTransactionMock,
+  getAddressBalanceGasTransactionBytes: getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHash: getAddressBalanceGasTransactionTxBytesHashMock,
+  simulateAddressBalanceGasTransaction: simulateAddressBalanceGasTransactionMock,
+}));
 
 // ─────────────────────────────────────────────
 // Constants
@@ -57,7 +95,7 @@ const SIMULATION_GAS_USED = {
   storageRebate: '200000',
 };
 
-const BASE_PROMO: CreatePromotionInput = {
+const BASE_PROMO: AdminPromotionCreateRequest = {
   type: 'gas_sponsorship',
   displayName: 'Test Promotion Prepare',
   description: 'Unit test promotion',
@@ -67,6 +105,29 @@ const BASE_PROMO: CreatePromotionInput = {
   postClaimUseWindowMs: 0,
   startAt: null,
 };
+
+type TestPromotionPrepareParams = Omit<
+  Parameters<typeof handlePromotionPrepareCore>[1],
+  'clientIp'
+> & { readonly clientIp: string };
+
+const TEST_ADMISSION_BLOCKER = {
+  checkIp: async () => ({ blocked: false as const }),
+  checkSubject: async () => ({ blocked: false as const }),
+  recordSponsorFailure: async () => undefined,
+};
+
+async function handlePromotionPrepare(
+  ctx: PromotionPrepareContext,
+  params: TestPromotionPrepareParams,
+  admission = { assertSponsorAvailable: async () => undefined },
+) {
+  return handlePromotionPrepareCore(
+    ctx,
+    { ...params, clientIp: await admitTestClientIp(TEST_ADMISSION_BLOCKER, params.clientIp) },
+    admission,
+  );
+}
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -93,47 +154,66 @@ async function buildCommandCountTxKindBytes(commandCount: number): Promise<strin
   return toBase64(kindBytes);
 }
 
-function createMockSui() {
-  return {
-    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
-        transaction,
-      ),
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
-}
+buildAddressBalanceGasTransactionMock.mockImplementation(
+  async (
+    _snapshot: ChainBoundSuiEndpointSnapshot,
+    options: BuildAddressBalanceGasTransactionOptions,
+  ) => {
+    const source = options.transaction.getData();
+    expect(source.sender).not.toBeNull();
+    expect(source.gasData.owner).toBeNull();
+    expect(source.gasData.price).toBeNull();
+    expect(source.gasData.budget).toBeNull();
+    expect(source.gasData.payment).toBeNull();
+    expect(source.expiration).toBeNull();
 
-/**
- * Extended mock that supports the full Transaction.build() gas-resolution path.
- *
- * Transaction.build({ client }) uses coreClientResolveTransactionPlugin when
- * client.core.resolveTransactionPlugin() returns undefined. That fallback calls
- * client.core.{getCurrentSystemState, getBalance, listCoins, getChainIdentifier}.
- *
- * Required only for tests that exercise the full prepare success path.
- * Tests that fail before step 6 (first build) can continue to use createMockSui().
- */
-function createMockSuiWithCore() {
-  return {
-    simulateTransaction: async ({ transaction }: { transaction: Uint8Array }) =>
-      bindGrpcResultToTransactionBytes(
-        grpcSimulationSuccess('fixture-digest', SIMULATION_GAS_USED),
-        transaction,
-      ),
-    core: {
-      // Returns undefined → Transaction.build() falls back to coreClientResolveTransactionPlugin,
-      // which then calls the other core methods below for gas-price / gas-payment / expiration resolution.
-      resolveTransactionPlugin: () => undefined,
-      getCurrentSystemState: async () => ({
-        systemState: { referenceGasPrice: '1000', epoch: '100' },
-      }),
-      // Sufficient address balance so setGasPayment() skips coin-object selection and sets payment = [].
-      getBalance: async () => ({ balance: { addressBalance: '100000000000000' } }),
-      listCoins: async () => ({ objects: [] }),
-      // 32 ones in base58 = 32 zero bytes — valid ObjectDigest for ValidDuring.chain.
-      getChainIdentifier: async () => ({ chainIdentifier: '11111111111111111111111111111111' }),
-    },
-  } as unknown as import('@mysten/sui/grpc').SuiGrpcClient;
+    const bytes = await addressBalanceGasTransactionBytesFixture({
+      transaction: options.transaction,
+      sponsorAddress: options.sponsorAddress,
+      gasBudget: options.gasBudget,
+      gasPrice: 1_000n,
+      chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+    });
+    const token = Object.freeze({}) as AddressBalanceGasTransaction;
+    addressBalanceGasTransactionContents.set(token, {
+      bytes: bytes.slice(),
+      txBytesHash: createHash('sha256').update(bytes).digest('hex'),
+    });
+    return token;
+  },
+);
+
+simulateAddressBalanceGasTransactionMock.mockImplementation(
+  async (transaction: AddressBalanceGasTransaction): Promise<SuiSimulationResult> => {
+    if (!addressBalanceGasTransactionContents.has(transaction)) {
+      throw new TypeError('Unknown address-balance gas transaction test token');
+    }
+    return suiSimulationSuccess(SIMULATION_GAS_USED);
+  },
+);
+
+getAddressBalanceGasTransactionBytesMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction): Uint8Array => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) {
+      throw new TypeError('Unknown address-balance gas transaction test token');
+    }
+    return contents.bytes.slice();
+  },
+);
+
+getAddressBalanceGasTransactionTxBytesHashMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction): string => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) {
+      throw new TypeError('Unknown address-balance gas transaction test token');
+    }
+    return contents.txBytesHash;
+  },
+);
+
+function createMockSui(): ChainBoundSuiEndpointSnapshot {
+  return suiEndpointSnapshotFixture();
 }
 
 // ─────────────────────────────────────────────
@@ -142,11 +222,9 @@ function createMockSuiWithCore() {
 
 async function setup() {
   const promotionStore = new MemoryPromotionStore();
-  const executionLedger = new MemoryPromotionExecutionLedger();
+  const executionLedger = new MemoryPromotionExecutionLedger(promotionStore);
   const sponsorPool = new SponsorPool([SPONSOR_KP], { hmacSecret: TEST_HMAC_SECRET });
-  const prepareStore = new MemoryPrepareStore((sponsorAddress, receiptId, txBytesHash) =>
-    sponsorPool.checkin(sponsorAddress, receiptId, txBytesHash),
-  );
+  const sponsoredExecutionStore = new MemorySponsoredExecutionStore(sponsorPool, executionLedger);
 
   // Create and activate a promotion
   const record = await promotionStore.create(BASE_PROMO);
@@ -155,8 +233,6 @@ async function setup() {
 
   // Claim promotion (creates entitlement atomically via ExecutionLedger)
   await executionLedger.claim(promoId, 'user-42', {
-    maxParticipants: BASE_PROMO.maxParticipants,
-    perUserGasAllowanceMist: PER_USER_ALLOWANCE,
     useUntilAt: null,
   });
 
@@ -165,7 +241,7 @@ async function setup() {
     promotionStore,
     executionLedger,
     sponsorPool,
-    prepareStore,
+    sponsoredExecutionStore,
     prepareInflightLimiter: new MemoryPrepareInflight(10),
     getConfig: async () => ({
       maxClaimMist: 50_000_000_000n,
@@ -180,7 +256,7 @@ async function setup() {
     globalAllowedTargets: GLOBAL_ALLOWED_TARGETS,
   };
 
-  return { ctx, promotionStore, executionLedger, prepareStore, promoId };
+  return { ctx, promotionStore, executionLedger, sponsoredExecutionStore, promoId };
 }
 
 // ─────────────────────────────────────────────
@@ -307,7 +383,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // 70KB payload: passes the 96KB prepare-request body cap but exceeds the
     // 64KB MAX_TX_KIND_BYTES field cap. P0 size check must fail at the
@@ -342,7 +418,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     try {
       await handlePromotionPrepare(ctx, {
@@ -366,29 +442,39 @@ describe('handlePromotionPrepare', () => {
 
   test('rejects undecodable txKindBytes with BAD_TX_KIND before inflight, checkout, reserve, or store (fail-closed decode)', async () => {
     const { ctx, promoId } = await setup();
+    const sponsorAvailable = vi.fn(async () => undefined);
+    const promotionReadSpy = vi.spyOn(ctx.promotionStore, 'get');
+    const entitlementReadSpy = vi.spyOn(ctx.executionLedger, 'getEntitlement');
     const inflightSpy = vi.spyOn(ctx.prepareInflightLimiter, 'tryAcquire');
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Garbage bytes that decode from base64 but fail Transaction.fromKind().
     const garbageTxKind = toBase64(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
 
     try {
-      await handlePromotionPrepare(ctx, {
-        promotionId: promoId,
-        senderAddress: USER_ADDR,
-        txKindBytes: garbageTxKind,
-        verifiedIdentity: buildIdentity(),
-        clientIp: '127.0.0.1',
-      });
+      await handlePromotionPrepare(
+        ctx,
+        {
+          promotionId: promoId,
+          senderAddress: USER_ADDR,
+          txKindBytes: garbageTxKind,
+          verifiedIdentity: buildIdentity(),
+          clientIp: '127.0.0.1',
+        },
+        { assertSponsorAvailable: sponsorAvailable },
+      );
       expect.unreachable('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(PromotionPrepareError);
       expect((err as PromotionPrepareError).code).toBe('BAD_TX_KIND');
     }
     expect(inflightSpy).not.toHaveBeenCalled();
+    expect(sponsorAvailable).not.toHaveBeenCalled();
+    expect(promotionReadSpy).not.toHaveBeenCalled();
+    expect(entitlementReadSpy).not.toHaveBeenCalled();
     expect(getConfigSpy).not.toHaveBeenCalled();
     expect(checkoutSpy).not.toHaveBeenCalled();
     expect(reserveSpy).not.toHaveBeenCalled();
@@ -401,7 +487,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Real SDK build: MoveCall with tx.gas as an argument.
     const tx = new Transaction();
@@ -440,7 +526,7 @@ describe('handlePromotionPrepare', () => {
       const getConfigSpy = vi.spyOn(ctx, 'getConfig');
       const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
       const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-      const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+      const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
       const txKindBytes = await buildCommandCountTxKindBytes(commandCount);
 
       await expect(
@@ -507,7 +593,7 @@ describe('handlePromotionPrepare', () => {
     const getConfigSpy = vi.spyOn(ctx, 'getConfig');
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
     const reserveSpy = vi.spyOn(ctx.executionLedger, 'reserve');
-    const storeSpy = vi.spyOn(ctx.prepareStore, 'store');
+    const storeSpy = vi.spyOn(ctx.sponsoredExecutionStore, 'commitPreparedReceipt');
 
     // Build a Sender withdrawal, patch to Sponsor via BCS
     const seed = new Transaction();
@@ -561,8 +647,6 @@ describe('handlePromotionPrepare', () => {
     await promotionStore.transitionStatus(futurePromo.promotionId, 'active');
 
     await executionLedger.claim(futurePromo.promotionId, 'user-42', {
-      maxParticipants: BASE_PROMO.maxParticipants,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: null,
     });
 
@@ -588,8 +672,6 @@ describe('handlePromotionPrepare', () => {
 
     // Claim with a use window that has already expired
     const claim = await executionLedger.claim(promoId, 'user-expired', {
-      maxParticipants: BASE_PROMO.maxParticipants,
-      perUserGasAllowanceMist: PER_USER_ALLOWANCE,
       useUntilAt: new Date(Date.now() - 86400_000).toISOString(),
     });
     expect(claim.ok).toBe(true);
@@ -649,8 +731,7 @@ describe('handlePromotionPrepare', () => {
     const result = await handlePromotionPrepare(
       {
         ...ctx,
-        // Provide a full-path Sui mock required for Transaction.build() gas resolution.
-        sui: createMockSuiWithCore(),
+        sui: createMockSui(),
         prepareInflightLimiter: {
           tryAcquire: vi.fn().mockResolvedValue({ release: releaseFn }),
           inflight: 0,
@@ -670,6 +751,23 @@ describe('handlePromotionPrepare', () => {
     expect(result.txBytes).toBeDefined();
     expect(result.receiptId).toBeDefined();
     expect(result.estimatedGasMist).toBeDefined();
+    const transaction = TransactionDataBuilder.fromBytes(fromBase64(result.txBytes)).snapshot();
+    expect(transaction.sender).toBe(normalizeSuiAddress(USER_ADDR));
+    expect(transaction.gasData.owner).toBe(normalizeSuiAddress(SPONSOR_KP.toSuiAddress()));
+    expect(BigInt(transaction.gasData.budget!)).toBe(BigInt(result.estimatedGasMist));
+    expect(BigInt(transaction.gasData.price!)).toBe(1_000n);
+    expect(transaction.gasData.payment).toEqual([]);
+    expect(transaction.expiration).toEqual({
+      $kind: 'ValidDuring',
+      ValidDuring: {
+        minEpoch: '1',
+        maxEpoch: '2',
+        minTimestamp: null,
+        maxTimestamp: null,
+        chain: SUI_CHAIN_IDENTIFIERS.testnet,
+        nonce: 0,
+      },
+    });
     expect(releaseFn).toHaveBeenCalledTimes(1);
   });
 
@@ -744,17 +842,13 @@ describe('handlePromotionPrepare', () => {
     const txKind = await buildTestTxKindBytes();
     const checkoutSpy = vi.spyOn(ctx.sponsorPool, 'checkout');
 
-    // Override checkUserQuota on the prepareStore to simulate quota exceeded
-    const quotaCtx: PromotionPrepareContext = {
-      ...ctx,
-      prepareStore: {
-        ...ctx.prepareStore,
-        checkUserQuota: async () => ({ exceeded: true as const, limit: 1 }),
-      },
-    };
+    vi.spyOn(ctx.sponsoredExecutionStore, 'checkUserQuota').mockResolvedValue({
+      exceeded: true,
+      limit: 1,
+    });
 
     await expect(
-      handlePromotionPrepare(quotaCtx, {
+      handlePromotionPrepare(ctx, {
         promotionId: promoId,
         senderAddress: USER_ADDR,
         txKindBytes: txKind,

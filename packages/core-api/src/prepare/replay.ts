@@ -9,7 +9,6 @@
  * Uses Sui SDK's Transaction.fromKind() for deserialization.
  */
 import { Transaction } from '@mysten/sui/transactions';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { fromBase64 } from '@mysten/sui/utils';
 import type { RelayPrepareErrorCode } from '@stelis/contracts';
 
@@ -31,13 +30,9 @@ export const MAX_TX_KIND_BYTES = 64 * 1024;
  * The caller is responsible for adding settle commands, setting sender/gas.
  *
  * @param txKindBytesBase64  Base64-encoded TransactionKind bytes
- * @param client             SuiGrpcClient for Transaction.fromKind() resolution
  * @throws if txKindBytes exceed MAX_TX_KIND_BYTES or are invalid
  */
-export async function deserializeUserTxKind(
-  txKindBytesBase64: string,
-  _client: SuiGrpcClient,
-): Promise<Transaction> {
+export async function deserializeUserTxKind(txKindBytesBase64: string): Promise<Transaction> {
   // P0: Size check
   let rawBytes: Uint8Array;
   try {

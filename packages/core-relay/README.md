@@ -11,7 +11,7 @@ Pure TypeScript relay validation and quote library - framework-independent.
 
 - Built for: maintainers, reviewers, and internal developers working on validation, quote math, or relay helpers.
 - Use for: transaction validation, quote math, and reusable relay calculation helpers.
-- Not for: dry-run execution, server setup, or public integration onboarding.
+- Not for: Host orchestration, server setup, Studio authentication utilities, or public integration onboarding.
 
 > [!NOTE]
 > Codes like `S-14`, `R-1` are invariant IDs defined in [invariants.md](../../docs/invariants.md)
@@ -34,8 +34,12 @@ flowchart TB
 > For cost formulas, see [economics-formal.md](../../docs/economics-formal.md).
 
 Shared contract/data constants and cross-package request and response types live in `@stelis/contracts`.
+Studio developer JWT decoding is a private `@stelis/core-api` concern and is not
+exported by any `@stelis/core-relay` entrypoint.
 
-> Layer 4 (dry-run) requires Sui RPC and is performed in `@stelis/core-api`.
+Current Sui RPC simulation and Move-view calls run through this package's exact
+operation gateways. `@stelis/core-api` owns the prepare/sponsor domain policy
+that consumes those normalized results.
 
 ## When to Use
 
@@ -44,11 +48,12 @@ Use this package when you need:
 - pure validation logic without a web framework
 - quote and non-loss math as reusable TypeScript functions
 - PTB normalization, validation helpers, and quote-side runtime helpers
+- exact current Sui simulation, execution, effects, event, object, coin, and balance gateways
 
 Use `@stelis/core-api` instead when you need:
 
 - HTTP handlers
-- dry-run execution
+- prepare/sponsor dry-run orchestration and failure policy
 - sponsor signing
 - prepare/sponsor handler orchestration
 

@@ -7,15 +7,50 @@
  * Boundary: binds app-api host concerns with core-api admin helpers
  * and the shared admin contracts in @stelis/contracts.
  */
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import {
+  ADMIN_BLOCKLIST_READ_ERROR_CODES,
+  ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
+  ADMIN_REQUEST_ADMISSION_ERROR_CODES,
+  ADMIN_PROMOTION_CREATE_ERROR_CODES,
+  ADMIN_PROMOTION_DELETE_ERROR_CODES,
+  ADMIN_PROMOTION_LIST_ERROR_CODES,
+  ADMIN_PROMOTION_READ_ERROR_CODES,
+  ADMIN_PROMOTION_STATUS_ERROR_CODES,
+  ADMIN_PROMOTION_UPDATE_ERROR_CODES,
+  ADMIN_READ_ERROR_CODES,
+  ADMIN_SPONSORED_LOGS_ERROR_CODES,
+  ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES,
+  ADMIN_WITHDRAWAL_ERROR_CODES,
   buildSponsorRefillAccountWithdrawMessage,
   HostWireParseError,
-  isPositiveU64DecimalString,
+  parseAdminAuditLogsResponse,
+  parseAdminBlocklistDeleteRequest,
+  parseAdminBlocklistDeleteResponse,
+  parseAdminBlocklistQuery,
+  parseAdminBlocklistResponse,
+  parseAdminPromotionCreateRequest,
+  parseAdminPromotionDeleteResponse,
+  parseAdminPromotionDetailResponse,
+  parseAdminPromotionListQuery,
+  parseAdminPromotionListResponse,
+  parseAdminPromotionResponse,
+  parseAdminPromotionStatusRequest,
+  parseAdminPromotionSummaryResponse,
+  parseAdminPromotionUpdateRequest,
+  parsePromotionId,
+  parseAdminSettlementSwapPathsResponse,
+  parseAdminSponsoredLogsQuery,
+  parseAdminSponsoredLogsResponse,
+  parseAdminSponsoredLogsSummaryResponse,
   parseSponsorRefillAccountWithdrawalRequest,
-  type SponsorRefillAccountWithdrawalResponse,
-  type SponsorRefillAccountWithdrawalChallengeResponse,
+  parseSponsorRefillAccountWithdrawalChallengeResponse,
+  parseSponsorRefillAccountWithdrawalResponse,
+  parseAdminStudioResponse,
+  parseAdminSponsorOperationsResponse,
+  type AdminSponsorOperationsResponse,
   type DeepBookPoolHop,
+  type HostErrorCode,
   type SponsorOperationsStatus,
   type SuiNetwork,
 } from '@stelis/contracts';
@@ -26,13 +61,18 @@ import {
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
 import {
-  ClientIpResolutionError,
-  readJsonBodyWithLimit,
+  AbuseBlockCurrentConflictError,
+  AbuseBlockInputError,
   MAX_SMALL_REQUEST_BODY_BYTES,
+  readAdmittedClientIp,
 } from '@stelis/core-api';
 import {
-  MAX_PROMOTION_LEDGER_VALUE_MIST,
+  computeTotalRequiredBudgetMist,
+  InvalidStatusTransitionError,
   PromotionCurrentConflictError,
+  PromotionFieldImmutableError,
+  PromotionLedgerValueError,
+  type Promotion,
 } from '@stelis/core-api/studio';
 import { createAdminRedisAdapter } from '../adminRedis.js';
 import {
@@ -41,254 +81,96 @@ import {
   writeAdminAuditLog,
 } from '../adminAuditLog.js';
 import { redactSensitiveText, safeErrorSummary } from '@stelis/core-api/observability';
-import { deriveSponsorAvailabilitySummary } from '../sponsor-operations/gate.js';
+import { calculateSponsorAvailability } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
-import type { AppApiContext } from '../context.js';
+import type { RelayAndStudioAppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
-import type { ResolveClientIp } from '../clientIp.js';
+import {
+  beginRequestAdmission,
+  finishAuthenticatedRequestAdmission,
+  type InitialRequestAdmission,
+  type RequestAdmissionDependencies,
+} from '../requestAdmission.js';
+import { codedHostError, mapError, respondMapped } from '../errorMap.js';
+import { formatRetryAfterSeconds } from '../retryAfter.js';
 import { safeBigintToNumber } from '../wireNumbers.js';
 
 /**
  * Enrich a Promotion with derived totalRequiredBudgetMist.
  * This keeps the computation in core-api and avoids storing derived data.
- * The derived value is display-only: over-bound draft products are still
- * rendered exactly here and rejected later by the activation gate.
+ * The store has already accepted the complete ledger budget before this
+ * current projection is created.
  */
-async function withDerivedBudget<T extends import('@stelis/core-api/studio').Promotion>(
+function withDerivedBudget<T extends Promotion>(
   record: T,
-): Promise<T & { totalRequiredBudgetMist: string }> {
-  const { computeTotalRequiredBudgetMist } = await import('@stelis/core-api/studio');
+): T & { totalRequiredBudgetMist: string } {
   return {
     ...record,
     totalRequiredBudgetMist: computeTotalRequiredBudgetMist(record),
   };
 }
 
-/**
- * Compute admin summary for a promotion using context stores.
- * Returns null if required stores are not available.
- */
+/** Compute the current promotion summary from the authoritative store projections. */
 async function computeAdminSummary(
-  ctx: AppApiContext,
+  ctx: RelayAndStudioAppApiContext,
   promotionId: string,
-  promotion: import('@stelis/core-api/studio').Promotion,
-): Promise<import('@stelis/core-api/studio').PromotionAdminSummary | null> {
-  if (!ctx.executionLedger) return null;
+  promotion: Promotion,
+): Promise<import('@stelis/core-api/studio').PromotionAdminSummary> {
   const { computePromotionAdminSummary } = await import('@stelis/core-api/studio');
-  const [claimedCount, budgetSummary] = await Promise.all([
-    ctx.executionLedger.getClaimedCount(promotionId),
-    ctx.executionLedger.getBudgetSummary(promotionId),
-  ]);
-  return computePromotionAdminSummary(promotion, claimedCount, budgetSummary);
+  const ledgerStatus = await ctx.executionLedger.getPromotionLedgerStatus(promotionId, null);
+  return computePromotionAdminSummary(promotion, ledgerStatus.claimedCount, ledgerStatus.budget);
 }
-import { tryBodyErrorResponse } from '../bodyError.js';
 
-/**
- * Thrown by the promotion body parse guards in this file.
- * Caught in the route handler and mapped to 400 BAD_REQUEST.
- * Keeps request-body parse errors distinct from store-level semantic errors
- * (`PromotionFieldImmutableError`, `InvalidStatusTransitionError`, …).
- */
-class PromotionBodyParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'PromotionBodyParseError';
+class AdminRequestContractError extends Error {
+  constructor() {
+    super('Admin request does not match the current Host wire contract');
+    this.name = 'AdminRequestContractError';
   }
 }
 
-const CREATE_PROMOTION_BODY_FIELDS = new Set([
-  'type',
-  'displayName',
-  'description',
-  'maxParticipants',
-  'perUserGasAllowanceMist',
-  'claimDeadlineAt',
-  'postClaimUseWindowMs',
-  'startAt',
-]);
-
-const UPDATE_PROMOTION_BODY_FIELDS = new Set([
-  'displayName',
-  'description',
-  'maxParticipants',
-  'perUserGasAllowanceMist',
-  'claimDeadlineAt',
-  'postClaimUseWindowMs',
-  'startAt',
-]);
-
-const PROMOTION_STATUS_BODY_FIELDS = new Set(['status', 'reason']);
-
-/**
- * Promotion writes accept only their current public JSON shape. Rejecting an
- * unknown field prevents removed or misspelled policy inputs from appearing to
- * succeed while the Host silently ignores them.
- */
-function parseExactPromotionBody(
-  value: unknown,
-  allowedFields: ReadonlySet<string>,
-): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new PromotionBodyParseError('Invalid request body: must be a JSON object');
-  }
-
-  const body = value as Record<string, unknown>;
-  for (const field of Object.keys(body)) {
-    if (!allowedFields.has(field)) {
-      throw new PromotionBodyParseError(`Unknown field: ${field}`);
-    }
-  }
-  return body;
-}
-
-function parseRequiredString(body: Record<string, unknown>, field: string): string {
-  const v = body[field];
-  if (typeof v !== 'string' || v.length === 0) {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be a non-empty string`);
-  }
-  return v;
-}
-
-function parseOptionalString(body: Record<string, unknown>, field: string): string | undefined {
-  const v = body[field];
-  if (v === undefined) return undefined;
-  if (typeof v !== 'string') {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be a string`);
-  }
-  return v;
-}
-
-function parseRequiredPositiveInteger(body: Record<string, unknown>, field: string): number {
-  const v = body[field];
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v <= 0) {
-    throw new PromotionBodyParseError(
-      `Invalid ${field}: must be a positive safe integer (≤ 2^53 − 1)`,
-    );
-  }
-  return v;
-}
-
-function parseOptionalPositiveInteger(
-  body: Record<string, unknown>,
-  field: string,
-): number | undefined {
-  const v = body[field];
-  if (v === undefined) return undefined;
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v <= 0) {
-    throw new PromotionBodyParseError(
-      `Invalid ${field}: must be a positive safe integer (≤ 2^53 − 1)`,
-    );
-  }
-  return v;
-}
-
-function parseRequiredPositiveBigintString(body: Record<string, unknown>, field: string): string {
-  const v = body[field];
-  if (typeof v !== 'string') {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be a bigint string`);
-  }
-  if (!/^(?:0|[1-9]\d*)$/.test(v)) {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be a decimal bigint string`);
-  }
-  let parsed: bigint;
+function parseAdminRequest<T>(value: unknown, parse: (input: unknown) => T): T {
   try {
-    parsed = BigInt(v);
-  } catch {
-    throw new PromotionBodyParseError(`Invalid ${field}: not a valid bigint string`);
-  }
-  if (parsed <= 0n) {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be a positive bigint`);
-  }
-  return v;
-}
-
-function parseOptionalPositiveBigintString(
-  body: Record<string, unknown>,
-  field: string,
-): string | undefined {
-  const v = body[field];
-  if (v === undefined) return undefined;
-  return parseRequiredPositiveBigintString(body, field);
-}
-
-/**
- * Fail-fast cap on a `perUserGasAllowanceMist` value at the API
- * boundary so over-bound promotions are rejected before they reach the
- * promotion store. The activation gate
- * (`validateActivationPrerequisites`) is the main validation point and
- * also enforces the same bound; this helper is the operator-friendly
- * 400 response on the admin write path.
- *
- * Bound: `MAX_PROMOTION_LEDGER_VALUE_MIST` (= `Number.MAX_SAFE_INTEGER`),
- * see `packages/core-api/src/studio/executionLedger.ts` for the
- * Redis-Lua int64 arithmetic rationale.
- */
-function assertPerUserAllowanceWithinBound(value: string): void {
-  const parsed = BigInt(value);
-  if (parsed > MAX_PROMOTION_LEDGER_VALUE_MIST) {
-    throw new PromotionBodyParseError(
-      `Invalid perUserGasAllowanceMist (${parsed.toString()}): must be ≤ ${MAX_PROMOTION_LEDGER_VALUE_MIST.toString()} (Number.MAX_SAFE_INTEGER) so the promotion ledger Redis-Lua int64 arithmetic stays exact`,
-    );
+    return parse(value);
+  } catch (err) {
+    if (err instanceof HostWireParseError) throw new AdminRequestContractError();
+    throw err;
   }
 }
 
-function parseOptionalNonNegativeInteger(
-  body: Record<string, unknown>,
-  field: string,
-): number | undefined {
-  const v = body[field];
-  if (v === undefined) return undefined;
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
-    throw new PromotionBodyParseError(
-      `Invalid ${field}: must be a non-negative safe integer (≤ 2^53 − 1)`,
-    );
+function respondAdminFailure(
+  c: Parameters<typeof respondMapped>[0],
+  err: unknown,
+  allowedCodes: readonly HostErrorCode[],
+): Response {
+  if (err instanceof AdminRequestContractError && allowedCodes.includes('BAD_REQUEST')) {
+    return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
   }
-  return v;
+  if (err instanceof AbuseBlockInputError && allowedCodes.includes('BAD_REQUEST')) {
+    return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
+  }
+  if (err instanceof AbuseBlockCurrentConflictError && allowedCodes.includes('ADMIN_CONFLICT')) {
+    return respondMapped(c, codedHostError('ADMIN_CONFLICT', allowedCodes));
+  }
+  if (
+    err instanceof PromotionCurrentConflictError &&
+    allowedCodes.includes('PROMOTION_CURRENT_CONFLICT')
+  ) {
+    return respondMapped(c, codedHostError('PROMOTION_CURRENT_CONFLICT', allowedCodes));
+  }
+  if (
+    (err instanceof InvalidStatusTransitionError || err instanceof PromotionFieldImmutableError) &&
+    allowedCodes.includes('ADMIN_CONFLICT')
+  ) {
+    return respondMapped(c, codedHostError('ADMIN_CONFLICT', allowedCodes));
+  }
+  if (err instanceof PromotionLedgerValueError && allowedCodes.includes('ADMIN_UNPROCESSABLE')) {
+    return respondMapped(c, codedHostError('ADMIN_UNPROCESSABLE', allowedCodes));
+  }
+  const mapped = mapError(err, allowedCodes, 'INTERNAL_ERROR');
+  if (mapped) return respondMapped(c, mapped);
+  return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
 }
 
-function parseOptionalNullableIsoString(
-  body: Record<string, unknown>,
-  field: string,
-): string | null | undefined {
-  const v = body[field];
-  if (v === undefined) return undefined;
-  if (v === null) return null;
-  if (typeof v !== 'string' || Number.isNaN(Date.parse(v))) {
-    throw new PromotionBodyParseError(`Invalid ${field}: must be null or a valid ISO 8601 string`);
-  }
-  return v;
-}
-
-/**
- * Shared error mapper for promotion admin routes.
- * Returns a Response when the error matches a known promotion contract.
- */
-function tryPromotionErrorResponse(c: Parameters<typeof tryBodyErrorResponse>[0], err: unknown) {
-  if (err instanceof Error) {
-    if (err.name === 'PromotionBodyParseError') {
-      return c.json({ error: redactSensitiveText(err.message) }, 400);
-    }
-    if (
-      err.name === 'InvalidStatusTransitionError' ||
-      err.name === 'PromotionFieldImmutableError'
-    ) {
-      return c.json({ error: redactSensitiveText(err.message) }, 409);
-    }
-    if (err instanceof PromotionCurrentConflictError) {
-      return c.json(
-        { code: 'PROMOTION_CURRENT_CONFLICT', error: redactSensitiveText(err.message) },
-        409,
-      );
-    }
-    if (err.name === 'PromotionActivationError') {
-      return c.json({ error: redactSensitiveText(err.message) }, 422);
-    }
-  }
-  return null;
-}
-
-const IP_PREFIX = 'stelis:abuse:block:ip:';
-const ADDR_PREFIX = 'stelis:abuse:block:address:';
 const WITHDRAW_NONCE_PREFIX = 'stelis:admin:withdraw_nonce:';
 const WITHDRAW_NONCE_TTL_MS = 60_000;
 
@@ -296,110 +178,121 @@ function withdrawalNonceKey(network: SuiNetwork, nonce: string): string {
   return `${WITHDRAW_NONCE_PREFIX}${network}:${nonce}`;
 }
 
-const SPONSORED_LOGS_DEFAULT_LIMIT = 50;
-const SPONSORED_LOGS_MAX_LIMIT = 200;
-
-function parseSponsoredLogsMode(
-  raw: string | undefined,
-): import('../sponsoredLogs/types.js').SponsoredExecutionAggregateMode | null {
-  if (raw === undefined || raw === '') return 'all';
-  if (raw === 'all' || raw === 'generic' || raw === 'promotion') return raw;
-  return null;
-}
-
-function parseSponsoredLogsLimit(raw: string | undefined): number | null {
-  if (raw === undefined || raw === '') return SPONSORED_LOGS_DEFAULT_LIMIT;
-  if (!/^[1-9]\d*$/.test(raw)) return null;
-  const n = Number(raw);
-  if (n > SPONSORED_LOGS_MAX_LIMIT) return null;
-  return n;
-}
-
-async function getAdminRedis(contextPromise: Promise<AppApiContext>): Promise<AdminRedisClient> {
-  return createAdminRedisAdapter((await contextPromise).redis);
+function getAdminRedis(context: RelayAndStudioAppApiContext): AdminRedisClient {
+  return createAdminRedisAdapter(context.redis);
 }
 
 export interface AdminRoutesRuntimeInput {
-  readonly resolveClientIp: ResolveClientIp;
+  readonly admission: RequestAdmissionDependencies;
   readonly network: SuiNetwork;
-  readonly adminAddress: string | null;
-  readonly adminJwt: AdminJwtConfig | null;
-  readonly refillEnabled: boolean;
-  readonly warnMist: bigint;
-  readonly refillTargetMist: bigint;
+  readonly allowedOrigins: readonly string[];
+  readonly admin: {
+    readonly address: string;
+    readonly jwt: AdminJwtConfig;
+  };
+}
+
+interface AdminRouteVariables {
+  readonly requestAdmission: InitialRequestAdmission;
 }
 
 export function createAdminRoutes(
-  contextPromise: Promise<AppApiContext>,
+  context: RelayAndStudioAppApiContext,
   runtime: AdminRoutesRuntimeInput,
 ) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: AdminRouteVariables }>();
 
-  // ── Auth guard middleware — all admin routes require session ───────
-  app.use('*', async (c, next) => {
-    const session = await requireAdminSessionFromContext(c, contextPromise, runtime.adminJwt);
-    if (!session) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
-    c.set('adminSession' as never, session as never);
-    await next();
-  });
+  /**
+   * Route-local Admin admission. The body policy is supplied next to the
+   * method, path, and handler below; there is no parallel path registry that
+   * can drift from Hono's route table.
+   */
+  const admitAdminRequest =
+    (jsonBodyLimitBytes?: number): MiddlewareHandler =>
+    async (c, next) => {
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ...(!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
+          ? { requiredOrigins: runtime.allowedOrigins }
+          : {}),
+        ...(jsonBodyLimitBytes === undefined ? {} : { jsonBodyLimitBytes }),
+      });
+      if (!admitted.ok) return admitted.response;
+      const session = await requireAdminSessionFromContext(c, context, runtime.admin.jwt);
+      if (!session) {
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_REQUEST_ADMISSION_ERROR_CODES),
+        );
+      }
+      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+        c,
+        runtime.admission,
+        admitted.value,
+        {
+          allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
+          subject: { kind: 'address', address: session.address },
+        },
+      );
+      if (!subjectAdmission.ok) return subjectAdmission.response;
+      c.set('requestAdmission', subjectAdmission.value);
+      await next();
+    };
 
   // ── GET /api/blocklist ────────────────────────────────────────────
-  app.get('/blocklist', async (c) => {
+  app.get('/blocklist', admitAdminRequest(), async (c) => {
     try {
-      const redis = await getAdminRedis(contextPromise);
-      const [ipKeys, addrKeys] = await Promise.all([
-        redis.scan(`${IP_PREFIX}*`),
-        redis.scan(`${ADDR_PREFIX}*`),
-      ]);
-
-      const entries = await Promise.all(
-        [...ipKeys, ...addrKeys].map(async (key) => {
-          const ttl = await redis.ttl(key);
-          return { key, ttl };
+      const params = parseAdminRequest(c.req.query(), parseAdminBlocklistQuery);
+      const ctx = context;
+      const page = await ctx.abuseStore.listBlocks(params);
+      return c.json(
+        parseAdminBlocklistResponse({
+          blocklist: page.blocks.map((block) => ({
+            scope: block.identity.scope,
+            subject: block.identity.subject,
+            reason: block.reason,
+            blockedUntilMs: block.blockedUntilMs,
+          })),
+          nextCursor: page.nextCursor,
         }),
       );
-
-      return c.json({ blocklist: entries });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_BLOCKLIST_READ_ERROR_CODES);
     }
   });
 
   // ── DELETE /api/blocklist ─────────────────────────────────────────
-  app.delete('/blocklist', async (c) => {
+  app.delete('/blocklist', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
-      const body = (await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES)) as {
-        key?: string;
-      };
-      if (!body.key || typeof body.key !== 'string') {
-        return c.json({ error: 'Missing field: key' }, 400);
-      }
+      const body = parseAdminRequest(
+        c.get('requestAdmission').body,
+        parseAdminBlocklistDeleteRequest,
+      );
 
-      const allowed = [IP_PREFIX, ADDR_PREFIX];
-      if (!allowed.some((p) => body.key!.startsWith(p))) {
-        return c.json({ error: 'Unauthorized key prefix' }, 403);
-      }
-
-      const redis = await getAdminRedis(contextPromise);
-      await redis.del(body.key);
-      return c.json({ ok: true, deleted: body.key });
+      const ctx = context;
+      const removed = await ctx.abuseStore.removeBlock({
+        scope: body.scope,
+        subject: body.subject,
+      });
+      return c.json(parseAdminBlocklistDeleteResponse({ removed }));
     } catch (err) {
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_BLOCKLIST_DELETE_ERROR_CODES);
     }
   });
 
   // ── GET /api/logs ─────────────────────────────────────────────────
-  app.get('/logs', async (c) => {
+  app.get('/logs', admitAdminRequest(), async (c) => {
     try {
-      const redis = await getAdminRedis(contextPromise);
+      const redis = getAdminRedis(context);
       const entries = await redis.lrange(ADMIN_AUDIT_LOG_KEY, 0, ADMIN_AUDIT_LOG_MAX_ENTRIES - 1);
-      return c.json({ logs: entries });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return c.json(
+        parseAdminAuditLogsResponse({
+          logs: entries.map((entry) => JSON.parse(entry) as unknown),
+        }),
+      );
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
     }
   });
 
@@ -408,17 +301,17 @@ export function createAdminRoutes(
   // Sponsored Logs filter dropdown. Reads exact MIST decimal strings
   // from the durable aggregate; never derives lifetime totals from
   // bounded recent rows.
-  app.get('/sponsored-logs/summary', async (c) => {
-    const mode = parseSponsoredLogsMode(c.req.query('mode'));
-    if (mode === null) {
-      return c.json({ error: 'Invalid mode (expected all|generic|promotion)' }, 400);
-    }
+  app.get('/sponsored-logs/summary', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const { mode } = parseAdminRequest(
+        { mode: c.req.query('mode') },
+        parseAdminSponsoredLogsQuery,
+      );
+      const ctx = context;
       const summary = await ctx.sponsoredLogsStore.getSummary(mode);
-      return c.json({ summary });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return c.json(parseAdminSponsoredLogsSummaryResponse({ summary }));
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_SPONSORED_LOGS_ERROR_CODES);
     }
   });
 
@@ -426,78 +319,71 @@ export function createAdminRoutes(
   // Combined summary + bounded recent entries for the Sponsored Logs
   // page. Numeric fields are exact MIST decimal strings (signed where
   // applicable) or `null` for unknown economics.
-  app.get('/sponsored-logs', async (c) => {
-    const mode = parseSponsoredLogsMode(c.req.query('mode'));
-    if (mode === null) {
-      return c.json({ error: 'Invalid mode (expected all|generic|promotion)' }, 400);
-    }
-    const limit = parseSponsoredLogsLimit(c.req.query('limit'));
-    if (limit === null) {
-      return c.json({ error: 'Invalid limit (expected positive integer ≤ 200)' }, 400);
-    }
+  app.get('/sponsored-logs', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const { mode, limit } = parseAdminRequest(
+        { mode: c.req.query('mode'), limit: c.req.query('limit') },
+        parseAdminSponsoredLogsQuery,
+      );
+      const ctx = context;
       const [summary, entries] = await Promise.all([
         ctx.sponsoredLogsStore.getSummary(mode),
         ctx.sponsoredLogsStore.getRecent(mode, limit),
       ]);
-      return c.json({ summary, entries });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return c.json(parseAdminSponsoredLogsResponse({ summary, entries }));
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_SPONSORED_LOGS_ERROR_CODES);
     }
   });
 
   // ── GET /api/sponsor-operations ─────────────────────────────────────────────────
   // Admin view. Sponsor operations fields are read from the shared Redis state
-  // store. An awaited bounded sponsor refill account probe runs before the read so the
-  // returned sponsor refill account balance is "fresh at return time" rather than
-  // last-known-cache.
-  // If that awaited sponsor refill account update cannot be committed, this route fails
-  // closed instead of serialising stale sponsor refill account data as if it were fresh.
+  // store. The route requests one retained, bounded balance observation before
+  // the read. An active account spend owns the source-account observation and
+  // can skip it; current health is always derived from Redis-time freshness.
   // `feeConfig` uses `host.getConfig()` which is already TTL-cached in
   // core-api. Other fields are boot-derived constants.
-  app.get('/sponsor-operations', async (c) => {
+  app.get('/sponsor-operations', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const ctx = context;
       const host = ctx.host;
 
-      // Await the bounded sponsor refill account probe here. Admin is not a hot path,
-      // and awaiting keeps the returned sponsor refill account fields honest.
-      await ctx.sponsorOperations.probeSponsorRefillAccount();
+      // Admin is not a hot path, so await the bounded observation before
+      // calculating the current public status.
+      await ctx.sponsorOperations.observeBalances();
 
       const [stateView, slotLeases] = await Promise.all([
         ctx.sponsorOperations.readState(),
         host.sponsorPool.leaseStatus(),
       ]);
-      const aggregates = deriveSponsorAvailabilitySummary(stateView);
+      const availability = calculateSponsorAvailability(stateView, slotLeases);
       const sponsorOperations: SponsorOperationsStatus = {
-        slots: stateView.slots.map((s) => ({
+        slots: availability.slots.map((s) => ({
           address: s.address,
           state: s.state,
-          balanceMist: s.balanceMist,
+          addressBalanceMist: s.addressBalanceMist,
           lastObservedAtMs: s.lastObservedAtMs,
           lastError: s.lastError === null ? null : redactSensitiveText(s.lastError),
         })),
         sponsorRefillAccount: {
-          address: ctx.sponsorOperations.sponsorRefillAccountAddress,
-          balanceMist: stateView.sponsorRefillAccount.balanceMist,
-          healthy: stateView.sponsorRefillAccount.healthy ?? false,
-          refillsRemaining: stateView.sponsorRefillAccount.refillsRemaining,
-          lastObservedAtMs: stateView.sponsorRefillAccount.lastObservedAtMs,
+          address: ctx.sponsorOperations.settings.sponsorRefillAccountAddress,
+          totalBalanceMist: availability.sponsorRefillAccount.totalBalanceMist,
+          healthy: availability.sponsorRefillAccount.healthy,
+          lastObservedAtMs: availability.sponsorRefillAccount.lastObservedAtMs,
           lastError:
-            stateView.sponsorRefillAccount.lastError === null
+            availability.sponsorRefillAccount.lastError === null
               ? null
-              : redactSensitiveText(stateView.sponsorRefillAccount.lastError),
+              : redactSensitiveText(availability.sponsorRefillAccount.lastError),
         },
-        availableSlots: aggregates.availableSlots,
-        degradedSlots: aggregates.degradedSlots,
+        healthySlots: availability.healthySlots,
+        degradedSlots: availability.degradedSlots,
         slotLeases,
-        gateErrorCode: aggregates.gateErrorCode,
+        gateErrorCode: availability.gateErrorCode,
       };
 
       // On-chain fee config (core-api TTL cache; see getConfig() in
       // packages/core-api/src/context.ts).
-      let feeConfig: Record<string, string> | null = null;
+      let feeConfig: AdminSponsorOperationsResponse['feeConfig'] = null;
       try {
         const cfg = await host.getConfig();
         feeConfig = {
@@ -520,14 +406,17 @@ export function createAdminRoutes(
         }),
       );
 
-      return c.json({
+      const response: AdminSponsorOperationsResponse = {
         sponsorOperations,
         primaryAddress: host.sponsorPool.primaryAddress,
         settlementPayoutRecipientAddress: host.settlementPayoutRecipientAddress,
         network: host.network,
-        sponsorBalanceWarnMist: runtime.warnMist.toString(),
-        sponsorBalanceRefillTargetMist: runtime.refillTargetMist.toString(),
-        refillEnabled: runtime.refillEnabled,
+        sponsorBalanceWarnMist: ctx.sponsorOperations.settings.warnMist.toString(),
+        sponsorBalanceRefillTargetMist:
+          ctx.sponsorOperations.settings.refillTargetMist?.toString() ?? null,
+        sponsorRefillAccountRunwayTargetMist:
+          ctx.sponsorOperations.settings.runwayTargetMist.toString(),
+        refillEnabled: ctx.sponsorOperations.settings.refillEnabled,
         quotedHostFeeMist: ctx.prepareConfig.quotedHostFeeMist.toString(),
         feeConfig,
         supportedSettlementSwapPaths,
@@ -537,20 +426,22 @@ export function createAdminRoutes(
           vaultRegistryId: host.vaultRegistryId,
           deepbookPackageId: ctx.prepareConfig.deepbookPackageId,
         },
-        studioEnabled: ctx.studio !== null,
-        rpcFleet: ctx.failoverTransport.getAdminSnapshot(),
-      });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+        rpcFleet: {
+          endpoints: ctx.rpcFleet.endpoints.map((endpoint) => ({ ...endpoint })),
+        },
+      };
+      return c.json(parseAdminSponsorOperationsResponse(response));
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
     }
   });
 
   // ── POST /api/sponsor-refill-account/withdrawal-challenge ────────────────────────────
-  app.post('/sponsor-refill-account/withdrawal-challenge', async (c) => {
+  app.post('/sponsor-refill-account/withdrawal-challenge', admitAdminRequest(), async (c) => {
     let ip: string | null = null;
     try {
-      ip = runtime.resolveClientIp(c);
-      const redis = await getAdminRedis(contextPromise);
+      ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+      const redis = getAdminRedis(context);
       const nonce = `stelis-withdraw:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(
         withdrawalNonceKey(runtime.network, nonce),
@@ -558,541 +449,420 @@ export function createAdminRoutes(
         { px: WITHDRAW_NONCE_TTL_MS },
       );
       const expiresAt = new Date(Date.now() + WITHDRAW_NONCE_TTL_MS).toISOString();
-      const response: SponsorRefillAccountWithdrawalChallengeResponse = { nonce, expiresAt };
-      return c.json(response);
+      return c.json(parseSponsorRefillAccountWithdrawalChallengeResponse({ nonce, expiresAt }));
     } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
       if (ip !== null) {
-        await writeAdminAuditLog(await getAdminRedis(contextPromise), {
+        await writeAdminAuditLog(getAdminRedis(context), {
           event: 'WITHDRAW_NONCE_ERROR',
           ts: new Date().toISOString(),
           ip,
           detail: safeErrorSummary(err),
         }).catch(() => undefined);
       }
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES);
     }
   });
 
   // ── POST /api/sponsor-refill-account/withdraw — execute withdrawal ──────────────────
-  app.post('/sponsor-refill-account/withdraw', async (c) => {
-    let ip: string | null = null;
-    try {
-      ip = runtime.resolveClientIp(c);
-      const ts = () => new Date().toISOString();
-      const redis = await getAdminRedis(contextPromise);
-      // Atomic ops rate-limit check at entry
-      const rateCheck = await checkAndIncrementAdminOperationAttempt(redis, ip);
-      if (!rateCheck.allowed) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_RATE_LIMITED',
-          ts: ts(),
-          ip,
-          detail: `429: ${rateCheck.current} attempts`,
-        });
-        return c.json({ error: 'Too many withdrawal attempts. Try again in 15 minutes.' }, 429);
-      }
-
-      // Parse body
-      const body = parseSponsorRefillAccountWithdrawalRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-      );
-      const { amountMist, nonce, signature } = body;
-
-      // amountMist validation
-      if (!isPositiveU64DecimalString(amountMist)) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: `400: invalid amountMist: "${amountMist}"`,
-        });
-        return c.json({ error: 'amountMist must be a positive u64 decimal integer string' }, 400);
-      }
-
-      // Signature verification uses the shared browser/server helper.
-      if (runtime.adminAddress === null) {
-        throw new Error('ADMIN_ADDRESS is not configured');
-      }
-      const adminAddress = runtime.adminAddress;
-      const message = buildSponsorRefillAccountWithdrawMessage(runtime.network, amountMist, nonce);
-      const sigValid = await verifySignedMessage({ message, signature, adminAddress });
-      if (!sigValid) {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: '401: bad signature',
-        });
-        return c.json({ code: 'WITHDRAWAL_SIGNATURE_INVALID', error: 'Invalid signature' }, 401);
-      }
-
-      // Signature validation precedes the atomic nonce-consume + durable
-      // operation reservation owned by the shared account spend coordinator.
-      const ctx = await contextPromise;
-      const recipientAddress = adminAddress;
-      const result = await ctx.sponsorOperations.withdraw({
-        destinationAddress: recipientAddress,
-        amountMist,
-        nonceKey: withdrawalNonceKey(runtime.network, nonce),
-      });
-      if (result.status === 'nonce_missing') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: '401: invalid nonce',
-        });
-        return c.json({ code: 'WITHDRAWAL_NONCE_MISSING', error: 'Invalid or expired nonce' }, 401);
-      }
-      if (result.status === 'runway_blocked') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_BLOCKED',
-          ts: ts(),
-          ip,
-          detail: redactSensitiveText(result.error),
-        });
-        return c.json(
-          {
-            code: 'WITHDRAWAL_RUNWAY_BLOCKED',
-            error: 'Withdrawal would leave sponsor refill account below minimum refill runway.',
-          },
-          400,
-        );
-      }
-      if (result.status === 'busy') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_NOT_ACCEPTED',
-          ts: ts(),
-          ip,
-          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
-        });
-        return c.json(
-          {
-            code: 'WITHDRAWAL_NOT_ACCEPTED',
-            error:
-              'Another Sponsor Refill Account spend was recovered. This withdrawal was not accepted.',
-            operationId: result.operationId,
-            digest: result.digest,
-          },
-          409,
-        );
-      }
-      if (result.status === 'pending') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_PENDING',
-          ts: ts(),
-          ip,
-          detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
-        });
-        return c.json(
-          {
-            code: 'WITHDRAWAL_PENDING',
-            error: 'Withdrawal outcome is pending recovery.',
-            operationId: result.operationId,
-            digest: result.digest,
-          },
-          503,
-        );
-      }
-      if (result.status === 'failed') {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_FAILED',
-          ts: ts(),
-          ip,
-          detail: redactSensitiveText(result.error),
-        });
-        return c.json(
-          {
-            code: 'WITHDRAWAL_FAILED',
-            error: 'Withdrawal failed',
-          },
-          422,
-        );
-      }
-      if (result.status === 'not_needed') {
-        throw new Error('Withdrawal returned a refill-only result');
-      }
-
-      const {
-        digest,
-        amountMist: completedAmountMist,
-        destinationAddress: completedDestinationAddress,
-      } = result;
-
+  app.post(
+    '/sponsor-refill-account/withdraw',
+    admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
+    async (c) => {
+      let ip: string | null = null;
       try {
-        await writeAdminAuditLog(redis, {
-          event: 'WITHDRAWAL_SUCCESS',
-          ts: ts(),
-          ip,
-          detail: `${completedAmountMist} MIST → ${completedDestinationAddress} (${digest})`,
-        });
-      } catch (auditError) {
-        // The durable terminal result is already authoritative. Audit storage
-        // failure must not turn a confirmed withdrawal into an HTTP failure.
-        // eslint-disable-next-line no-console
-        console.error(
-          '[sponsor-refill-account/withdraw] Success audit write failed:',
-          safeErrorSummary(auditError),
-        );
-      }
-
-      const response: SponsorRefillAccountWithdrawalResponse = {
-        digest,
-        amountMist: completedAmountMist,
-        recipient: completedDestinationAddress,
-      };
-      return c.json(response);
-    } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
-      if (err instanceof HostWireParseError) {
-        return c.json({ error: redactSensitiveText(err.message), code: 'BAD_REQUEST' }, 400);
-      }
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
-      // eslint-disable-next-line no-console
-      console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
-      try {
-        if (ip !== null) {
-          const r = await getAdminRedis(contextPromise);
-          await writeAdminAuditLog(r, {
-            event: 'WITHDRAWAL_ERROR',
-            ts: new Date().toISOString(),
+        ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+        const ts = () => new Date().toISOString();
+        const redis = getAdminRedis(context);
+        // Atomic ops rate-limit check at entry
+        const rateCheck = await checkAndIncrementAdminOperationAttempt(redis, ip);
+        if (!rateCheck.allowed) {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_RATE_LIMITED',
+            ts: ts(),
             ip,
-            detail: safeErrorSummary(err),
+            detail: `429: ${rateCheck.current} attempts`,
           });
+          return respondMapped(
+            c,
+            codedHostError(
+              'RATE_LIMITED',
+              ADMIN_WITHDRAWAL_ERROR_CODES,
+              {
+                retryAfterMs: rateCheck.retryAfterMs,
+              },
+              {
+                'Retry-After': formatRetryAfterSeconds(rateCheck.retryAfterMs),
+              },
+            ),
+          );
         }
-      } catch {
-        /* Redis unavailable — audit log best-effort */
+
+        // Parse body
+        const body = parseAdminRequest(
+          c.get('requestAdmission').body,
+          parseSponsorRefillAccountWithdrawalRequest,
+        );
+        const { amountMist, nonce, signature } = body;
+
+        // Signature verification uses the shared browser/server helper.
+        const adminAddress = runtime.admin.address;
+        const message = buildSponsorRefillAccountWithdrawMessage(
+          runtime.network,
+          amountMist,
+          nonce,
+        );
+        const sigValid = await verifySignedMessage({ message, signature, adminAddress });
+        if (!sigValid) {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: '401: bad signature',
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_SIGNATURE_INVALID', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+
+        // Signature validation precedes the atomic nonce-consume + durable
+        // operation reservation owned by the shared account spend coordinator.
+        const ctx = context;
+        const recipientAddress = adminAddress;
+        const result = await ctx.sponsorOperations.withdraw({
+          destinationAddress: recipientAddress,
+          amountMist,
+          nonceKey: withdrawalNonceKey(runtime.network, nonce),
+        });
+        if (result.status === 'nonce_missing') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: '401: invalid nonce',
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_NONCE_MISSING', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'runway_blocked') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_BLOCKED',
+            ts: ts(),
+            ip,
+            detail: redactSensitiveText(result.error),
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_RUNWAY_BLOCKED', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'busy') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_NOT_ACCEPTED',
+            ts: ts(),
+            ip,
+            detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_NOT_ACCEPTED', ADMIN_WITHDRAWAL_ERROR_CODES, {
+              operationId: result.operationId,
+              ...(result.digest === null ? {} : { digest: result.digest }),
+            }),
+          );
+        }
+        if (result.status === 'pending') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_PENDING',
+            ts: ts(),
+            ip,
+            detail: `${result.operationId}: ${redactSensitiveText(result.error)}`,
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_PENDING', ADMIN_WITHDRAWAL_ERROR_CODES, {
+              operationId: result.operationId,
+              ...(result.digest === null ? {} : { digest: result.digest }),
+            }),
+          );
+        }
+        if (result.status === 'failed') {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_FAILED',
+            ts: ts(),
+            ip,
+            detail: redactSensitiveText(result.error),
+          });
+          return respondMapped(
+            c,
+            codedHostError('WITHDRAWAL_FAILED', ADMIN_WITHDRAWAL_ERROR_CODES),
+          );
+        }
+        if (result.status === 'not_needed') {
+          throw new Error('Withdrawal returned a refill-only result');
+        }
+
+        const {
+          digest,
+          amountMist: completedAmountMist,
+          destinationAddress: completedDestinationAddress,
+        } = result;
+
+        try {
+          await writeAdminAuditLog(redis, {
+            event: 'WITHDRAWAL_SUCCESS',
+            ts: ts(),
+            ip,
+            detail: `${completedAmountMist} MIST → ${completedDestinationAddress} (${digest})`,
+          });
+        } catch (auditError) {
+          // The durable terminal result is already authoritative. Audit storage
+          // failure must not turn a confirmed withdrawal into an HTTP failure.
+          // eslint-disable-next-line no-console
+          console.error(
+            '[sponsor-refill-account/withdraw] Success audit write failed:',
+            safeErrorSummary(auditError),
+          );
+        }
+
+        return c.json(
+          parseSponsorRefillAccountWithdrawalResponse({
+            digest,
+            amountMist: completedAmountMist,
+            recipient: completedDestinationAddress,
+          }),
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[sponsor-refill-account/withdraw] Unexpected error:', safeErrorSummary(err));
+        try {
+          if (ip !== null) {
+            const r = getAdminRedis(context);
+            await writeAdminAuditLog(r, {
+              event: 'WITHDRAWAL_ERROR',
+              ts: new Date().toISOString(),
+              ip,
+              detail: safeErrorSummary(err),
+            });
+          }
+        } catch {
+          /* Redis unavailable — audit log best-effort */
+        }
+        return respondAdminFailure(c, err, ADMIN_WITHDRAWAL_ERROR_CODES);
       }
-      return c.json({ error: 'Internal server error' }, 500);
-    }
-  });
+    },
+  );
 
   // ── GET /api/settlement-swap-paths ────────────────────────────────
-  // Operational inspection: returns the active settlement swap path registry loaded at boot.
-  app.get('/settlement-swap-paths', async (c) => {
+  // Operational inspection: returns the active registry loaded at boot.
+  app.get('/settlement-swap-paths', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
+      const ctx = context;
       const settlementSwapPaths = ctx.prepareConfig.supportedSettlementSwapPaths;
-      return c.json({
-        count: settlementSwapPaths.length,
-        settlementSwapPaths: settlementSwapPaths.map((p) => ({
-          settlementTokenType: p.settlementTokenType,
-          settlementTokenSymbol: p.settlementTokenSymbol,
-          settlementTokenDecimals: p.settlementTokenDecimals,
-          lotSize: safeBigintToNumber(p.lotSize, 'lotSize'),
-          minSize: safeBigintToNumber(p.minSize, 'minSize'),
-          effectiveFeeRateBps: p.effectiveFeeRateBps,
-          settlementSwapDirection: p.settlementSwapDirection,
-          hopCount: p.hops.length,
-          hops: p.hops.map((h: DeepBookPoolHop) => ({
-            poolId: h.poolId,
-            baseType: h.baseType,
-            quoteType: h.quoteType,
-            swapDirection: h.swapDirection,
-            feeBps: h.feeBps,
+      return c.json(
+        parseAdminSettlementSwapPathsResponse({
+          count: settlementSwapPaths.length,
+          settlementSwapPaths: settlementSwapPaths.map((path) => ({
+            settlementTokenType: path.settlementTokenType,
+            settlementTokenSymbol: path.settlementTokenSymbol,
+            settlementTokenDecimals: path.settlementTokenDecimals,
+            lotSize: safeBigintToNumber(path.lotSize, 'lotSize'),
+            minSize: safeBigintToNumber(path.minSize, 'minSize'),
+            effectiveFeeRateBps: path.effectiveFeeRateBps,
+            settlementSwapDirection: path.settlementSwapDirection,
+            hopCount: path.hops.length,
+            hops: path.hops.map((hop: DeepBookPoolHop) => ({
+              poolId: hop.poolId,
+              baseType: hop.baseType,
+              quoteType: hop.quoteType,
+              swapDirection: hop.swapDirection,
+              feeBps: hop.feeBps,
+            })),
           })),
-        })),
-      });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+        }),
+      );
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
     }
   });
 
   // ── GET /api/studio ──────────────────────────────────────────────
-  // Studio operational status.
-  // Returns { enabled: false } if studio mode is not active.
-  // Budget is per-promotion — use GET /api/promotions/:id for per-promotion KPIs.
-  app.get('/studio', async (c) => {
+  // Studio authentication configuration for this `relay_and_studio` Host.
+  app.get('/studio', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.studio) {
-        return c.json({ enabled: false }, 200);
-      }
-
-      return c.json({
-        enabled: true,
-        config: {
-          developerJwtTrustConfigured: !!ctx.developerJwtTrustConfig,
-          developerJwtVerifyUrlConfigured: !!ctx.developerJwtVerifyUrl,
-        },
-      });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      const ctx = context;
+      return c.json(
+        parseAdminStudioResponse({
+          config: {
+            developerJwtVerifyUrlConfigured: !!ctx.developerJwtVerifyUrl,
+          },
+        }),
+      );
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_READ_ERROR_CODES);
     }
   });
   // ── GET /api/promotions ──────────────────────────────────────────
-  app.get('/promotions', async (c) => {
+  app.get('/promotions', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const statusFilter = c.req.query('status') as
-        | import('@stelis/core-api/studio').PromotionStatus
-        | undefined;
-      const promotions = await ctx.promotionStore.list(
-        statusFilter ? { status: statusFilter } : undefined,
+      const ctx = context;
+      const { status, ...pageParams } = parseAdminRequest(
+        c.req.query(),
+        parseAdminPromotionListQuery,
       );
-      const enriched = await Promise.all(promotions.map(withDerivedBudget));
-      return c.json({ promotions: enriched });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      const page = await ctx.promotionStore.listPage(
+        pageParams,
+        status === undefined ? undefined : { status },
+      );
+      const enriched = page.promotions.map(withDerivedBudget);
+      return c.json(
+        parseAdminPromotionListResponse({
+          promotions: enriched,
+          nextCursor: page.nextCursor,
+        }),
+      );
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_LIST_ERROR_CODES);
     }
   });
 
   // ── POST /api/promotions ─────────────────────────────────────────
-  app.post('/promotions', async (c) => {
+  app.post('/promotions', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     let ip: string | null = null;
     try {
-      ip = runtime.resolveClientIp(c);
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const body = parseExactPromotionBody(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-        CREATE_PROMOTION_BODY_FIELDS,
+      ip = readAdmittedClientIp(c.get('requestAdmission').clientIp);
+      const ctx = context;
+      const body = parseAdminRequest(
+        c.get('requestAdmission').body,
+        parseAdminPromotionCreateRequest,
       );
-
-      // Only gas_sponsorship is creatable.
-      if (body.type !== 'gas_sponsorship') {
-        return c.json(
-          { error: 'Only gas_sponsorship promotions can be created in this version' },
-          400,
-        );
-      }
-
-      const perUserGasAllowanceMistParsed = parseRequiredPositiveBigintString(
-        body,
-        'perUserGasAllowanceMist',
-      );
-      assertPerUserAllowanceWithinBound(perUserGasAllowanceMistParsed);
-      const input: import('@stelis/core-api/studio').CreatePromotionInput = {
-        type: 'gas_sponsorship',
-        displayName: parseRequiredString(body, 'displayName'),
-        description: parseOptionalString(body, 'description') ?? '',
-        maxParticipants: parseRequiredPositiveInteger(body, 'maxParticipants'),
-        perUserGasAllowanceMist: perUserGasAllowanceMistParsed,
-        claimDeadlineAt: parseOptionalNullableIsoString(body, 'claimDeadlineAt') ?? null,
-        postClaimUseWindowMs: parseOptionalNonNegativeInteger(body, 'postClaimUseWindowMs') ?? 0,
-        startAt: parseOptionalNullableIsoString(body, 'startAt') ?? null,
-      };
-
-      const record = await ctx.promotionStore.create(input);
+      const record = await ctx.promotionStore.create(body);
       // Durable admin audit trail: emit the same operation-log event shape used by
       // every other admin write path so `/api/logs` and `app-admin` can
       // attribute promotion creation without bespoke sink wiring.
-      await writeAdminAuditLog(await getAdminRedis(contextPromise), {
+      await writeAdminAuditLog(getAdminRedis(context), {
         event: 'PROMOTION_CREATE',
         ts: new Date().toISOString(),
         ip,
         detail: `201: promotionId=${record.promotionId}, maxParticipants=${record.maxParticipants}, perUserGasAllowanceMist=${record.perUserGasAllowanceMist}`,
       }).catch(() => undefined);
-      return c.json({ promotion: await withDerivedBudget(record) }, 201);
+      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }), 201);
     } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
-      const mapped = tryPromotionErrorResponse(c, err);
-      if (mapped) return mapped;
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_CREATE_ERROR_CODES);
     }
   });
 
   // ── GET /api/promotions/:id ──────────────────────────────────────
-  // Returns the promotion plus derived admin summary data.
-  app.get('/promotions/:id', async (c) => {
+  app.get('/promotions/:id', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const record = await ctx.promotionStore.get(id);
       if (!record) {
-        return c.json({ error: 'Promotion not found' }, 404);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
+        );
       }
-      const enriched = await withDerivedBudget(record);
       const summary = await computeAdminSummary(ctx, id, record);
-      return c.json({ promotion: enriched, summary });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return c.json(
+        parseAdminPromotionDetailResponse({
+          promotion: withDerivedBudget(record),
+          summary,
+        }),
+      );
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
     }
   });
 
   // ── PUT /api/promotions/:id ──────────────────────────────────────
-  app.put('/promotions/:id', async (c) => {
+  app.put('/promotions/:id', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
-      const body = parseExactPromotionBody(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-        UPDATE_PROMOTION_BODY_FIELDS,
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+      const input = parseAdminRequest(
+        c.get('requestAdmission').body,
+        parseAdminPromotionUpdateRequest,
       );
-
-      const input: import('@stelis/core-api/studio').UpdatePromotionInput = {};
-
-      const displayName = parseOptionalString(body, 'displayName');
-      if (displayName !== undefined) {
-        if (displayName.length === 0) {
-          return c.json({ error: 'Invalid displayName: must be a non-empty string' }, 400);
-        }
-        input.displayName = displayName;
-      }
-      const description = parseOptionalString(body, 'description');
-      if (description !== undefined) input.description = description;
-
-      const maxParticipants = parseOptionalPositiveInteger(body, 'maxParticipants');
-      if (maxParticipants !== undefined) input.maxParticipants = maxParticipants;
-
-      const perUserGasAllowanceMist = parseOptionalPositiveBigintString(
-        body,
-        'perUserGasAllowanceMist',
-      );
-      if (perUserGasAllowanceMist !== undefined) {
-        assertPerUserAllowanceWithinBound(perUserGasAllowanceMist);
-        input.perUserGasAllowanceMist = perUserGasAllowanceMist;
-      }
-
-      const claimDeadlineAt = parseOptionalNullableIsoString(body, 'claimDeadlineAt');
-      if (claimDeadlineAt !== undefined) input.claimDeadlineAt = claimDeadlineAt;
-
-      const postClaimUseWindowMs = parseOptionalNonNegativeInteger(body, 'postClaimUseWindowMs');
-      if (postClaimUseWindowMs !== undefined) input.postClaimUseWindowMs = postClaimUseWindowMs;
-
-      const startAt = parseOptionalNullableIsoString(body, 'startAt');
-      if (startAt !== undefined) input.startAt = startAt;
 
       const record = await ctx.promotionStore.update(id, input);
       if (!record) {
-        return c.json({ error: 'Promotion not found' }, 404);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_UPDATE_ERROR_CODES),
+        );
       }
-      return c.json({ promotion: await withDerivedBudget(record) });
+      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
     } catch (err) {
-      const mapped = tryPromotionErrorResponse(c, err);
-      if (mapped) return mapped;
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_UPDATE_ERROR_CODES);
     }
   });
 
   // ── POST /api/promotions/:id/status ──────────────────────────────
-  app.post('/promotions/:id/status', async (c) => {
+  app.post('/promotions/:id/status', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
-      const body = parseExactPromotionBody(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-        PROMOTION_STATUS_BODY_FIELDS,
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+      const body = parseAdminRequest(
+        c.get('requestAdmission').body,
+        parseAdminPromotionStatusRequest,
       );
-      if (!body.status || typeof body.status !== 'string') {
-        return c.json({ error: 'Missing required field: status' }, 400);
-      }
-      const validStatuses = ['draft', 'active', 'paused', 'archived'];
-      if (!validStatuses.includes(body.status)) {
-        return c.json({ error: `Invalid status: ${body.status}` }, 400);
-      }
-
-      const reason = parseOptionalString(body, 'reason');
-      const record = await ctx.promotionStore.transitionStatus(
-        id,
-        body.status as import('@stelis/core-api/studio').PromotionStatus,
-        reason,
-      );
+      const record = await ctx.promotionStore.transitionStatus(id, body.status, body.reason);
       if (!record) {
-        return c.json({ error: 'Promotion not found' }, 404);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_STATUS_ERROR_CODES),
+        );
       }
-      return c.json({ promotion: await withDerivedBudget(record) });
+      return c.json(parseAdminPromotionResponse({ promotion: withDerivedBudget(record) }));
     } catch (err) {
-      const mapped = tryPromotionErrorResponse(c, err);
-      if (mapped) return mapped;
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_STATUS_ERROR_CODES);
     }
   });
 
   // ── DELETE /api/promotions/:id ───────────────────────────────────
-  app.delete('/promotions/:id', async (c) => {
+  app.delete('/promotions/:id', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
-      const deleted = await ctx.promotionStore.delete(id);
-      if (!deleted) {
-        return c.json(
-          { error: 'Promotion not found or not deletable (only draft promotions can be deleted)' },
-          404,
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
+      const result = await ctx.promotionStore.delete(id);
+      if (result.status === 'not_found') {
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_DELETE_ERROR_CODES),
         );
       }
-      return c.json({ ok: true });
+      if (result.status === 'not_deletable') {
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_CONFLICT', ADMIN_PROMOTION_DELETE_ERROR_CODES),
+        );
+      }
+      return c.json(parseAdminPromotionDeleteResponse({ ok: true }));
     } catch (err) {
-      const mapped = tryPromotionErrorResponse(c, err);
-      if (mapped) return mapped;
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_DELETE_ERROR_CODES);
     }
   });
 
-  // ── GET /api/promotions/:id/users ── claimed-user list ───────────
-  // Returns all claimed users for a promotion with per-user gas state.
-  // No pagination; maxParticipants bounds the result size.
-  app.get('/promotions/:id/users', async (c) => {
+  // ── GET /api/promotions/:id/summary ──────────────────────────────
+  app.get('/promotions/:id/summary', admitAdminRequest(), async (c) => {
     try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore || !ctx.executionLedger) {
-        return c.json({ error: 'Promotion system not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
+      const ctx = context;
+      const id = parseAdminRequest(c.req.param('id'), parsePromotionId);
       const promotion = await ctx.promotionStore.get(id);
       if (!promotion) {
-        return c.json({ error: 'Promotion not found' }, 404);
-      }
-
-      // Enriched projection from ExecutionLedger (no N+1 join)
-      const users = await ctx.executionLedger.listClaimedUsers(id);
-
-      return c.json({ promotionId: id, users, total: users.length });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
-    }
-  });
-
-  // ── GET /api/promotions/:id/summary ── budget KPIs ──────────────
-  app.get('/promotions/:id/summary', async (c) => {
-    try {
-      const ctx = await contextPromise;
-      if (!ctx.promotionStore) {
-        return c.json({ error: 'Promotion store not available (studio not enabled)' }, 503);
-      }
-      const id = c.req.param('id');
-      const promotion = await ctx.promotionStore.get(id);
-      if (!promotion) {
-        return c.json({ error: 'Promotion not found' }, 404);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_NOT_FOUND', ADMIN_PROMOTION_READ_ERROR_CODES),
+        );
       }
       const summary = await computeAdminSummary(ctx, id, promotion);
-      if (!summary) {
-        return c.json({ error: 'Budget stores not available' }, 503);
-      }
-      return c.json({ promotionId: id, summary });
-    } catch {
-      return c.json({ error: 'Internal server error' }, 500);
+      return c.json(parseAdminPromotionSummaryResponse({ promotionId: id, summary }));
+    } catch (err) {
+      return respondAdminFailure(c, err, ADMIN_PROMOTION_READ_ERROR_CODES);
     }
   });
 

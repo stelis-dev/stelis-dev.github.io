@@ -6,8 +6,9 @@
  * Non-parser errors are re-thrown so prepare.ts L1_PARSE_FAILED can handle them.
  *
  * IMPORTANT: executionCostClaim and settlementPayoutRecipient are decoded from
- * built TX Pure inputs — NOT from builder input values.
- * This enables independent L2 validation that catches builder encoding bugs.
+ * the supplied transaction's Pure inputs, not from parallel scalar values.
+ * Prepare validates these inputs before gas resolution; the resolver then
+ * proves that the sealed transaction kept the same commands and input identities.
  *
  * Argument index mapping remains an implementation detail of
  * `@stelis/core-relay`; this wrapper verifies behavior through the parser.
@@ -33,9 +34,10 @@ export interface ExtractSettleArgsOptions {
 }
 
 /**
- * Extract SettleArgs from a built Transaction's commands + inputs.
+ * Extract SettleArgs from validated Transaction commands and inputs.
  *
- * All fields are decoded from the built TX — no input values used.
+ * All fields are decoded from those commands and inputs; no parallel scalar
+ * values are used.
  * Throws PrepareValidationError('L2_EXTRACT_FAILED') on any extraction failure.
  */
 export function extractSettleArgsFromBuiltTx(

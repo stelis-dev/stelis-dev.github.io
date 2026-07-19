@@ -1,18 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { DEEPBOOK_IDS, NODE_TIMER_MAX_DELAY_MS, STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
+import type { HostChainState } from '@stelis/core-api';
+import { createSuiEndpointSnapshot } from '@stelis/core-relay';
+import type { QualifySuiRpcEndpointsOptions } from '../src/sui/qualifiedSuiRpc.js';
 
 const state = vi.hoisted(() => ({
   registryPath: '',
   rpcAuthValue: null as string | null,
-  createRedisClient: vi.fn(),
+  qualificationSignal: null as AbortSignal | null,
   loadRpcConfig: vi.fn(),
-  createSuiClient: vi.fn(),
-  validateChainIdentity: vi.fn(),
-  probeEndpointCapabilities: vi.fn(),
+  qualifySuiRpcEndpoints: vi.fn(),
+  readHostChainState: vi.fn(),
+  resolveSettlementSwapPathRegistry: vi.fn(),
 }));
+
+vi.mock('@stelis/core-api', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-api')>('@stelis/core-api');
+  return {
+    ...actual,
+    readHostChainState: state.readHostChainState,
+  };
+});
 
 vi.mock('../src/settlementSwapPathRegistry.js', async () => {
   const actual = await vi.importActual<typeof import('../src/settlementSwapPathRegistry.js')>(
@@ -21,32 +36,66 @@ vi.mock('../src/settlementSwapPathRegistry.js', async () => {
   return {
     ...actual,
     getSettlementSwapPathRegistryPath: () => state.registryPath,
+    resolveSettlementSwapPathRegistry: state.resolveSettlementSwapPathRegistry,
   };
 });
-
-vi.mock('../src/redisClient.js', () => ({
-  createRedisClient: state.createRedisClient,
-}));
 
 vi.mock('../src/sui/parseEndpointConfig.js', () => ({
   loadRpcConfig: state.loadRpcConfig,
 }));
 
-vi.mock('../src/sui/createSuiClient.js', () => ({
-  createSuiClient: state.createSuiClient,
-}));
-
-vi.mock('../src/sui/validateChainIdentity.js', () => ({
-  validateChainIdentity: state.validateChainIdentity,
-}));
-
-vi.mock('../src/sui/probeEndpointCapabilities.js', () => ({
-  probeEndpointCapabilities: state.probeEndpointCapabilities,
+vi.mock('../src/sui/qualifiedSuiRpc.js', () => ({
+  qualifySuiRpcEndpoints: state.qualifySuiRpcEndpoints,
 }));
 
 import { runBootValidation } from '../src/boot.js';
 
-const ENDPOINT = { url: 'https://rpc.snapshot.test', fetchInit: {}, meta: {} };
+const ENDPOINT = { baseUrl: 'https://rpc.snapshot.test/provider/grpc', meta: {} };
+const TESTNET_CONTRACT_IDS = STELIS_CONTRACT_IDS.testnet!;
+const TESTNET_DEEPBOOK_IDS = DEEPBOOK_IDS.testnet!;
+const PRIMARY_CLIENT = Object.freeze({ network: 'testnet' }) as unknown as SuiGrpcClient;
+const QUALIFICATION_SNAPSHOT = createSuiEndpointSnapshot([PRIMARY_CLIENT]);
+const INITIAL_HOST_CHAIN_STATE: HostChainState = Object.freeze({
+  config: Object.freeze({
+    packageId: TESTNET_CONTRACT_IDS.packageId,
+    configId: TESTNET_CONTRACT_IDS.configId,
+    maxClaimMist: 1n,
+    minSettleMist: 2n,
+    maxHostFeeMist: 3n,
+    protocolFlatFeeMist: 4n,
+    configVersion: 5n,
+    maxSpreadBps: 6n,
+  }),
+  vaultRegistryId: TESTNET_CONTRACT_IDS.vaultRegistryId,
+  vaultsTableId: `0x${'56'.repeat(32)}`,
+});
+const SETTLEMENT_SWAP_PATH: SingleHopSettlementSwapPath = {
+  hops: [
+    {
+      poolId: `0x${'12'.repeat(32)}`,
+      baseType: `0x${'78'.repeat(32)}::coin::COIN`,
+      quoteType: '0x2::sui::SUI',
+      swapDirection: 'baseForQuote',
+      feeBps: 0,
+    },
+  ],
+  settlementTokenType: `0x${'78'.repeat(32)}::coin::COIN`,
+  settlementTokenSymbol: 'COIN',
+  settlementTokenDecimals: 9,
+  lotSize: 1n,
+  minSize: 1n,
+  effectiveFeeRateBps: 0,
+  settlementSwapDirection: 'baseForQuote',
+};
+const STUDIO_TARGET = `0x${'cd'.repeat(32)}::module::entry`;
+const { publicKey: STUDIO_PUBLIC_KEY } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const VALID_STUDIO_TRUST_JSON = JSON.stringify({
+  issuer: 'https://auth.boot-snapshot.test',
+  audience: 'stelis-studio',
+  algorithm: 'RS256',
+  publicKeyPem: STUDIO_PUBLIC_KEY.export({ type: 'spki', format: 'pem' }),
+  claimPaths: { userId: 'sub', senderAddress: 'wallet_address' },
+});
 let temporaryDirectory = '';
 
 function setRequiredEnvironment(): void {
@@ -63,26 +112,28 @@ function setRequiredEnvironment(): void {
   vi.stubEnv('TRUSTED_PROXY_HOPS', '1');
   vi.stubEnv('HOST_FEE_MIST', '7');
   vi.stubEnv('PREPARE_INFLIGHT_CAPACITY', '5');
-  vi.stubEnv('CORS_ORIGINS', 'https://admin.before.example');
   vi.stubEnv('RPC_AUTH_VALUE', 'rpc-auth-before-await');
   vi.stubEnv('SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS', '5000');
   vi.stubEnv('SPONSOR_OPERATIONS_SPONSOR_REFILL_ACCOUNT_BALANCE_TIMEOUT_MS', '5000');
   vi.stubEnv('SPONSOR_OPERATIONS_REFILL_TIMEOUT_MS', '30000');
   vi.stubEnv('SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS', '15000');
+  vi.stubEnv('SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS', '15000');
 }
 
-function setStudioEnvironment(allowedTargets: string): void {
+function setStudioEnvironment(allowedTargets: string, developerJwtTrustJson = '{}'): void {
   vi.stubEnv('ADMIN_JWT_SECRET', 'studio-admin-jwt-secret-00000000');
   vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
+  vi.stubEnv('CORS_ORIGINS', 'https://admin.before.example');
   vi.stubEnv('STUDIO_ALLOWED_TARGETS', allowedTargets);
   // Target validation runs before trust parsing; these tests intentionally
   // isolate the target boundary from JWT key construction.
-  vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', '{}');
+  vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', developerJwtTrustJson);
 }
 
 beforeEach(async () => {
   vi.clearAllMocks();
   state.rpcAuthValue = null;
+  state.qualificationSignal = null;
   temporaryDirectory = await mkdtemp(join(tmpdir(), 'stelis-boot-runtime-input-'));
   state.registryPath = join(temporaryDirectory, 'settlement-swap-paths.json');
   await writeFile(
@@ -95,26 +146,6 @@ beforeEach(async () => {
   );
   setRequiredEnvironment();
 
-  state.createRedisClient.mockResolvedValue({
-    eval: vi.fn().mockImplementation(async (_script, _keys, args) => {
-      process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
-      process.env.CORS_ORIGINS = 'https://admin.after.example';
-      process.env.ADMIN_JWT_SECRET = 'x'.repeat(32);
-      process.env.ADMIN_ADDRESS = `0x${'ab'.repeat(32)}`;
-      process.env.STUDIO_ALLOWED_TARGETS = `0x${'cd'.repeat(32)}::module::entry`;
-      process.env.STUDIO_DEVELOPER_JWT_TRUST_JSON = '{not valid json';
-      return args[0];
-    }),
-    set: vi.fn().mockImplementation(async () => {
-      process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
-      process.env.CORS_ORIGINS = 'https://admin.after.example';
-      process.env.ADMIN_JWT_SECRET = 'x'.repeat(32);
-      process.env.ADMIN_ADDRESS = `0x${'ab'.repeat(32)}`;
-      process.env.STUDIO_ALLOWED_TARGETS = `0x${'cd'.repeat(32)}::module::entry`;
-      process.env.STUDIO_DEVELOPER_JWT_TRUST_JSON = '{not valid json';
-    }),
-    dispose: vi.fn().mockResolvedValue(undefined),
-  });
   state.loadRpcConfig.mockImplementation(
     (
       _network: string,
@@ -125,16 +156,39 @@ beforeEach(async () => {
       return [ENDPOINT];
     },
   );
-  state.validateChainIdentity.mockResolvedValue({
-    chainIdentifier: 'testnet-chain',
-    endpointResults: [{ url: ENDPOINT.url, error: null }],
-  });
-  state.probeEndpointCapabilities.mockResolvedValue({ ok: true });
-  state.createSuiClient.mockReturnValue({
-    client: { runtime: 'sui-client' },
-    primaryClient: { runtime: 'primary-sui-client' },
-    failoverTransport: { runtime: 'failover-transport' },
-  });
+  state.readHostChainState.mockResolvedValue(INITIAL_HOST_CHAIN_STATE);
+  state.resolveSettlementSwapPathRegistry.mockResolvedValue([SETTLEMENT_SWAP_PATH]);
+  state.qualifySuiRpcEndpoints.mockImplementation(
+    async (
+      options: QualifySuiRpcEndpointsOptions<{
+        readonly initialHostChainState: HostChainState;
+        readonly settlementSwapPaths: readonly SingleHopSettlementSwapPath[];
+      }>,
+    ) => {
+      const controller = new AbortController();
+      state.qualificationSignal = controller.signal;
+      process.env.RPC_AUTH_VALUE = 'rpc-auth-after-await';
+      process.env.CORS_ORIGINS = 'https://admin.after.example';
+      process.env.ADMIN_JWT_SECRET = 'x'.repeat(32);
+      process.env.ADMIN_ADDRESS = `0x${'ab'.repeat(32)}`;
+      process.env.STUDIO_ALLOWED_TARGETS = `0x${'cd'.repeat(32)}::module::entry`;
+      process.env.STUDIO_DEVELOPER_JWT_TRUST_JSON = '{not valid json';
+      const qualification = await options.qualify({
+        snapshot: QUALIFICATION_SNAPSHOT,
+        signal: controller.signal,
+      });
+      return Object.freeze({
+        snapshot: QUALIFICATION_SNAPSHOT,
+        primaryQualification: qualification,
+        rejected: Object.freeze([]),
+        adminSnapshot: Object.freeze({
+          endpoints: Object.freeze([
+            Object.freeze({ origin: 'https://rpc.snapshot.test', role: 'primary' as const }),
+          ]),
+        }),
+      });
+    },
+  );
 });
 
 afterEach(async () => {
@@ -143,25 +197,139 @@ afterEach(async () => {
 });
 
 describe('runBootValidation runtime input', () => {
-  it('uses one pre-await env snapshot and retains parsed registry entries after file removal', async () => {
+  it('uses one pre-await env snapshot and retains the primary endpoint qualification', async () => {
     const result = await runBootValidation();
     await rm(state.registryPath);
 
     expect(state.rpcAuthValue).toBe('rpc-auth-before-await');
-    expect(result.publicSummary).toEqual({
-      mode: 'generic',
-      studioEnabled: false,
-      network: 'testnet',
-    });
-    expect(result.runtimeInput.corsAllowedOrigins).toEqual(['https://admin.before.example']);
-    expect(result.runtimeInput.context.quotedHostFeeMist).toBe(7n);
-    expect(result.runtimeInput.context.prepareInflightCapacity).toBe(5);
-    expect(result.runtimeInput.context.sponsorOperations.withdrawalReceiptTtlMs).toBe(3_600_000);
-    expect(result.runtimeInput.context.studio).toBeNull();
-    expect(result.runtimeInput.context.settlementSwapPathRegistryEntries).toEqual([
-      { poolId: `0x${'12'.repeat(32)}` },
-    ]);
+    expect(result.context.mode).toBe('relay_only');
+    expect(Object.hasOwn(result, 'corsAllowedOrigins')).toBe(false);
+    expect(Object.hasOwn(result.context, 'studio')).toBe(false);
+    expect(result.context.quotedHostFeeMist).toBe(7n);
+    expect(result.context.prepareInflightCapacity).toBe(5);
+    expect(result.context.sponsorOperations.settings.withdrawalReceiptTtlMs).toBe(3_600_000);
+    expect(result.context.sui).toBe(QUALIFICATION_SNAPSHOT);
+    expect(result.context.initialHostChainState).toBe(INITIAL_HOST_CHAIN_STATE);
+    expect(result.context.settlementSwapPaths).toEqual([SETTLEMENT_SWAP_PATH]);
+    expect(Object.hasOwn(result.context, 'rpcFleet')).toBe(false);
+    expect(state.qualifySuiRpcEndpoints).toHaveBeenCalledWith(
+      expect.objectContaining({ network: 'testnet', endpoints: [ENDPOINT] }),
+    );
+    expect(state.readHostChainState).toHaveBeenCalledWith(
+      QUALIFICATION_SNAPSHOT,
+      TESTNET_CONTRACT_IDS,
+      state.qualificationSignal,
+    );
+    expect(state.resolveSettlementSwapPathRegistry).toHaveBeenCalledWith(
+      QUALIFICATION_SNAPSHOT,
+      TESTNET_DEEPBOOK_IDS.packageId,
+      [{ poolId: `0x${'12'.repeat(32)}` }],
+      state.qualificationSignal,
+    );
   });
+
+  it('retains one complete `relay_and_studio` snapshot without post-await env reads', async () => {
+    setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+
+    const result = await runBootValidation();
+
+    if (result.context.mode !== 'relay_and_studio') {
+      throw new Error('expected `relay_and_studio` runtime input');
+    }
+    if (!('adminAddress' in result)) {
+      throw new Error('expected Admin configuration in `relay_and_studio` runtime input');
+    }
+    expect(result.corsAllowedOrigins).toEqual(['https://admin.before.example']);
+    expect(result.adminAddress).toBe(`0x${'ab'.repeat(32)}`);
+    expect(result.context.rpcFleet).toEqual({
+      endpoints: [{ origin: 'https://rpc.snapshot.test', role: 'primary' }],
+    });
+    expect([...result.context.studio.globalAllowedTargets]).toEqual([STUDIO_TARGET]);
+    expect(result.context.studio.developerJwtTrustConfig.issuer).toBe(
+      'https://auth.boot-snapshot.test',
+    );
+  });
+
+  it.each(['http://localhost:4100/verify', 'http://127.0.0.1/verify', 'http://[::1]/verify'])(
+    'accepts the exact local HTTP developer-verification host: %s',
+    async (verifyUrl) => {
+      setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', verifyUrl);
+
+      const result = await runBootValidation();
+      if (result.context.mode !== 'relay_and_studio') {
+        throw new Error('expected `relay_and_studio` context input');
+      }
+      expect(result.context.studio.developerJwtVerifyUrl).toBe(verifyUrl);
+    },
+  );
+
+  it.each([
+    'http://auth.example.test/verify',
+    'http://localhost.example.test/verify',
+    'http://127.0.0.2/verify',
+    'http://[::ffff:127.0.0.1]/verify',
+  ])('rejects a non-exact local HTTP developer-verification host: %s', async (verifyUrl) => {
+    setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+    vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', verifyUrl);
+
+    await expect(runBootValidation()).rejects.toThrow(
+      'must use HTTPS, except for an exact loopback hostname',
+    );
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      verifyUrl: 'https://callback-user:callback-password-secret@auth.example.test/verify',
+      reason: 'must not contain embedded credentials',
+      secret: 'callback-password-secret',
+    },
+    {
+      verifyUrl: 'https://auth.example.test/verify#callback-fragment-secret',
+      reason: 'must not contain a fragment',
+      secret: 'callback-fragment-secret',
+    },
+  ])(
+    'rejects an unsafe developer-verification URL before external services: $verifyUrl',
+    async ({ verifyUrl, reason, secret }) => {
+      setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', verifyUrl);
+
+      const error = await runBootValidation().catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(reason);
+      expect((error as Error).message).not.toContain(secret);
+      expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects malformed Studio JWT trust before external services', async () => {
+    setStudioEnvironment(STUDIO_TARGET, '{');
+
+    await expect(runBootValidation()).rejects.toThrow();
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'ADMIN_ADDRESS',
+    'ADMIN_JWT_SECRET',
+    'CORS_ORIGINS',
+    'STUDIO_ALLOWED_TARGETS',
+    'STUDIO_DEVELOPER_JWT_TRUST_JSON',
+  ] as const)(
+    'rejects `relay_and_studio` config missing %s before external services',
+    async (key) => {
+      setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
+      vi.stubEnv(key, '');
+
+      await expect(runBootValidation()).rejects.toThrow(
+        `\`relay_and_studio\` configuration is incomplete. Missing: ${key}`,
+      );
+      expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects enabled refill without its documented target before external services', async () => {
     vi.stubEnv('SPONSOR_OPERATIONS_REFILL_ENABLED', 'true');
@@ -170,11 +338,28 @@ describe('runBootValidation runtime input', () => {
     await expect(runBootValidation()).rejects.toThrow(
       'SPONSOR_BALANCE_REFILL_TARGET_MIST is required',
     );
-    expect(state.createRedisClient).not.toHaveBeenCalled();
-    expect(state.validateChainIdentity).not.toHaveBeenCalled();
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it('rejects SponsorOperations timer values that Node would truncate', async () => {
+    vi.stubEnv('SPONSOR_OPERATIONS_CONFIRMATION_TIMEOUT_MS', String(NODE_TIMER_MAX_DELAY_MS + 1));
+
+    await expect(runBootValidation()).rejects.toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it('rejects inconsistent SponsorOperations settings before external services', async () => {
+    vi.stubEnv('SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS', '15001');
+    vi.stubEnv('SPONSOR_OPERATIONS_RECONCILIATION_INTERVAL_MS', '15000');
+
+    await expect(runBootValidation()).rejects.toThrow(
+      'balance timeouts must not exceed reconciliationIntervalMs',
+    );
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 
   it('rejects malformed response-header configuration before external services', async () => {
+    setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
     vi.stubEnv('CORS_ORIGINS', 'https://admin.example/path');
     await expect(runBootValidation()).rejects.toThrow(
       'CORS_ORIGINS entry must be an http(s) origin',
@@ -184,8 +369,7 @@ describe('runBootValidation runtime input', () => {
     vi.stubEnv('COOKIE_DOMAIN', '.example.com; Secure');
     await expect(runBootValidation()).rejects.toThrow('COOKIE_DOMAIN must be a valid DNS domain');
 
-    expect(state.createRedisClient).not.toHaveBeenCalled();
-    expect(state.validateChainIdentity).not.toHaveBeenCalled();
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -197,6 +381,7 @@ describe('runBootValidation runtime input', () => {
   ])('rejects an unreachable Studio target at boot: %s', async (target) => {
     setStudioEnvironment(target);
     await expect(runBootValidation()).rejects.toThrow('STUDIO_ALLOWED_TARGETS entry');
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 
   it('rejects Studio targets that collide after package-address canonicalization', async () => {
@@ -204,5 +389,6 @@ describe('runBootValidation runtime input', () => {
     await expect(runBootValidation()).rejects.toThrow(
       'STUDIO_ALLOWED_TARGETS contains duplicate entry after canonicalization',
     );
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 });

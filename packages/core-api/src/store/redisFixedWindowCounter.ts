@@ -44,12 +44,12 @@ function parseRedisInteger(value: unknown, label: string): number {
  * Parse the [current, pttl] tuple returned by the Lua script.
  */
 export function parseFixedWindowResult(value: unknown): FixedWindowCounterResult {
-  if (!Array.isArray(value) || value.length < 2) {
+  if (!Array.isArray(value) || value.length !== 2) {
     throw new Error('redisFixedWindowCounter: invalid EVAL response');
   }
   const current = parseRedisInteger(value[0], 'current');
   const pttlMs = parseRedisInteger(value[1], 'pttlMs');
-  if (current < 0 || pttlMs < -2) {
+  if (current < 1 || pttlMs < 0) {
     throw new Error('redisFixedWindowCounter: invalid EVAL response');
   }
   return { current, pttlMs };

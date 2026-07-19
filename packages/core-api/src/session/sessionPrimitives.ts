@@ -5,22 +5,23 @@
  * handleSponsor (generic) and handlePromotionSponsor (promotion).
  *
  * Mode-specific policy (generic re-validation, promotion entitlement)
- * remains internal. The narrow current-Sui result parser is also consumed by
- * app-api so Host execution boundaries share one fail-closed SDK-union authority.
+ * remains internal. Current Sui responses reach these helpers only after the
+ * core-relay operation gateways validate their exact SDK unions.
  */
-import { createHash } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
-import { Transaction, TransactionDataBuilder } from '@mysten/sui/transactions';
+import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
 import { verifyTransactionSignature } from '@mysten/sui/verify';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
-import { bindCurrentSuiResultToBytes, bindCurrentSuiResultToDigest } from '@stelis/core-relay';
+import {
+  executeSuiTransaction,
+  simulateSuiTransaction,
+  type SuiEndpointSnapshot,
+  type SuiExecutionErrorKind,
+} from '@stelis/core-relay';
+import { assertSuiTransactionDigest } from '@stelis/core-relay/server';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { SPONSOR_POOL_CHECKIN_FAILED } from '../observability/events.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
-import type { PreflightResult, ExecResult, ConsumeOutcome, GasUsedFields } from './sessionTypes.js';
+import type { PreflightResult, ExecResult } from './sessionTypes.js';
 // ─────────────────────────────────────────────
 // txBytes decode
 // ─────────────────────────────────────────────
@@ -42,15 +43,6 @@ export class SessionDecodeError extends Error {
     super(message);
     this.name = 'SessionDecodeError';
   }
-}
-
-// ─────────────────────────────────────────────
-// txBytes hash
-// ─────────────────────────────────────────────
-
-/** Compute SHA-256 hex digest of raw txBytes. File-local — only used by consumeEntry. */
-function computeTxHash(txBytes: Uint8Array): string {
-  return createHash('sha256').update(txBytes).digest('hex');
 }
 
 // ─────────────────────────────────────────────
@@ -109,29 +101,6 @@ export class SenderSignatureError extends Error {
     super(message);
     this.name = 'SenderSignatureError';
   }
-}
-
-// ─────────────────────────────────────────────
-// Consume
-// ─────────────────────────────────────────────
-
-/**
- * Atomically consume a prepared entry from the store.
- * Returns a normalized ConsumeOutcome — callers map to mode-specific errors.
- */
-export async function consumeEntry(
-  store: PrepareStoreAdapter,
-  receiptId: string,
-  txBytes: Uint8Array,
-): Promise<ConsumeOutcome> {
-  const txHash = computeTxHash(txBytes);
-  const result = await store.consume(receiptId, txHash);
-
-  if (result === 'not_found') return { status: 'not_found' };
-  if (result === 'expired') return { status: 'expired' };
-  if (result === 'hash_mismatch') return { status: 'hash_mismatch' };
-
-  return { status: 'ok', entry: result, txHash };
 }
 
 // ─────────────────────────────────────────────
@@ -195,231 +164,24 @@ export class GasOwnerMismatchError extends Error {
 // Preflight simulation
 // ─────────────────────────────────────────────
 
-type RuntimeRecord = Record<string, unknown>;
-type CurrentExecutionErrorKind = SuiClientTypes.ExecutionError['$kind'];
-
-const CURRENT_EXECUTION_ERROR_KIND = {
-  MoveAbort: true,
-  SizeError: true,
-  CommandArgumentError: true,
-  TypeArgumentError: true,
-  PackageUpgradeError: true,
-  IndexError: true,
-  CoinDenyListError: true,
-  CongestedObjects: true,
-  ObjectIdError: true,
-  Unknown: true,
-} as const satisfies Record<CurrentExecutionErrorKind, true>;
-
-const CURRENT_EXECUTION_ERROR_KINDS = Object.keys(
-  CURRENT_EXECUTION_ERROR_KIND,
-) as CurrentExecutionErrorKind[];
-
-type NormalizedExecutionError = {
-  readonly kind: CurrentExecutionErrorKind;
-  readonly message: string;
-};
-
-type NormalizedExecutionStatus =
-  | { readonly success: true; readonly error: null }
-  | { readonly success: false; readonly error: NormalizedExecutionError };
-
-type ParsedSuiTransactionResult =
-  | {
-      readonly kind: 'success';
-      readonly digest: string;
-      readonly effects: RuntimeRecord;
-      readonly gasUsed: GasUsedFields | null;
-    }
-  | {
-      readonly kind: 'failure';
-      readonly digest: string;
-      readonly effects: RuntimeRecord;
-      readonly gasUsed: GasUsedFields | null;
-      readonly error: NormalizedExecutionError;
-    };
-
-function isRuntimeRecord(value: unknown): value is RuntimeRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isCurrentExecutionErrorKind(value: unknown): value is CurrentExecutionErrorKind {
-  return typeof value === 'string' && Object.hasOwn(CURRENT_EXECUTION_ERROR_KIND, value);
-}
-
-function readCurrentExecutionError(value: unknown): NormalizedExecutionError | null {
-  if (!isRuntimeRecord(value) || typeof value.message !== 'string') return null;
-  if (!isCurrentExecutionErrorKind(value.$kind)) return null;
-
-  const kind = value.$kind;
-  for (const candidate of CURRENT_EXECUTION_ERROR_KINDS) {
-    const hasPayload = Object.prototype.hasOwnProperty.call(value, candidate);
-    if ((candidate === kind) !== hasPayload) return null;
-  }
-
-  if (kind === 'Unknown') {
-    if (value.Unknown !== null) return null;
-  } else if (kind === 'CongestedObjects') {
-    const payload = value.CongestedObjects;
-    if (
-      !isRuntimeRecord(payload) ||
-      typeof payload.name !== 'string' ||
-      !Array.isArray(payload.objects) ||
-      !payload.objects.every((objectId) => typeof objectId === 'string')
-    ) {
-      return null;
-    }
-  } else if (value[kind] == null) {
-    return null;
-  }
-
-  return { kind, message: value.message };
-}
-
-function readCurrentExecutionStatus(value: unknown): NormalizedExecutionStatus | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (value.success === true) {
-    return value.error === null ? { success: true, error: null } : null;
-  }
-  if (value.success !== false) return null;
-  const error = readCurrentExecutionError(value.error);
-  return error ? { success: false, error } : null;
-}
-
-function isCanonicalGasAmount(value: unknown): value is string {
-  return typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value);
-}
-
-function normalizeGasUsed(value: unknown): GasUsedFields | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (
-    !isCanonicalGasAmount(value.computationCost) ||
-    !isCanonicalGasAmount(value.storageCost) ||
-    !isCanonicalGasAmount(value.storageRebate)
-  ) {
-    return null;
-  }
-  return {
-    computationCost: value.computationCost,
-    storageCost: value.storageCost,
-    storageRebate: value.storageRebate,
-  };
-}
-
-function readTerminalPayload(
-  value: unknown,
-  expectedSuccess: boolean,
-): {
-  readonly digest: string;
-  readonly status: NormalizedExecutionStatus;
-  readonly effects: RuntimeRecord;
-  readonly gasUsed: GasUsedFields | null;
-} | null {
-  if (!isRuntimeRecord(value)) return null;
-  if (typeof value.digest !== 'string' || value.digest.length === 0) return null;
-
-  const status = readCurrentExecutionStatus(value.status);
-  if (!status || status.success !== expectedSuccess) return null;
-  if (!isRuntimeRecord(value.effects)) return null;
-
-  const effectsStatus = readCurrentExecutionStatus(value.effects.status);
-  if (!effectsStatus || !isDeepStrictEqual(value.status, value.effects.status)) return null;
-  if (value.effects.transactionDigest !== value.digest) return null;
-
-  return {
-    digest: value.digest,
-    status,
-    effects: value.effects,
-    gasUsed: normalizeGasUsed(value.effects.gasUsed),
-  };
-}
-
-function parseCurrentSuiTerminal(value: unknown): ParsedSuiTransactionResult | null {
-  if (!isRuntimeRecord(value)) return null;
-
-  if (value.$kind === 'Transaction') {
-    if (value.FailedTransaction !== undefined) return null;
-    const payload = readTerminalPayload(value.Transaction, true);
-    if (!payload || !payload.status.success) return null;
-    return {
-      kind: 'success',
-      digest: payload.digest,
-      effects: payload.effects,
-      gasUsed: payload.gasUsed,
-    };
-  }
-
-  if (value.$kind === 'FailedTransaction') {
-    if (value.Transaction !== undefined) return null;
-    const payload = readTerminalPayload(value.FailedTransaction, false);
-    if (!payload || payload.status.success) return null;
-    return {
-      kind: 'failure',
-      digest: payload.digest,
-      effects: payload.effects,
-      gasUsed: payload.gasUsed,
-      error: payload.status.error,
-    };
-  }
-
-  return null;
-}
-
-/**
- * Parse a current Sui terminal result and bind it to the transaction bytes
- * that produced the RPC request.
- *
- * `parseCurrentSuiTerminal()` proves only that the returned terminal union
- * is internally self-consistent. That is not enough at an execution boundary:
- * an internally valid result for a different transaction must never drive
- * sponsor accounting, lease release, or a public response. This helper is the
- * single authority for that request/result binding.
- */
-export function parseCurrentSuiTerminalForBytes(
-  value: unknown,
-  txBytes: Uint8Array,
-): ParsedSuiTransactionResult | null {
-  if (!bindCurrentSuiResultToBytes(value, txBytes)) return null;
-  return parseCurrentSuiTerminal(value);
-}
-
-/** Bind a current Sui terminal result to a digest-owned lookup request. */
-export function parseCurrentSuiTerminalForDigest(
-  value: unknown,
-  expectedDigest: string,
-): ParsedSuiTransactionResult | null {
-  if (!bindCurrentSuiResultToDigest(value, expectedDigest)) return null;
-  return parseCurrentSuiTerminal(value);
-}
-
-function isConfirmedCongestion(kind: CurrentExecutionErrorKind): boolean {
-  return kind === 'CongestedObjects';
+function isConfirmedCongestion(kind: SuiExecutionErrorKind): boolean {
+  return kind === 'CongestedObjects' || kind === 'ExecutionCanceledDueToConsensusObjectCongestion';
 }
 
 /**
  * Run preflight simulation and return a normalized result.
- * Does NOT throw on simulation failure — returns `{ success: false, reason }`.
+ * Does NOT throw on simulation failure — returns the structured execution error.
  * Throws only on infrastructure errors (network, RPC).
  */
 export async function runPreflight(
-  sui: SuiGrpcClient,
+  sui: SuiEndpointSnapshot,
   txBytes: Uint8Array,
 ): Promise<PreflightResult> {
-  const simResult = await sui.simulateTransaction({
-    transaction: txBytes,
-    include: { effects: true },
-  });
-  const terminal = parseCurrentSuiTerminalForBytes(simResult, txBytes);
-  if (!terminal) {
-    return { success: false, reason: 'Simulation returned malformed terminal result' };
+  const result = await simulateSuiTransaction(sui, { transaction: txBytes });
+  if (result.outcome === 'failure') {
+    return { success: false, error: result.error };
   }
-  if (terminal.kind === 'failure') {
-    return { success: false, reason: terminal.error.message };
-  }
-  if (!terminal.gasUsed) {
-    return { success: false, reason: 'Simulation returned no valid gasUsed' };
-  }
-  return { success: true, gasUsed: terminal.gasUsed };
+  return { success: true, gasUsed: result.effects.gasUsed };
 }
 
 // ─────────────────────────────────────────────
@@ -434,12 +196,10 @@ export async function runPreflight(
  * `SponsorPostSignatureUncertaintyError`. Only a validated terminal result can
  * establish congestion or on-chain execution.
  *
- * The pool `sign(sponsorAddress, receiptId, txBytes)` signature pins lease
- * verification to `HMAC(secret, receiptId || sponsorAddress || hash(txBytes))`,
- * compared against the committed proof the prepare runner installed at
- * `sponsorPool.commit(sponsorAddress, receiptId, buildResult.txBytesHash)`.
- * `sponsorAddress` is the lease identity; `receiptId` and the committed hash
- * bind that lease to one prepared transaction. A
+ * The pool `sign(sponsorAddress, receiptId, txBytes)` call verifies the
+ * stage-separated executing lease proof installed atomically immediately
+ * before signing. The proof binds the stage, receipt, sponsor, validated
+ * transaction-bytes hash, and expected Sui transaction digest. A
  * Redis-only attacker cannot produce a matching proof for any other
  * `txBytes` because the HMAC secret stays in process env.
  */
@@ -454,8 +214,8 @@ export async function runPreflight(
  * post-signature branch from failures that cannot have submitted a sponsor-
  * signed transaction.
  *
- * `cause` carries the underlying RPC or terminal-shape error so callers can
- * preserve the original public error message after recording the typed stage.
+ * `cause` is retained only for internal reconciliation and diagnostics. Public
+ * route errors are fixed typed errors and must not expose or parse this text.
  */
 export class SponsorPostSignatureUncertaintyError extends Error {
   readonly executionStage = 'after_sponsor_signature' as const;
@@ -472,46 +232,42 @@ export class SponsorPostSignatureUncertaintyError extends Error {
 
 export async function signAndSubmit(
   pool: SponsorPoolAdapter,
-  sui: SuiGrpcClient,
+  sui: SuiEndpointSnapshot,
   sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
+  expectedDigest: string,
 ): Promise<ExecResult> {
-  // Derive the Sui transaction identity before issuing the sponsor signature.
-  // Every terminal response and every post-signature uncertainty record below
-  // is bound to this exact signed transaction identity.
-  const expectedDigest = TransactionDataBuilder.getDigestFromBytes(txBytes);
+  // The receipt store authored this durable identity while atomically entering
+  // execution. Verify that it still matches these exact bytes before issuing
+  // either the sponsor signature or the irreversible execution RPC.
+  assertSuiTransactionDigest(txBytes, expectedDigest);
 
-  // Pool throws SponsorLeaseExpiredError directly if the committed HMAC
+  // Pool throws SponsorLeaseExpiredError directly if the executing lease HMAC
   // lease proof for (receiptId, sponsorAddress, hash(txBytes)) does not match
   // the Redis value — including the case where `entry.txBytesHash` was
-  // overwritten under a live committed lease, because the committed
-  // Redis proof still references the original commit digest. Pre-sign
+  // overwritten under a live executing lease, because the stored
+  // Redis proof still references the original transaction-bytes hash. Pre-sign
   // failures rethrow unchanged: the sponsor signature was NOT issued
   // for them, so post-signature uncertainty policies (entitlement consume
   // and sponsored-execution recording) must not apply.
   const sponsorSig = await pool.sign(sponsorAddress, receiptId, txBytes);
 
   try {
-    const execResult = await sui.executeTransaction({
+    const result = await executeSuiTransaction(sui, {
       transaction: txBytes,
+      expectedDigest,
       signatures: [userSignature, sponsorSig.signature],
-      include: { effects: true, events: true },
     });
 
-    const terminal = parseCurrentSuiTerminalForDigest(execResult, expectedDigest);
-    if (!terminal) {
-      throw new Error('Transaction execution returned malformed terminal result');
-    }
-
-    if (terminal.kind === 'failure') {
-      if (isConfirmedCongestion(terminal.error.kind)) {
+    if (result.outcome === 'failure') {
+      if (isConfirmedCongestion(result.error.kind)) {
         return {
           success: false,
           executionStage: 'after_sponsor_signature',
-          digest: terminal.digest,
-          reason: terminal.error.message,
+          digest: result.digest,
+          error: result.error,
           isCongestion: true,
           gasUsed: null,
         };
@@ -519,19 +275,19 @@ export async function signAndSubmit(
       return {
         success: false,
         executionStage: 'on_chain',
-        digest: terminal.digest,
-        reason: terminal.error.message,
+        digest: result.digest,
+        error: result.error,
         isCongestion: false,
-        gasUsed: terminal.gasUsed,
+        gasUsed: result.effects.gasUsed,
       };
     }
 
     return {
       success: true,
       executionStage: 'on_chain',
-      digest: terminal.digest,
-      effects: terminal.effects,
-      gasUsed: terminal.gasUsed,
+      digest: result.digest,
+      effects: result.effects,
+      gasUsed: result.effects.gasUsed,
     };
   } catch (submitErr) {
     if (submitErr instanceof SponsorPostSignatureUncertaintyError) {
@@ -549,11 +305,9 @@ export async function signAndSubmit(
  * Best-effort slot checkin with structured error logging.
  * Safe to call in finally blocks — never throws.
  *
- * The pool `checkin` signature is `(sponsorAddress, receiptId, txBytesHash | null)`.
- * Callers pass the prepare commit hash (`txBytesHash`) when releasing a
- * committed lease, and `null` when releasing a lease that only reached the
- * reservation window (for example build/commit failure before
- * `prepareStore.store()`).
+ * This path releases only a lease that remains in the reservation window
+ * (for example build failure before `commitPreparedReceipt()`). Committed and
+ * executing leases are removed only by the receipt store's atomic mutation.
  *
  * The pool verifies the appropriate stage-specific HMAC proof before
  * deleting the slot; a forged receipt or hash silently no-ops rather
@@ -563,10 +317,9 @@ export async function safeSlotCheckin(
   pool: SponsorPoolAdapter,
   sponsorAddress: string,
   receiptId: string,
-  txBytesHash: string | null,
 ): Promise<void> {
   try {
-    await pool.checkin(sponsorAddress, receiptId, txBytesHash);
+    await pool.checkin(sponsorAddress, receiptId);
   } catch (checkinErr) {
     logStructuredEvent(
       SPONSOR_POOL_CHECKIN_FAILED,

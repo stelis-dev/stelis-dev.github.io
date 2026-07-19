@@ -115,7 +115,10 @@ export function HomePage() {
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 
 // connect() auto-detects network from the Host.
-const suiClient = new SuiGrpcClient({ network: 'testnet' });
+const suiClient = new SuiGrpcClient({
+  network: 'testnet',
+  baseUrl: 'https://fullnode.testnet.sui.io:443',
+});
 const sdk = await StelisSDK.connect('https://relay.example.com/relay');
 
 // sdk.network is resolved after connect ('testnet' | 'mainnet').

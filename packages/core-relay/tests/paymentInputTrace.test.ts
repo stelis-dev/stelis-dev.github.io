@@ -252,7 +252,7 @@ describe('paymentInputIntegrity extraction', () => {
     payload.reservation.MaxAmountU64 = '0x10';
 
     expect(() => extractPaymentInputTrace(commands, inputs, findSettleCommand(commands))).toThrow(
-      'MaxAmountU64 must be a non-negative decimal integer string',
+      'expected a canonical unsigned u64',
     );
   });
 

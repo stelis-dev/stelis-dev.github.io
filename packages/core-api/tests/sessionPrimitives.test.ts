@@ -1,17 +1,33 @@
-import { describe, expect, test, vi } from 'vitest';
 import { TransactionDataBuilder } from '@mysten/sui/transactions';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { describe, expect, test, vi } from 'vitest';
 import type { SponsorPoolAdapter } from '../src/context.js';
 import {
-  parseCurrentSuiTerminalForBytes,
   runPreflight,
   signAndSubmit,
   SponsorPostSignatureUncertaintyError,
 } from '../src/session/sessionPrimitives.js';
-import { grpcExecutionSuccess, grpcSimulationSuccess } from './helpers/suiGrpcExecutionFixtures.js';
+import {
+  moveAbortSuiExecutionError,
+  suiEndpointSnapshotFixture,
+  suiExecutionSuccess,
+  suiSimulationFailure,
+  suiSimulationSuccess,
+} from './helpers/suiGatewayResultFixtures.js';
+
+const { executeSuiTransactionMock, simulateSuiTransactionMock } = vi.hoisted(() => ({
+  executeSuiTransactionMock: vi.fn(),
+  simulateSuiTransactionMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  executeSuiTransaction: executeSuiTransactionMock,
+  simulateSuiTransaction: simulateSuiTransactionMock,
+}));
 
 const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
 const EXPECTED_DIGEST = TransactionDataBuilder.getDigestFromBytes(TX_BYTES);
+const SUI = suiEndpointSnapshotFixture();
 
 function sponsorPool(): SponsorPoolAdapter {
   return {
@@ -25,48 +41,98 @@ function sponsorPool(): SponsorPoolAdapter {
   } as unknown as SponsorPoolAdapter;
 }
 
-describe('Sui terminal request binding', () => {
-  test('accepts only an internally valid terminal for the submitted transaction bytes', () => {
-    expect(
-      parseCurrentSuiTerminalForBytes(grpcExecutionSuccess(EXPECTED_DIGEST), TX_BYTES)?.digest,
-    ).toBe(EXPECTED_DIGEST);
+describe('current Sui gateway results at the sponsor-session boundary', () => {
+  test('preflight consumes one validated success result', async () => {
+    simulateSuiTransactionMock.mockResolvedValueOnce(
+      suiSimulationSuccess({
+        computationCost: '3',
+        storageCost: '2',
+        storageRebate: '1',
+      }),
+    );
 
-    expect(
-      parseCurrentSuiTerminalForBytes(grpcExecutionSuccess('different-digest'), TX_BYTES),
-    ).toBeNull();
+    await expect(runPreflight(SUI, TX_BYTES)).resolves.toEqual({
+      success: true,
+      gasUsed: {
+        computationCost: '3',
+        storageCost: '2',
+        storageRebate: '1',
+        nonRefundableStorageFee: '0',
+      },
+    });
+    expect(simulateSuiTransactionMock).toHaveBeenCalledWith(SUI, { transaction: TX_BYTES });
   });
 
-  test('preflight fails closed when RPC returns a self-consistent result for another transaction', async () => {
-    const sui = {
-      simulateTransaction: vi.fn(async () => grpcSimulationSuccess('different-digest')),
-    } as unknown as SuiGrpcClient;
+  test('preflight preserves the structured failure supplied by the gateway', async () => {
+    const error = moveAbortSuiExecutionError({
+      command: 0,
+      packageId: '0xabc',
+      module: 'settle',
+      abortCode: '101',
+      constantName: 'EClaimTooHigh',
+    });
+    simulateSuiTransactionMock.mockResolvedValueOnce(suiSimulationFailure(error));
 
-    await expect(runPreflight(sui, TX_BYTES)).resolves.toEqual({
+    await expect(runPreflight(SUI, TX_BYTES)).resolves.toEqual({
       success: false,
-      reason: 'Simulation returned malformed terminal result',
+      error,
     });
   });
 
-  test('post-signature digest mismatch preserves the signed transaction identity', async () => {
+  test('post-signature gateway rejection preserves the signed transaction identity', async () => {
     const pool = sponsorPool();
-    const sui = {
-      executeTransaction: vi.fn(async () => grpcExecutionSuccess('different-digest')),
-    } as unknown as SuiGrpcClient;
+    executeSuiTransactionMock.mockRejectedValueOnce(new Error('qualified RPC unavailable'));
 
     const thrown = await signAndSubmit(
       pool,
-      sui,
+      SUI,
       '0x1',
       'receipt',
       TX_BYTES,
       'user-signature',
+      EXPECTED_DIGEST,
     ).catch((error: unknown) => error);
 
     expect(thrown).toBeInstanceOf(SponsorPostSignatureUncertaintyError);
     expect((thrown as SponsorPostSignatureUncertaintyError).expectedDigest).toBe(EXPECTED_DIGEST);
-    expect((thrown as SponsorPostSignatureUncertaintyError).message).toContain(
-      'malformed terminal result',
-    );
     expect(pool.sign).toHaveBeenCalledTimes(1);
+  });
+
+  test('a mismatched durable digest cannot obtain a sponsor signature', async () => {
+    const pool = sponsorPool();
+    executeSuiTransactionMock.mockClear();
+
+    await expect(
+      signAndSubmit(
+        pool,
+        SUI,
+        '0x1',
+        'receipt',
+        TX_BYTES,
+        'user-signature',
+        TransactionDataBuilder.getDigestFromBytes(new Uint8Array([9, 9, 9])),
+      ),
+    ).rejects.toThrow('digest does not match its transaction bytes');
+    expect(pool.sign).not.toHaveBeenCalled();
+    expect(executeSuiTransactionMock).not.toHaveBeenCalled();
+  });
+
+  test('submission consumes one validated execution success result', async () => {
+    const pool = sponsorPool();
+    executeSuiTransactionMock.mockResolvedValueOnce(suiExecutionSuccess(EXPECTED_DIGEST));
+
+    await expect(
+      signAndSubmit(pool, SUI, '0x1', 'receipt', TX_BYTES, 'user-signature', EXPECTED_DIGEST),
+    ).resolves.toMatchObject({
+      success: true,
+      executionStage: 'on_chain',
+      digest: EXPECTED_DIGEST,
+    });
+    expect(pool.sign).toHaveBeenCalledWith('0x1', 'receipt', TX_BYTES);
+    expect(executeSuiTransactionMock).toHaveBeenCalledWith(SUI, {
+      transaction: TX_BYTES,
+      expectedDigest: EXPECTED_DIGEST,
+      signatures: ['user-signature', 'sponsor-signature'],
+    });
   });
 });

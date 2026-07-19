@@ -11,7 +11,9 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import type { SingleHopSettlementSwapPath } from '../src/types.js';
+import { createSuiEndpointSnapshot } from '@stelis/core-relay/browser';
 
 // ── Mock: @stelis/core-relay (batchGetHopMidPrices) ──────────────────────────
 let _hopPrices: bigint[] = [0n];
@@ -23,7 +25,7 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   };
 });
 
-import { checkSettlementSwapPathLiquidity } from '../src/swap.js';
+import { readSettlementSwapPathLiquidity } from '../src/swap.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 const PKG = '0x' + '1'.repeat(64);
@@ -68,7 +70,17 @@ const QFB_POOL: SingleHopSettlementSwapPath = {
 };
 
 function mockClient(): SuiGrpcClient {
-  return {} as unknown as SuiGrpcClient;
+  return withSuiClientIdentity({});
+}
+
+function readLiquidity(
+  settlementSwapPath: SingleHopSettlementSwapPath,
+): Promise<Awaited<ReturnType<typeof readSettlementSwapPathLiquidity>>> {
+  return readSettlementSwapPathLiquidity(
+    createSuiEndpointSnapshot([mockClient()]),
+    DBPKG,
+    settlementSwapPath,
+  );
 }
 
 // ─────────────────────────────────────────────
@@ -79,7 +91,7 @@ describe('checkSettlementSwapPathLiquidity', () => {
   // ── mid_price = 0 → no_orders ─────────────────────────────────────
   it('returns no_orders when midPrice is 0', async () => {
     _hopPrices = [0n];
-    const result = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const result = await readLiquidity(DEEP_POOL);
     expect(result.hasLiquidity).toBe(false);
     expect(result.status).toBe('no_orders');
     expect(result.midPrice).toBeNull();
@@ -89,15 +101,13 @@ describe('checkSettlementSwapPathLiquidity', () => {
 
   it('rejects a price vector that does not cover the complete path', async () => {
     _hopPrices = [];
-    await expect(checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL)).rejects.toThrow(
-      'exactly one price per hop',
-    );
+    await expect(readLiquidity(DEEP_POOL)).rejects.toThrow('exactly one price per hop');
   });
 
   // ── mid_price > 0 → ok ────────────────────────────────────────────
   it('returns ok when midPrice is positive', async () => {
     _hopPrices = [27_000_000_000n];
-    const result = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const result = await readLiquidity(DEEP_POOL);
     expect(result.hasLiquidity).toBe(true);
     expect(result.status).toBe('ok');
     expect(result.midPrice).toBe(27_000_000_000);
@@ -107,7 +117,7 @@ describe('checkSettlementSwapPathLiquidity', () => {
   // ── priceHuman calculation ─────────────────────────────────────────
   it('computes priceHuman correctly', async () => {
     _hopPrices = [27_000_000_000n];
-    const result = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const result = await readLiquidity(DEEP_POOL);
     // priceHuman = 27_000_000_000 × 10^6 / (1e9 × 1e9) = 0.027
     expect(result.priceHuman).toBeCloseTo(0.027, 4);
     expect(result.priceDisplay).toBe('0.027000');
@@ -116,11 +126,11 @@ describe('checkSettlementSwapPathLiquidity', () => {
   // ── label is always SYMBOL/SUI ─────────────────────────────────────
   it('returns label as "SYMBOL/SUI"', async () => {
     _hopPrices = [0n];
-    const noLiq = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const noLiq = await readLiquidity(DEEP_POOL);
     expect(noLiq.label).toBe('DEEP/SUI');
 
     _hopPrices = [27_000_000_000n];
-    const ok = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const ok = await readLiquidity(DEEP_POOL);
     expect(ok.label).toBe('DEEP/SUI');
   });
 
@@ -131,7 +141,7 @@ describe('checkSettlementSwapPathLiquidity', () => {
     // composedMidPrice = Number(1e18 * 1e9 / 1e18) = 1_000_000_000
     // priceHuman = 1_000_000_000 * 1e6 / (1e9 * 1e9) = 0.001
     _hopPrices = [1_000_000_000n];
-    const result = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, QFB_POOL);
+    const result = await readLiquidity(QFB_POOL);
     expect(result.hasLiquidity).toBe(true);
     expect(result.status).toBe('ok');
     expect(result.midPrice).toBe(1_000_000_000);
@@ -143,7 +153,7 @@ describe('checkSettlementSwapPathLiquidity', () => {
 
   it('preserves exact raw midPrice when path-wide value exceeds safe number range', async () => {
     _hopPrices = [9_007_199_254_740_993n];
-    const result = await checkSettlementSwapPathLiquidity(mockClient(), DBPKG, DEEP_POOL);
+    const result = await readLiquidity(DEEP_POOL);
     expect(result.hasLiquidity).toBe(true);
     expect(result.midPrice).toBeNull();
     expect(result.midPriceRaw).toBe(9_007_199_254_740_993n);

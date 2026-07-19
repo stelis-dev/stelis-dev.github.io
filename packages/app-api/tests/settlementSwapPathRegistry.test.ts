@@ -7,15 +7,34 @@
  *   - determineSettlementToken: settle.move baseForQuote direction enforcement
  */
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { TransactionDataBuilder } from '@mysten/sui/transactions';
+import { createSuiEndpointSnapshot, type SuiEndpointSnapshot } from '@stelis/core-relay';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import type { Transaction } from '@mysten/sui/transactions';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 
-const { forbiddenReadFile, forbiddenReadFileSync } = vi.hoisted(() => ({
+const {
+  forbiddenReadFile,
+  forbiddenReadFileSync,
+  getSuiCoinMetadata,
+  getSuiObject,
+  simulateSuiMoveView,
+} = vi.hoisted(() => ({
   forbiddenReadFile: vi.fn(() => {
     throw new Error('registry resolver must not read a file');
   }),
   forbiddenReadFileSync: vi.fn(() => {
     throw new Error('registry resolver must not read a file');
   }),
+  getSuiCoinMetadata: vi.fn(),
+  getSuiObject: vi.fn(),
+  simulateSuiMoveView: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay')>()),
+  getSuiCoinMetadata,
+  getSuiObject,
+  simulateSuiMoveView,
 }));
 
 vi.mock('node:fs/promises', async () => {
@@ -33,39 +52,14 @@ import {
   determineSettlementToken,
   resolveSettlementSwapPathRegistry,
 } from '../src/settlementSwapPathRegistry.js';
-import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
-
-vi.mock('@mysten/sui/transactions', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@mysten/sui/transactions')>();
-  class Transaction {
-    private target = '';
-
-    moveCall(input: { target: string }) {
-      this.target = input.target;
-      return [];
-    }
-
-    object(id: string) {
-      return id;
-    }
-
-    setSender() {
-      return undefined;
-    }
-
-    async build() {
-      return new TextEncoder().encode(this.target);
-    }
-  }
-
-  return { ...actual, Transaction };
-});
+import { DEEPBOOK_RUNTIME_PACKAGE_ID, type SingleHopSettlementSwapPath } from '@stelis/contracts';
 
 const SUI_TYPE = '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
 const DEEP_TYPE = '0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP';
 const USDC_TYPE = '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN';
-const POOL_ID = '0xpool';
-const DEEPBOOK_PACKAGE_ID = '0xdeepbook';
+const POOL_ID = `0x${'44'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'55'.repeat(32)}`;
+const SECOND_POOL_ID = `0x${'66'.repeat(32)}`;
 
 function settlementSwapPathRegistryJson(testnet: unknown, mainnet: unknown = []) {
   return { testnet, mainnet };
@@ -78,34 +72,37 @@ function settlementSwapPathRegistryJson(testnet: unknown, mainnet: unknown = [])
 describe('parseSettlementSwapPathRegistryJson', () => {
   it('parses a single 1-hop settlement swap path', () => {
     const result = parseSettlementSwapPathRegistryJson(
-      settlementSwapPathRegistryJson(['0xabc123']),
+      settlementSwapPathRegistryJson([POOL_ID]),
       'testnet',
     );
-    expect(result).toEqual([{ poolId: '0xabc123' }]);
+    expect(result).toEqual([{ poolId: normalizeSuiAddress(POOL_ID) }]);
   });
 
   it('parses multiple 1-hop settlement swap paths', () => {
     const result = parseSettlementSwapPathRegistryJson(
-      settlementSwapPathRegistryJson(['0xabc', '0xdef']),
+      settlementSwapPathRegistryJson([POOL_ID, SECOND_POOL_ID]),
       'testnet',
     );
-    expect(result).toEqual([{ poolId: '0xabc' }, { poolId: '0xdef' }]);
+    expect(result).toEqual([
+      { poolId: normalizeSuiAddress(POOL_ID) },
+      { poolId: normalizeSuiAddress(SECOND_POOL_ID) },
+    ]);
   });
 
   it('parses only the selected network section', () => {
     const result = parseSettlementSwapPathRegistryJson(
-      settlementSwapPathRegistryJson(['0xtestnet'], ['0xmainnet']),
+      settlementSwapPathRegistryJson([POOL_ID], [SECOND_POOL_ID]),
       'mainnet',
     );
-    expect(result).toEqual([{ poolId: '0xmainnet' }]);
+    expect(result).toEqual([{ poolId: normalizeSuiAddress(SECOND_POOL_ID) }]);
   });
 
   it('throws on old flat-array input', () => {
-    expect(() => parseSettlementSwapPathRegistryJson(['0xabc123'], 'testnet')).toThrow('object');
+    expect(() => parseSettlementSwapPathRegistryJson([POOL_ID], 'testnet')).toThrow('object');
   });
 
   it('throws on missing network section', () => {
-    expect(() => parseSettlementSwapPathRegistryJson({ mainnet: ['0xabc123'] }, 'testnet')).toThrow(
+    expect(() => parseSettlementSwapPathRegistryJson({ mainnet: [POOL_ID] }, 'testnet')).toThrow(
       'testnet',
     );
   });
@@ -113,7 +110,7 @@ describe('parseSettlementSwapPathRegistryJson', () => {
   it('throws on unsupported network section', () => {
     expect(() =>
       parseSettlementSwapPathRegistryJson(
-        { testnet: ['0xabc123'], mainnet: [], devnet: ['0xdef456'] },
+        { testnet: [POOL_ID], mainnet: [], devnet: [SECOND_POOL_ID] },
         'testnet',
       ),
     ).toThrow('Unsupported network section');
@@ -169,7 +166,7 @@ function makeSettlementSwapPath(
     settlementSwapDirection: 'baseForQuote',
     hops: [
       {
-        poolId: '0xfake',
+        poolId: normalizeSuiAddress(POOL_ID),
         baseType: settlementTokenType,
         quoteType: SUI_TYPE,
         swapDirection: 'baseForQuote',
@@ -268,64 +265,86 @@ function bcsBool(value: boolean): Uint8Array {
   return new Uint8Array([value ? 1 : 0]);
 }
 
-function viewResult(transaction: Uint8Array, values: Uint8Array[]) {
-  const digest = TransactionDataBuilder.getDigestFromBytes(transaction);
+function viewResult(values: Uint8Array[]) {
   return {
-    $kind: 'Transaction' as const,
-    Transaction: { digest, status: { success: true as const, error: null } },
+    outcome: 'success' as const,
     commandResults: [
       {
         returnValues: values.map((bcs) => ({ bcs })),
+        mutatedReferences: [],
       },
     ],
   };
+}
+
+const ENDPOINT_SNAPSHOT = createSuiEndpointSnapshot([{ network: 'testnet' } as SuiGrpcClient]);
+
+function configureResolverGateways(feePenaltyMultiplier: bigint): void {
+  getSuiObject.mockResolvedValue({
+    type: `${DEEPBOOK_RUNTIME_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
+  });
+  getSuiCoinMetadata.mockResolvedValue({ symbol: 'USDC', decimals: 6 });
+  simulateSuiMoveView.mockImplementation(
+    async (
+      _snapshot: SuiEndpointSnapshot,
+      { transaction }: { readonly transaction: Transaction },
+    ) => {
+      const data = transaction.getData();
+      if (data.sender !== null) {
+        throw new Error('registry caller must leave Move-view sender ownership to the gateway');
+      }
+      if (
+        data.gasData.budget !== null ||
+        data.gasData.owner !== null ||
+        data.gasData.payment !== null ||
+        data.gasData.price !== null
+      ) {
+        throw new Error('registry caller must leave Move-view gas ownership to the gateway');
+      }
+      const command = data.commands[0];
+      if (data.commands.length !== 1 || command?.$kind !== 'MoveCall') {
+        throw new Error('registry fixture expected exactly one current MoveCall');
+      }
+      const moveCall = command.MoveCall;
+      const target = `${moveCall.package}::${moveCall.module}::${moveCall.function}`;
+      if (target.endsWith('::constants::float_scaling')) {
+        return viewResult([bcsU64(1_000_000_000n)]);
+      }
+      if (target.endsWith('::constants::fee_penalty_multiplier')) {
+        return viewResult([bcsU64(feePenaltyMultiplier)]);
+      }
+      if (target.endsWith('::pool::pool_book_params')) {
+        return viewResult([bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
+      }
+      if (target.endsWith('::pool::whitelisted')) {
+        return viewResult([bcsBool(false)]);
+      }
+      if (target.endsWith('::pool::pool_trade_params')) {
+        return viewResult([bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
+      }
+      throw new Error(`unexpected view call target: ${target}`);
+    },
+  );
 }
 
 describe('resolveSettlementSwapPathRegistry', () => {
   beforeEach(() => {
     forbiddenReadFile.mockClear();
     forbiddenReadFileSync.mockClear();
+    getSuiCoinMetadata.mockReset();
+    getSuiObject.mockReset();
+    simulateSuiMoveView.mockReset();
   });
 
   it('publishes fee-bearing settlement swap paths on Stelis input-fee basis', async () => {
-    const client = {
-      getObject: vi.fn(async () => ({
-        object: {
-          type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
-        },
-      })),
-      getCoinMetadata: vi.fn(async () => ({
-        coinMetadata: { symbol: 'USDC', decimals: 6 },
-      })),
-      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
-        const target = new TextDecoder().decode(transaction);
-        if (target.endsWith('::constants::float_scaling')) {
-          return viewResult(transaction, [bcsU64(1_000_000_000n)]);
-        }
-        if (target.endsWith('::constants::fee_penalty_multiplier')) {
-          return viewResult(transaction, [bcsU64(1_250_000_000n)]);
-        }
-        if (target.endsWith('::pool::pool_book_params')) {
-          return viewResult(transaction, [bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
-        }
-        if (target.endsWith('::pool::whitelisted')) {
-          return viewResult(transaction, [bcsBool(false)]);
-        }
-        if (target.endsWith('::pool::pool_trade_params')) {
-          // DeepBook taker_fee 2_000_000 / 1e9 = 20 bps in DEEP-fee mode.
-          // Stelis executes input-fee mode, which applies the 1.25x penalty: 25 bps.
-          return viewResult(transaction, [bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
-        }
-        throw new Error(`unexpected view call target: ${target}`);
-      }),
-    };
+    configureResolverGateways(1_250_000_000n);
 
     const entries = parseSettlementSwapPathRegistryJson(
       settlementSwapPathRegistryJson([POOL_ID]),
       'testnet',
     );
     const settlementSwapPaths = await resolveSettlementSwapPathRegistry(
-      client as never,
+      ENDPOINT_SNAPSHOT,
       DEEPBOOK_PACKAGE_ID,
       entries,
     );
@@ -337,42 +356,14 @@ describe('resolveSettlementSwapPathRegistry', () => {
   });
 
   it('uses deployed DeepBook fee constants instead of local literals', async () => {
-    const client = {
-      getObject: vi.fn(async () => ({
-        object: {
-          type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
-        },
-      })),
-      getCoinMetadata: vi.fn(async () => ({
-        coinMetadata: { symbol: 'USDC', decimals: 6 },
-      })),
-      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => {
-        const target = new TextDecoder().decode(transaction);
-        if (target.endsWith('::constants::float_scaling')) {
-          return viewResult(transaction, [bcsU64(1_000_000_000n)]);
-        }
-        if (target.endsWith('::constants::fee_penalty_multiplier')) {
-          return viewResult(transaction, [bcsU64(2_000_000_000n)]);
-        }
-        if (target.endsWith('::pool::pool_book_params')) {
-          return viewResult(transaction, [bcsU64(1n), bcsU64(1_000n), bcsU64(10_000n)]);
-        }
-        if (target.endsWith('::pool::whitelisted')) {
-          return viewResult(transaction, [bcsBool(false)]);
-        }
-        if (target.endsWith('::pool::pool_trade_params')) {
-          return viewResult(transaction, [bcsU64(2_000_000n), bcsU64(0n), bcsU64(0n)]);
-        }
-        throw new Error(`unexpected view call target: ${target}`);
-      }),
-    };
+    configureResolverGateways(2_000_000_000n);
 
     const entries = parseSettlementSwapPathRegistryJson(
       settlementSwapPathRegistryJson([POOL_ID]),
       'testnet',
     );
     const settlementSwapPaths = await resolveSettlementSwapPathRegistry(
-      client as never,
+      ENDPOINT_SNAPSHOT,
       DEEPBOOK_PACKAGE_ID,
       entries,
     );
@@ -380,37 +371,98 @@ describe('resolveSettlementSwapPathRegistry', () => {
     expect(settlementSwapPaths[0].hops[0].feeBps).toBe(40);
   });
 
-  it('rejects command results carried by a failed DeepBook view transaction', async () => {
-    const client = {
-      getObject: vi.fn(async () => ({
-        object: {
-          type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
-        },
-      })),
-      getCoinMetadata: vi.fn(async () => ({
-        coinMetadata: { symbol: 'USDC', decimals: 6 },
-      })),
-      simulateTransaction: vi.fn(async ({ transaction }: { transaction: Uint8Array }) => ({
-        $kind: 'FailedTransaction' as const,
-        FailedTransaction: {
-          digest: TransactionDataBuilder.getDigestFromBytes(transaction),
-          status: {
-            success: false as const,
-            error: { $kind: 'Unknown', message: 'view aborted', Unknown: null },
-          },
-        },
-        // A failed RPC result may still carry decodable-looking values. They
-        // are not authoritative view output and must never enter the registry.
-        commandResults: [{ returnValues: [{ bcs: bcsU64(1_000_000_000n) }] }],
-      })),
-    };
+  it('rejects published and unrelated package IDs as Pool runtime identity', async () => {
+    configureResolverGateways(1_250_000_000n);
+    getSuiObject.mockResolvedValue({
+      type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
+    });
 
     const entries = parseSettlementSwapPathRegistryJson(
       settlementSwapPathRegistryJson([POOL_ID]),
       'testnet',
     );
     await expect(
-      resolveSettlementSwapPathRegistry(client as never, DEEPBOOK_PACKAGE_ID, entries),
-    ).rejects.toThrow('DeepBook float_scaling failed: view aborted');
+      resolveSettlementSwapPathRegistry(ENDPOINT_SNAPSHOT, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('object is not the current DeepBook Pool type');
+
+    configureResolverGateways(1_250_000_000n);
+    getSuiObject.mockResolvedValue({
+      type: `${normalizeSuiAddress(`0x${'77'.repeat(32)}`)}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
+    });
+    await expect(
+      resolveSettlementSwapPathRegistry(ENDPOINT_SNAPSHOT, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('object is not the current DeepBook Pool type');
+  });
+
+  it('rejects command results carried by a failed DeepBook view transaction', async () => {
+    getSuiObject.mockResolvedValue({
+      type: `${DEEPBOOK_PACKAGE_ID}::pool::Pool<${USDC_TYPE}, ${SUI_TYPE}>`,
+    });
+    getSuiCoinMetadata.mockResolvedValue({ symbol: 'USDC', decimals: 6 });
+    simulateSuiMoveView.mockResolvedValue({
+      outcome: 'failure',
+      error: { kind: 'InvariantViolation' },
+      // A failed RPC result may still carry decodable-looking values. They
+      // are not authoritative view output and must never enter the registry.
+      commandResults: [{ returnValues: [{ bcs: bcsU64(1_000_000_000n) }] }],
+    });
+
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    await expect(
+      resolveSettlementSwapPathRegistry(ENDPOINT_SNAPSHOT, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('DeepBook float_scaling failed: Sui execution failed (InvariantViolation)');
+  });
+
+  it('rejects extra command results instead of selecting the first result', async () => {
+    configureResolverGateways(1_250_000_000n);
+    const command = {
+      returnValues: [{ bcs: bcsU64(1_000_000_000n) }],
+      mutatedReferences: [],
+    };
+    simulateSuiMoveView.mockResolvedValue({
+      outcome: 'success',
+      commandResults: [command, command],
+    });
+
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    await expect(
+      resolveSettlementSwapPathRegistry(ENDPOINT_SNAPSHOT, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('returned 2 command results (expected 1)');
+  });
+
+  it('rejects extra return values and mutated references from fixed-ABI views', async () => {
+    configureResolverGateways(1_250_000_000n);
+    simulateSuiMoveView.mockResolvedValue(viewResult([bcsU64(1n), bcsU64(2n)]));
+
+    const entries = parseSettlementSwapPathRegistryJson(
+      settlementSwapPathRegistryJson([POOL_ID]),
+      'testnet',
+    );
+    const first = resolveSettlementSwapPathRegistry(
+      ENDPOINT_SNAPSHOT,
+      DEEPBOOK_PACKAGE_ID,
+      entries,
+    );
+    await expect(first).rejects.toThrow('returned 2 values (expected 1)');
+
+    configureResolverGateways(1_250_000_000n);
+    simulateSuiMoveView.mockResolvedValue({
+      outcome: 'success',
+      commandResults: [
+        {
+          returnValues: [{ bcs: bcsU64(1n) }],
+          mutatedReferences: [{ bcs: bcsU64(2n) }],
+        },
+      ],
+    });
+    await expect(
+      resolveSettlementSwapPathRegistry(ENDPOINT_SNAPSHOT, DEEPBOOK_PACKAGE_ID, entries),
+    ).rejects.toThrow('unexpectedly returned mutated references');
   });
 });

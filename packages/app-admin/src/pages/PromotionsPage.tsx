@@ -12,9 +12,12 @@ import {
   updatePromotion,
   transitionPromotionStatus,
   deletePromotion,
-  type PromotionRecord,
-  type PromotionStatus,
 } from '../api/client';
+import {
+  isPromotionStatus,
+  type AdminPromotionRecord,
+  type PromotionStatus,
+} from '@stelis/contracts';
 
 const STATUS_COLORS: Record<PromotionStatus, string> = {
   draft: '#94a3b8',
@@ -93,7 +96,7 @@ export interface CreateFormState {
   description: string;
   maxParticipants: string;
   perUserGasAllowanceMist: string;
-  postClaimUseWindowDays: string;
+  postClaimUseWindowMs: string;
   claimDeadlineAt: string;
 }
 
@@ -102,7 +105,7 @@ const EMPTY_FORM: CreateFormState = {
   description: '',
   maxParticipants: '',
   perUserGasAllowanceMist: '',
-  postClaimUseWindowDays: '0',
+  postClaimUseWindowMs: '0',
   claimDeadlineAt: '',
 };
 
@@ -116,11 +119,9 @@ interface ValidatedFormPayload {
 }
 
 type FormValidationResult =
-  | { ok: true; payload: ValidatedFormPayload }
-  | { ok: false; message: string };
+  { ok: true; payload: ValidatedFormPayload } | { ok: false; message: string };
 
 const INTEGER_REGEX = /^-?\d+$/;
-const DAY_MS = 86_400_000;
 
 /**
  * Parse a non-empty decimal integer string into a safe `number`. Rejects
@@ -134,12 +135,6 @@ export function parseSafeIntegerString(raw: string): number | null {
   const n = Number(raw);
   if (!Number.isSafeInteger(n)) return null;
   return n;
-}
-
-function postClaimWindowMsToDaysInput(ms: number): string {
-  if (ms <= 0) return '0';
-  if (!Number.isSafeInteger(ms) || ms % DAY_MS !== 0) return '';
-  return String(ms / DAY_MS);
 }
 
 /**
@@ -183,19 +178,12 @@ export function validatePromotionForm(form: CreateFormState): FormValidationResu
     return { ok: false, message: 'Per-user gas allowance must be positive (MIST)' };
   }
 
-  const daysRaw = form.postClaimUseWindowDays.trim();
-  const postClaimDays = parseSafeIntegerString(daysRaw);
-  if (postClaimDays === null || postClaimDays < 0) {
+  const windowRaw = form.postClaimUseWindowMs.trim();
+  const postClaimUseWindowMs = parseSafeIntegerString(windowRaw);
+  if (postClaimUseWindowMs === null || postClaimUseWindowMs < 0) {
     return {
       ok: false,
-      message: 'Post-claim use window (days) must be a non-negative safe integer (≤ 2^53 − 1)',
-    };
-  }
-  const postClaimUseWindowMs = postClaimDays * DAY_MS;
-  if (!Number.isSafeInteger(postClaimUseWindowMs)) {
-    return {
-      ok: false,
-      message: 'Post-claim use window overflows safe integer range — use fewer days',
+      message: 'Post-claim use window (ms) must be a non-negative safe integer (≤ 2^53 − 1)',
     };
   }
 
@@ -222,10 +210,13 @@ export function validatePromotionForm(form: CreateFormState): FormValidationResu
 }
 
 export function PromotionsPage() {
-  const [promotions, setPromotions] = useState<PromotionRecord[]>([]);
+  const [promotions, setPromotions] = useState<AdminPromotionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<PromotionStatus | ''>('');
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [previousCursors, setPreviousCursors] = useState<(string | null)[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<CreateFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -236,15 +227,20 @@ export function PromotionsPage() {
   const loadPromotions = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setNextCursor(null);
     try {
-      const result = await getPromotions(statusFilter || undefined);
+      const result = await getPromotions({
+        ...(statusFilter === '' ? {} : { status: statusFilter }),
+        ...(cursor === null ? {} : { cursor }),
+      });
       setPromotions(result.promotions);
+      setNextCursor(result.nextCursor);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load promotions');
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [cursor, statusFilter]);
 
   useEffect(() => {
     void loadPromotions();
@@ -354,7 +350,7 @@ export function PromotionsPage() {
     }
   };
 
-  const startEdit = (p: PromotionRecord) => {
+  const startEdit = (p: AdminPromotionRecord) => {
     editingIdRef.current = p.promotionId;
     setEditingId(p.promotionId);
     setShowCreate(false);
@@ -363,18 +359,33 @@ export function PromotionsPage() {
       description: p.description,
       maxParticipants: String(p.maxParticipants),
       perUserGasAllowanceMist: p.perUserGasAllowanceMist,
-      postClaimUseWindowDays: postClaimWindowMsToDaysInput(p.postClaimUseWindowMs),
+      postClaimUseWindowMs: String(p.postClaimUseWindowMs),
       claimDeadlineAt: p.claimDeadlineAt ? p.claimDeadlineAt.slice(0, 16) : '',
     });
   };
 
-  // ── Status summary cards ──────────────────────────────────────
-  const counts = {
-    total: promotions.length,
-    active: promotions.filter((p) => p.status === 'active').length,
-    draft: promotions.filter((p) => p.status === 'draft').length,
-    paused: promotions.filter((p) => p.status === 'paused').length,
-    archived: promotions.filter((p) => p.status === 'archived').length,
+  const closeEditor = () => {
+    editingIdRef.current = null;
+    setEditingId(null);
+    setShowCreate(false);
+    setForm(EMPTY_FORM);
+  };
+
+  const showNextPage = () => {
+    if (nextCursor === null) return;
+    closeEditor();
+    setNextCursor(null);
+    setPreviousCursors((current) => [...current, cursor]);
+    setCursor(nextCursor);
+  };
+
+  const showPreviousPage = () => {
+    const previousCursor = previousCursors[previousCursors.length - 1];
+    if (previousCursor === undefined) return;
+    closeEditor();
+    setNextCursor(null);
+    setPreviousCursors((current) => current.slice(0, -1));
+    setCursor(previousCursor);
   };
 
   return (
@@ -396,36 +407,21 @@ export function PromotionsPage() {
         </button>
       </div>
 
-      {/* Summary cards */}
-      <div className="admin-stat-row" style={{ marginBottom: 20 }}>
-        <div className="admin-stat-card">
-          <div className="admin-stat-label">Total</div>
-          <div className="admin-stat-value">{counts.total}</div>
-        </div>
-        <div className="admin-stat-card">
-          <div className="admin-stat-label">Active</div>
-          <div className="admin-stat-value" style={{ color: '#34d399' }}>
-            {counts.active}
-          </div>
-        </div>
-        <div className="admin-stat-card">
-          <div className="admin-stat-label">Draft</div>
-          <div className="admin-stat-value">{counts.draft}</div>
-        </div>
-        <div className="admin-stat-card">
-          <div className="admin-stat-label">Paused</div>
-          <div className="admin-stat-value" style={{ color: '#fbbf24' }}>
-            {counts.paused}
-          </div>
-        </div>
-      </div>
-
       {/* Filter */}
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
         <select
           id="promo-status-filter"
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as PromotionStatus | '')}
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === '' || isPromotionStatus(value)) {
+              closeEditor();
+              setStatusFilter(value);
+              setNextCursor(null);
+              setCursor(null);
+              setPreviousCursors([]);
+            }
+          }}
           className="admin-select"
         >
           <option value="">All Statuses</option>
@@ -434,6 +430,23 @@ export function PromotionsPage() {
           <option value="paused">Paused</option>
           <option value="archived">Archived</option>
         </select>
+        <button
+          type="button"
+          className="admin-btn admin-btn-sm"
+          disabled={loading || previousCursors.length === 0}
+          onClick={showPreviousPage}
+        >
+          Previous
+        </button>
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>Page {previousCursors.length + 1}</span>
+        <button
+          type="button"
+          className="admin-btn admin-btn-sm"
+          disabled={loading || nextCursor === null}
+          onClick={showNextPage}
+        >
+          Next
+        </button>
       </div>
 
       {actionError && (
@@ -472,9 +485,6 @@ export function PromotionsPage() {
             {!editingId && (
               <div style={{ fontSize: 13, color: '#94a3b8', padding: '4px 0' }}>
                 Type: <strong>Gas Sponsorship</strong>
-                <span style={{ fontSize: 11, marginLeft: 8 }}>
-                  (only creatable type in this version)
-                </span>
               </div>
             )}
             <label htmlFor="promo-max">
@@ -520,13 +530,13 @@ export function PromotionsPage() {
               )}
             </div>
             <label htmlFor="promo-post-claim">
-              Post-Claim Use Window (days, 0 = unlimited)
+              Post-Claim Use Window (milliseconds, 0 = unlimited)
               <input
                 id="promo-post-claim"
                 type="number"
                 className="admin-input"
-                value={form.postClaimUseWindowDays}
-                onChange={(e) => setForm({ ...form, postClaimUseWindowDays: e.target.value })}
+                value={form.postClaimUseWindowMs}
+                onChange={(e) => setForm({ ...form, postClaimUseWindowMs: e.target.value })}
                 min="0"
               />
             </label>

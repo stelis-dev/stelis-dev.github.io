@@ -23,6 +23,12 @@
  * `hostNetMist` is the single sponsored-execution profit/loss value
  * recorded by the host. Negative values are host loss.
  */
+import {
+  buildSettlementEconomicsSnapshot,
+  type GasUsedLike,
+  type SettlementEconomicsSnapshot,
+} from './economicsLogging.js';
+import type { SponsorResultEconomics } from './handlers/sponsorResult.js';
 
 // ─────────────────────────────────────────────
 // Sponsored execution economics shape
@@ -73,6 +79,14 @@ export function unknownSponsoredExecutionEconomics(
   return { economicsStatus: 'unknown', failureReason };
 }
 
+/** Canonical internal reason stored when congestion prevents a terminal gas proof. */
+export const SPONSOR_CONGESTION_FAILURE_REASON = 'congestion' as const;
+
+/** Canonical internal reason stored for a proven on-chain revert. */
+export function sponsorOnchainRevertFailureReason(message: string): string {
+  return `onchain_revert: ${message}`;
+}
+
 /**
  * Derive a `SponsoredExecutionEconomicsKnown` from raw inputs. The
  * derived field `hostNetMist` is the canonical profit/loss value
@@ -108,11 +122,67 @@ export function deriveSponsoredExecutionEconomics(input: {
   };
 }
 
+/**
+ * Derive economics for a generic settlement that returned a proven on-chain
+ * terminal result. The snapshot is returned for structured logging; the same
+ * calculation is used by foreground execution and crash recovery.
+ */
+export function deriveSettlementExecutionEconomics(input: {
+  readonly gasUsed: GasUsedLike;
+  readonly recoveredGasMist: bigint;
+  readonly hostFeeMist: bigint;
+  readonly protocolFeeMist: bigint;
+}): {
+  readonly snapshot: SettlementEconomicsSnapshot;
+  readonly economics: SponsoredExecutionEconomicsKnown;
+} {
+  const snapshot = buildSettlementEconomicsSnapshot({
+    gasUsed: input.gasUsed,
+    executionCostClaim: input.recoveredGasMist,
+    feeCharged: input.hostFeeMist,
+    protocolFee: input.protocolFeeMist,
+  });
+  return {
+    snapshot,
+    economics: deriveSponsoredExecutionEconomics({
+      recoveredGasMist: snapshot.executionCostClaim,
+      hostPaidGasMist: snapshot.netGas,
+      hostFeeMist: snapshot.feeCharged,
+      grossGasMist: snapshot.grossGas,
+      storageRebateMist: snapshot.storageRebate,
+      protocolFeeMist: snapshot.protocolFee,
+    }),
+  };
+}
+
+/**
+ * Derive economics when gas was paid but no settlement value was recovered.
+ * Promotion execution and generic on-chain reverts share this rule.
+ */
+export function deriveHostPaidGasEconomics(
+  gasUsed: GasUsedLike,
+  failureReason: string | null,
+): SponsoredExecutionEconomicsKnown {
+  const snapshot = buildSettlementEconomicsSnapshot({
+    gasUsed,
+    executionCostClaim: 0n,
+    feeCharged: 0n,
+    protocolFee: 0n,
+  });
+  return deriveSponsoredExecutionEconomics({
+    recoveredGasMist: 0n,
+    hostPaidGasMist: snapshot.netGas,
+    hostFeeMist: 0n,
+    grossGasMist: snapshot.grossGas,
+    storageRebateMist: snapshot.storageRebate,
+    protocolFeeMist: null,
+    failureReason,
+  });
+}
+
 // ─────────────────────────────────────────────
 // HTTP/log serialization for SponsorResultMetadata.economics
 // ─────────────────────────────────────────────
-
-import type { SponsorResultEconomics } from './handlers/sponsorResult.js';
 
 /**
  * Convert internal bigint-valued economics into the string-valued shape

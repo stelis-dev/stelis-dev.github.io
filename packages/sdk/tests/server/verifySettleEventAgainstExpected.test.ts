@@ -1,14 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   verifySettleEventAgainstExpected,
-  verifySettleEventInTransaction,
+  verifySettleEventResultAgainstExpected,
 } from '../../src/server/verifySettleEventAgainstExpected.js';
 import { decodeSettleEvent } from '../../src/server/settleEventDecoder.js';
-import type { SuiClientTypes } from '@mysten/sui/client';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
+import type { SuiTransactionWithEventsResult } from '@stelis/core-relay/browser';
+import { STELIS_CONTRACT_IDS, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 import { serializeSettleEventBcs, type SettleEventBcsInput } from '../helpers/settleEventBcs.js';
+import { withSuiClientIdentity } from '../helpers/suiClientIdentity.js';
+
+const { getSuiTransactionEventsMock } = vi.hoisted(() => ({
+  getSuiTransactionEventsMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
+  return { ...actual, getSuiTransactionEvents: getSuiTransactionEventsMock };
+});
 
 const PACKAGE_ID = STELIS_CONTRACT_IDS.testnet!.packageId;
 
@@ -26,7 +36,7 @@ function sha256Bytes(input: string): Uint8Array {
   return new Uint8Array(buf);
 }
 
-const RECEIPT_ID_HEX = 'aabbccdd' + '00'.repeat(28);
+const RECEIPT_ID_HEX = '0x' + 'aabbccdd' + '00'.repeat(28);
 const ORDER_ID = 'ord_001';
 const USER_ADDR = '0x' + '0'.repeat(56) + '1234abcd'; // TEST_USER
 const TREASURY_ADDR = '0x' + 'ff'.repeat(32);
@@ -36,6 +46,8 @@ const EXPECTED_BASE = {
   orderId: ORDER_ID,
   user: USER_ADDR,
 } as const;
+
+type SuiEvent = Extract<SuiTransactionWithEventsResult, { outcome: 'success' }>['events'][number];
 
 function makeSettleEventBcs() {
   const data: SettleEventBcsInput = {
@@ -62,131 +74,83 @@ function makeSettleEventBcs() {
   return serializeSettleEventBcs(data);
 }
 
-function makeEvent(bcsBytes: Uint8Array, eventType = `${PACKAGE_ID}::events::SettleEvent`) {
+function makeEvent(bcsBytes: Uint8Array, overrides: Partial<Omit<SuiEvent, 'bcs'>> = {}): SuiEvent {
   return {
     packageId: PACKAGE_ID,
     module: 'events',
     sender: USER_ADDR,
-    eventType,
+    eventType: `${PACKAGE_ID}::events::SettleEvent`,
     bcs: bcsBytes,
-    json: null,
+    ...overrides,
   };
 }
 
 function successfulTransaction(
-  events: SuiClientTypes.Event[],
+  events: readonly SuiEvent[],
   digest = '0xDIGEST',
-): SuiClientTypes.TransactionResult<{ events: true }> {
+): SuiTransactionWithEventsResult {
   return {
-    $kind: 'Transaction',
-    Transaction: {
-      events,
-      digest,
-      signatures: [],
-      epoch: '1',
+    outcome: 'success',
+    digest,
+    effects: {
+      version: 2,
+      transactionDigest: digest,
       status: { success: true, error: null },
-      balanceChanges: undefined,
-      effects: undefined,
-      objectTypes: undefined,
-      transaction: undefined,
-      bcs: undefined,
+      gasUsed: {
+        computationCost: '1',
+        storageCost: '1',
+        storageRebate: '0',
+        nonRefundableStorageFee: '0',
+      },
+      eventsDigest: null,
     },
+    events,
   };
 }
 
-function failedTransaction(
-  events: SuiClientTypes.Event[],
-): SuiClientTypes.TransactionResult<{ events: true }> {
+function failedTransaction(events: readonly SuiEvent[]): SuiTransactionWithEventsResult {
+  const error = { kind: 'MoveAbortRaw' as const };
   return {
-    $kind: 'FailedTransaction',
-    FailedTransaction: {
-      events,
-      digest: '0xDIGEST',
-      signatures: [],
-      epoch: '1',
-      status: {
-        success: false,
-        error: {
-          $kind: 'Unknown',
-          Unknown: null,
-          message: 'MoveAbort in settlement',
-        },
+    outcome: 'failure',
+    digest: '0xDIGEST',
+    effects: {
+      version: 2,
+      transactionDigest: '0xDIGEST',
+      status: { success: false, error },
+      gasUsed: {
+        computationCost: '1',
+        storageCost: '1',
+        storageRebate: '0',
+        nonRefundableStorageFee: '0',
       },
-      balanceChanges: undefined,
-      effects: undefined,
-      objectTypes: undefined,
-      transaction: undefined,
-      bcs: undefined,
+      eventsDigest: null,
     },
+    events,
+    error,
   };
 }
 
-function mockClient(events: unknown[]): SuiGrpcClient {
-  return {
-    getTransaction: vi.fn().mockResolvedValue({
-      $kind: 'Transaction',
-      Transaction: {
-        events,
-        digest: '0xDIGEST',
-        signatures: [],
-        epoch: '1',
-        status: { success: true, error: null },
-      },
-    }),
-  } as unknown as SuiGrpcClient;
+function mockClient(
+  result: SuiTransactionWithEventsResult,
+  network: 'testnet' | 'mainnet' = 'testnet',
+  chainIdentifier = SUI_CHAIN_IDENTIFIERS[network],
+): SuiGrpcClient {
+  const client = withSuiClientIdentity({}, network, chainIdentifier);
+  getSuiTransactionEventsMock.mockReturnValue(result);
+  return client;
 }
 
 function mockEmptyClient(): SuiGrpcClient {
-  return {
-    getTransaction: vi.fn().mockResolvedValue({
-      $kind: 'Transaction',
-      Transaction: {
-        events: [],
-        digest: '0xDIGEST',
-        signatures: [],
-        epoch: '1',
-        status: { success: true, error: null },
-      },
-    }),
-  } as unknown as SuiGrpcClient;
+  return mockClient(successfulTransaction([]));
 }
 
-function mockFailedClient(events: unknown[]): SuiGrpcClient {
-  return {
-    getTransaction: vi.fn().mockResolvedValue({
-      $kind: 'FailedTransaction',
-      FailedTransaction: {
-        events,
-        digest: '0xDIGEST',
-        signatures: [],
-        epoch: '1',
-        status: {
-          success: false,
-          error: {
-            $kind: 'Unknown',
-            Unknown: null,
-            message: 'MoveAbort in settlement',
-          },
-        },
-      },
-    }),
-  } as unknown as SuiGrpcClient;
+function mockFailedClient(events: readonly SuiEvent[]): SuiGrpcClient {
+  return mockClient(failedTransaction(events));
 }
 
-function mockMissingEventsClient(): SuiGrpcClient {
-  return {
-    getTransaction: vi.fn().mockResolvedValue({
-      $kind: 'Transaction',
-      Transaction: {
-        events: undefined,
-        digest: '0xDIGEST',
-        signatures: [],
-        epoch: '1',
-        status: { success: true, error: null },
-      },
-    }),
-  } as unknown as SuiGrpcClient;
-}
+beforeEach(() => {
+  getSuiTransactionEventsMock.mockReset();
+});
 
 describe('decodeSettleEvent canonical BCS boundary', () => {
   it('rejects trailing bytes after the generated event schema', () => {
@@ -210,71 +174,51 @@ describe('decodeSettleEvent canonical BCS boundary', () => {
   });
 });
 
-describe('verifySettleEventInTransaction', () => {
-  it('verifies a current successful result without fetching it again', () => {
-    const result = successfulTransaction([makeEvent(makeSettleEventBcs())]);
-
-    const verified = verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE);
-
-    expect(verified.receiptId).toBe(RECEIPT_ID_HEX);
-    expect(verified.executionCostClaim).toBe('50000');
-  });
-
-  it('rejects a malformed discriminator and payload combination', () => {
-    const success = successfulTransaction([makeEvent(makeSettleEventBcs())]);
-    const malformed = {
-      ...success,
-      FailedTransaction: success.Transaction,
-    } as unknown as SuiClientTypes.TransactionResult<{ events: true }>;
-
-    expect(() => verifySettleEventInTransaction(malformed, '0xDIGEST', EXPECTED_BASE)).toThrow(
-      'malformed or mismatched result',
-    );
-  });
-
-  it('rejects a current failed result before consuming its matching event', () => {
-    const result = failedTransaction([makeEvent(makeSettleEventBcs())]);
-
-    expect(() => verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE)).toThrow(
-      /Transaction 0xDIGEST failed: MoveAbort in settlement/,
-    );
-  });
-
-  it('rejects a result payload for a different digest', () => {
-    const result = successfulTransaction([makeEvent(makeSettleEventBcs())], '0xOTHER');
-
-    expect(() => verifySettleEventInTransaction(result, '0xDIGEST', EXPECTED_BASE)).toThrow(
-      'malformed or mismatched result',
-    );
-  });
-
-  it('rejects a successful payload whose requested events are not an array', () => {
-    const result = successfulTransaction([makeEvent(makeSettleEventBcs())]);
-    const malformed = {
-      ...result,
-      Transaction: { ...result.Transaction, events: undefined },
-    } as unknown as SuiClientTypes.TransactionResult<{ events: true }>;
-
-    expect(() => verifySettleEventInTransaction(malformed, '0xDIGEST', EXPECTED_BASE)).toThrow(
-      'did not include requested events',
-    );
-  });
-});
-
 describe('verifySettleEventAgainstExpected', () => {
+  it('verifies an already-loaded exact result without a second event read', () => {
+    const terminal = successfulTransaction([makeEvent(makeSettleEventBcs())]);
+
+    const result = verifySettleEventResultAgainstExpected(terminal, '0xDIGEST', EXPECTED_BASE);
+
+    expect(result.receiptId).toBe(RECEIPT_ID_HEX);
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
+  });
+
   it('returns verified fields on match', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE);
 
     expect(result.receiptId).toBe(RECEIPT_ID_HEX);
     expect(result.user).toBe(USER_ADDR);
     expect(result.executionCostClaim).toBe('50000');
     expect(result.execTimestampMs).toBe('1700000000000');
-    expect(client.getTransaction).toHaveBeenCalledTimes(1);
+    expect(getSuiTransactionEventsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a client declared for another network before reading events', async () => {
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]), 'mainnet');
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('Sui operation request was invalid');
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a live chain identifier that disagrees with the settlement network', async () => {
+    const client = mockClient(
+      successfulTransaction([makeEvent(makeSettleEventBcs())]),
+      'testnet',
+      SUI_CHAIN_IDENTIFIERS.mainnet,
+    );
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('Sui operation returned a malformed response');
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
   });
 
   it('verifies orderId hash correctly', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
       receiptId: RECEIPT_ID_HEX,
       orderIdHash: createHash('sha256').update(ORDER_ID).digest('hex'),
@@ -284,12 +228,12 @@ describe('verifySettleEventAgainstExpected', () => {
     expect(result.orderIdHash).toBe(createHash('sha256').update(ORDER_ID).digest('hex'));
   });
 
-  it('accepts an optional 0x prefix on exact 32-byte receipt and order hashes', async () => {
+  it('accepts an optional 0x prefix on the exact 32-byte order hash', async () => {
     const orderIdHash = createHash('sha256').update(ORDER_ID).digest('hex');
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
 
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
-      receiptId: `0x${RECEIPT_ID_HEX}`,
+      receiptId: RECEIPT_ID_HEX,
       orderIdHash: `0x${orderIdHash}`,
       user: USER_ADDR,
     });
@@ -299,7 +243,7 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('treats undefined orderId as absent when orderIdHash is provided', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
       receiptId: RECEIPT_ID_HEX,
       orderId: undefined,
@@ -317,49 +261,47 @@ describe('verifySettleEventAgainstExpected', () => {
     ).rejects.toThrow('No events found');
   });
 
-  it('rejects a FailedTransaction before consuming a matching event', async () => {
+  it('rejects a normalized failed transaction before consuming a matching event', async () => {
     const client = mockFailedClient([makeEvent(makeSettleEventBcs())]);
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
-    ).rejects.toThrow(/Transaction 0xDIGEST failed: MoveAbort in settlement/);
+    ).rejects.toThrow(/Transaction 0xDIGEST failed: Sui execution failed \(MoveAbortRaw\)/);
   });
 
-  it('rejects a successful response that omitted requested events', async () => {
-    const client = mockMissingEventsClient();
+  it('rejects a gateway result for a different digest', async () => {
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())], '0xOTHER'));
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
-    ).rejects.toThrow('did not include requested events');
+    ).rejects.toThrow('returned a mismatched result');
   });
 
   it('throws when SettleEvent eventType not found', async () => {
-    const client = mockClient([
-      {
-        packageId: '0xOTHER',
-        module: 'other',
-        sender: USER_ADDR,
-        eventType: '0xOTHER::events::Other',
-        bcs: new Uint8Array(0),
-      },
-    ]);
+    const client = mockClient(
+      successfulTransaction([
+        makeEvent(new Uint8Array(0), {
+          eventType: `0x${'9'.repeat(64)}::events::Other`,
+        }),
+      ]),
+    );
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
     ).rejects.toThrow('SettleEvent not found');
   });
 
   it('throws on receiptId mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
-        receiptId: 'ff'.repeat(32),
+        receiptId: `0x${'ff'.repeat(32)}`,
       }),
     ).rejects.toThrow('receiptId');
   });
 
   it('throws on orderId hash mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
@@ -370,7 +312,7 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('throws on user mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
@@ -380,7 +322,7 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('throws on executionCostClaim mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
@@ -390,7 +332,7 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('throws on quotedHostFeeMist mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
@@ -400,7 +342,7 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('throws on protocolFee mismatch', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
@@ -410,18 +352,18 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('reports multiple mismatches', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         orderId: ORDER_ID,
-        receiptId: 'ff'.repeat(32),
+        receiptId: `0x${'ff'.repeat(32)}`,
         user: '0x' + 'ab'.repeat(32),
       }),
     ).rejects.toThrow(/receiptId.*user/s);
   });
 
   it('rejects before network fetch when expected fields are missing', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(
         client,
@@ -429,18 +371,18 @@ describe('verifySettleEventAgainstExpected', () => {
         {} as Parameters<typeof verifySettleEventAgainstExpected>[2],
       ),
     ).rejects.toThrow('expected.receiptId is required');
-    expect(client.getTransaction).not.toHaveBeenCalled();
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
   });
 
   it('rejects receipt and direct order hashes that are empty after removing 0x', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         ...EXPECTED_BASE,
         receiptId: '0x',
       }),
-    ).rejects.toThrow('expected.receiptId must be a 32-byte hex string');
+    ).rejects.toThrow('expected.receiptId must be 0x followed by 64 lowercase hex digits');
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
@@ -450,22 +392,22 @@ describe('verifySettleEventAgainstExpected', () => {
       }),
     ).rejects.toThrow('expected.orderIdHash must be a 32-byte hex string');
 
-    expect(client.getTransaction).not.toHaveBeenCalled();
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
   });
 
   it('rejects when neither orderId nor orderIdHash is provided', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
         user: USER_ADDR,
       } as unknown as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
-    expect(client.getTransaction).not.toHaveBeenCalled();
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
   });
 
   it('rejects when both orderId and orderIdHash are provided', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', {
         receiptId: RECEIPT_ID_HEX,
@@ -474,11 +416,11 @@ describe('verifySettleEventAgainstExpected', () => {
         user: USER_ADDR,
       } as unknown as Parameters<typeof verifySettleEventAgainstExpected>[2]),
     ).rejects.toThrow('exactly one of orderId or orderIdHash');
-    expect(client.getTransaction).not.toHaveBeenCalled();
+    expect(getSuiTransactionEventsMock).not.toHaveBeenCalled();
   });
 
   it('matches canonical Sui addresses across padding and case', async () => {
-    const client = mockClient([makeEvent(makeSettleEventBcs())]);
+    const client = mockClient(successfulTransaction([makeEvent(makeSettleEventBcs())]));
     const result = await verifySettleEventAgainstExpected(client, '0xDIGEST', {
       ...EXPECTED_BASE,
       user: '0x1234ABCD',
@@ -489,7 +431,7 @@ describe('verifySettleEventAgainstExpected', () => {
 
   it('rejects duplicate canonical SettleEvents', async () => {
     const event = makeEvent(makeSettleEventBcs());
-    const client = mockClient([event, event]);
+    const client = mockClient(successfulTransaction([event, event]));
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
@@ -497,12 +439,42 @@ describe('verifySettleEventAgainstExpected', () => {
   });
 
   it('rejects a SettleEvent emitted under the wrong package', async () => {
-    const client = mockClient([
-      makeEvent(makeSettleEventBcs(), `0x${'9'.repeat(64)}::events::SettleEvent`),
-    ]);
+    const client = mockClient(
+      successfulTransaction([
+        makeEvent(makeSettleEventBcs(), {
+          eventType: `0x${'9'.repeat(64)}::events::SettleEvent`,
+        }),
+      ]),
+    );
 
     await expect(
       verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
     ).rejects.toThrow('SettleEvent not found');
+  });
+
+  it.each([
+    ['package', { packageId: `0x${'9'.repeat(64)}` }],
+    ['module', { module: 'not_events' }],
+  ] as const)(
+    'rejects a canonical eventType whose top-level %s identity conflicts',
+    async (_field, overrides) => {
+      const client = mockClient(
+        successfulTransaction([makeEvent(makeSettleEventBcs(), overrides)]),
+      );
+
+      await expect(
+        verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+      ).rejects.toThrow('envelope identity');
+    },
+  );
+
+  it('rejects a canonical event whose sender conflicts with the decoded user', async () => {
+    const client = mockClient(
+      successfulTransaction([makeEvent(makeSettleEventBcs(), { sender: `0x${'dd'.repeat(32)}` })]),
+    );
+
+    await expect(
+      verifySettleEventAgainstExpected(client, '0xDIGEST', EXPECTED_BASE),
+    ).rejects.toThrow('sender does not match');
   });
 });

@@ -15,7 +15,7 @@ Use it when your app already builds a Sui transaction and wants a Host to sponso
 
 ## Start Here
 
-Use this README when you are integrating against an existing Host (with or without Studio mode enabled) and do **not** want to operate your own Host.
+Use this README when you are integrating against an existing `relay_only` or `relay_and_studio` Host and do **not** want to operate your own Host.
 
 If your product lets users complete transactions without managing gas, this is the default entry path.
 Start by connecting to an existing Host.
@@ -32,7 +32,7 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 - Need to call a deployed Host directly without the SDK? Start with [docs/api.md](../../docs/api.md).
 - Need the transaction constraints enforced before prepare? Start with [docs/api.md → User TransactionKind rules](../../docs/api.md#user-transactionkind-rules).
 - Integrating against the Studio promotion flow? Pair this README with [docs/payment-platform.md](../../docs/payment-platform.md).
-- Operating a Host with Studio mode enabled? Use [docs/operations.md → Studio Mode Operations](../../docs/operations.md#studio-mode-operations).
+- Operating a `relay_and_studio` Host? Use [docs/operations.md → `relay_and_studio` Operations](../../docs/operations.md#relay_and_studio-operations).
 - Need product-owned settlement token support because your selected Host is missing your token? Move to [docs/payment-platform.md](../../docs/payment-platform.md) and [docs/operations.md -> Settlement Token Onboarding Procedure](../../docs/operations.md#settlement-token-onboarding-procedure).
 - Need an interactive browser flow? Use [packages/app-web](../app-web/README.md).
 
@@ -47,16 +47,22 @@ Consume the shipped SDK as-is. Modifying the SDK, contracts, or Host/core source
 
 > The SDK does not retry Host errors. It returns Host failures as
 > `StelisApiException` or `StelisSponsoredError`, preserving a current Host
-> domain code only when that code belongs to the route that returned it. It uses
-> `UNKNOWN` for uncoded transport responses, non-current codes, and codes emitted
-> by the wrong route.
+> domain code only when that code belongs to the route that returned it.
+> Uncoded responses, non-current codes, and codes emitted by the wrong route are
+> Host contract errors and are not represented as `StelisApiException`.
 > Retry/backoff policy belongs on your side. Capacity codes include
 > `SPONSOR_CAPACITY_UNAVAILABLE`, `SPONSOR_REFILL_ACCOUNT_UNHEALTHY`,
 > `PREPARE_OVERLOADED`, `NO_SPONSOR_SLOT`, and `LEASE_EXPIRED`.
+> `PAYMENT_COIN_CONFLICT` means the Host could not reconcile the transaction's
+> settlement-token payment safely. The SDK preserves this code; it is not proof
+> of insufficient balance.
+> `PAYMENT_COIN_LIMIT_EXCEEDED` means the bounded prepare read could not prove
+> a safe settlement-token funding source. Consolidate the wallet's
+> settlement-token Coin objects and retry; do not treat it as
+> `INSUFFICIENT_FUNDS`.
 > Only the current closed metadata fields (`retryAfterMs`, `subcode`, `digest`,
-> `minSettleMist`, `requiredTotalIn`, `isEstimate`) are preserved. A malformed
-> or extended remote error body is reported as `UNKNOWN`; arbitrary remote
-> fields and non-JSON body text are never copied into the exception.
+> `operationId`, `minSettleMist`, `requiredTotalIn`, `isEstimate`) are preserved.
+> Arbitrary remote fields and non-JSON body text are never copied into an error.
 > Missing token support is resolved by the Host operator updating `packages/app-api/settlement-swap-paths.json` on a product-owned `Studio` or `Host` deployment, not by SDK customization.
 
 ## Purpose
@@ -79,10 +85,12 @@ The supported npm entry points are:
 - `StelisSDK.executeSuiFirst()`
 - `StelisSDK.estimateGas()`
 - `StelisSDK.getExchangeRate()` — read the current settlement-token/SUI rate through the connected Host network
+- `StelisSDK.queryUserCredit()` — read current User Vault credit after proving the supplied Sui client network
 - `StelisSDK.getSettlementSwapPathForSettlementToken()` — resolve one Host-advertised current settlement swap path by exact coin type
+- `StelisSDK.checkSettlementSwapPathLiquidity()` — prove the supplied Sui client network and read current DeepBook pool liquidity
 - `StelisSDK.buildWithdrawPtb()` — build a vault withdrawal PTB
 - `StelisSDK.prepareSponsored()` — advanced 2-step flow (prepare → sign → sponsor)
-- `StelisSDK.executePromotionSponsored()` — promotion-specific execution (studio mode)
+- `StelisSDK.executePromotionSponsored()` — promotion-specific execution through Host Studio routes
 - `StelisSDK.preparePromotionSponsored()` — advanced 2-step promotion flow
 - `StelisSDK.sponsorPromotionSponsored()` — submit signed promotion TX
 - `StelisSponsoredError` — structured error for sponsored execution failures
@@ -90,8 +98,6 @@ The supported npm entry points are:
 - `StelisIntegrityError` — S-16 integrity verification failures
 - `listAvailablePromotions()` — standalone server-to-server promotion discovery
 - `getPromotionUserState()` — standalone server-to-server promotion detail
-- `checkSettlementSwapPathLiquidity()` — DeepBook pool liquidity check
-- `queryUserCredit()` — on-chain vault/credit lookup
 - `parseRelayConfigResponse()` — strict parser for the current Host config wire shape
 - `STELIS_CONTRACT_IDS`, `DEEPBOOK_IDS` — built-in on-chain contract IDs
 - exported response, config, and promotion types
@@ -99,7 +105,7 @@ The supported npm entry points are:
 The server-only entry point `@stelis/sdk/server` exports:
 
 - `verifySettleEventAgainstExpected()` — verify an on-chain `SettleEvent` against backend-owned expected fields
-- `verifySettleEventInTransaction()` — apply the same verification to an already fetched current transaction result
+- `verifySettleEventResultAgainstExpected()` — verify an already fetched exact current transaction result without a second RPC read
 - `extractSettleEvents()` — extract decoded `SettleEvent` summaries for reconciliation scans
 - `ExpectedSettleEventFields`, `VerifiedSettleEvent`, and `ExtractedSettleEventSummary`
 
@@ -166,7 +172,7 @@ sequenceDiagram
 npm install @stelis/sdk
 ```
 
-**Peer Dependency**: `@mysten/sui` ^1.0.0 || ^2.0.0
+**Peer Dependency**: `@mysten/sui` 2.17.0
 
 ## Quick Start — StelisSDK (Recommended)
 
@@ -186,14 +192,17 @@ import { StelisSDK, STELIS_CONTRACT_IDS } from '@stelis/sdk';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 
 // 0. Create your own SuiGrpcClient.
-const suiClient = new SuiGrpcClient({ network: 'testnet' });
+const suiClient = new SuiGrpcClient({
+  network: 'testnet',
+  baseUrl: 'https://fullnode.testnet.sui.io:443',
+});
 
 // 1. Connect to a Host with package pinning (required for integrity protection).
 // Contract IDs are built into @stelis/sdk (bundled from the shared internal contract package).
 const sdk = await StelisSDK.connect('http://localhost:3200/relay', {
   pinnedPackageId: STELIS_CONTRACT_IDS.testnet?.packageId, // fail-closed if null
   requestTimeouts: {
-    // Optional overrides (ms). Defaults are defined by StelisRequestTimeouts.
+    // Optional overrides (1..2,147,483,647 ms). Defaults are defined by StelisRequestTimeouts.
     sponsorMs: 25_000,
   },
 });
@@ -308,33 +317,29 @@ const result = await sdk.executeSponsored(tx, {
 
 This keeps wallet custody, policy, and approval logic on your side while using the same prepare -> sign -> sponsor contract.
 
-### Studio Endpoint
+### Host Studio Availability
 
-For promotion integrations, use `studioEndpoint: true` at connect time.
-This is required for `executePromotionSponsored()` and related promotion methods.
+Promotion methods call the connected Host's `/studio/*` routes directly. There is no
+client-side option that enables Studio. A `relay_only` Host returns
+`STUDIO_UNAVAILABLE`; the SDK preserves that response as a `StelisApiException` with
+HTTP status `503`.
 
 ```typescript
-const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
-  studioEndpoint: true, // required for promotion methods
+const sdk = await StelisSDK.connect('https://host.example/relay', {
   pinnedPackageId: STELIS_CONTRACT_IDS.testnet?.packageId,
 });
 ```
-
-> [!NOTE]
-> `studioEndpoint: true` activates studio mode on the connected endpoint.
-> Promotion methods (`executePromotionSponsored`, `preparePromotionSponsored`, `sponsorPromotionSponsored`) are rejected
-> at call time if the SDK was not connected in studio mode.
 
 ### Promotion-Sponsored Execution
 
 For promotion-specific flows, use `executePromotionSponsored()`. This uses dedicated
 `/studio/promotions/:id/prepare` and `/studio/promotions/:id/sponsor` endpoints instead
 of the generic sponsored path. No `settlementToken` is needed — the promotion budget covers gas.
+Use a Promotion ID returned by the Host's promotion list; the examples below assume it
+is available as `promotionId`.
 
 ```typescript
-const sdk = await StelisSDK.connect('https://studio.myapp.dev/relay', {
-  studioEndpoint: true,
-});
+const sdk = await StelisSDK.connect('https://host.example/relay');
 
 const tx = new Transaction();
 tx.moveCall({ target: '0xMyContract::module::action', arguments: [...] });
@@ -343,7 +348,7 @@ const result = await sdk.executePromotionSponsored(tx, {
   client: suiClient,
   signer: wallet.signTransaction,
   addr: userAddress,
-  promotionId: 'promo_abc',
+  promotionId,
   developerJwt: 'eyJ...',  // issued by your developer backend
 });
 console.log(result.digest);
@@ -357,7 +362,7 @@ For advanced 2-step control:
 //   verifies the server did not modify your user commands)
 const prepared = await sdk.preparePromotionSponsored(tx, {
   client: suiClient,
-  promotionId: 'promo_abc',
+  promotionId,
   addr: userAddress,
   developerJwt: 'eyJ...',
 });
@@ -369,7 +374,7 @@ const signature = await wallet.signTransaction(prepared.txBytes);
 
 // Step 3: Sponsor
 const result = await sdk.sponsorPromotionSponsored({
-  promotionId: 'promo_abc',
+  promotionId,
   receiptId: prepared.receiptId,
   txBytes: prepared.txBytes,
   userSignature: signature,
@@ -379,7 +384,6 @@ const result = await sdk.sponsorPromotionSponsored({
 ```
 
 > [!IMPORTANT]
-> `executePromotionSponsored()` requires `studioEndpoint: true` at connect time.
 > The promotion TX must contain 1 to 16 commands, all of them `MoveCall`.
 > Non-MoveCall commands (`SplitCoins`, `TransferObjects`, etc.) are rejected by
 > the promotion handler. The Host adds gas metadata but no commands.
@@ -391,28 +395,41 @@ For server-side integration (not browser), use the standalone discovery helpers:
 ```typescript
 import { listAvailablePromotions, getPromotionUserState } from '@stelis/sdk';
 
-// List all promotions visible to a user
-const { promotions } = await listAvailablePromotions(
+// Read one bounded page of promotions visible to a user
+const firstPage = await listAvailablePromotions(
   'https://studio.myapp.dev',
   'developer-jwt-for-user-123',
+  { limit: 50 },
 );
 
-// Get detailed promotion state for a specific user
-const detail = await getPromotionUserState(
-  'https://studio.myapp.dev',
-  'promo_abc',
-  'developer-jwt-for-user-123',
-);
+const secondPage = firstPage.nextCursor
+  ? await listAvailablePromotions('https://studio.myapp.dev', 'developer-jwt-for-user-123', {
+      cursor: firstPage.nextCursor,
+      limit: 50,
+    })
+  : null;
+
+// Get detailed state for a Promotion returned by the Host
+const firstPromotion = firstPage.promotions[0];
+const detail = firstPromotion
+  ? await getPromotionUserState(
+      'https://studio.myapp.dev',
+      firstPromotion.promotionId,
+      'developer-jwt-for-user-123',
+    )
+  : null;
 ```
 
 > These helpers use developer JWT authentication and do not require
-> a `StelisSDK` instance. They are designed for server-to-server flows.
+> a `StelisSDK` instance. Promotion pages contain at most 100 items, are ordered
+> by Promotion ID, and return `nextCursor: null` after the final page. A non-null
+> `nextCursor` is the exclusive cursor for the next request.
 
 ### Server Settlement Verification
 
 For backend fulfillment, verify the final digest against the application values you expected when preparing the transaction. The helper requires expected fields; a `SettleEvent` by itself is not treated as application payment completion. The example assumes your backend retained the `receiptId` and prepare cost from a two-step prepare/sponsor flow.
 
-`receiptId` and a directly supplied `orderIdHash` are exact 32-byte hex strings; either form may include a `0x` prefix. A failed transaction is rejected even if its response contains event-shaped data.
+`receiptId` is exactly `0x` followed by 64 lowercase hex digits. A directly supplied `orderIdHash` is an exact 32-byte hex string with an optional `0x` prefix. A failed transaction is rejected even if its response contains event-shaped data.
 
 ```typescript
 import { verifySettleEventAgainstExpected } from '@stelis/sdk/server';
@@ -428,12 +445,6 @@ const settlement = await verifySettleEventAgainstExpected(suiClient, sponsorDige
 
 console.log(settlement.orderIdHash);
 ```
-
-If the backend already fetched the current transaction result with events, use
-`verifySettleEventInTransaction(result, sponsorDigest, expected)` to avoid a
-second RPC read. It requires the exact successful Sui result union, matching
-digest, and requested events before applying the same compiled-schema and
-application-field checks.
 
 Use `extractSettleEvents()` from `@stelis/sdk/server` for reconciliation scans only. Its warning logger is required because the returned array contains successful summaries only:
 
@@ -588,7 +599,7 @@ console.log(result.orderId); // echoed only on sponsored path, undefined for dir
 - `tx` must not have gas fields preset (`setGasPayment`, `setGasBudget`, `setGasOwner`, `setGasPrice` throw)
 - Gas budget is computed from `simulateTransaction` + `DEFAULT_GAS_MARGIN_BPS`
 - Infra failures (`network`, `timeout`, `grpc`) trigger best-effort `executeSponsored` fallback
-- Deterministic failures (simulation abort, no gasUsed) throw immediately
+- Deterministic failures (simulation abort or malformed current Sui response) throw immediately
 
 > [!NOTE]
 > `path: 'sui' | 'sponsored'` is for debug/tracing only. Do not branch on it.
@@ -598,8 +609,9 @@ console.log(result.orderId); // echoed only on sponsored path, undefined for dir
 
 ## Monorepo-Only PTB Builders
 
-Low-level PTB builders (`buildSwapAndSettlePtb`, `buildSettleWithCreditPtb`)
-live in the monorepo source at `packages/core-relay/src/ptb/builders.ts` and are re-exported from `@stelis/core-relay/browser` for internal/server-side use. They are **not exported** from the `@stelis/sdk` npm entrypoint. `buildWithdrawPtb` is available via `StelisSDK.buildWithdrawPtb()`.
+Low-level settlement PTB builders are Host-internal and are not exported from
+the `@stelis/sdk` package. `buildWithdrawPtb` is available via
+`StelisSDK.buildWithdrawPtb()`.
 
 For npm consumers, the stable public path remains:
 
@@ -723,7 +735,7 @@ deducted in subsequent transactions.
 
 ## Settlement Swap Path Liquidity Check
 
-### `checkSettlementSwapPathLiquidity()` — Pre-flight Liquidity Verification
+### `StelisSDK.checkSettlementSwapPathLiquidity()` — Pre-flight Liquidity Verification
 
 Performs a mid_price query to verify active bid+ask orders exist.
 `mid_price > 0` is a reliable indicator: DeepBook only returns a non-zero
@@ -732,9 +744,7 @@ value when both bid and ask orders are present in the book.
 settlement swap path liquidity is checked via mid-price query instead.)
 
 ```typescript
-import { checkSettlementSwapPathLiquidity } from '@stelis/sdk';
-
-const status = await checkSettlementSwapPathLiquidity(suiClient, deepbookPkgId, settlementSwapPath);
+const status = await sdk.checkSettlementSwapPathLiquidity(suiClient, settlementSwapPath);
 // status.hasLiquidity  → boolean
 // status.status        → 'ok' | 'no_orders'
 // status.midPrice      → JSON-safe display number, or null if outside safe range

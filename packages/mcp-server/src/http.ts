@@ -1,16 +1,18 @@
 import type { FetchLike, StelisMcpServerConfig } from './config.js';
 import {
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
   parseHostErrorResponse,
   type HostErrorCode,
-  type HostErrorResponse,
+  type HostErrorMeta,
 } from '@stelis/contracts';
 
 export class StelisMcpHttpError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code: HostErrorCode | 'HTTP_ERROR',
-    public readonly body: HostErrorResponse | undefined,
+    public readonly code: HostErrorCode,
+    public readonly meta?: HostErrorMeta,
   ) {
     super(message);
     this.name = 'StelisMcpHttpError';
@@ -52,7 +54,7 @@ export async function requestJson(
     return await handleResponse(res, options.allowedErrorCodes);
   } catch (error) {
     if (isAbortError(error)) {
-      throw new Error(`Stelis host request timed out after ${timeoutMs} ms.`);
+      throw new Error(`Stelis Host request timed out after ${timeoutMs} ms.`);
     }
     throw error;
   } finally {
@@ -100,8 +102,8 @@ function resolveFetch(fetchFn: FetchLike | undefined): FetchLike {
 
 function resolveTimeoutMs(input: number | undefined, fallback: number): number {
   const value = input ?? fallback;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error('timeoutMs must be a positive integer.');
+  if (!isNodeTimerDelayMs(value)) {
+    throw new Error(`timeoutMs must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}.`);
   }
   return value;
 }
@@ -114,21 +116,20 @@ async function handleResponse(
   const data = parseJsonIfPossible(raw);
 
   if (!res.ok) {
-    let currentError: HostErrorResponse | undefined;
+    let currentError;
     try {
       currentError = parseHostErrorResponse(data, allowedErrorCodes, res.status);
     } catch {
-      currentError = undefined;
+      throw new Error(`Stelis Host returned a non-current error response (HTTP ${res.status})`);
     }
-    const code = currentError?.code ?? 'HTTP_ERROR';
-    const message =
-      currentError?.error ??
-      `Stelis Host returned a non-current error response (HTTP ${res.status})`;
-    throw new StelisMcpHttpError(message, res.status, code, currentError);
+    let meta: HostErrorMeta | undefined;
+    const { error: _error, code: _code, ...currentMeta } = currentError;
+    if (Object.keys(currentMeta).length > 0) meta = currentMeta;
+    throw new StelisMcpHttpError(currentError.error, res.status, currentError.code, meta);
   }
 
   if (data === undefined) {
-    throw new Error(`Invalid non-JSON response from Stelis host (HTTP ${res.status}).`);
+    throw new Error(`Invalid non-JSON response from Stelis Host (HTTP ${res.status}).`);
   }
 
   return data;

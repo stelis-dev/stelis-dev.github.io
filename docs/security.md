@@ -4,18 +4,18 @@ This document summarizes the current security boundaries that are visible in the
 
 ## Main Boundaries
 
-| Boundary | Current rule |
-| --- | --- |
-| User assets | User vault assets are owned on-chain by the user. |
-| Sponsor gas | User commands must not reference `GasCoin` or use `FundsWithdrawal(Sponsor)`. |
-| User TransactionKind | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most 11 commands. |
-| Final Host-built transaction | The Host-built generic transaction must contain exactly one allowed settlement call and at most 16 commands. |
-| Settlement-token funding | The Host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting. |
-| Prepare authorization | Generic prepare requires a sender personal-message signature over the transaction-kind hash and request fields. |
-| Settlement swap path | Relay validation accepts only configured settlement swap paths. Each supported `settlementTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
-| Prepare records | Prepare records are single-use and time-limited. |
-| Promotion calls | Promotion-sponsored transactions contain 1 to 16 `MoveCall` commands, all matching `STUDIO_ALLOWED_TARGETS`; the Host adds no commands. |
-| Admin routes | `/api/*` routes require an admin session. |
+| Boundary                     | Current rule                                                                                                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| User assets                  | User vault assets are owned on-chain by the user.                                                                                                                    |
+| Sponsor gas                  | User commands must not reference `GasCoin` or use `FundsWithdrawal(Sponsor)`.                                                                                        |
+| User TransactionKind         | Generic `/relay/prepare` accepts only a user-supplied `User TransactionKind` with zero settlement calls and at most 11 commands.                                     |
+| Final Host-built transaction | The Host-built generic transaction must contain exactly one allowed settlement call and at most 16 commands.                                                         |
+| Settlement-token funding     | The Host combines coin object provenance with `FundsWithdrawal(Sender)` address-balance accounting.                                                                  |
+| Prepare authorization        | Generic prepare requires a sender personal-message signature over the transaction-kind hash and request fields.                                                      |
+| Settlement swap path         | Relay validation accepts only configured settlement swap paths. Each supported `settlementTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
+| Prepare records              | Prepare records are single-use and time-limited.                                                                                                                     |
+| Promotion calls              | Promotion-sponsored transactions contain 1 to 16 `MoveCall` commands, all matching `STUDIO_ALLOWED_TARGETS`; the Host adds no commands.                              |
+| Admin routes                 | `/api/*` routes require an admin session.                                                                                                                            |
 
 ## Web3 Security Policy
 
@@ -48,12 +48,21 @@ Sponsor Refill Account withdrawal is privileged. The withdrawal route requires a
 
 The Host runtime adds request and operations controls:
 
-- Redis-backed prepare store
+- Redis-backed sponsored execution store
 - rate limiting
 - abuse blocking
 - sponsor slot leasing
-- sponsor operation health gate
+- aggregate sponsor capacity checks before prepare and a fresh receipt-assigned sponsor balance check before execution
 - admin session validation
+
+Relay, Studio, Auth, and Admin routes apply their relevant checks in one
+fail-closed sequence: operating mode, client-IP admission, Origin and
+Content-Type admission, bounded body reading, credential verification,
+authenticated-subject admission, then route-specific work. In particular,
+SponsorOperations and sponsor-lease reads for Relay prepare do not occur until
+wallet authorization and sender admission succeed.
+The exact HTTP header and mode contract is in
+[`API Reference → Request admission`](./api.md#request-admission).
 
 Generic `/relay/prepare` requires signed prepare authorization before the prepare state machine performs sponsor slot checkout, nonce reservation, on-chain reads, or transaction building. The Host recomputes `txKindBytesHash`, verifies the sender personal-message signature, enforces the prepare authorization timestamp window, and rejects reused prepare authorization nonces.
 
@@ -61,7 +70,12 @@ Production deployments still place the API behind upstream traffic controls such
 
 ## Studio Promotion Security
 
-Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`.
+Studio promotion routes use developer JWTs. The Host verifies JWTs against `STUDIO_DEVELOPER_JWT_TRUST_JSON`. It validates the complete local Studio configuration before Sui endpoint qualification begins.
+
+An optional developer-verification callback must use HTTPS, apart from exact
+loopback HTTP hostnames, and cannot contain embedded credentials or a URL
+fragment. The callback POST omits ambient credentials and refuses redirects so
+the developer JWT is sent only to the URL accepted at boot.
 
 Promotion prepare and sponsor routes also check:
 

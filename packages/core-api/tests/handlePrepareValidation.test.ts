@@ -16,17 +16,45 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase64 } from '@mysten/sui/utils';
+import { createHash } from 'node:crypto';
 import type { PrepareHandlerConfig, PrepareParams } from '../src/handlers/prepare.js';
 import { handlePrepare } from '../src/handlers/prepare.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
-import { createStaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
-import { TEST_PREPARE_AUTH_SENDER, withPrepareAuthorization } from './prepareAuthTestHelpers.js';
+import {
+  createStaticSettlementSwapPathDescriptorMap,
+  type AddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
+import {
+  TEST_PREPARE_AUTH_PACKAGE_ID,
+  TEST_PREPARE_AUTH_SENDER,
+  withPrepareAuthorization,
+} from './prepareAuthTestHelpers.js';
+import { suiEndpointSnapshotFixture } from './helpers/suiGatewayResultFixtures.js';
+import { ALLOW_PREPARE_REQUEST } from './prepareRequestAdmissionTestHelpers.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
-const { mockPrepareBuildPipeline, mockQueryUserCredit } = vi.hoisted(() => ({
+const {
+  mockPrepareBuildPipeline,
+  mockQueryUserCredit,
+  addressBalanceGasTransactionContents,
+  getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHashMock,
+} = vi.hoisted(() => ({
   mockPrepareBuildPipeline: vi.fn(),
   mockQueryUserCredit: vi.fn(),
+  addressBalanceGasTransactionContents: new WeakMap<
+    object,
+    { readonly bytes: Uint8Array; readonly txBytesHash: string }
+  >(),
+  getAddressBalanceGasTransactionBytesMock: vi.fn(),
+  getAddressBalanceGasTransactionTxBytesHashMock: vi.fn(),
+}));
+
+vi.mock('@stelis/core-relay/server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@stelis/core-relay/server')>()),
+  getAddressBalanceGasTransactionBytes: getAddressBalanceGasTransactionBytesMock,
+  getAddressBalanceGasTransactionTxBytesHash: getAddressBalanceGasTransactionTxBytesHashMock,
 }));
 
 vi.mock('../src/prepare/build.js', async (importOriginal) => {
@@ -42,11 +70,47 @@ vi.mock('@stelis/core-relay', async (importOriginal) => {
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 const MOCK_CREDIT = { vaultObjectId: null, credit: '0', needsCreate: true, lastNonce: '0' };
+const CONFIG_ID = `0x${'22'.repeat(32)}`;
+const REGISTRY_ID = `0x${'33'.repeat(32)}`;
+const PAYOUT_ADDRESS = `0x${'44'.repeat(32)}`;
+const SPONSOR_ADDRESS = `0x${'55'.repeat(32)}`;
+const DEEPBOOK_PACKAGE_ID = `0x${'66'.repeat(32)}`;
+const POOL_ID = `0x${'77'.repeat(32)}`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
+const TEST_ABUSE_BLOCKER = {
+  checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+  checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+  recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+};
+
+function addressBalanceGasTransactionFixture(bytes: Uint8Array): AddressBalanceGasTransaction {
+  const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
+  addressBalanceGasTransactionContents.set(transaction, {
+    bytes: bytes.slice(),
+    txBytesHash: createHash('sha256').update(bytes).digest('hex'),
+  });
+  return transaction;
+}
+
+getAddressBalanceGasTransactionBytesMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.bytes.slice();
+  },
+);
+getAddressBalanceGasTransactionTxBytesHashMock.mockImplementation(
+  (transaction: AddressBalanceGasTransaction) => {
+    const contents = addressBalanceGasTransactionContents.get(transaction);
+    if (!contents) throw new TypeError('test transaction was not created by its fixture');
+    return contents.txBytesHash;
+  },
+);
 
 function makeCtx() {
   const onchainConfig = {
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+    configId: CONFIG_ID,
     maxClaimMist: 50_000_000n,
     minSettleMist: 0n,
     maxHostFeeMist: 500_000n,
@@ -55,53 +119,35 @@ function makeCtx() {
   };
   return {
     network: 'testnet' as const,
-    sui: {
-      getObject: vi.fn().mockResolvedValue({ object: { json: onchainConfig } }),
-      getDynamicField: vi.fn(),
-      listOwnedObjects: vi.fn().mockResolvedValue({ objects: [] }),
-      listCoins: vi.fn().mockResolvedValue({ objects: [] }),
-      simulateTransaction: vi.fn().mockResolvedValue({
-        Transaction: {
-          status: { success: true },
-          effects: {
-            gasUsed: { computationCost: '1000000', storageCost: '500000', storageRebate: '200000' },
-          },
-        },
-      }),
-    },
+    // The build pipeline and credit query are mocked at their current
+    // boundaries in this validation-only suite. Do not invent raw Sui client
+    // methods that the exercised path never calls.
+    sui: suiEndpointSnapshotFixture(),
     sponsorPool: {
       checkout: vi.fn().mockResolvedValue({
-        sponsorAddress: '0xSPONSOR',
+        sponsorAddress: SPONSOR_ADDRESS,
       }),
-      commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       sign: vi.fn(),
     },
-    packageId: '0xPACKAGE',
-    configId: '0xCONFIG',
-    vaultRegistryId: '0xREGISTRY',
+    packageId: TEST_PREPARE_AUTH_PACKAGE_ID,
+    configId: CONFIG_ID,
+    vaultRegistryId: REGISTRY_ID,
     rateLimiter: {},
-    abuseBlocker: {
-      checkIp: vi.fn().mockResolvedValue({ blocked: false }),
-      checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
-      recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
-    },
+    abuseBlocker: TEST_ABUSE_BLOCKER,
     prepareRequestNonceStore: {
       claim: vi.fn().mockResolvedValue('ok'),
     },
-    prepareStore: {
-      store: vi.fn().mockResolvedValue(undefined),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn().mockResolvedValue(undefined),
+    sponsoredExecutionStore: {
+      commitPreparedReceipt: vi.fn(async (draft) => ({ ...draft, issuedAt: 1_741_680_000_000 })),
       reserveNonce: vi.fn().mockResolvedValue(1n),
-      releaseReservation: vi.fn().mockResolvedValue(undefined),
+      releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
     },
-    settlementPayoutRecipientAddress: '0xPAYOUT',
+    settlementPayoutRecipientAddress: PAYOUT_ADDRESS,
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -119,14 +165,14 @@ function makeExtraCfg(): PrepareHandlerConfig {
     {
       hops: [
         {
-          poolId: '0xPOOL',
-          baseType: '0xDEEP::deep::DEEP',
+          poolId: POOL_ID,
+          baseType: SETTLEMENT_TOKEN_TYPE,
           quoteType: '0x2::sui::SUI',
           swapDirection: 'baseForQuote' as const,
           feeBps: 0,
         },
       ],
-      settlementTokenType: '0xDEEP::deep::DEEP',
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
       settlementTokenSymbol: 'DEEP',
       settlementTokenDecimals: 6,
       lotSize: 1n,
@@ -136,15 +182,15 @@ function makeExtraCfg(): PrepareHandlerConfig {
     },
   ];
   return {
-    deepbookPackageId: '0xDEEPBOOK',
+    deepbookPackageId: DEEPBOOK_PACKAGE_ID,
     supportedSettlementSwapPaths,
     settlementSwapPathDescriptors: createStaticSettlementSwapPathDescriptorMap(
       supportedSettlementSwapPaths,
     ),
     allowedSettlementSwapPaths: [
       {
-        tokenType: '0xDEEP::deep::DEEP',
-        hops: ['0xPOOL'],
+        tokenType: SETTLEMENT_TOKEN_TYPE,
+        hops: [POOL_ID],
         settlementSwapDirection: 'baseForQuote' as const,
       },
     ],
@@ -160,12 +206,16 @@ async function makeValidTxKindBytes(): Promise<string> {
 }
 
 async function makeParams(txKindBytes: string): Promise<PrepareParams> {
-  return withPrepareAuthorization({
-    txKindBytes,
-    senderAddress: TEST_PREPARE_AUTH_SENDER,
-    settlementTokenType: '0xDEEP::deep::DEEP',
-    clientIp: '127.0.0.1',
-  });
+  return withPrepareAuthorization(
+    {
+      txKindBytes,
+      senderAddress: TEST_PREPARE_AUTH_SENDER,
+      settlementTokenType: SETTLEMENT_TOKEN_TYPE,
+      clientIp: '127.0.0.1',
+      abuseBlocker: TEST_ABUSE_BLOCKER,
+    },
+    { packageId: TEST_PREPARE_AUTH_PACKAGE_ID },
+  );
 }
 
 /**
@@ -224,7 +274,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('L1_PARSE_FAILED: rejects when built TX contains Publish command', async () => {
     const publishBytes = await buildPublishTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: publishBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(publishBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_FORBIDDEN_COMMAND',
+        message: 'PTB contains forbidden command: Publish',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 350_000n,
@@ -233,14 +289,19 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
     const ctx = makeCtx();
 
     try {
-      await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg());
+      await handlePrepare(
+        ctx,
+        await makeParams(txKindBytes),
+        makeExtraCfg(),
+        ALLOW_PREPARE_REQUEST,
+      );
       expect.unreachable('Expected PrepareValidationError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
@@ -254,7 +315,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('L1: rejects when built TX has no settle function', async () => {
     const noSettleBytes = await buildNoSettleTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: noSettleBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(noSettleBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_NO_SETTLE',
+        message: 'PTB does not contain a settle or swap_and_settle call',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
@@ -265,14 +332,19 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
     const ctx = makeCtx();
 
     try {
-      await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg());
+      await handlePrepare(
+        ctx,
+        await makeParams(txKindBytes),
+        makeExtraCfg(),
+        ALLOW_PREPARE_REQUEST,
+      );
       expect.unreachable('Expected PrepareValidationError');
     } catch (err) {
       expect(err).toBeInstanceOf(PrepareValidationError);
@@ -284,7 +356,13 @@ describe('handlePrepare — built-transaction validation rejection', () => {
   it('slot is released when built-transaction validation fails', async () => {
     const noSettleBytes = await buildNoSettleTxBytes();
     mockPrepareBuildPipeline.mockResolvedValue({
-      txBytes: noSettleBytes,
+      addressBalanceGasTransaction: addressBalanceGasTransactionFixture(noSettleBytes),
+      l1Validation: {
+        ok: false,
+        code: 'L1_NO_SETTLE',
+        message: 'PTB does not contain a settle or swap_and_settle call',
+      },
+      settleArgs: null,
       simGas: 1_300_000n,
       grossGas: 1_500_000n,
       gasVarianceFixedMist: 100_000n,
@@ -295,20 +373,25 @@ describe('handlePrepare — built-transaction validation rejection', () => {
       profile: 'new_user',
       paymentInputSource: 'coin_object',
       swapAmountSmallest: 500_000n,
-      sponsorAddress: '0xSPONSOR42',
+      sponsorAddress: SPONSOR_ADDRESS,
     });
 
     const txKindBytes = await makeValidTxKindBytes();
     const ctx = makeCtx();
 
-    await handlePrepare(ctx, await makeParams(txKindBytes), makeExtraCfg()).catch(() => {});
+    await handlePrepare(
+      ctx,
+      await makeParams(txKindBytes),
+      makeExtraCfg(),
+      ALLOW_PREPARE_REQUEST,
+    ).catch(() => {});
 
     // Slot must be released even on built-transaction validation failure. checkin is called with
     // `(sponsorAddress, receiptId)` where receiptId is the generated lease
     // authenticator; assert on its shape.
     expect(ctx.sponsorPool.checkin).toHaveBeenCalledTimes(1);
     const checkinArgs = (ctx.sponsorPool.checkin as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(checkinArgs[0]).toBe('0xSPONSOR');
+    expect(checkinArgs[0]).toBe(SPONSOR_ADDRESS);
     expect(checkinArgs[1]).toMatch(/^0x[0-9a-f]{64}$/);
   });
 });

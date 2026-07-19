@@ -1,44 +1,80 @@
-import { describe, it, expect } from 'vitest';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import { bootstrapSponsorOperations } from '../../src/sponsor-operations/bootstrap.js';
+import { describe, expect, it, vi } from 'vitest';
+import type { SuiEndpointSnapshot } from '@stelis/core-relay';
+
+const gateway = vi.hoisted(() => ({ getSuiBalance: vi.fn() }));
+
+vi.mock('@stelis/core-relay', async () => {
+  const actual = await vi.importActual<typeof import('@stelis/core-relay')>('@stelis/core-relay');
+  return { ...actual, getSuiBalance: gateway.getSuiBalance };
+});
+
+import { observeSponsorOperationsBalances } from '../../src/sponsor-operations/bootstrap.js';
 import type {
-  SponsorRefillAccountWriteFields,
   RedisSponsorOperationsState,
-  SlotRead,
+  SponsorRefillAccountWriteFields,
+  SponsorSlotRecord,
   SlotWriteFields,
 } from '../../src/sponsor-operations/redisState.js';
-import { SPONSOR_BALANCE_WARN_MIST } from '../../src/sponsor-operations/defaults.js';
 import type { SponsorRefillAccountSpendStateStore } from '../../src/sponsor-operations/accountSpendState.js';
+import { suiEndpointSnapshotFixture } from '../suiEndpointSnapshotFixture.js';
+import { createTestSponsorOperationsSettings } from './settingsFixture.js';
 
-function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
-  state: RedisSponsorOperationsState;
-  spendState: SponsorRefillAccountSpendStateStore;
-  slotWrites: Array<{ address: string; fields: SlotWriteFields }>;
-  sponsorRefillAccountWrites: SponsorRefillAccountWriteFields[];
-  failSlot?: boolean;
-  failPm?: boolean;
-} {
+const SLOT_A = `0x${'aa'.repeat(32)}`;
+const SLOT_B = `0x${'bb'.repeat(32)}`;
+const REFILL_ACCOUNT = `0x${'55'.repeat(32)}`;
+
+function slotRecord(
+  address: string,
+  overrides: Partial<SponsorSlotRecord> = {},
+): SponsorSlotRecord {
+  return {
+    address,
+    state: 'healthy',
+    addressBalanceMist: '100',
+    lastError: null,
+    lastObservedAtMs: 1,
+    writeSeq: 1,
+    refillOperationId: null,
+    refillOperationSequence: null,
+    refillOperationState: null,
+    refillRequiredSourceBalanceMist: null,
+    ...overrides,
+  };
+}
+
+function fixture(initialSlots: readonly SponsorSlotRecord[] = []) {
+  const slots = new Map(initialSlots.map((slot) => [slot.address, slot]));
   const slotWrites: Array<{ address: string; fields: SlotWriteFields }> = [];
-  const sponsorRefillAccountWrites: SponsorRefillAccountWriteFields[] = [];
-  const slots = new Map<string, SlotRead | null>(Object.entries(initialSlots));
-  const ref = { slotWrites, sponsorRefillAccountWrites } as ReturnType<typeof makeStubState>;
-  ref.state = {
-    async updateSlotIfWriteSeq(address, _expectedWriteSeq, fields) {
-      if (ref.failSlot) throw new Error('redis write rejected');
+  const accountWrites: SponsorRefillAccountWriteFields[] = [];
+  let failSlotWrite = false;
+  let staleSlotWrite = false;
+  let staleAccountWrite = false;
+  let accountSpendState: 'reserved' | 'ready' | 'reconciling' | 'succeeded' | 'failed' | null =
+    null;
+
+  const state: RedisSponsorOperationsState = {
+    async updateSlotIfWriteSeq(address, _expectedWriteSequence, fields) {
+      if (failSlotWrite) throw new Error('redis write rejected');
+      if (staleSlotWrite) return false;
       slotWrites.push({ address, fields });
       return true;
     },
     async readSlot(address) {
       return slots.get(address) ?? null;
     },
+    async readSlotAvailability(address) {
+      const record = slots.get(address) ?? null;
+      return record === null ? null : { ...record, observationFresh: true };
+    },
     async readSponsorRefillAccount() {
       return null;
     },
     async readAll() {
-      return { slots: [], sponsorRefillAccount: {} as never };
+      throw new Error('not used');
     },
   };
-  ref.spendState = {
+
+  const spendState: SponsorRefillAccountSpendStateStore = {
     async read() {
       return null;
     },
@@ -46,7 +82,12 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
       return null;
     },
     async readAccountObservationCursor() {
-      return { operationId: null, spendSequence: 0, writeSequence: 0 };
+      return {
+        operationId: accountSpendState === null ? null : 'operation-a',
+        spendState: accountSpendState,
+        spendSequence: accountSpendState === null ? 0 : 1,
+        writeSequence: 0,
+      };
     },
     async reserve() {
       throw new Error('not used');
@@ -64,308 +105,167 @@ function makeStubState(initialSlots: Record<string, SlotRead | null> = {}): {
       throw new Error('not used');
     },
     async updateAccountObservation(_cursor, fields) {
-      if (ref.failPm) throw new Error('redis write rejected');
-      sponsorRefillAccountWrites.push(fields);
+      if (staleAccountWrite) return false;
+      accountWrites.push(fields);
       return true;
     },
   };
-  return ref;
-}
 
-function makeStubSui(impl: (owner: string) => Promise<string | Error>): SuiGrpcClient {
-  const stub = {
-    async getBalance({ owner }: { owner: string }): Promise<{ balance: { balance: string } }> {
-      const result = await impl(owner);
-      if (result instanceof Error) throw result;
-      return { balance: { balance: result } };
+  return {
+    state,
+    spendState,
+    slotWrites,
+    accountWrites,
+    failSlotWrites() {
+      failSlotWrite = true;
+    },
+    makeSlotWriteStale() {
+      staleSlotWrite = true;
+    },
+    makeAccountWriteStale() {
+      staleAccountWrite = true;
+    },
+    setAccountSpendState(state: typeof accountSpendState) {
+      accountSpendState = state;
     },
   };
-  return stub as unknown as SuiGrpcClient;
 }
 
-function makeSlotRead(
-  state: SlotRead['state'],
-  fields: Partial<Omit<SlotRead, 'address' | 'state'>> = {},
-): SlotRead {
-  return {
-    address: SLOT_A,
-    state,
-    balanceMist: fields.balanceMist ?? null,
-    lastError: fields.lastError ?? null,
-    lastObservedAtMs: fields.lastObservedAtMs ?? null,
-    writeSeq: fields.writeSeq ?? null,
-    pendingRefillDigest: fields.pendingRefillDigest ?? null,
-    refillAttemptedAmountMist: fields.refillAttemptedAmountMist ?? null,
-    refillObservedBalanceMist: fields.refillObservedBalanceMist ?? null,
-    refillReconciliationResult: fields.refillReconciliationResult ?? null,
-    refillOperationId: fields.refillOperationId ?? null,
-    refillOperationSequence: fields.refillOperationSequence ?? null,
-    refillOperationState: fields.refillOperationState ?? null,
-    refillRequiredSourceBalanceMist: fields.refillRequiredSourceBalanceMist ?? null,
-  };
+function settings(sponsorAddresses: readonly string[] = [SLOT_A]) {
+  return createTestSponsorOperationsSettings({
+    sponsorAddresses,
+    sponsorRefillAccountAddress: REFILL_ACCOUNT,
+    slotBalanceTimeoutMs: 100,
+    sponsorRefillAccountBalanceTimeoutMs: 100,
+  });
 }
 
-const SLOT_A = '0xslota';
-const SLOT_B = '0xslotb';
-const SPONSOR_REFILL_ACCOUNT_ADDRESS = '0x' + '55'.repeat(32);
-const LONG_MULTIBYTE_ERROR = '한'.repeat(300);
-const TRIMMED_MULTIBYTE_ERROR = '한'.repeat(170);
+function sui(read: (owner: string) => Promise<string | Error>): SuiEndpointSnapshot {
+  const snapshot = suiEndpointSnapshotFixture();
+  gateway.getSuiBalance.mockImplementation(
+    async (_snapshot: SuiEndpointSnapshot, input: { owner: string }) => {
+      const result = await read(input.owner);
+      if (result instanceof Error) throw result;
+      return { balance: result, addressBalance: result };
+    },
+  );
+  return snapshot;
+}
 
-describe('bootstrapSponsorOperations', () => {
-  it('writes healthy slot state when chain balance is above warn threshold', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => SPONSOR_BALANCE_WARN_MIST.toString()),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 10_000_000_000n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
+describe('observeSponsorOperationsBalances', () => {
+  it('stores only raw slot and refill-account observations', async () => {
+    const store = fixture();
+    const snapshot = sui(async (owner) => (owner === SLOT_A ? '90' : '500'));
+
+    await observeSponsorOperationsBalances({
+      sui: snapshot,
+      state: store.state,
+      spendState: store.spendState,
+      settings: settings(),
     });
-    expect(stub.slotWrites).toHaveLength(1);
-    expect(stub.slotWrites[0].fields).toEqual({
-      state: 'healthy',
-      balanceMist: SPONSOR_BALANCE_WARN_MIST.toString(),
-      lastError: '',
-      pendingRefillDigest: '',
-      refillAttemptedAmountMist: '',
-      refillObservedBalanceMist: '',
-      refillReconciliationResult: '',
-      refillOperationId: '',
-      refillOperationSequence: '',
-      refillOperationState: '',
+
+    expect(store.slotWrites).toEqual([
+      { address: SLOT_A, fields: { addressBalanceMist: '90', lastError: '' } },
+    ]);
+    expect(store.accountWrites).toEqual([{ totalBalanceMist: '500', lastError: '' }]);
+    expect(store.slotWrites[0]?.fields).not.toHaveProperty('state');
+    expect(store.accountWrites[0]).not.toHaveProperty('healthy');
+  });
+
+  it('records a bounded probe failure as raw error evidence', async () => {
+    const store = fixture();
+    const snapshot = sui(async (owner) => (owner === SLOT_A ? new Error('slot rpc down') : '500'));
+
+    await observeSponsorOperationsBalances({
+      sui: snapshot,
+      state: store.state,
+      spendState: store.spendState,
+      settings: settings(),
+    });
+
+    expect(store.slotWrites[0]).toEqual({
+      address: SLOT_A,
+      fields: { addressBalanceMist: '', lastError: 'slot rpc down' },
     });
   });
 
-  it('writes low_balance when balance is below warn threshold', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => (SPONSOR_BALANCE_WARN_MIST - 1n).toString()),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: null,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.slotWrites[0].fields.state).toBe('low_balance');
-  });
-
-  it('does not overwrite a runway eligibility threshold while a boot observation remains low', async () => {
-    const stub = makeStubState({
-      [SLOT_A]: makeSlotRead('refill_failed', {
-        writeSeq: 4,
-        refillRequiredSourceBalanceMist: '237',
-      }),
-    });
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => '0'),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 100n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-
-    expect(stub.slotWrites[0].fields.state).toBe('low_balance');
-    expect(stub.slotWrites[0].fields).not.toHaveProperty('refillRequiredSourceBalanceMist');
-  });
-
-  it('writes rpc_unreachable + lastError when a slot probe rejects', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async (owner) => {
-        if (owner === SLOT_A) return new Error('slot rpc down');
-        return '10000000000';
-      }),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: null,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.slotWrites[0].fields).toEqual({
-      state: 'rpc_unreachable',
-      balanceMist: '',
-      lastError: 'slot rpc down',
-      pendingRefillDigest: '',
-      refillAttemptedAmountMist: '',
-      refillObservedBalanceMist: '',
-      refillReconciliationResult: '',
-      refillOperationId: '',
-      refillOperationSequence: '',
-      refillOperationState: '',
-    });
-  });
-
-  it('treats non-decimal slot balances as degraded probe failures', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async (owner) => {
-        if (owner === SLOT_A) return '0x10';
-        return '10000000000';
-      }),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: null,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.slotWrites[0].fields.state).toBe('rpc_unreachable');
-    expect(stub.slotWrites[0].fields.balanceMist).toBe('');
-    expect(stub.slotWrites[0].fields.lastError).toContain(
-      'must be a non-negative decimal integer string',
-    );
-  });
-
-  it('trims multibyte slot lastError payloads to 512 UTF-8 bytes', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async (owner) => {
-        if (owner === SLOT_A) return new Error(LONG_MULTIBYTE_ERROR);
-        return '10000000000';
-      }),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: null,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-
-    expect(stub.slotWrites[0].fields.lastError).toBe(TRIMMED_MULTIBYTE_ERROR);
-    expect(
-      new TextEncoder().encode(stub.slotWrites[0].fields.lastError ?? '').length,
-    ).toBeLessThanOrEqual(512);
-  });
-
-  it('writes sponsor-refill-account healthy=0 with lastError when the sponsor-refill-account probe rejects', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async (owner) => {
-        if (owner === SPONSOR_REFILL_ACCOUNT_ADDRESS)
-          return new Error('sponsor refill account rpc down');
-        return '10000000000';
-      }),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: null,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.sponsorRefillAccountWrites[0]).toEqual({
-      balanceMist: '',
-      healthy: '0',
-      refillsRemaining: '',
-      lastError: 'sponsor refill account rpc down',
-    });
-  });
-
-  it('computes refillsRemaining when refillTargetMist is set', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async () => '30000000000'),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 10_000_000_000n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
-    });
-    expect(stub.sponsorRefillAccountWrites[0].refillsRemaining).toBe('3');
-  });
-
-  it('refuses to overwrite a refill that the account coordinator has not reconciled', async () => {
-    const stub = makeStubState({
-      [SLOT_A]: makeSlotRead('refilling', {
-        pendingRefillDigest: '0xpending',
-        refillAttemptedAmountMist: '6000000000',
-        refillObservedBalanceMist: '4000000000',
-        refillReconciliationResult: 'dispatch_submitted',
+  it('skips a slot observation owned by an active refill spend', async () => {
+    const store = fixture([
+      slotRecord(SLOT_A, {
+        state: 'refilling',
         refillOperationId: 'operation-a',
         refillOperationSequence: 3,
         refillOperationState: 'reconciling',
       }),
+    ]);
+
+    await observeSponsorOperationsBalances({
+      sui: sui(async () => '100'),
+      state: store.state,
+      spendState: store.spendState,
+      settings: settings(),
     });
-    await expect(
-      bootstrapSponsorOperations({
-        sui: makeStubSui(async () => '10000000000'),
-        state: stub.state,
-        spendState: stub.spendState,
-        slotAddresses: [SLOT_A],
-        sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-        warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-        refillTargetMist: 10_000_000_000n,
-        slotBalanceTimeoutMs: 500,
-        sponsorRefillAccountBalanceTimeoutMs: 500,
-      }),
-    ).rejects.toThrow('was not recovered');
-    expect(stub.slotWrites).toEqual([]);
+    expect(store.slotWrites).toEqual([]);
   });
 
-  it('propagates Redis-write failure and fails boot', async () => {
-    const stub = makeStubState();
-    stub.failSlot = true;
-    await expect(
-      bootstrapSponsorOperations({
-        sui: makeStubSui(async () => '1000000'),
-        state: stub.state,
-        spendState: stub.spendState,
-        slotAddresses: [SLOT_A],
-        sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-        warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-        refillTargetMist: null,
-        slotBalanceTimeoutMs: 500,
-        sponsorRefillAccountBalanceTimeoutMs: 500,
-      }),
-    ).rejects.toThrow(/redis write rejected/);
+  it('skips the refill-account observation while its spend lifecycle is active', async () => {
+    const store = fixture();
+    store.setAccountSpendState('ready');
+
+    await observeSponsorOperationsBalances({
+      sui: sui(async () => '100'),
+      state: store.state,
+      spendState: store.spendState,
+      settings: settings(),
+    });
+
+    expect(store.slotWrites).toHaveLength(1);
+    expect(store.accountWrites).toEqual([]);
   });
 
-  it('syncs multiple slots in parallel', async () => {
-    const stub = makeStubState();
-    await bootstrapSponsorOperations({
-      sui: makeStubSui(async (owner) => {
-        if (owner === SLOT_A) return SPONSOR_BALANCE_WARN_MIST.toString();
-        if (owner === SLOT_B) return '1000000';
-        return '20000000000';
+  it('lets a concurrent owner win either observation CAS without failing the task', async () => {
+    const store = fixture();
+    store.makeSlotWriteStale();
+    store.makeAccountWriteStale();
+
+    await expect(
+      observeSponsorOperationsBalances({
+        sui: sui(async () => '100'),
+        state: store.state,
+        spendState: store.spendState,
+        settings: settings(),
       }),
-      state: stub.state,
-      spendState: stub.spendState,
-      slotAddresses: [SLOT_A, SLOT_B],
-      sponsorRefillAccountAddress: SPONSOR_REFILL_ACCOUNT_ADDRESS,
-      warnThresholdMist: SPONSOR_BALANCE_WARN_MIST,
-      refillTargetMist: 10_000_000_000n,
-      slotBalanceTimeoutMs: 500,
-      sponsorRefillAccountBalanceTimeoutMs: 500,
+    ).resolves.toBeUndefined();
+    expect(store.slotWrites).toEqual([]);
+    expect(store.accountWrites).toEqual([]);
+  });
+
+  it('propagates durable observation write failure', async () => {
+    const store = fixture();
+    store.failSlotWrites();
+
+    await expect(
+      observeSponsorOperationsBalances({
+        sui: sui(async () => '100'),
+        state: store.state,
+        spendState: store.spendState,
+        settings: settings(),
+      }),
+    ).rejects.toThrow('redis write rejected');
+  });
+
+  it('observes all configured slots without storing derived status', async () => {
+    const store = fixture();
+    const snapshot = sui(async (owner) => (owner === REFILL_ACCOUNT ? '500' : '100'));
+
+    await observeSponsorOperationsBalances({
+      sui: snapshot,
+      state: store.state,
+      spendState: store.spendState,
+      settings: settings([SLOT_A, SLOT_B]),
     });
-    expect(stub.slotWrites).toHaveLength(2);
-    const a = stub.slotWrites.find((s) => s.address === SLOT_A)!;
-    const b = stub.slotWrites.find((s) => s.address === SLOT_B)!;
-    expect(a.fields.state).toBe('healthy');
-    expect(b.fields.state).toBe('low_balance');
-    expect(stub.sponsorRefillAccountWrites).toHaveLength(1);
-    expect(stub.sponsorRefillAccountWrites[0].healthy).toBe('1');
-    expect(stub.sponsorRefillAccountWrites[0].refillsRemaining).toBe('2');
+
+    expect(store.slotWrites.map((entry) => entry.address).sort()).toEqual([SLOT_A, SLOT_B]);
+    expect(store.slotWrites.every((entry) => !('state' in entry.fields))).toBe(true);
   });
 });

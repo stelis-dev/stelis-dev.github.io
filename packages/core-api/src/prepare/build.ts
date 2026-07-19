@@ -14,7 +14,11 @@
  */
 import { Transaction } from '@mysten/sui/transactions';
 import { fromBase64 } from '@mysten/sui/utils';
-import type { ExecutionCostClaimEstimate, SimulationGasUsed } from '@stelis/core-relay';
+import type {
+  ExecutionCostClaimEstimate,
+  HostValidationEnv,
+  SimulationGasUsed,
+} from '@stelis/core-relay';
 import type { PtbCommand, SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
 import type {
   ExecutableSwapQuote,
@@ -30,7 +34,9 @@ import {
   PrefixValueTraceError,
   SlippageQueryError,
   traceUserPrefixValue,
+  validateGenericSettlementTransaction,
   type PrefixValueTrace,
+  type SuiSimulationResult,
 } from '@stelis/core-relay';
 import {
   createDeepbookQuotePort,
@@ -42,16 +48,22 @@ import {
   createRequestQuoteCache,
   ExecutionGapExceededError,
   MarketQuoteUnavailableError,
+  simulateAddressBalanceGasTransaction,
   SwapUnviableUnderPolicyError,
 } from '@stelis/core-relay/server';
 import type { QuoteRpcStats, QuoteCache } from '@stelis/core-relay/server';
-import { resolvePaymentSource } from './coinSelection.js';
+import {
+  createPaymentSourceReader,
+  resolvePaymentSource,
+  type PaymentSourceReader,
+} from './coinSelection.js';
 import { PrepareValidationError, type PrepareErrorMeta } from './replay.js';
 import {
   classifyDryRunFailure,
-  safeBuild,
+  safeBuildAddressBalanceGasTransaction,
   buildSettleMeta as _buildSettleMeta,
 } from './prepareErrors.js';
+import { extractSettleArgsFromBuiltTx } from './extractSettleArgs.js';
 import {
   checkCreditOnlyEligibility,
   calculateRequiredSwapOutput,
@@ -64,9 +76,7 @@ import { compileCreditSettlement, compileSwapSettlement } from './ptbCompiler.js
 import type { SettlePlanAuditFields } from './settlePlanTypes.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_BUILD_STAGE } from '../observability/events.js';
-import { createHash } from 'crypto';
 import { mist, unBps, type Mist } from '../internal/brand.js';
-import { parseCurrentSuiTerminalForBytes } from '../session/sessionPrimitives.js';
 import type {
   BuildContext,
   GenericPrepareBuildOutput,
@@ -189,31 +199,22 @@ type CreditProbeMeasurement =
   | { outcome: 'skipped' };
 
 function extractSuccessfulDryRunGas(
-  simResult: unknown,
-  dryRunBytes: Uint8Array,
+  result: SuiSimulationResult,
   stelisPackageId: string,
   commands: readonly PtbCommand[],
   meta: PrepareErrorMeta,
 ): SimulationGasUsed {
-  const terminal = parseCurrentSuiTerminalForBytes(simResult, dryRunBytes);
-  if (!terminal) {
-    throw new PrepareValidationError(
-      'DRY_RUN_FAILED',
-      'Dry-run returned a malformed terminal result',
-    );
+  if (result.outcome === 'failure') {
+    throw classifyDryRunFailure(result.error, stelisPackageId, commands, meta);
   }
-  if (terminal.kind === 'failure') {
-    throw classifyDryRunFailure(terminal.error.message, stelisPackageId, commands, meta);
-  }
-  if (!terminal.gasUsed) {
-    throw new PrepareValidationError('DRY_RUN_NO_GAS', 'Dry-run returned no gas usage');
-  }
-  return terminal.gasUsed;
+  return result.effects.gasUsed;
 }
 
 async function dryRunForGas(
   ctx: BuildContext,
   tx: Transaction,
+  sponsorAddress: string,
+  gasBudget: bigint,
   meta: PrepareErrorMeta,
   completedStage: string,
   pass: 'credit_preswap' | 'pass1',
@@ -234,9 +235,16 @@ async function dryRunForGas(
   const settlementTokenSymbol = failureContext.settlementTokenSymbol;
   const commands = convertSdkCommands(tx.getData().commands as unknown[]);
 
-  let dryRunBytes: Uint8Array;
+  let gasTransaction;
   try {
-    dryRunBytes = await safeBuild(tx, ctx.sui, ctx.packageId, meta);
+    gasTransaction = await safeBuildAddressBalanceGasTransaction(
+      tx,
+      ctx.sui,
+      sponsorAddress,
+      gasBudget,
+      ctx.packageId,
+      meta,
+    );
   } catch (err) {
     logPrepareBuildStage('dryrun_safebuild_failed', {
       pass,
@@ -249,12 +257,9 @@ async function dryRunForGas(
     throw err;
   }
 
-  let simResult: Awaited<ReturnType<typeof ctx.sui.simulateTransaction>>;
+  let simResult: SuiSimulationResult;
   try {
-    simResult = await ctx.sui.simulateTransaction({
-      transaction: dryRunBytes,
-      include: { effects: true },
-    });
+    simResult = await simulateAddressBalanceGasTransaction(gasTransaction);
   } catch (err) {
     logPrepareBuildStage('dryrun_simulate_failed', {
       pass,
@@ -271,18 +276,18 @@ async function dryRunForGas(
   // `extractSuccessfulDryRunGas` may still throw below. Dual emit on extract
   // failure (simulated + dryrun_extract_failed) is intentional.
   logPrepareBuildStage(completedStage, {
-    has_transaction: Boolean(simResult.Transaction),
+    outcome: simResult.outcome,
   });
 
   try {
-    return extractSuccessfulDryRunGas(simResult, dryRunBytes, ctx.packageId, commands, meta);
+    return extractSuccessfulDryRunGas(simResult, ctx.packageId, commands, meta);
   } catch (err) {
     logPrepareBuildStage('dryrun_extract_failed', {
       pass,
       pool_id: poolId,
       settlement_token_symbol: settlementTokenSymbol,
       error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-      has_transaction: Boolean(simResult.Transaction),
+      outcome: simResult.outcome,
       completed_stage_emitted: true,
       ...quoteRpcStatsLogFields(quoteStats, false),
       phase_complete: false,
@@ -294,7 +299,7 @@ async function dryRunForGas(
 function assertSingleHopOnly(settlementSwapPath: SingleHopSettlementSwapPath): void {
   if (settlementSwapPath.hops.length !== 1) {
     throw new PrepareValidationError(
-      'SLIPPAGE_QUERY_FAILED',
+      'MARKET_QUOTE_UNAVAILABLE',
       `Unsupported hop count ${settlementSwapPath.hops.length} (only one-hop settlement swap paths are supported)`,
       { stage: 'hop_validation', poolId: settlementSwapPath.hops[0]?.poolId ?? 'unknown' },
     );
@@ -313,12 +318,6 @@ function materializePrefixValueTrace(
       throw new PrepareValidationError('PAYMENT_COIN_CONFLICT', error.message);
     }
     throw error;
-  }
-  if (trace.unaccountableSenderWithdrawal) {
-    throw new PrepareValidationError(
-      'UNACCOUNTABLE_WITHDRAWAL',
-      'Transaction contains a FundsWithdrawal(Sender) input that cannot be safely interpreted for address-balance accounting.',
-    );
   }
   return trace;
 }
@@ -363,7 +362,7 @@ async function loadRawMidPrices(
   } catch (err) {
     if (err instanceof SlippageQueryError) {
       throw new PrepareValidationError(
-        'SLIPPAGE_QUERY_FAILED',
+        'MARKET_QUOTE_UNAVAILABLE',
         `Mid-price query failed: ${err.message}`,
         {
           stage,
@@ -382,7 +381,7 @@ function normalizeMarketPolicyError(
 ): never {
   const poolId = descriptor.hops[0]?.poolId ?? 'unknown';
   if (err instanceof MarketQuoteUnavailableError) {
-    throw new PrepareValidationError('SLIPPAGE_QUERY_FAILED', err.message, { stage, poolId });
+    throw new PrepareValidationError('MARKET_QUOTE_UNAVAILABLE', err.message, { stage, poolId });
   }
   if (err instanceof ExecutionGapExceededError) {
     throw new PrepareValidationError('SLIPPAGE_EXCEEDED', err.message, { stage, poolId });
@@ -400,8 +399,8 @@ function normalizeMarketPolicyError(
 // as-is (network glitches, unexpected throw types, etc.).
 function classifyQuoteFailure(
   err: unknown,
-): 'SLIPPAGE_QUERY_FAILED' | 'SLIPPAGE_EXCEEDED' | 'UNKNOWN' {
-  if (err instanceof MarketQuoteUnavailableError) return 'SLIPPAGE_QUERY_FAILED';
+): 'MARKET_QUOTE_UNAVAILABLE' | 'SLIPPAGE_EXCEEDED' | 'UNKNOWN' {
+  if (err instanceof MarketQuoteUnavailableError) return 'MARKET_QUOTE_UNAVAILABLE';
   if (err instanceof ExecutionGapExceededError) return 'SLIPPAGE_EXCEEDED';
   if (err instanceof SwapUnviableUnderPolicyError) return 'SLIPPAGE_EXCEEDED';
   return 'UNKNOWN';
@@ -541,6 +540,7 @@ async function dryRunPreSwapCreditPathCosts(
     ctx,
     input,
     runContext.prefixTrace,
+    runContext.paymentSourceReader,
     {
       executionCostClaim: seedClaim,
       simGasReported: seedClaim,
@@ -572,13 +572,13 @@ async function dryRunPreSwapCreditPathCosts(
   }
 
   tx.setSender(input.senderAddress);
-  tx.setGasOwner(input.sponsorAddress);
-  tx.setGasBudget(ctx.maxClaimMist);
 
   const meta = buildSettleMeta(ctx, seedClaim, false);
   const gasUsed = await dryRunForGas(
     ctx,
     tx,
+    input.sponsorAddress,
+    ctx.maxClaimMist,
     meta,
     'credit_preswap_dryrun_simulated',
     'credit_preswap',
@@ -691,6 +691,7 @@ async function buildFinalGenericPrepareResult(
     ctx,
     input,
     prefixTrace,
+    runContext.paymentSourceReader,
     {
       executionCostClaim,
       simGasReported: simGas,
@@ -765,7 +766,6 @@ async function buildFinalGenericPrepareResult(
   }
 
   pass2Tx.setSender(input.senderAddress);
-  pass2Tx.setGasOwner(input.sponsorAddress);
 
   // gasBudget = grossGas × (1 + gasMarginBps / 10000), capped at maxClaimMist.
   // `unBps()` marks the explicit drop of the Bps brand at the
@@ -773,12 +773,40 @@ async function buildFinalGenericPrepareResult(
   // is not persisted on the store entry; it is read back from the PTB.
   const rawGasBudget = (grossGas * BigInt(10000 + unBps(input.gasMarginBps))) / 10000n;
   const gasBudget = rawGasBudget > ctx.maxClaimMist ? ctx.maxClaimMist : rawGasBudget;
-  pass2Tx.setGasBudget(gasBudget);
+
+  // Validate the exact PTB meaning before the server-only gas builder seals it.
+  // The resolver authority independently proves that commands, sender, and
+  // resolved input identities are unchanged in the sealed transaction.
+  assertFinalPaymentInputIntegrity(pass2Tx, ctx.packageId, paymentInputIntegrityExpectation);
+  const validationEnv: HostValidationEnv = {
+    network: ctx.network,
+    settlementPayoutRecipientAddress: ctx.settlementPayoutRecipientAddress,
+    configId: ctx.configId,
+    vaultRegistryId: ctx.vaultRegistryId,
+    packageId: ctx.packageId,
+    allowedSettlementSwapPaths: ctx.allowedSettlementSwapPaths,
+  };
+  const l1Validation = validateGenericSettlementTransaction(pass2Tx, validationEnv);
+  const settleArgs = l1Validation.ok
+    ? extractSettleArgsFromBuiltTx(
+        convertSdkCommands(pass2Tx.getData().commands),
+        pass2Tx.getData().inputs,
+        validationEnv,
+        { requirePaymentInputTrace: true },
+      )
+    : null;
 
   const settleMeta = buildSettleMeta(ctx, executionCostClaim, false);
-  let txBytes: Uint8Array;
+  let addressBalanceGasTransaction;
   try {
-    txBytes = await safeBuild(pass2Tx, ctx.sui, ctx.packageId, settleMeta);
+    addressBalanceGasTransaction = await safeBuildAddressBalanceGasTransaction(
+      pass2Tx,
+      ctx.sui,
+      input.sponsorAddress,
+      gasBudget,
+      ctx.packageId,
+      settleMeta,
+    );
   } catch (err) {
     // Final-build failure is the last gap before `two_pass_complete`. Without
     // this emit the request loses phase-local context for the failure (the
@@ -799,17 +827,8 @@ async function buildFinalGenericPrepareResult(
     throw err;
   }
 
-  // ── Tamper-proof hash ───────────────────────────────────────────────────
-
-  // `safeBuild` has accepted the final PTB. Before hashing it, confirm that
-  // the suffix still contains the exact objects and amounts selected by the
-  // funding resolver.
-  assertFinalPaymentInputIntegrity(pass2Tx, ctx.packageId, paymentInputIntegrityExpectation);
-
-  const txBytesHash = sha256Hex(txBytes);
   const rpcSummary = summarizeRpcStats(rpcAcc);
   logPrepareBuildStage('two_pass_complete', {
-    tx_bytes_hash: txBytesHash,
     execution_cost_claim_mist: executionCostClaim.toString(),
     sim_gas_mist: simGas.toString(),
     slippage_buffer_mist: slippageBufferMist.toString(),
@@ -821,8 +840,9 @@ async function buildFinalGenericPrepareResult(
   });
 
   return {
-    txBytes,
-    txBytesHash,
+    addressBalanceGasTransaction,
+    l1Validation,
+    settleArgs,
     executionCostClaim,
     simGas,
     gasVarianceFixedMist,
@@ -854,6 +874,7 @@ interface GenericPrepareBuildRunContext {
   readonly rpcAcc: BuildRpcAccumulator;
   readonly quoteCache: QuoteCache;
   readonly prefixTrace: PrefixValueTrace;
+  readonly paymentSourceReader: PaymentSourceReader;
 }
 
 interface MaxClaimGasProbeResult {
@@ -869,6 +890,7 @@ interface SwapExecutionGapMeasurement {
 }
 
 function createGenericPrepareBuildRunContext(
+  ctx: BuildContext,
   input: GenericPrepareBuildRequest,
 ): GenericPrepareBuildRunContext {
   // Request-local quote cache shared across pass1 / pass1.5 / pass2 so that
@@ -880,6 +902,11 @@ function createGenericPrepareBuildRunContext(
     quoteCache: createRequestQuoteCache(),
     prefixTrace: materializePrefixValueTrace(
       Transaction.fromKind(fromBase64(input.userTxKindBytes)),
+      input.settlementSwapPath.settlementTokenType,
+    ),
+    paymentSourceReader: createPaymentSourceReader(
+      ctx.sui,
+      input.senderAddress,
       input.settlementSwapPath.settlementTokenType,
     ),
   };
@@ -920,6 +947,7 @@ async function runMaxClaimGasProbe(
     ctx,
     input,
     runContext.prefixTrace,
+    runContext.paymentSourceReader,
     {
       executionCostClaim: pass1Claim,
       simGasReported: pass1Claim,
@@ -947,11 +975,6 @@ async function runMaxClaimGasProbe(
     pass1_quantity_in_rpc_calls: runContext.rpcAcc.pass1Quote.quantityInCalls,
   });
   pass1Tx.setSender(input.senderAddress);
-  pass1Tx.setGasOwner(input.sponsorAddress);
-  // Set explicit gasBudget so the SDK's core-resolver skips its internal
-  // setGasBudget simulation (which can fail with fragmented sponsor gas coins).
-  // Our own simulateTransaction below measures actual gas usage.
-  pass1Tx.setGasBudget(ctx.maxClaimMist);
 
   const pass1Meta = buildSettleMeta(ctx, pass1Claim, true);
 
@@ -960,6 +983,8 @@ async function runMaxClaimGasProbe(
   const gasUsed = await dryRunForGas(
     ctx,
     pass1Tx,
+    input.sponsorAddress,
+    ctx.maxClaimMist,
     pass1Meta,
     'pass1_dryrun_simulated',
     'pass1',
@@ -1057,7 +1082,7 @@ export async function runGenericPrepareBuildPipeline(
   input: GenericPrepareBuildRequest,
 ): Promise<GenericPrepareBuildOutput> {
   logGenericPrepareBuildStart(input);
-  const runContext = createGenericPrepareBuildRunContext(input);
+  const runContext = createGenericPrepareBuildRunContext(ctx, input);
 
   // A credit_general request can be credit-coverable after measurement even
   // when it cannot cover maxClaimMist. Measure that candidate without first
@@ -1162,6 +1187,7 @@ async function runPreparePass(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
   prefixTrace: PrefixValueTrace,
+  paymentSourceReader: PaymentSourceReader,
   audit: SettleAuditFields,
   prefetchedMidPrices?: bigint[],
   passLabel: PreparePassLabel = 'pass2',
@@ -1270,7 +1296,7 @@ async function runPreparePass(
       rpcStats.midPriceCalls += 1;
       rpcStats.midPriceTotalMs += Date.now() - midPriceStartedAt;
     } catch (err) {
-      // Mid-price RPC failed before any quote-solve work. Without this emit
+      // Mid-price query failed before any quote-solve work. Without this emit
       // the request would have zero failure-stage observability for the
       // mid-price axis. Partial timing reflects the elapsed duration of the
       // failed attempt; mid_price_calls is 0 because the success-path
@@ -1323,9 +1349,7 @@ async function runPreparePass(
   try {
     // ── Step 5: Funding resolution (chain query) ──────────────────────────
     const funding = await resolvePaymentSource(
-      ctx.sui,
-      input.senderAddress,
-      settlementSwapPath.settlementTokenType,
+      paymentSourceReader,
       swapAmountSmallest,
       settlementSwapPath.settlementTokenSymbol,
       prefixTrace,
@@ -1398,12 +1422,4 @@ async function runPreparePass(
     });
     throw err;
   }
-}
-
-/**
- * SHA-256 hex digest of raw bytes.
- * Uses Node.js crypto module.
- */
-function sha256Hex(data: Uint8Array): string {
-  return createHash('sha256').update(data).digest('hex');
 }

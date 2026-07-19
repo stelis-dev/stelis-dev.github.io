@@ -12,9 +12,9 @@
  *   8.  getBalance infra failure → best-effort sponsored fallback
  *       (NOTE: fallback itself may also fail if client node is down)
  *   9.  simulateTransaction infra failure → best-effort sponsored fallback
- *  10.  simulateTransaction FailedTransaction → Error (outside catch)
- *  11.  gasUsed missing → Error (outside catch)
- *  12.  SUI execution FailedTransaction → Error
+ *  10.  normalized simulation failure → Error (outside catch)
+ *  11.  programming TypeError → Error (outside infrastructure fallback)
+ *  12.  normalized SUI execution failure → Error
  *  13.  infra fallback: executeSponsored also fails → error propagates as-is
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -24,12 +24,28 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
-import { makeCreditResult } from './helpers/currentFixtures.js';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
+import {
+  SuiOperationError,
+  simulateSuiTransaction,
+  type SuiTransactionWithEventsResult,
+} from '@stelis/core-relay/browser';
 
-const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
-  mockExtractSettleFields: vi.fn(),
-  mockValidateSettleFields: vi.fn(),
-}));
+type SuiTransactionResult = Awaited<ReturnType<typeof simulateSuiTransaction>>;
+
+const { mockExtractSettleFields, mockValidateSettleFields, currentSuiOperations } = vi.hoisted(
+  () => ({
+    mockExtractSettleFields: vi.fn(),
+    mockValidateSettleFields: vi.fn(),
+    currentSuiOperations: {
+      value: null as null | {
+        balance: string | Error;
+        simulation: unknown;
+        execution: unknown;
+      },
+    },
+  }),
+);
 
 // ── Mock: integrity ───────────────────────────────────────────────────────────
 vi.mock('../src/integrity.js', () => ({
@@ -46,9 +62,28 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
-    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
+    getSuiBalance: vi.fn(async () => {
+      const balance = currentSuiOperations.value!.balance;
+      if (balance instanceof Error) throw balance;
+      return {
+        coinType: '0x2::sui::SUI',
+        balance,
+        coinBalance: balance,
+        addressBalance: '0',
+      };
+    }),
+    simulateSuiTransaction: vi.fn(async () => {
+      const simulation = currentSuiOperations.value!.simulation;
+      if (simulation instanceof Error) throw simulation;
+      return simulation;
+    }),
+    executeSuiTransaction: vi.fn(async () => {
+      const execution = currentSuiOperations.value!.execution;
+      if (execution instanceof Error) throw execution;
+      return execution;
+    }),
   };
 });
 
@@ -132,25 +167,64 @@ const EXPECTED_GAS_BUDGET = 1_100_000n; // 1_000_000 * 1.1
 const MOCK_BUILD_BYTES = new Uint8Array([1, 2, 3, 4]);
 const MOCK_BUILD_DIGEST = TransactionDataBuilder.getDigestFromBytes(MOCK_BUILD_BYTES);
 
-function executionError(message: string) {
-  return { $kind: 'Unknown' as const, message, Unknown: null };
+function exactEffects(digest = MOCK_BUILD_DIGEST, success = true) {
+  const error = { kind: 'MoveAbortRaw' as const };
+  return {
+    version: 2 as const,
+    transactionDigest: digest,
+    status: success
+      ? ({ success: true as const, error: null } as const)
+      : ({ success: false as const, error } as const),
+    gasUsed: { ...MOCK_SIM_GAS_USED, nonRefundableStorageFee: '0' },
+    eventsDigest: null,
+  };
 }
 
-function makeSimSuccess(digest = MOCK_BUILD_DIGEST) {
+function makeSimSuccess(): SuiTransactionResult {
   return {
-    $kind: 'Transaction' as const,
-    Transaction: {
-      digest,
-      status: { success: true as const, error: null },
-      effects: {
-        transactionDigest: digest,
-        status: { success: true as const, error: null },
-        gasUsed: MOCK_SIM_GAS_USED,
-      },
-    },
-    FailedTransaction: undefined,
-    commandResults: undefined,
+    outcome: 'success',
+    effects: { gasUsed: { ...MOCK_SIM_GAS_USED, nonRefundableStorageFee: '0' } },
   };
+}
+
+function makeExecutionSuccess(digest = MOCK_BUILD_DIGEST): SuiTransactionWithEventsResult {
+  return {
+    outcome: 'success',
+    digest,
+    effects: exactEffects(digest),
+    events: [],
+  };
+}
+
+function makeFailure(): SuiTransactionResult {
+  const error = { kind: 'MoveAbortRaw' as const };
+  return {
+    outcome: 'failure',
+    effects: { gasUsed: { ...MOCK_SIM_GAS_USED, nonRefundableStorageFee: '0' } },
+    error,
+  };
+}
+
+function makeExecutionFailure(): SuiTransactionWithEventsResult {
+  const error = { kind: 'MoveAbortRaw' as const };
+  return {
+    outcome: 'failure',
+    digest: MOCK_BUILD_DIGEST,
+    effects: {
+      ...exactEffects(MOCK_BUILD_DIGEST, false),
+      status: { success: false, error },
+    },
+    error,
+    events: [],
+  };
+}
+
+function transportUnavailable(operation: 'get_balance' | 'simulate_transaction') {
+  return new SuiOperationError('transport_unavailable', {
+    operation,
+    attempt: 1,
+    maxAttempts: 1,
+  });
 }
 
 function makeSuiClient(
@@ -159,29 +233,22 @@ function makeSuiClient(
     simResult: unknown;
     execResult: unknown;
     buildBytes: Uint8Array;
+    balanceError: Error;
+    simulationError: Error;
   }> = {},
 ): SuiGrpcClient {
   const balanceMist = overrides.balanceMist ?? SUFFICIENT_SUI_BALANCE;
   const simResult = overrides.simResult ?? makeSimSuccess();
-  const execResult = overrides.execResult ?? {
-    $kind: 'Transaction',
-    Transaction: {
-      digest: MOCK_BUILD_DIGEST,
-      status: { success: true, error: null },
-      effects: {
-        transactionDigest: MOCK_BUILD_DIGEST,
-        status: { success: true, error: null },
-      },
-    },
-  };
-  return {
-    getBalance: vi.fn().mockResolvedValue({ balance: { balance: balanceMist } }),
-    simulateTransaction: vi.fn().mockResolvedValue(simResult),
-    executeTransaction: vi.fn().mockResolvedValue(execResult),
-    getReferenceGasPrice: vi.fn().mockResolvedValue(1000n),
-    listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
+  const execResult = overrides.execResult ?? makeExecutionSuccess();
+  const client = withSuiClientIdentity({
     resolveTransactionPlugin: vi.fn().mockReturnValue(undefined),
-  } as unknown as SuiGrpcClient;
+  });
+  currentSuiOperations.value = {
+    balance: overrides.balanceError ?? balanceMist,
+    simulation: overrides.simulationError ?? simResult,
+    execution: execResult,
+  };
+  return client;
 }
 
 async function createSDK(): Promise<StelisSDK> {
@@ -306,8 +373,7 @@ describe('StelisSDK.executeSuiFirst', () => {
   it('falls back to executeSponsored when getBalance fails with network error (best-effort)', async () => {
     // NOTE: fallback may also fail if the same client node is down.
     // This test verifies the fallback path is attempted, not that it always succeeds.
-    const client = makeSuiClient();
-    (client.getBalance as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('fetch failed'));
+    const client = makeSuiClient({ balanceError: transportUnavailable('get_balance') });
     mockPrepare.mockResolvedValue({
       txBytes: 'base64TxBytes',
       receiptId: '0x' + 'ff'.repeat(32),
@@ -332,10 +398,9 @@ describe('StelisSDK.executeSuiFirst', () => {
 
   // ── 9: simulateTransaction infra failure → best-effort sponsored fallback ───
   it('falls back to executeSponsored when simulateTransaction fails with timeout (best-effort)', async () => {
-    const client = makeSuiClient();
-    (client.simulateTransaction as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error('timeout'),
-    );
+    const client = makeSuiClient({
+      simulationError: transportUnavailable('simulate_transaction'),
+    });
     mockPrepare.mockResolvedValue({
       txBytes: 'base64TxBytes',
       receiptId: '0x' + 'ff'.repeat(32),
@@ -358,110 +423,35 @@ describe('StelisSDK.executeSuiFirst', () => {
     expect(result.path).toBe('sponsored');
   });
 
-  // ── 10: simulateTransaction FailedTransaction → throw (outside catch) ─────
-  it('throws when simulation returns FailedTransaction', async () => {
-    const client = makeSuiClient({
-      simResult: {
-        $kind: 'FailedTransaction',
-        FailedTransaction: {
-          digest: MOCK_BUILD_DIGEST,
-          status: { success: false, error: executionError('InsufficientGas') },
-        },
-        Transaction: undefined,
-        commandResults: undefined,
-      },
-    });
+  // ── 10: normalized simulation failure → throw (outside catch) ─────────────
+  it('throws when the Sui gateway returns a simulation failure', async () => {
+    const client = makeSuiClient({ simResult: makeFailure() });
     await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
       'Simulation failed',
     );
     expect(mockSponsor).not.toHaveBeenCalled();
   });
 
-  // ── 11: gasUsed missing → throw (outside catch) ───────────────────────────
-  it('throws when simulation returns success but gasUsed is missing', async () => {
-    const client = makeSuiClient({
-      simResult: {
-        $kind: 'Transaction',
-        Transaction: {
-          digest: MOCK_BUILD_DIGEST,
-          status: { success: true, error: null },
-          effects: {
-            transactionDigest: MOCK_BUILD_DIGEST,
-            status: { success: true, error: null },
-          },
-        }, // no gasUsed
-        FailedTransaction: undefined,
-        commandResults: undefined,
-      },
-    });
+  // ── 11: programming error is not an infrastructure fallback ───────────────
+  it('does not classify a programming TypeError as infrastructure fallback', async () => {
+    const client = makeSuiClient({ simulationError: new TypeError('invalid request') });
     await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
-      'no gasUsed',
-    );
-  });
-
-  it('rejects a self-consistent simulation result for another transaction', async () => {
-    const client = makeSuiClient({ simResult: makeSimSuccess('different-digest') });
-    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
-      'Simulation returned a malformed or mismatched result',
+      'invalid request',
     );
     expect(mockSponsor).not.toHaveBeenCalled();
   });
 
-  // ── 12: SUI execution FailedTransaction → throw ───────────────────────────
-  it('throws when direct SUI executeTransaction returns FailedTransaction', async () => {
-    const client = makeSuiClient({
-      execResult: {
-        $kind: 'FailedTransaction',
-        FailedTransaction: {
-          digest: MOCK_BUILD_DIGEST,
-          status: { success: false, error: executionError('MoveAbort') },
-        },
-        Transaction: undefined,
-      },
-    });
+  // ── 12: normalized SUI execution failure → throw ──────────────────────────
+  it('throws when the direct SUI gateway returns an execution failure', async () => {
+    const client = makeSuiClient({ execResult: makeExecutionFailure() });
     await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
       'Transaction failed',
     );
   });
 
-  it('rejects a self-consistent direct execution result for another transaction', async () => {
-    const client = makeSuiClient({
-      execResult: {
-        $kind: 'Transaction',
-        Transaction: {
-          digest: 'different-digest',
-          status: { success: true, error: null },
-          effects: {
-            transactionDigest: 'different-digest',
-            status: { success: true, error: null },
-          },
-        },
-      },
-    });
-    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
-      'Transaction returned a malformed or mismatched result',
-    );
-  });
-
-  it('rejects a direct execution result that omits requested effects', async () => {
-    const client = makeSuiClient({
-      execResult: {
-        $kind: 'Transaction',
-        Transaction: {
-          digest: MOCK_BUILD_DIGEST,
-          status: { success: true, error: null },
-        },
-      },
-    });
-    await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
-      'Transaction returned no requested effects',
-    );
-  });
-
   // ── 13: infra fallback → executeSponsored also fails → error propagates ─────
   it('propagates executeSponsored error when infra fallback also fails', async () => {
-    const client = makeSuiClient();
-    (client.getBalance as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('fetch failed'));
+    const client = makeSuiClient({ balanceError: transportUnavailable('get_balance') });
     mockPrepare.mockRejectedValue(new Error('HOST_DOWN'));
 
     await expect(sdk.executeSuiFirst(new Transaction(), defaultOpts(client))).rejects.toThrow(
@@ -505,8 +495,7 @@ describe('StelisSDK.executeSuiFirst', () => {
 
   // ── orderId echo — infra fallback (getBalance failure) ─────────────────
   it('echoes orderId on infra fallback path (getBalance failure)', async () => {
-    const client = makeSuiClient();
-    (client.getBalance as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('fetch failed'));
+    const client = makeSuiClient({ balanceError: transportUnavailable('get_balance') });
     mockPrepare.mockResolvedValue({
       txBytes: 'base64TxBytes',
       receiptId: '0x' + 'ff'.repeat(32),

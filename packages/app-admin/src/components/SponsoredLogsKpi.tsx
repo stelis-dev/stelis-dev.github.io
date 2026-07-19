@@ -17,7 +17,7 @@
  */
 
 import { mistToSui } from '../utils';
-import type { SponsoredExecutionAggregate } from '../api/client';
+import type { AdminSponsoredExecutionAggregate } from '@stelis/contracts';
 
 const NEGATIVE_STYLE: React.CSSProperties = { color: '#f87171' };
 const UNSIGNED_DECIMAL_RE = /^(?:0|[1-9]\d*)$/;
@@ -47,7 +47,7 @@ function formatCompactCount(value: string): string {
 
 export interface SponsoredLogsKpiProps {
   /** Aggregate summary fetched from the admin API. */
-  readonly summary: SponsoredExecutionAggregate | null;
+  readonly summary: AdminSponsoredExecutionAggregate | null;
   /** Loading state — render dimmed placeholders. */
   readonly loading?: boolean;
 }

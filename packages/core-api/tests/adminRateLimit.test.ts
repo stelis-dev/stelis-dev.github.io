@@ -31,6 +31,12 @@ describe('parseFixedWindowResult', () => {
     expect(() => parseFixedWindowResult([1])).toThrow('invalid EVAL response');
   });
 
+  it('throws on trailing values', () => {
+    expect(() => parseFixedWindowResult([1, 900000, 'unexpected'])).toThrow(
+      'invalid EVAL response',
+    );
+  });
+
   it('coerces string values to number', () => {
     const result = parseFixedWindowResult(['5', '900000']);
     expect(result).toEqual({ current: 5, pttlMs: 900000 });
@@ -40,6 +46,12 @@ describe('parseFixedWindowResult', () => {
     expect(() => parseFixedWindowResult(['1.5', '900000'])).toThrow('invalid current');
     expect(() => parseFixedWindowResult(['1e3', '900000'])).toThrow('invalid current');
     expect(() => parseFixedWindowResult(['9007199254740993', '900000'])).toThrow('invalid current');
+  });
+
+  it('rejects impossible counter and expiry states', () => {
+    expect(() => parseFixedWindowResult([0, 900000])).toThrow('invalid EVAL response');
+    expect(() => parseFixedWindowResult([1, -1])).toThrow('invalid EVAL response');
+    expect(() => parseFixedWindowResult([1, -2])).toThrow('invalid EVAL response');
   });
 });
 

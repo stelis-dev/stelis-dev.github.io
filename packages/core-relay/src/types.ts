@@ -204,8 +204,8 @@ export interface SettleArgs {
   slippageBufferMist: bigint;
   /**
    * Quote timestamp (ms since epoch) embedded in the settle PTB.
-   * Used for observability and audit trail only. Not used for expiry
-   * enforcement — the prepare store TTL owns that concern.
+   * Used for observability and audit trail only. The sponsored-execution
+   * receipt deadline, not this transaction field, owns expiry enforcement.
    */
   quoteTimestampMs: bigint;
 }

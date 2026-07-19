@@ -29,7 +29,7 @@ The repository uses npm workspaces for development. Product publishing and deplo
 | Package | Role |
 | --- | --- |
 | `@stelis/contracts` | Contract IDs, shared request and response types, settlement swap direction data, and data shared with Move contracts |
-| `@stelis/core-relay` | Transaction validation, Sui request/result identity binding, pricing, settlement swap path checks, and transaction-building helpers |
+| `@stelis/core-relay` | Transaction validation, exact current Sui operation gateways, pricing, settlement swap path checks, and transaction-building helpers |
 | `@stelis/core-api` | Server-side domain logic for prepare, sponsor, admin, promotion, stores, and abuse controls |
 
 Internal packages are marked `private: true`. They are workspace boundaries, not public install targets.
@@ -52,7 +52,6 @@ stelis/
   docs/
     index.md
     repository-structure.md
-    schemas/
     architecture/
   scripts/
 ```
@@ -80,9 +79,11 @@ graph TD
     AppApi --> Contracts
     AppApi --> Relay
     AppApi --> CoreApi
+    AppWeb --> Contracts
     AppWeb --> Sdk
     AppWeb --> Relay
     AppAdmin --> Contracts
+    AppAdmin --> Relay
     Mcp -. "HTTP at runtime" .-> AppApi
     Contracts -. "contains IDs for" .-> Move
 ```
@@ -91,7 +92,7 @@ Important rules:
 
 - `@stelis/sdk` and `@stelis/mcp-server` are sibling products. They must not import each other.
 - `@stelis/mcp-server` calls a Stelis Host over HTTP and consumes current wire contracts from `@stelis/contracts` in source. Its published build bundles that private source-of-truth code and does not require `@stelis/contracts` at runtime. It does not import `@stelis/sdk`, `@stelis/core-api`, or `@stelis/app-api`.
-- App packages depend on internal packages only when they are built inside this repository. The Host and public web app consume `@stelis/core-relay` directly for Sui request/result identity binding; they do not reach it through a convenience re-export from another product boundary.
+- App packages depend on internal packages only when they are built inside this repository. The Host, public web app, and admin web app consume `@stelis/core-relay` directly for exact current Sui operations; they do not reach it through a convenience re-export from another product boundary.
 - External user entry points are product packages, not internal packages.
 - Do not add a new top-level package unless it is a product package or a durable internal package with clear ownership.
 

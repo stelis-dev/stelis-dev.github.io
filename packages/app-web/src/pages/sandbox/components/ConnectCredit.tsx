@@ -4,12 +4,12 @@ import type { CreditResult } from '@stelis/sdk';
 import { useCallback, useEffect, useState } from 'react';
 import { useSettlementSwapPathStatus } from '../hooks/useSettlementSwapPathStatus';
 import { useSDK } from '../hooks/useSDK';
-import { queryUserCredit } from '@stelis/sdk';
 import { getSelectedSettlementSwapPath, SUI_DECIMALS } from '../constants';
 import { WalletButton } from './WalletButton';
 import { SANDBOX_CARD_STYLE } from './cardStyles';
 import { formatSmallestUnitDecimal, parseDecimalIntegerToBigInt } from '../amount';
 import { signAndExecuteLocalTransaction } from '../localSuiExecution';
+import { createSuiEndpointSnapshot, getSuiBalance } from '@stelis/core-relay/browser';
 
 interface ConnectCreditProps {
   refreshKey?: number;
@@ -44,21 +44,22 @@ export function ConnectCredit({
     if (!account || !client || !settlementTokenType) return;
     let cancelled = false;
     (async () => {
+      const endpoints = createSuiEndpointSnapshot([client]);
       // ── SUI balance ──────────────────────────────────────────────
       try {
-        const bal = await client.getBalance({ owner: account.address });
-        if (!cancelled) setSuiBalance(bal.balance.balance);
+        const bal = await getSuiBalance(endpoints, { owner: account.address });
+        if (!cancelled) setSuiBalance(bal.balance);
       } catch {
         // SUI balance fetch failed — non-critical for sandbox display
       }
 
       // ── Settlement token balance (coin objects + address balance) ─
       try {
-        const bal = await client.getBalance({
+        const bal = await getSuiBalance(endpoints, {
           owner: account.address,
           coinType: settlementTokenType,
         });
-        if (!cancelled) setSettlementTokenBalance(bal.balance.balance);
+        if (!cancelled) setSettlementTokenBalance(bal.balance);
       } catch {
         // Settlement token balance fetch failed — non-critical for sandbox display
       }
@@ -71,7 +72,7 @@ export function ConnectCredit({
   const fetchCredit = useCallback(async () => {
     if (!account || !client || !sdk) return;
     try {
-      const res = await queryUserCredit(client, sdk.config.vaultRegistryId, account.address);
+      const res = await sdk.queryUserCredit(client, account.address);
       setCreditRes(res);
       setCreditError(null);
     } catch (err) {

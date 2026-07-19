@@ -5,7 +5,17 @@
  * failures.ts runtime predicates, abuse-blocker adapters, and app-api
  * error mapping.
  */
-import type { HostErrorCode } from '@stelis/contracts';
+import type {
+  PromotionPrepareErrorCode,
+  PromotionSponsorErrorCode,
+  RelayConfigErrorCode,
+  RelayPrepareErrorCode,
+  RelaySponsorErrorCode,
+  RelayStatusErrorCode,
+  StudioClaimErrorCode,
+  StudioDetailErrorCode,
+  StudioListErrorCode,
+} from '@stelis/contracts';
 
 // ─────────────────────────────────────────────
 // Public type exports
@@ -52,7 +62,18 @@ export type PromotionAbuseCode = (typeof PROMOTION_ABUSE_CODES)[keyof typeof PRO
  * promotion-specific internal abuse codes. Public HTTP projection belongs to
  * `@stelis/contracts`; this module owns classification and abuse impact.
  */
-export type FailureCode = HostErrorCode | PromotionAbuseCode;
+type RelayAndStudioFailureCode =
+  | RelayStatusErrorCode
+  | RelayConfigErrorCode
+  | RelayPrepareErrorCode
+  | RelaySponsorErrorCode
+  | StudioListErrorCode
+  | StudioDetailErrorCode
+  | StudioClaimErrorCode
+  | PromotionPrepareErrorCode
+  | PromotionSponsorErrorCode;
+
+export type FailureCode = RelayAndStudioFailureCode | PromotionAbuseCode;
 
 /**
  * Code-level classification (orthogonal to subcode-level carve-out).
@@ -75,7 +96,7 @@ export type FailureCode = HostErrorCode | PromotionAbuseCode;
  *   time. Treated like `ignored` for abuse counters (the subject did
  *   not cause the drift), but additionally emits
  *   `SPONSOR_DRIFT_OBSERVED` for operator visibility when the drift
- *   was stored-hash-verified (post-consume). `abuseImpact` is `SKIP_BOTH`.
+ *   was prepared-hash-verified. `abuseImpact` is `SKIP_BOTH`.
  * - `infra`: 5xx-class infrastructure outcomes (Redis outages, pool
  *   manager unhealthy, sponsor lease commit failures, internal errors).
  *   Counters skip; the call site typically maps to HTTP 503/500.
@@ -311,25 +332,26 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     classification: 'normal',
     abuseImpact: IP_ONLY,
   },
+  PAYMENT_COIN_LIMIT_EXCEEDED: {
+    classification: 'normal',
+    abuseImpact: IP_ONLY,
+    notes: 'Bounded settlement-token Coin discovery could not prove a safe funding source.',
+  },
   DRY_RUN_FAILED: {
     classification: 'normal',
     abuseImpact: COUNT_BOTH,
     notes: 'Build-time dry-run rejection; subcode-level carve-out may apply.',
-  },
-  DRY_RUN_NO_GAS: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Sui simulation returned no gasUsed — server-observed RPC anomaly.',
   },
   UNACCOUNTABLE_WITHDRAWAL: {
     classification: 'manipulation',
     abuseImpact: SKIP_BOTH,
     notes: 'User-prefix address-balance withdrawal cannot be accounted exactly.',
   },
-  SLIPPAGE_QUERY_FAILED: {
+  MARKET_QUOTE_UNAVAILABLE: {
     classification: 'infra',
     abuseImpact: SKIP_BOTH,
-    notes: 'DeepBook query RPC failure at build time.',
+    notes:
+      'A completed DeepBook view did not provide a usable current quote; Sui operation failures remain internal errors.',
   },
   SLIPPAGE_EXCEEDED: {
     classification: 'normal',
@@ -456,10 +478,20 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     abuseImpact: SKIP_BOTH,
     notes: 'Already-blocked subject; never recorded again.',
   },
+  RATE_LIMITED: {
+    classification: 'ignored',
+    abuseImpact: SKIP_BOTH,
+    notes: 'The active rate limit is already the protection; do not count the rejection again.',
+  },
   BLOCK_CHECK_UNAVAILABLE: {
     classification: 'infra',
     abuseImpact: SKIP_BOTH,
     notes: 'Abuse blocker adapter throw — fail-closed availability defect.',
+  },
+  STUDIO_UNAVAILABLE: {
+    classification: 'infra',
+    abuseImpact: SKIP_BOTH,
+    notes: 'The current Host has no usable Studio runtime for the requested route.',
   },
   VAULT_STATE_INCONSISTENT: {
     classification: 'drift',
@@ -605,6 +637,11 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     classification: 'normal',
     abuseImpact: IP_ONLY,
   },
+  PROMOTION_CURRENT_CONFLICT: {
+    classification: 'ignored',
+    abuseImpact: SKIP_BOTH,
+    notes: 'Exact current Promotion or ledger state changed during one atomic operation.',
+  },
   NOT_CLAIMED: {
     classification: 'normal',
     abuseImpact: IP_ONLY,
@@ -684,17 +721,6 @@ export const FAILURE_TABLE: Readonly<Record<FailureCode, FailurePolicy>> = {
     notes:
       'Shared sponsor recorder code for both routes; market subcodes increment the subject revert family.',
   },
-  GAS_EFFECTS_MISSING: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Promotion-route post-success gasUsed missing.',
-  },
-  CONSUME_FAILED: {
-    classification: 'infra',
-    abuseImpact: SKIP_BOTH,
-    notes: 'Promotion-route prepare-store consume infra failure.',
-  },
-
   // ── Promotion-specific abuse codes (not public HTTP codes) ───────
   // These never appear in HTTP response bodies; they are recorded
   // against the abuse blocker via `recordPromotionAbuseEvent`.

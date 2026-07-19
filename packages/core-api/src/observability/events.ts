@@ -5,10 +5,6 @@
  * `../structuredEventLog.ts`. Redis-backed admin audit logs written
  * by `packages/app-api/src/adminAuditLog.ts` are a separate observability
  * path and are out of scope for this file.
- *
- * The app-api Sui failover transport additionally emits a typed, endpoint-
- * scoped event family at its owning boundary. The complete operator-facing
- * summary is in `docs/operations.md#observability`.
  */
 
 // ─────────────────────────────────────────────
@@ -22,9 +18,6 @@ export const PREPARE_INFLIGHT_RELEASED = 'PREPARE_INFLIGHT_RELEASED';
 export const PREPARE_INFLIGHT_REJECTED = 'PREPARE_INFLIGHT_REJECTED';
 export const PREPARE_INFLIGHT_RELEASE_FAILED = 'PREPARE_INFLIGHT_RELEASE_FAILED';
 export const PREPARE_ENTRY_CORRUPT = 'PREPARE_ENTRY_CORRUPT';
-export const PREPARE_STORE_EVICT_CALLBACK_FAILED = 'PREPARE_STORE_EVICT_CALLBACK_FAILED';
-export const PREPARE_STORE_EVICT_CLEANUP_FAILED = 'PREPARE_STORE_EVICT_CLEANUP_FAILED';
-export const PREPARE_STORE_EVICT_CLEANUP_THREW = 'PREPARE_STORE_EVICT_CLEANUP_THREW';
 export const PREPARE_SLOT_EXHAUSTED = 'PREPARE_SLOT_EXHAUSTED';
 
 // ─────────────────────────────────────────────
@@ -35,7 +28,6 @@ export const SPONSOR_FAILURE_RECORDED = 'SPONSOR_FAILURE_RECORDED';
 export const SPONSOR_FAILURE_RECORDER_FAILED = 'SPONSOR_FAILURE_RECORDER_FAILED';
 export const ABUSE_BLOCK_CHECK_FAILED = 'ABUSE_BLOCK_CHECK_FAILED';
 export const SPONSOR_SENDER_STORE_DIVERGENCE = 'SPONSOR_SENDER_STORE_DIVERGENCE';
-export const SPONSOR_EXEC_GAS_USED_MISSING = 'SPONSOR_EXEC_GAS_USED_MISSING';
 export const SPONSOR_DRIFT_OBSERVED = 'SPONSOR_DRIFT_OBSERVED';
 export const SETTLEMENT_ECONOMICS_EXECUTION = 'SETTLEMENT_ECONOMICS_EXECUTION';
 export const SETTLEMENT_ECONOMICS_LOG_FAILED = 'SETTLEMENT_ECONOMICS_LOG_FAILED';
@@ -45,13 +37,9 @@ export const SETTLEMENT_ECONOMICS_LOG_FAILED = 'SETTLEMENT_ECONOMICS_LOG_FAILED'
 // ─────────────────────────────────────────────
 
 export const SPONSOR_POOL_LEASE_CHECKOUT = 'SPONSOR_POOL_LEASE_CHECKOUT';
-export const SPONSOR_POOL_LEASE_COMMITTED = 'SPONSOR_POOL_LEASE_COMMITTED';
 export const SPONSOR_POOL_LEASE_CHECKIN = 'SPONSOR_POOL_LEASE_CHECKIN';
 export const SPONSOR_POOL_LEASE_EXHAUSTED = 'SPONSOR_POOL_LEASE_EXHAUSTED';
-export const SPONSOR_POOL_LEASE_RELEASE = 'SPONSOR_POOL_LEASE_RELEASE';
-export const SPONSOR_POOL_LEASE_RELEASE_FAILED = 'SPONSOR_POOL_LEASE_RELEASE_FAILED';
 export const SPONSOR_POOL_SIGN = 'SPONSOR_POOL_SIGN';
-export const SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE = 'SPONSOR_POOL_SLOT_INFO_UNRECOVERABLE';
 export const SPONSOR_POOL_CHECKIN_FAILED = 'SPONSOR_POOL_CHECKIN_FAILED';
 export const SPONSOR_RESULT_CALLBACK_FAILED = 'SPONSOR_RESULT_CALLBACK_FAILED';
 
@@ -65,6 +53,11 @@ export const SPONSOR_RESULT_CALLBACK_FAILED = 'SPONSOR_RESULT_CALLBACK_FAILED';
 // outer catch in the sponsor result callback traps an unexpected escape. The
 // `source` payload field discriminates the concrete emit site.
 export const SPONSOR_OPERATIONS_STATE_WRITE_FAILED = 'SPONSOR_OPERATIONS_STATE_WRITE_FAILED';
+
+// A retained SponsorOperations task failed before it could complete its own
+// durable transition. Raw balance observations are never rewritten from this
+// event path; the scheduler only reports the failure and keeps one retained retry timer.
+export const SPONSOR_OPERATIONS_TASK_FAILED = 'SPONSOR_OPERATIONS_TASK_FAILED';
 
 // ─────────────────────────────────────────────
 // Sponsored execution recorder
@@ -83,15 +76,7 @@ export const SPONSORED_LOGS_RECORDER_FAILED = 'SPONSORED_LOGS_RECORDER_FAILED';
 export const PROMOTION_ABUSE_RECORDED = 'PROMOTION_ABUSE_RECORDED';
 export const PROMOTION_ABUSE_RECORDER_FAILED = 'PROMOTION_ABUSE_RECORDER_FAILED';
 export const PROMOTION_GAS_OVERRUN_WARNING = 'PROMOTION_GAS_OVERRUN_WARNING';
-export const PROMOTION_USAGE_RECORDER_FAILED = 'PROMOTION_USAGE_RECORDER_FAILED';
 export const PROMOTION_SPONSOR_EXECUTION = 'PROMOTION_SPONSOR_EXECUTION';
-
-// Uncertain landing after `pool.sign()` issued the sponsor signature. The
-// transaction may have reached the network, but the Host could not prove a
-// terminal result. Operators reconcile by senderAddress + receiptId +
-// submitted-time window (digest is unavailable at the uncertainty boundary).
-export const PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY =
-  'PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY';
 
 // ─────────────────────────────────────────────
 // Execution-ledger lifecycle
@@ -99,19 +84,5 @@ export const PROMOTION_SPONSOR_POST_SIGNATURE_UNCERTAINTY =
 
 export const LEDGER_RELEASE_FAILED_IN_HANDLER = 'LEDGER_RELEASE_FAILED_IN_HANDLER';
 export const LEDGER_RELEASE_THREW_IN_HANDLER = 'LEDGER_RELEASE_THREW_IN_HANDLER';
-// Failure-path consume helper events. Mirror the release pair for the
-// post-signature/post-submit consume branches.
-// `_FAILED_IN_HANDLER`: `ConsumeResult.ok === false` (e.g.
-// `reservation_not_found`). `_THREW_IN_HANDLER`: adapter call threw.
-// Both preserve the primary sponsor error and signal that the reservation
-// may still be eligible for the ExecutionLedger reservation reaper release
-// path.
-export const LEDGER_CONSUME_FAILED_IN_HANDLER = 'LEDGER_CONSUME_FAILED_IN_HANDLER';
-export const LEDGER_CONSUME_THREW_IN_HANDLER = 'LEDGER_CONSUME_THREW_IN_HANDLER';
 export const PROMOTION_EXECUTION_LEDGER_REAPER_ERROR = 'PROMOTION_EXECUTION_LEDGER_REAPER_ERROR';
-
-// ─────────────────────────────────────────────
-// Redis / infrastructure
-// ─────────────────────────────────────────────
-
-export const REDIS_SCAN_UNAVAILABLE = 'REDIS_SCAN_UNAVAILABLE';
+export const ABUSE_BLOCK_EXPIRY_TASK_FAILED = 'ABUSE_BLOCK_EXPIRY_TASK_FAILED';

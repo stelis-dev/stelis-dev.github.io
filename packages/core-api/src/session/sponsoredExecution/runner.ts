@@ -14,18 +14,21 @@
  *
  * Cleanup ordering:
  *   route-specific reservations (reverse acquire order)
- *     → sponsor slot checkin
+ *     → sponsor slot release
  *       → inflight release
  * Inflight is intentionally non-transferable — it always releases on
  * every path so concurrency caps stay accurate after a durable commit.
  * See `reservations.ts` for the type-level enforcement.
  *
- * Internal module. The public prepare handlers now delegate to
- * `runPrepareStateMachine` while preserving their stable entrypoint
- * signatures.
+ * Internal module. Public prepare handlers delegate to
+ * `runPrepareStateMachine`.
  */
 
 import { toBase64, toHex } from '@mysten/sui/utils';
+import {
+  getAddressBalanceGasTransactionBytes,
+  getAddressBalanceGasTransactionTxBytesHash,
+} from '@stelis/core-relay/server';
 import type {
   GasBoundBuildResult,
   LedgerReservationHandle,
@@ -47,7 +50,8 @@ import {
   type ReservationLifecycle,
 } from './reservations.js';
 import type { SponsorPoolAdapter } from '../../context.js';
-import type { PreparedTxDraft, PrepareStoreAdapter } from '../../store/prepareTypes.js';
+import type { PreparedTxDraft } from '../../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../../store/sponsoredExecutionStore.js';
 import type { PrepareInflightLimiter } from '../../store/prepareInflightTypes.js';
 import type { PromotionExecutionLedger } from '../../studio/executionLedger.js';
 import type { ReserveFailureReason } from '../../studio/domain.js';
@@ -70,7 +74,7 @@ import type { ReserveFailureReason } from '../../studio/domain.js';
 export interface PrepareStateMachineHost {
   readonly inflightLimiter: PrepareInflightLimiter;
   readonly sponsorPool: SponsorPoolAdapter;
-  readonly prepareStore: PrepareStoreAdapter;
+  readonly sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   readonly executionLedger?: PromotionExecutionLedger;
 }
 
@@ -103,6 +107,8 @@ export interface PrepareDraftPolicyFields {
 export interface PrepareStateMachineRequest<TResult = unknown> {
   readonly senderAddress: string;
   readonly clientIp: string;
+  /** Runs after pure request validation and before any runner-owned domain I/O. */
+  readonly assertSponsorAvailable: () => Promise<void>;
   readonly ledgerAcquireParams?: {
     readonly promotionId: string;
     readonly userId: string;
@@ -160,21 +166,6 @@ function generateReceiptIdHex(): string {
   return `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
 }
 
-/**
- * Hook-call helper that:
- *   1. preserves the runner's awaiting contract regardless of whether
- *      the hook returns `void` or `Promise<void>`,
- *   2. accepts an optional hook (for the two route-reservation states
- *      that may be omitted by policies that do not need them).
- */
-async function callHook<Args extends unknown[]>(
-  hook: ((...args: Args) => Promise<unknown> | unknown) | undefined,
-  ...args: Args
-): Promise<void> {
-  if (!hook) return;
-  await hook(...args);
-}
-
 // ─────────────────────────────────────────────
 // Runner
 // ─────────────────────────────────────────────
@@ -207,23 +198,20 @@ export async function runPrepareStateMachine<TResult>(
   let buildResult: GasBoundBuildResult | null = null;
 
   try {
-    await callHook(policy.hooks.Intent, hookContext);
-    await callHook(policy.hooks.RequestValidation, hookContext);
+    await policy.hooks.Intent(hookContext);
+    await policy.hooks.RequestValidation(hookContext);
+    await request.assertSponsorAvailable();
 
     const inflight = new InflightReservationImpl(host.inflightLimiter);
     await inflight.acquire(policy.discriminator);
     acquired.push(inflight);
-    await callHook(policy.hooks.InflightAdmission, hookContext);
 
     chainSnapshot = await policy.hooks.ChainSnapshot(hookContext);
-    await callHook(policy.hooks.ExecutionPolicySelected, hookContext);
-    await callHook(policy.hooks.SlotFreePlan, hookContext);
 
     const slotReservation = new SponsorSlotReservationImpl(host.sponsorPool);
     sponsorSlotHandle = await slotReservation.acquire(receiptId);
     if (!sponsorSlotHandle) throw new RunnerSponsorSlotExhaustedError();
     acquired.push(slotReservation);
-    await callHook(policy.hooks.SponsorSlotReservationAcquired, hookContext, sponsorSlotHandle);
 
     if (policy.handleRequirements.gasBoundBuild.nonce) {
       if (!chainSnapshot.nonceAcquire) {
@@ -231,19 +219,13 @@ export async function runPrepareStateMachine<TResult>(
           'policy requires nonce reservation handle but ChainSnapshot did not return nonceAcquire',
         );
       }
-      const nonceReservation = new NonceReservationImpl(host.prepareStore);
+      const nonceReservation = new NonceReservationImpl(host.sponsoredExecutionStore);
       nonceHandle = await nonceReservation.acquire(
         hookContext.senderAddress,
         chainSnapshot.nonceAcquire.onchainLastNonce,
         receiptId,
       );
       acquired.push(nonceReservation);
-      await callHook(
-        policy.hooks.RouteReservationBeforeBuild,
-        hookContext,
-        sponsorSlotHandle,
-        nonceHandle,
-      );
     }
 
     const gasBoundInput = createGasBoundBuildInput({
@@ -251,6 +233,10 @@ export async function runPrepareStateMachine<TResult>(
       nonce: nonceHandle,
     });
     buildResult = await policy.hooks.GasBoundBuild(hookContext, gasBoundInput);
+    const txBytes = getAddressBalanceGasTransactionBytes(buildResult.addressBalanceGasTransaction);
+    const txBytesHash = getAddressBalanceGasTransactionTxBytesHash(
+      buildResult.addressBalanceGasTransaction,
+    );
 
     if (policy.handleRequirements.preparedCommit.ledgerReservation) {
       if (!host.executionLedger) {
@@ -277,22 +263,14 @@ export async function runPrepareStateMachine<TResult>(
       }
       ledgerReservationHandle = ledgerAcquireResult;
       acquired.push(ledgerReservation);
-      await callHook(
-        policy.hooks.RouteReservationAfterBuild,
-        hookContext,
-        sponsorSlotHandle,
-        ledgerReservationHandle,
-      );
     }
-
-    await callHook(policy.hooks.SelfCheck, hookContext);
 
     const policyDraftFields = request.preparedDraftFields();
     const commonDraftInputs = {
       receiptId,
       senderAddress: hookContext.senderAddress,
       clientIp: hookContext.clientIp,
-      txBytesHash: buildResult.txBytesHash,
+      txBytesHash,
       sponsorAddress: sponsorSlotHandle.sponsorAddress,
       executionPathKey: policyDraftFields.executionPathKey,
       orderId: policyDraftFields.orderId,
@@ -318,23 +296,19 @@ export async function runPrepareStateMachine<TResult>(
       draft = {
         ...commonDraftInputs,
         mode: 'promotion',
-        nonce: 0n,
         promotionId: ledgerReservationHandle.promotionId,
         userId: ledgerReservationHandle.userId,
         reservedGasMist: ledgerReservationHandle.reservedGasMist,
       };
     }
     const response = await request.projectResponse({
-      txBytesBase64: toBase64(buildResult.txBytes),
+      txBytesBase64: toBase64(txBytes),
       // Keep the runner's store input private. A response projector cannot
       // mutate receipt/hash/resource identity after this boundary.
       draft: Object.freeze({ ...draft }) as Readonly<PreparedTxDraft>,
     });
 
-    await slotReservation.commitToTxBytesHash(buildResult.txBytesHash);
-    await callHook(policy.hooks.SponsorLeaseCommitted, hookContext);
-
-    await host.prepareStore.store(draft);
+    await host.sponsoredExecutionStore.commitPreparedReceipt(draft);
     for (const reservation of acquired) {
       if (isTransferable(reservation)) reservation.transferOwnership();
     }

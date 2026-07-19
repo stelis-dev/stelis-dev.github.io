@@ -6,21 +6,62 @@
  * In prod, VITE_STELIS_API_URL provides the base URL (same pattern as
  * app-web's RELAY_API_BASE in relayApiEndpoint.ts).
  *
- * Current auth and Sponsor Refill Account withdrawal wire types and response
- * parsers come from `@stelis/contracts`. Other admin-only routes remain local
- * because this boundary does not broaden their public contract surface.
+ * Every current Admin/Auth request, success response, and coded error is
+ * validated by the shared `@stelis/contracts` wire authority at this boundary.
  */
 
 import {
+  ADMIN_BLOCKLIST_READ_ERROR_CODES,
+  ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
+  ADMIN_PROMOTION_CREATE_ERROR_CODES,
+  ADMIN_PROMOTION_DELETE_ERROR_CODES,
+  ADMIN_PROMOTION_LIST_ERROR_CODES,
+  ADMIN_PROMOTION_STATUS_ERROR_CODES,
+  ADMIN_PROMOTION_UPDATE_ERROR_CODES,
+  ADMIN_AUTH_LOGOUT_ERROR_CODES,
+  ADMIN_AUTH_NONCE_ERROR_CODES,
+  ADMIN_AUTH_VERIFY_ERROR_CODES,
+  ADMIN_READ_ERROR_CODES,
+  ADMIN_SESSION_ERROR_CODES,
+  ADMIN_SPONSORED_LOGS_ERROR_CODES,
+  ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES,
+  ADMIN_WITHDRAWAL_ERROR_CODES,
+  parseAdminAuditLogsResponse,
   parseAdminAuthChallengeResponse,
   parseAdminAuthSuccessResponse,
+  parseAdminAuthVerifyRequest,
+  parseAdminBlocklistDeleteRequest,
+  parseAdminBlocklistDeleteResponse,
+  parseAdminBlocklistQuery,
+  parseAdminBlocklistResponse,
+  parseAdminPromotionCreateRequest,
+  parseAdminPromotionDeleteResponse,
+  parseAdminPromotionListQuery,
+  parseAdminPromotionListResponse,
+  parseAdminPromotionResponse,
+  parseAdminPromotionStatusRequest,
+  parseAdminPromotionUpdateRequest,
+  parseAdminSponsoredLogsQuery,
+  parseAdminSessionResponse,
+  parseAdminSponsoredLogsResponse,
+  parseAdminSponsoredLogsSummaryResponse,
+  parseAdminStudioResponse,
   parseSponsorRefillAccountWithdrawalChallengeResponse,
+  parseSponsorRefillAccountWithdrawalRequest,
   parseSponsorRefillAccountWithdrawalResponse,
+  parseAdminSponsorOperationsResponse,
+  parseHostErrorResponse,
+  type AdminPromotionCreateRequest,
+  type AdminBlocklistDeleteRequest,
+  type AdminBlocklistQuery,
+  type AdminPromotionListQuery,
+  type AdminPromotionStatusRequest,
+  type AdminPromotionUpdateRequest,
+  type AdminSponsoredLogsMode,
   type AdminAuthVerifyRequest,
-  SingleHopSettlementSwapPathResponse,
+  type HostErrorCode,
+  type HostErrorMeta,
   type SponsorRefillAccountWithdrawalRequest,
-  SuiNetwork,
-  SponsorOperationsStatus as SponsorOperationsState,
 } from '@stelis/contracts';
 
 /**
@@ -41,8 +82,9 @@ export function buildApiUrl(path: string): string {
 export class ApiError extends Error {
   constructor(
     public status: number,
-    public code: string,
+    public code: HostErrorCode,
     message: string,
+    public meta: HostErrorMeta = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -51,8 +93,9 @@ export class ApiError extends Error {
 
 async function apiFetch<T>(
   url: string,
-  init?: RequestInit,
-  parse?: (value: unknown) => T,
+  init: RequestInit | undefined,
+  parse: (value: unknown) => T,
+  allowedErrorCodes: readonly HostErrorCode[],
 ): Promise<T> {
   const res = await fetch(buildApiUrl(url), {
     ...init,
@@ -64,148 +107,109 @@ async function apiFetch<T>(
   });
 
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    throw new ApiError(
-      res.status,
-      (typeof body.code === 'string' ? body.code : undefined) ??
-        (body.error as string) ??
-        `HTTP_${res.status}`,
-      (body.message as string) ?? (body.error as string) ?? `Request failed: ${res.status}`,
-    );
+    const parsed = parseHostErrorResponse(await res.json(), allowedErrorCodes, res.status);
+    const { error, code, ...meta } = parsed;
+    throw new ApiError(res.status, code, error, meta);
   }
 
   const data: unknown = await res.json();
-  return parse ? parse(data) : (data as T);
+  return parse(data);
 }
 
 // ── Session ────────────────────────────────────────────────────────────────
 
-export interface Session {
-  address: string;
-  exp: number;
-  iat: number;
-}
-
-export function getSession(): Promise<Session> {
-  return apiFetch<Session>('/auth/session');
+export function getSession() {
+  return apiFetch('/auth/session', undefined, parseAdminSessionResponse, ADMIN_SESSION_ERROR_CODES);
 }
 
 export function issueAdminAuthChallenge() {
-  return apiFetch('/auth/nonce', { method: 'POST' }, parseAdminAuthChallengeResponse);
+  return apiFetch(
+    '/auth/nonce',
+    { method: 'POST' },
+    parseAdminAuthChallengeResponse,
+    ADMIN_AUTH_NONCE_ERROR_CODES,
+  );
 }
 
 export async function verifyAdminAuth(data: AdminAuthVerifyRequest): Promise<void> {
+  const request = parseAdminAuthVerifyRequest(data);
   await apiFetch(
     '/auth/verify',
     {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(request),
     },
     parseAdminAuthSuccessResponse,
+    ADMIN_AUTH_VERIFY_ERROR_CODES,
   );
 }
 
 export async function renewAdminSession(data: AdminAuthVerifyRequest): Promise<void> {
+  const request = parseAdminAuthVerifyRequest(data);
   await apiFetch(
     '/auth/renew',
     {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(request),
     },
     parseAdminAuthSuccessResponse,
+    ADMIN_AUTH_VERIFY_ERROR_CODES,
   );
 }
 
 export async function logoutAdminSession(): Promise<void> {
-  await apiFetch('/auth/logout', { method: 'POST' }, parseAdminAuthSuccessResponse);
+  await apiFetch(
+    '/auth/logout',
+    { method: 'POST' },
+    parseAdminAuthSuccessResponse,
+    ADMIN_AUTH_LOGOUT_ERROR_CODES,
+  );
 }
 
 // ── Sponsor Operations / Dashboard ─────────────────────────────────────────
 
-interface FeeConfig {
-  maxHostFeeMist: string;
-  protocolFlatFeeMist: string;
-  maxClaimMist: string;
-  minSettleMist: string;
-  configVersion: string;
-}
-
-export interface SponsorOperationsStatus {
-  // `/api/sponsor-operations` runs a bounded sponsor refill account probe and reads the shared Redis
-  // state on every request after boot-time sync. The field is always a
-  // concrete payload.
-  sponsorOperations: SponsorOperationsState;
-  primaryAddress: string | null;
-  settlementPayoutRecipientAddress: string;
-  network: SuiNetwork;
-  sponsorBalanceWarnMist?: string;
-  sponsorBalanceRefillTargetMist?: string;
-  feeConfig: FeeConfig | null;
-  /**
-   * Subset of `SingleHopSettlementSwapPathResponse` consumed by admin pages. Fields
-   * `lotSize`, `minSize`, and `settlementTokenDecimals` are omitted because
-   * admin never reads them. The shared transport type lives in
-   * `@stelis/contracts` (type-only import above); drift is prevented at
-   * type-check time by deriving this subset from it directly.
-   */
-  supportedSettlementSwapPaths: Array<
-    Pick<
-      SingleHopSettlementSwapPathResponse,
-      | 'settlementTokenSymbol'
-      | 'settlementTokenType'
-      | 'settlementSwapDirection'
-      | 'hops'
-      | 'effectiveFeeRateBps'
-    >
-  >;
-  // Config-page fields (also returned by /api/sponsor-operations)
-  quotedHostFeeMist?: string;
-  onChainIds?: {
-    packageId: string | null;
-    configId: string | null;
-    vaultRegistryId: string | null;
-    deepbookPackageId: string | null;
-  };
-  refillEnabled?: boolean;
-  studioEnabled?: boolean;
-  rpcFleet?: {
-    endpoints: Array<{
-      url: string;
-      role: 'primary' | 'secondary';
-      status: 'healthy' | 'cooldown';
-      cooldownRemainingMs: number;
-    }>;
-    totalEndpoints: number;
-    healthyEndpoints: number;
-  };
-}
-
-export function getSponsorOperations(): Promise<SponsorOperationsStatus> {
-  return apiFetch<SponsorOperationsStatus>('/api/sponsor-operations');
+export function getSponsorOperations() {
+  return apiFetch(
+    '/api/sponsor-operations',
+    undefined,
+    parseAdminSponsorOperationsResponse,
+    ADMIN_READ_ERROR_CODES,
+  );
 }
 
 // ── Audit Logs ─────────────────────────────────────────────────────────────
 
-export function getAuditLogs(): Promise<{ logs: string[] }> {
-  return apiFetch<{ logs: string[] }>('/api/logs');
+export function getAuditLogs() {
+  return apiFetch('/api/logs', undefined, parseAdminAuditLogsResponse, ADMIN_READ_ERROR_CODES);
 }
 
 // ── Blocklist ──────────────────────────────────────────────────────────────
 
-export interface BlockEntry {
-  key: string;
-  ttl: number;
+export function getBlocklist(query: AdminBlocklistQuery = {}) {
+  const current = parseAdminBlocklistQuery(query);
+  const search = new URLSearchParams();
+  if (current.cursor !== null) search.set('cursor', current.cursor);
+  if (query.limit !== undefined) search.set('limit', String(current.limit));
+  const encoded = search.toString();
+  return apiFetch(
+    `/api/blocklist${encoded.length === 0 ? '' : `?${encoded}`}`,
+    undefined,
+    parseAdminBlocklistResponse,
+    ADMIN_BLOCKLIST_READ_ERROR_CODES,
+  );
 }
 
-export function getBlocklist(): Promise<{ blocklist: BlockEntry[] }> {
-  return apiFetch<{ blocklist: BlockEntry[] }>('/api/blocklist');
-}
-
-export function removeBlocklistEntry(key: string): Promise<void> {
-  return apiFetch('/api/blocklist', {
-    method: 'DELETE',
-    body: JSON.stringify({ key }),
-  });
+export function removeBlocklistEntry(identity: AdminBlocklistDeleteRequest) {
+  const request = parseAdminBlocklistDeleteRequest(identity);
+  return apiFetch(
+    '/api/blocklist',
+    {
+      method: 'DELETE',
+      body: JSON.stringify(request),
+    },
+    parseAdminBlocklistDeleteResponse,
+    ADMIN_BLOCKLIST_DELETE_ERROR_CODES,
+  );
 }
 
 // ── Withdraw ───────────────────────────────────────────────────────────────
@@ -215,171 +219,123 @@ export function issueSponsorRefillAccountWithdrawalChallenge() {
     '/api/sponsor-refill-account/withdrawal-challenge',
     { method: 'POST' },
     parseSponsorRefillAccountWithdrawalChallengeResponse,
+    ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES,
   );
 }
 
 export function executeSponsorRefillAccountWithdrawal(data: SponsorRefillAccountWithdrawalRequest) {
+  const request = parseSponsorRefillAccountWithdrawalRequest(data);
   return apiFetch(
     '/api/sponsor-refill-account/withdraw',
     {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(request),
     },
     parseSponsorRefillAccountWithdrawalResponse,
+    ADMIN_WITHDRAWAL_ERROR_CODES,
   );
 }
 
 // ── Studio ─────────────────────────────────────────────────────────────
 
-export interface StudioStatusResponse {
-  enabled: boolean;
-  config?: {
-    developerJwtTrustConfigured: boolean;
-    developerJwtVerifyUrlConfigured: boolean;
-  };
-}
-
-export function getStudio(): Promise<StudioStatusResponse> {
-  return apiFetch<StudioStatusResponse>('/api/studio');
+export function getStudio() {
+  return apiFetch('/api/studio', undefined, parseAdminStudioResponse, ADMIN_READ_ERROR_CODES);
 }
 
 // ── Promotions ────────────────────────────────────────────────────────────
 
-type PromotionType = 'gas_sponsorship';
-export type PromotionStatus = 'draft' | 'active' | 'paused' | 'archived';
-
-export interface PromotionRecord {
-  promotionId: string;
-  type: PromotionType;
-  displayName: string;
-  description: string;
-  status: PromotionStatus;
-  maxParticipants: number;
-  perUserGasAllowanceMist: string;
-  /** Derived: maxParticipants * perUserGasAllowanceMist. Computed by API, not stored. */
-  totalRequiredBudgetMist: string;
-  claimDeadlineAt: string | null;
-  postClaimUseWindowMs: number;
-  startAt: string | null;
-  pauseReason: string | null;
-  archiveReason: string | null;
-  createdAt: string;
-  updatedAt: string;
+export function getPromotions(query: AdminPromotionListQuery = {}) {
+  const current = parseAdminPromotionListQuery(query);
+  const search = new URLSearchParams();
+  if (current.status !== undefined) search.set('status', current.status);
+  if (current.cursor !== null) search.set('cursor', current.cursor);
+  if (query.limit !== undefined) search.set('limit', String(current.limit));
+  const encoded = search.toString();
+  return apiFetch(
+    `/api/promotions${encoded.length === 0 ? '' : `?${encoded}`}`,
+    undefined,
+    parseAdminPromotionListResponse,
+    ADMIN_PROMOTION_LIST_ERROR_CODES,
+  );
 }
 
-export function getPromotions(
-  status?: PromotionStatus,
-): Promise<{ promotions: PromotionRecord[] }> {
-  const qs = status ? `?status=${status}` : '';
-  return apiFetch<{ promotions: PromotionRecord[] }>(`/api/promotions${qs}`);
+export function createPromotion(data: AdminPromotionCreateRequest) {
+  const request = parseAdminPromotionCreateRequest(data);
+  return apiFetch(
+    '/api/promotions',
+    {
+      method: 'POST',
+      body: JSON.stringify(request),
+    },
+    parseAdminPromotionResponse,
+    ADMIN_PROMOTION_CREATE_ERROR_CODES,
+  );
 }
 
-export function createPromotion(
-  data: Partial<PromotionRecord>,
-): Promise<{ promotion: PromotionRecord }> {
-  return apiFetch<{ promotion: PromotionRecord }>('/api/promotions', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-}
-
-export function updatePromotion(
-  id: string,
-  data: Partial<PromotionRecord>,
-): Promise<{ promotion: PromotionRecord }> {
-  return apiFetch<{ promotion: PromotionRecord }>(`/api/promotions/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    body: JSON.stringify(data),
-  });
+export function updatePromotion(id: string, data: AdminPromotionUpdateRequest) {
+  const request = parseAdminPromotionUpdateRequest(data);
+  return apiFetch(
+    `/api/promotions/${encodeURIComponent(id)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(request),
+    },
+    parseAdminPromotionResponse,
+    ADMIN_PROMOTION_UPDATE_ERROR_CODES,
+  );
 }
 
 export function transitionPromotionStatus(
   id: string,
-  status: PromotionStatus,
+  status: AdminPromotionStatusRequest['status'],
   reason?: string,
-): Promise<{ promotion: PromotionRecord }> {
-  return apiFetch<{ promotion: PromotionRecord }>(
+) {
+  const request = parseAdminPromotionStatusRequest({
+    status,
+    ...(reason === undefined ? {} : { reason }),
+  });
+  return apiFetch(
     `/api/promotions/${encodeURIComponent(id)}/status`,
     {
       method: 'POST',
-      body: JSON.stringify({ status, reason }),
+      body: JSON.stringify(request),
     },
+    parseAdminPromotionResponse,
+    ADMIN_PROMOTION_STATUS_ERROR_CODES,
   );
 }
 
-export function deletePromotion(id: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/promotions/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+export function deletePromotion(id: string) {
+  return apiFetch(
+    `/api/promotions/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    parseAdminPromotionDeleteResponse,
+    ADMIN_PROMOTION_DELETE_ERROR_CODES,
+  );
 }
 
 // ── Sponsored execution logs ───────────────────────────────────────────────
 
-export type SponsoredLogsMode = 'all' | 'generic' | 'promotion';
-
-export interface SponsoredExecutionAggregate {
-  mode: SponsoredLogsMode;
-  /** Unsigned decimal count, with at most one execution per receipt. */
-  sponsoredExecutions: string;
-  /** Unsigned decimal count of known negative-host-net executions. */
-  lossCount: string;
-  /** Sum of known host net rows. */
-  cumulativeHostNetMist: string;
-  /** Sum of negative known host net rows. */
-  cumulativeLossMist: string;
-}
-
-export type SponsoredLogsRowMode = 'generic' | 'promotion';
-export type SponsoredLogsEconomicsStatus = 'known' | 'unknown';
-export type SponsoredLogsOutcome = 'success' | 'onchain_revert' | 'internal_error';
-
-export interface SponsoredExecutionLogEntry {
-  createdAt: string;
-  mode: SponsoredLogsRowMode;
-  outcome: SponsoredLogsOutcome;
-  receiptId: string;
-  digest: string | null;
-  senderAddress: string;
-  sponsorAddress: string;
-  executionPathKey: string;
-  orderIdHash: string | null;
-  promotionId: string | null;
-  userId: string | null;
-  recoveredGasMist: string | null;
-  hostPaidGasMist: string | null;
-  hostNetMist: string | null;
-  /**
-   * Unsigned decimal MIST string for known rows (`"0"` when fee is
-   * explicitly zero). `null` when `economicsStatus === "unknown"`.
-   */
-  hostFeeMist: string | null;
-  /**
-   * Protocol fee is protocol revenue and does not enter host net.
-   * Kept on the row for audit/debugging; not shown in the default log table.
-   */
-  protocolFeeMist: string | null;
-  grossGasMist: string | null;
-  storageRebateMist: string | null;
-  economicsStatus: SponsoredLogsEconomicsStatus;
-  failureReason: string | null;
-}
-
-export function getSponsoredLogsSummary(
-  mode: SponsoredLogsMode = 'all',
-): Promise<{ summary: SponsoredExecutionAggregate }> {
-  return apiFetch<{ summary: SponsoredExecutionAggregate }>(
-    `/api/sponsored-logs/summary?mode=${encodeURIComponent(mode)}`,
+export function getSponsoredLogsSummary(mode: AdminSponsoredLogsMode = 'all') {
+  const query = parseAdminSponsoredLogsQuery({ mode });
+  return apiFetch(
+    `/api/sponsored-logs/summary?mode=${encodeURIComponent(query.mode)}`,
+    undefined,
+    parseAdminSponsoredLogsSummaryResponse,
+    ADMIN_SPONSORED_LOGS_ERROR_CODES,
   );
 }
 
-export function getSponsoredLogs(
-  mode: SponsoredLogsMode = 'all',
-  limit?: number,
-): Promise<{ summary: SponsoredExecutionAggregate; entries: SponsoredExecutionLogEntry[] }> {
-  const qs = new URLSearchParams({ mode });
-  if (limit !== undefined) qs.set('limit', String(limit));
-  return apiFetch<{
-    summary: SponsoredExecutionAggregate;
-    entries: SponsoredExecutionLogEntry[];
-  }>(`/api/sponsored-logs?${qs.toString()}`);
+export function getSponsoredLogs(mode: AdminSponsoredLogsMode = 'all', limit?: number) {
+  const query = parseAdminSponsoredLogsQuery({
+    mode,
+    ...(limit === undefined ? {} : { limit: String(limit) }),
+  });
+  const qs = new URLSearchParams({ mode: query.mode, limit: String(query.limit) });
+  return apiFetch(
+    `/api/sponsored-logs?${qs.toString()}`,
+    undefined,
+    parseAdminSponsoredLogsResponse,
+    ADMIN_SPONSORED_LOGS_ERROR_CODES,
+  );
 }

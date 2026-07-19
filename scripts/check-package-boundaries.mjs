@@ -20,8 +20,8 @@ const PACKAGE_IMPORT_ALLOWLIST = {
   '@stelis/core-api': ['@stelis/contracts', '@stelis/core-relay'],
   '@stelis/sdk': ['@stelis/contracts', '@stelis/core-relay'],
   '@stelis/app-api': ['@stelis/contracts', '@stelis/core-api', '@stelis/core-relay'],
-  '@stelis/app-web': ['@stelis/core-relay', '@stelis/sdk'],
-  '@stelis/app-admin': ['@stelis/contracts'],
+  '@stelis/app-web': ['@stelis/contracts', '@stelis/core-relay', '@stelis/sdk'],
+  '@stelis/app-admin': ['@stelis/contracts', '@stelis/core-relay'],
   '@stelis/mcp-server': ['@stelis/contracts'],
 };
 
@@ -29,7 +29,6 @@ const SPECIFIER_ALLOWLIST = {
   '@stelis/core-api->@stelis/core-relay': new Set([
     '@stelis/core-relay',
     '@stelis/core-relay/server',
-    '@stelis/core-relay/browser',
   ]),
   '@stelis/sdk->@stelis/core-relay': new Set(['@stelis/core-relay/browser']),
   '@stelis/app-api->@stelis/core-api': new Set([
@@ -42,6 +41,7 @@ const SPECIFIER_ALLOWLIST = {
   '@stelis/app-api->@stelis/core-relay': new Set(['@stelis/core-relay']),
   '@stelis/app-web->@stelis/core-relay': new Set(['@stelis/core-relay/browser']),
   '@stelis/app-web->@stelis/sdk': new Set(['@stelis/sdk']),
+  '@stelis/app-admin->@stelis/core-relay': new Set(['@stelis/core-relay/browser']),
 };
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.mjs']);

@@ -26,8 +26,6 @@ type SponsorFailureRecordCode = Exclude<
   'SPONSOR_PREFLIGHT_FAILED' | 'SPONSOR_ONCHAIN_FAILED'
 >;
 
-export const ABUSE_BLOCKED_CODE = 'ABUSE_BLOCKED';
-
 /**
  * Availability defect: the abuse-blocker adapter (memory or Redis) raised
  * while servicing `checkIp` / `checkSubject`. The request cannot be
@@ -36,7 +34,6 @@ export const ABUSE_BLOCKED_CODE = 'ABUSE_BLOCKED';
  * rather than fail-open bypass or a misleading 500.
  */
 export class BlockCheckUnavailableError extends Error {
-  readonly code = 'BLOCK_CHECK_UNAVAILABLE' as const;
   constructor(message = 'Abuse block check is temporarily unavailable') {
     super(message);
     this.name = 'BlockCheckUnavailableError';
@@ -56,38 +53,91 @@ export const DEFAULT_ABUSE_BLOCKER_CONFIG: AbuseBlockerConfig = {
   addressOnchainRevertThreshold: 5,
 };
 
+declare const admittedClientIpBrand: unique symbol;
+
 /**
- * Authoritative abuse-block gate. On adapter throw (Redis outage, memory
- * blocker internal error) the gate fails closed: a structured
- * `ABUSE_BLOCK_CHECK_FAILED` warn is emitted once at this shared branch and
- * a typed `BlockCheckUnavailableError` is thrown. Callers let the typed
- * error propagate to their route-outer `mapError` bridge, which renders
- * HTTP 503 `BLOCK_CHECK_UNAVAILABLE`. The gate does not fail open, does
- * not silently degrade, and does not record the adapter throw as an
- * abuse signal.
- *
- * `subject` is the typed non-IP subject. Generic `/relay/*` callers pass
- * `{ kind: 'address', address }`; Studio promotion callers pass
- * `{ kind: 'studio_user', userId }`. Pre-proof callers pass `undefined`,
- * which checks only the IP block.
+ * Opaque proof that the Host completed the authoritative IP block check and
+ * the IP was not blocked. The value intentionally exposes no raw-IP field.
+ * Runtime consumers must unwrap it through this module, which rejects forged
+ * structural values in addition to the compile-time nominal brand.
  */
-export async function checkBlockedRequest(
+export interface AdmittedClientIp {
+  readonly [admittedClientIpBrand]: true;
+}
+
+export type ClientIpAdmissionResult =
+  | {
+      readonly blocked: true;
+      readonly reason?: AbuseBlockStatus['reason'];
+      readonly retryAfterMs?: number;
+      readonly scope?: AbuseBlockStatus['scope'];
+    }
+  | {
+      readonly blocked: false;
+      readonly admittedClientIp: AdmittedClientIp;
+    };
+
+interface AdmittedClientIpValue {
+  readonly blocker: AbuseBlockerAdapter;
+  readonly ip: string;
+}
+
+const admittedClientIpValues = new WeakMap<object, AdmittedClientIpValue>();
+
+/**
+ * Authoritative, one-time IP admission gate. A token is minted only after the
+ * adapter returns an unblocked result. Adapter failures fail closed as
+ * `BlockCheckUnavailableError`; blocked results never carry a token.
+ */
+export async function admitClientIp(
   blocker: AbuseBlockerAdapter,
   ip: string,
-  subject?: AbuseSubject,
-): Promise<AbuseBlockStatus> {
+): Promise<ClientIpAdmissionResult> {
   try {
-    const ipStatus = await blocker.checkIp(ip);
-    if (ipStatus.blocked) return ipStatus;
+    const status = await blocker.checkIp(ip);
+    if (status.blocked) {
+      return {
+        blocked: true,
+        ...(status.reason === undefined ? {} : { reason: status.reason }),
+        ...(status.retryAfterMs === undefined ? {} : { retryAfterMs: status.retryAfterMs }),
+        ...(status.scope === undefined ? {} : { scope: status.scope }),
+      };
+    }
 
-    if (!subject) return { blocked: false };
-
-    return await blocker.checkSubject(subject);
+    const admittedClientIp = Object.freeze(Object.create(null)) as AdmittedClientIp;
+    admittedClientIpValues.set(admittedClientIp, { blocker, ip });
+    return { blocked: false, admittedClientIp };
   } catch (err) {
     logStructuredEvent(
       ABUSE_BLOCK_CHECK_FAILED,
       {
         ip,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      'warn',
+    );
+    throw new BlockCheckUnavailableError();
+  }
+}
+
+export async function checkBlockedSubject(
+  blocker: AbuseBlockerAdapter,
+  admittedClientIp: AdmittedClientIp,
+  subject: AbuseSubject,
+): Promise<AbuseBlockStatus> {
+  const admitted = readAdmittedClientIpValue(admittedClientIp);
+  if (admitted.blocker !== blocker) {
+    throw new TypeError(
+      'AdmittedClientIp must be a token created by admitClientIp for the same blocker',
+    );
+  }
+  try {
+    return await blocker.checkSubject(subject);
+  } catch (err) {
+    logStructuredEvent(
+      ABUSE_BLOCK_CHECK_FAILED,
+      {
+        ip: admitted.ip,
         ...subjectLogFields(subject),
         error: err instanceof Error ? err.message : String(err),
       },
@@ -95,6 +145,25 @@ export async function checkBlockedRequest(
     );
     throw new BlockCheckUnavailableError();
   }
+}
+
+/** Raw projection for Host-owned durable records, limiter keys, and logs. */
+export function readAdmittedClientIp(admittedClientIp: AdmittedClientIp): string {
+  return readAdmittedClientIpValue(admittedClientIp).ip;
+}
+
+function readAdmittedClientIpValue(admittedClientIp: AdmittedClientIp): AdmittedClientIpValue {
+  if (
+    (typeof admittedClientIp !== 'object' && typeof admittedClientIp !== 'function') ||
+    admittedClientIp === null
+  ) {
+    throw new TypeError('AdmittedClientIp must be a token created by admitClientIp');
+  }
+  const value = admittedClientIpValues.get(admittedClientIp);
+  if (value === undefined) {
+    throw new TypeError('AdmittedClientIp must be a token created by admitClientIp');
+  }
+  return value;
 }
 
 /**
@@ -184,16 +253,4 @@ export async function recordSponsorFailureForAbuse(
 function subjectLogFields(subject: AbuseSubject | undefined): Record<string, string> {
   if (!subject) return {};
   return subject.kind === 'address' ? { address: subject.address } : { userId: subject.userId };
-}
-
-export function toBlockedError(status: AbuseBlockStatus): {
-  error: string;
-  code: typeof ABUSE_BLOCKED_CODE;
-  retryAfterMs?: number;
-} {
-  return {
-    error: 'Request temporarily blocked',
-    code: ABUSE_BLOCKED_CODE,
-    ...(status.retryAfterMs === undefined ? {} : { retryAfterMs: status.retryAfterMs }),
-  };
 }

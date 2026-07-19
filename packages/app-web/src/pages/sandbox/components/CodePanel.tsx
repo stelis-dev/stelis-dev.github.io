@@ -19,8 +19,8 @@ function makeSnippets(
       code: `# Core SDK — gas abstraction + Relay API client
 npm install @stelis/sdk
 
-# Sui blockchain client
-npm install @mysten/sui
+# Exact current Sui blockchain client used by this SDK release
+npm install @mysten/sui@2.17.0
 
 # Wallet connector (React)
 npm install @mysten/dapp-kit-react
@@ -44,36 +44,44 @@ console.log(sdk.settlementPayoutRecipient);     // '0x...'`,
       title: `Step 3: Sponsored Transfer (${tokenSymbol})`,
       code: `import { Transaction } from '@mysten/sui/transactions';
 
-const tx = new Transaction();
+async function executeTransfer({
+  settlementTokenCoinId, // one Coin object with balance >= transferMist
+  transferMist,
+  recipientAddress,
+  senderAddress,
+  client,
+  wallet,
+}) {
+  if (!settlementTokenCoinId) throw new Error('A settlement-token Coin object is required');
+  if (transferMist <= 0n) throw new Error('Transfer amount must be greater than zero');
 
-// Pick a coin, merge others into it, split the transfer amount.
-// The Host traces command-ordered prefix value and address-balance
-// withdrawals, so there is no need to reserve an untouched coin.
-const primaryCoin = tx.object(coinId);
-if (otherCoinIds.length > 0) {
-  tx.mergeCoins(primaryCoin, otherCoinIds.map(id => tx.object(id)));
-}
-const [transferCoin] = tx.splitCoins(primaryCoin, [tx.pure.u64(transferMist)]);
-tx.transferObjects([transferCoin], recipientAddress);
+  // This reference path intentionally uses one sufficient Coin object. If the
+  // wallet is fragmented, consolidate its settlement-token Coin objects first.
+  const tx = new Transaction();
+  const sourceCoin = tx.object(settlementTokenCoinId);
+  const [transferCoin] = tx.splitCoins(sourceCoin, [tx.pure.u64(transferMist)]);
+  tx.transferObjects([transferCoin], recipientAddress);
 
-// The Host pays SUI gas; settlement recovers the cost from User Vault credit
-// or supported ${tokenSymbol} value.
-const result = await sdk.executeSponsored(tx, {
-  client,              // SuiGrpcClient
-  prepareAuthorizationSigner: async (messageBytes) => {
-    const { signature } = await wallet.signPersonalMessage({ message: messageBytes });
-    return signature;
-  },
-  signer: async (txBytes) => {
-    const { signature } = await wallet.signTransaction({ transaction: txBytes });
-    return signature;
-  },
-  addr: senderAddress,
-  settlementToken: { type: sdk.supportedSettlementSwapPaths[${settlementSwapPathIndex}].settlementTokenType },
-});
+  // The Host pays SUI gas; settlement recovers the cost from User Vault credit
+  // or supported ${tokenSymbol} value.
+  const result = await sdk.executeSponsored(tx, {
+    client,              // SuiGrpcClient
+    prepareAuthorizationSigner: async (messageBytes) => {
+      const { signature } = await wallet.signPersonalMessage({ message: messageBytes });
+      return signature;
+    },
+    signer: async (txBytes) => {
+      const { signature } = await wallet.signTransaction({ transaction: txBytes });
+      return signature;
+    },
+    addr: senderAddress,
+    settlementToken: { type: sdk.supportedSettlementSwapPaths[${settlementSwapPathIndex}].settlementTokenType },
+  });
 
-console.log(result.digest);        // on-chain TX digest
-console.log(result.totalCostSui);  // total cost in SUI`,
+  console.log(result.digest);        // on-chain TX digest
+  console.log(result.totalCostSui);  // total cost in SUI
+  return result;
+}`,
     },
   };
 }

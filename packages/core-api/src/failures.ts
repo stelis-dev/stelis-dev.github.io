@@ -190,7 +190,7 @@ interface SponsorDriftBaseContext {
   subcode: string;
   /** Prepared-entry receiptId; stored-hash-verified, safe to include in logs. */
   receiptId: string;
-  /** Tx-derived sender; proven equal to prepare-time commit post-consume. */
+  /** Transaction-derived sender; proven equal to the prepared sender. */
   sender: string;
   /** Client IP from the request context. */
   clientIp: string;
@@ -210,7 +210,7 @@ export type SponsorDriftContext =
 
 /**
  * Emit `SPONSOR_DRIFT_OBSERVED`. Used by both sponsor lifecycles when a
- * post-consume stored-hash-verified drift is observed. Default level is `info`;
+ * prepared-hash-verified drift is observed. Default level is `info`;
  * `L2_NO_SETTLEMENT_SWAP_PATHS_CONFIGURED` is escalated to `warn` because it indicates
  * operator misconfiguration rather than a transient per-request
  * condition.

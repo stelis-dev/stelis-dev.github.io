@@ -9,14 +9,16 @@ import {
   issueSponsorRefillAccountWithdrawalChallenge,
   executeSponsorRefillAccountWithdrawal,
   getSponsoredLogsSummary,
-  type SponsorOperationsStatus,
-  type SponsoredExecutionAggregate,
 } from '../api/client';
 import { SponsoredLogsKpi } from '../components/SponsoredLogsKpi';
 import {
   buildSponsorRefillAccountWithdrawMessage,
   isPositiveU64DecimalString,
+  parseSponsorRefillAccountWithdrawalRequest,
+  type AdminSponsorOperationsResponse,
+  type AdminSponsoredExecutionAggregate,
   type SuiNetwork,
+  type SponsorRefillAccountWithdrawalRequest,
   type SponsorSlotState,
 } from '@stelis/contracts';
 import { getWallets } from '@mysten/wallet-standard';
@@ -26,10 +28,10 @@ import type { AuthContext } from '../components/AuthGuard';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function formatOptionalMistToSui(balanceMist: string | null | undefined): string | null {
-  if (balanceMist == null) return null;
+function formatOptionalMistToSui(amountMist: string | null | undefined): string | null {
+  if (amountMist == null) return null;
   try {
-    return formatMistToSui(balanceMist);
+    return formatMistToSui(amountMist);
   } catch {
     return null;
   }
@@ -61,12 +63,10 @@ type WithdrawSignerResolution =
     }
   | { ok: false; message: string };
 
-interface SignedWithdrawalRequest {
+interface PendingWithdrawal {
   readonly adminAddress: string;
   readonly network: SuiNetwork;
-  readonly nonce: string;
-  readonly signature: string;
-  readonly amountMist: string;
+  readonly request: SponsorRefillAccountWithdrawalRequest;
 }
 
 const PENDING_WITHDRAWAL_STORAGE_KEY = 'stelis:admin:pending-withdrawal';
@@ -74,7 +74,7 @@ const PENDING_WITHDRAWAL_STORAGE_KEY = 'stelis:admin:pending-withdrawal';
 function readPendingWithdrawal(
   adminAddress: string | null,
   network: SuiNetwork,
-): SignedWithdrawalRequest | null {
+): PendingWithdrawal | null {
   try {
     if (adminAddress === null) {
       sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
@@ -82,21 +82,28 @@ function readPendingWithdrawal(
     }
     const raw = sessionStorage.getItem(PENDING_WITHDRAWAL_STORAGE_KEY);
     if (raw === null) return null;
-    const parsed = JSON.parse(raw) as Partial<SignedWithdrawalRequest>;
+    const parsed: unknown = JSON.parse(raw);
     if (
-      parsed.adminAddress !== adminAddress ||
-      parsed.network !== network ||
-      typeof parsed.nonce !== 'string' ||
-      parsed.nonce.length === 0 ||
-      typeof parsed.signature !== 'string' ||
-      parsed.signature.length === 0 ||
-      typeof parsed.amountMist !== 'string' ||
-      !isPositiveU64DecimalString(parsed.amountMist)
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).some(
+        (key) => key !== 'adminAddress' && key !== 'network' && key !== 'request',
+      )
     ) {
       sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
       return null;
     }
-    return parsed as SignedWithdrawalRequest;
+    const envelope = parsed as Record<string, unknown>;
+    if (envelope.adminAddress !== adminAddress || envelope.network !== network) {
+      sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
+      return null;
+    }
+    return {
+      adminAddress,
+      network,
+      request: parseSponsorRefillAccountWithdrawalRequest(envelope.request),
+    };
   } catch {
     try {
       sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
@@ -108,14 +115,14 @@ function readPendingWithdrawal(
 }
 
 function pendingWithdrawalMatchesRuntime(
-  request: SignedWithdrawalRequest,
+  request: PendingWithdrawal,
   adminAddress: string | null,
   network: SuiNetwork,
 ): boolean {
   return request.adminAddress === adminAddress && request.network === network;
 }
 
-function rememberPendingWithdrawal(request: SignedWithdrawalRequest | null): void {
+function rememberPendingWithdrawal(request: PendingWithdrawal | null): void {
   try {
     if (request === null) {
       sessionStorage.removeItem(PENDING_WITHDRAWAL_STORAGE_KEY);
@@ -183,27 +190,23 @@ function resolveWithdrawSigner(adminAddress: string): WithdrawSignerResolution {
   };
 }
 
-type RpcFleet = NonNullable<SponsorOperationsStatus['rpcFleet']>;
+type RpcFleet = AdminSponsorOperationsResponse['rpcFleet'];
 
 function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
   return (
     <div className="admin-card">
-      <div className="admin-card-title">
-        RPC Fleet ({rpcFleet.healthyEndpoints}/{rpcFleet.totalEndpoints} healthy)
-      </div>
+      <div className="admin-card-title">RPC Endpoints ({rpcFleet.endpoints.length} qualified)</div>
       <table className="admin-table">
         <thead>
           <tr>
             <th>Endpoint</th>
             <th>Role</th>
-            <th>Status</th>
-            <th style={{ textAlign: 'right' }}>Cooldown</th>
           </tr>
         </thead>
         <tbody>
-          {rpcFleet.endpoints.map((ep) => (
-            <tr key={ep.url}>
-              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{ep.url}</td>
+          {rpcFleet.endpoints.map((ep, index) => (
+            <tr key={`${ep.role}:${index}`}>
+              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{ep.origin}</td>
               <td>
                 <span
                   style={{
@@ -213,14 +216,6 @@ function RpcFleetCard({ rpcFleet }: { rpcFleet: RpcFleet }) {
                 >
                   {ep.role}
                 </span>
-              </td>
-              <td>
-                <span style={{ color: ep.status === 'healthy' ? '#22c55e' : '#ef4444' }}>
-                  {ep.status}
-                </span>
-              </td>
-              <td style={{ textAlign: 'right', fontFamily: 'monospace' }}>
-                {ep.cooldownRemainingMs > 0 ? `${Math.ceil(ep.cooldownRemainingMs / 1000)}s` : '—'}
               </td>
             </tr>
           ))}
@@ -249,7 +244,7 @@ function WithdrawSection({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pendingRequest, setPendingRequest] = useState<SignedWithdrawalRequest | null>(() =>
+  const [pendingRequest, setPendingRequest] = useState<PendingWithdrawal | null>(() =>
     readPendingWithdrawal(adminAddress, network),
   );
   const amountValidation = validateWithdrawAmountInput(amount);
@@ -295,16 +290,16 @@ function WithdrawSection({
           message: new TextEncoder().encode(message),
           account: signerResolution.suiAccount,
         });
-        request = { adminAddress, network, nonce, signature, amountMist };
+        request = {
+          adminAddress,
+          network,
+          request: parseSponsorRefillAccountWithdrawalRequest({ nonce, signature, amountMist }),
+        };
         setPendingRequest(request);
         rememberPendingWithdrawal(request);
       }
 
-      const { digest } = await executeSponsorRefillAccountWithdrawal({
-        nonce: request.nonce,
-        signature: request.signature,
-        amountMist: request.amountMist,
-      });
+      const { digest } = await executeSponsorRefillAccountWithdrawal(request.request);
       setPendingRequest(null);
       rememberPendingWithdrawal(null);
       setResult(`Success: ${digest}`);
@@ -386,7 +381,7 @@ function WithdrawSection({
       </div>
       {pendingRequest && (
         <div style={{ fontSize: 11, color: '#fbbf24', marginTop: 6 }}>
-          Pending signed request: {pendingRequest.amountMist} MIST
+          Pending signed request: {pendingRequest.request.amountMist} MIST
         </div>
       )}
       <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 10, lineHeight: 1.6 }}>
@@ -411,11 +406,11 @@ function WithdrawSection({
 
 export function DashboardPage() {
   const { session } = useOutletContext<AuthContext>();
-  const [data, setData] = useState<SponsorOperationsStatus | null>(null);
+  const [data, setData] = useState<AdminSponsorOperationsResponse | null>(null);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const [sponsoredSummary, setSponsoredSummary] = useState<SponsoredExecutionAggregate | null>(
+  const [sponsoredSummary, setSponsoredSummary] = useState<AdminSponsoredExecutionAggregate | null>(
     null,
   );
   const [sponsoredLoading, setSponsoredLoading] = useState(false);
@@ -461,8 +456,8 @@ export function DashboardPage() {
         <h1 className="admin-page-title">Dashboard</h1>
         <p className="admin-page-sub">Loading…</p>
         {error && <p style={{ color: '#f87171' }}>{error}</p>}
-        <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          {['Server Mode', 'Network', 'Sponsor Slots'].map((label) => (
+        <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+          {['Network', 'Sponsor Slots'].map((label) => (
             <div className="admin-stat" key={label}>
               <div className="admin-stat-label">{label}</div>
               <div
@@ -482,11 +477,9 @@ export function DashboardPage() {
   const sponsorOperations = data.sponsorOperations;
   const sponsorRefillAccountAddress = sponsorOperations.sponsorRefillAccount.address;
   const sponsorRefillAccountBalanceSui = formatOptionalMistToSui(
-    sponsorOperations.sponsorRefillAccount.balanceMist,
+    sponsorOperations.sponsorRefillAccount.totalBalanceMist,
   );
-  const sponsorRefillAccountRefillsRemaining =
-    sponsorOperations.sponsorRefillAccount.refillsRemaining;
-  const healthySlots = sponsorOperations.availableSlots;
+  const healthySlots = sponsorOperations.healthySlots;
   const degradedSlots = sponsorOperations.degradedSlots;
   const leasedSlots = sponsorOperations.slotLeases.leasedSlots;
   const freeSlots = sponsorOperations.slotLeases.freeSlots;
@@ -520,36 +513,7 @@ export function DashboardPage() {
       {error && <p style={{ color: '#f87171', marginBottom: 20 }}>{error}</p>}
 
       {/* Stat grid */}
-      <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-        <div className="admin-stat">
-          <div className="admin-stat-label">Server Mode</div>
-          <div
-            className="admin-stat-value"
-            style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-          >
-            <span
-              style={{
-                display: 'inline-block',
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: data.studioEnabled ? '#a78bfa' : '#22c55e',
-                boxShadow: data.studioEnabled
-                  ? '0 0 8px rgba(167,139,250,0.5)'
-                  : '0 0 8px rgba(34,197,94,0.4)',
-              }}
-            />
-            <span
-              style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: data.studioEnabled ? '#a78bfa' : '#22c55e',
-              }}
-            >
-              {data.studioEnabled ? 'Studio' : 'Relay'}
-            </span>
-          </div>
-        </div>
+      <div className="admin-stat-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
         <div className="admin-stat">
           <div className="admin-stat-label">Network</div>
           <div className="admin-stat-value" style={{ fontSize: 18 }}>
@@ -587,7 +551,7 @@ export function DashboardPage() {
               fontWeight: 700,
               marginTop: 6,
             }}
-            title="Sponsor operations gate closes /prepare + /sponsor with 503 when no healthy sponsor slot is available."
+            title="The aggregate sponsor operations gate closes /prepare with 503 when no healthy, free sponsor slot is available. /sponsor checks the exact slot already leased to its receipt."
           >
             {gatePaused ? `Closed — ${gateReason ?? 'unknown'}` : 'Open'}
           </div>
@@ -599,8 +563,8 @@ export function DashboardPage() {
         <SponsoredLogsKpi summary={sponsoredSummary} loading={sponsoredLoading} />
       </div>
 
-      {/* RPC Fleet */}
-      {data.rpcFleet && <RpcFleetCard rpcFleet={data.rpcFleet} />}
+      {/* Qualified RPC endpoints */}
+      <RpcFleetCard rpcFleet={data.rpcFleet} />
 
       {/* Service Accounts */}
       <div className="admin-card">
@@ -647,17 +611,10 @@ export function DashboardPage() {
               <td
                 style={{
                   fontWeight: 600,
-                  color:
-                    (sponsorRefillAccountRefillsRemaining ?? 0) > 2
-                      ? '#22c55e'
-                      : (sponsorRefillAccountRefillsRemaining ?? 0) > 0
-                        ? '#f59e0b'
-                        : '#ef4444',
+                  color: sponsorOperations.sponsorRefillAccount.healthy ? '#22c55e' : '#ef4444',
                 }}
               >
-                {sponsorRefillAccountRefillsRemaining != null
-                  ? `${sponsorRefillAccountRefillsRemaining} refills`
-                  : '—'}
+                {sponsorOperations.sponsorRefillAccount.healthy ? 'Healthy' : 'Unavailable'}
               </td>
             </tr>
             {sponsorOperations?.slots.map((slot) => {
@@ -668,7 +625,7 @@ export function DashboardPage() {
                   <td style={{ fontFamily: 'monospace', fontSize: 13 }} title={slot.address}>
                     {truncateAddress(slot.address)} <CopyButton value={slot.address} />
                   </td>
-                  <td>{formatOptionalMistToSui(slot.balanceMist) ?? '—'}</td>
+                  <td>{formatOptionalMistToSui(slot.addressBalanceMist) ?? '—'}</td>
                   <td
                     style={{
                       color: leased === undefined ? '#64748b' : leased ? '#f59e0b' : '#22c55e',
@@ -679,11 +636,11 @@ export function DashboardPage() {
                   </td>
                   <td
                     style={{
-                      color: slot.state !== null ? SLOT_STATE_COLOR[slot.state] : '#64748b',
+                      color: SLOT_STATE_COLOR[slot.state],
                       fontWeight: 600,
                     }}
                   >
-                    {slot.state !== null ? SLOT_STATE_LABEL[slot.state] : '—'}
+                    {SLOT_STATE_LABEL[slot.state]}
                   </td>
                 </tr>
               );

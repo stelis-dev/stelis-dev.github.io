@@ -25,10 +25,9 @@ import {
   NonceReservationImpl,
   SponsorSlotReservationImpl,
 } from '../src/session/sponsoredExecution/reservations.js';
-import { ReservationHandleClosedError } from '../src/session/sponsoredExecution/reservationHandles.js';
 import { PrepareOverloadError } from '../src/store/prepareErrors.js';
 import type { SponsorPoolAdapter } from '../src/context.js';
-import type { PrepareStoreAdapter } from '../src/store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../src/store/sponsoredExecutionStore.js';
 import type { InflightHandle, PrepareInflightLimiter } from '../src/store/prepareInflightTypes.js';
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
 
@@ -172,7 +171,6 @@ describe('SponsorSlotReservationImpl', () => {
       size: 1,
       primaryAddress: '0xPRIMARY',
       checkout: vi.fn().mockResolvedValue(slot),
-      commit: vi.fn().mockResolvedValue(undefined),
       checkin: vi.fn().mockResolvedValue(undefined),
       leaseStatus: vi.fn().mockResolvedValue({
         leasedSlots: 0,
@@ -204,41 +202,14 @@ describe('SponsorSlotReservationImpl', () => {
     expect(ev).toBeNull();
   });
 
-  test('commitToTxBytesHash forwards to pool.commit(sponsorAddress, receiptId, hash)', async () => {
-    const pool = makePool({ sponsorAddress: '0xSP' });
-    const r = new SponsorSlotReservationImpl(pool);
-    await r.acquire('0xRECEIPT');
-
-    await r.commitToTxBytesHash('a'.repeat(64));
-
-    expect(pool.commit).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'a'.repeat(64));
-  });
-
-  test('commitToTxBytesHash throws if called before acquire', async () => {
-    const pool = makePool({ sponsorAddress: '0xSP' });
-    const r = new SponsorSlotReservationImpl(pool);
-    await expect(r.commitToTxBytesHash('h')).rejects.toThrow(/before acquire/);
-  });
-
-  test('release() delegates to safeSlotCheckin (pool.checkin called with slot/receipt/committed-hash)', async () => {
-    const pool = makePool({ sponsorAddress: '0xSP' });
-    const r = new SponsorSlotReservationImpl(pool);
-    await r.acquire('0xRECEIPT');
-    await r.commitToTxBytesHash('h'.repeat(64));
-
-    await r.release();
-
-    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', 'h'.repeat(64));
-  });
-
-  test('release() before commitToTxBytesHash passes null to pool.checkin (reserved-stage hand-off)', async () => {
+  test('release() before durable commit checks in the exact reserved lease', async () => {
     const pool = makePool({ sponsorAddress: '0xSP' });
     const r = new SponsorSlotReservationImpl(pool);
     await r.acquire('0xRECEIPT');
 
     await r.release();
 
-    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT', null);
+    expect(pool.checkin).toHaveBeenCalledWith('0xSP', '0xRECEIPT');
   });
 
   test('release() never throws even when pool.checkin throws (safeSlotCheckin internal swallow)', async () => {
@@ -269,15 +240,21 @@ describe('SponsorSlotReservationImpl', () => {
 // ─────────────────────────────────────────────
 
 describe('NonceReservationImpl', () => {
-  function makeStore(reservedNonce: bigint = 1n): PrepareStoreAdapter {
+  function makeStore(reservedNonce: bigint = 1n): SponsoredExecutionStoreAdapter {
     return {
-      store: vi.fn(),
-      consume: vi.fn(),
-      peek: vi.fn(),
-      evictPreparedEntry: vi.fn(),
+      commitPreparedReceipt: vi.fn(),
+      readPreparedReceipt: vi.fn(),
+      discardPreparedReceipt: vi.fn(),
+      beginSponsoredExecution: vi.fn(),
+      finalizeSponsoredExecution: vi.fn(),
+      readExpiredPreparedReceipts: vi.fn(),
+      readDueExecutions: vi.fn(),
+      readPendingCallbacks: vi.fn(),
+      markCallbackDelivered: vi.fn(),
       checkUserQuota: vi.fn(),
       reserveNonce: vi.fn().mockResolvedValue(reservedNonce),
-      releaseReservation: vi.fn().mockResolvedValue(undefined),
+      releaseNonceReservation: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
     };
   }
 
@@ -295,19 +272,19 @@ describe('NonceReservationImpl', () => {
     expect(store.reserveNonce).toHaveBeenCalledWith('0xSENDER', 0n, '0xRECEIPT');
   });
 
-  test('release() forwards to store.releaseReservation(receiptId, sender)', async () => {
+  test('release() forwards to store.releaseNonceReservation(receiptId, sender)', async () => {
     const store = makeStore();
     const r = new NonceReservationImpl(store);
     await r.acquire('0xSENDER', 0n, '0xRECEIPT');
 
     await r.release();
 
-    expect(store.releaseReservation).toHaveBeenCalledWith('0xRECEIPT', '0xSENDER');
+    expect(store.releaseNonceReservation).toHaveBeenCalledWith('0xRECEIPT', '0xSENDER');
   });
 
-  test('release() silently swallows store.releaseReservation throws', async () => {
+  test('release() silently swallows store.releaseNonceReservation throws', async () => {
     const store = makeStore();
-    (store.releaseReservation as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (store.releaseNonceReservation as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('redis unreachable'),
     );
     const r = new NonceReservationImpl(store);
@@ -322,7 +299,7 @@ describe('NonceReservationImpl', () => {
     expect(noEvent).toBeUndefined();
   });
 
-  test('transferOwnership() then release() does not call store.releaseReservation', async () => {
+  test('transferOwnership() then release() does not release the nonce reservation', async () => {
     const store = makeStore();
     const r = new NonceReservationImpl(store);
     await r.acquire('0xSENDER', 0n, '0xRECEIPT');
@@ -330,7 +307,7 @@ describe('NonceReservationImpl', () => {
     r.transferOwnership();
     await r.release();
 
-    expect(store.releaseReservation).not.toHaveBeenCalled();
+    expect(store.releaseNonceReservation).not.toHaveBeenCalled();
   });
 
   test('release() is idempotent — second call is a no-op', async () => {
@@ -341,7 +318,7 @@ describe('NonceReservationImpl', () => {
     await r.release();
     await r.release();
 
-    expect(store.releaseReservation).toHaveBeenCalledTimes(1);
+    expect(store.releaseNonceReservation).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -379,7 +356,7 @@ describe('LedgerBudgetReservationImpl', () => {
           : { ok: true };
       }),
       getEntitlement: vi.fn(),
-      getBudgetSummary: vi.fn(),
+      getPromotionLedgerStatus: vi.fn(),
     } as unknown as PromotionExecutionLedger;
   }
 
@@ -418,24 +395,6 @@ describe('LedgerBudgetReservationImpl', () => {
     expect(ev).toBeNull();
   });
 
-  test('consume(actualGasMist) forwards to ledger.consume and marks handle consumed', async () => {
-    const ledger = makeLedger();
-    const r = new LedgerBudgetReservationImpl(ledger);
-    const ev = await r.acquire(ACQUIRE_PARAMS);
-
-    await r.consume(900_000n);
-
-    expect(ledger.consume).toHaveBeenCalledWith('0xR', 900_000n);
-    expect(ev!.isLive()).toBe(false);
-    expect(() => ev!.reservedGasMist).toThrow(ReservationHandleClosedError);
-  });
-
-  test('consume() throws if called before acquire', async () => {
-    const ledger = makeLedger();
-    const r = new LedgerBudgetReservationImpl(ledger);
-    await expect(r.consume(1n)).rejects.toThrow(/before acquire/);
-  });
-
   test('release() forwards to ledger.release(receiptId)', async () => {
     const ledger = makeLedger();
     const r = new LedgerBudgetReservationImpl(ledger);
@@ -459,7 +418,7 @@ describe('LedgerBudgetReservationImpl', () => {
     );
     expect(event).toBeDefined();
     expect(event!['receiptId']).toBe('0xR');
-    expect(event!['triggerReason']).toBe('prepare_store_failed');
+    expect(event!['triggerReason']).toBe('prepared_receipt_not_committed');
     expect(event!['releaseFailureReason']).toBe('reservation_not_found');
   });
 
@@ -476,7 +435,7 @@ describe('LedgerBudgetReservationImpl', () => {
     );
     expect(event).toBeDefined();
     expect(event!['receiptId']).toBe('0xR');
-    expect(event!['triggerReason']).toBe('prepare_store_failed');
+    expect(event!['triggerReason']).toBe('prepared_receipt_not_committed');
   });
 
   test('transferOwnership() then release() does not call ledger.release', async () => {

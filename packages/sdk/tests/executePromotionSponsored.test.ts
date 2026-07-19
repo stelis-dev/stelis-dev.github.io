@@ -5,13 +5,14 @@
  *   1. preparePromotionSponsored — builds kind bytes and calls client.promotionPrepare
  *   2. sponsorPromotionSponsored — forwards params to client.promotionSponsor
  *   3. executePromotionSponsored — orchestrates prepare → sign → sponsor
- *   4. Non-studioMode rejection — all methods throw when studioEndpoint is not set
+ *   4. Host Studio availability errors are preserved without a client-side mode branch
  *
  * Strategy: mock StelisClient methods and verify SDK orchestration.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
@@ -67,6 +68,8 @@ vi.mock('../src/client.js', () => ({
 const ADDR = '0x' + 'a'.repeat(64);
 const PKG = '0x' + '1'.repeat(64);
 const DEEP_TYPE = `${PKG}::deep::DEEP`;
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 
 const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
   network: 'testnet',
@@ -97,20 +100,12 @@ const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
 };
 
 function makeMockSuiClient(): SuiGrpcClient {
-  return {
-    getReferenceGasPrice: vi.fn().mockResolvedValue(1000n),
-    listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
-  } as unknown as SuiGrpcClient;
+  return withSuiClientIdentity({});
 }
 
-async function createStudioSDK(): Promise<StelisSDK> {
+async function createSDK(): Promise<StelisSDK> {
   mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
-  return StelisSDK.connect('http://studio.local/relay', { studioEndpoint: true });
-}
-
-async function createNonStudioSDK(): Promise<StelisSDK> {
-  mockGetConfig.mockResolvedValueOnce(RELAY_CONFIG_RESPONSE);
-  return StelisSDK.connect('http://relay.local/relay');
+  return StelisSDK.connect('http://host.local/relay');
 }
 
 /**
@@ -143,13 +138,13 @@ describe('StelisSDK.preparePromotionSponsored', () => {
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
     mockVerifyPromotionIntegrity.mockReset();
-    sdk = await createStudioSDK();
+    sdk = await createSDK();
   });
 
   it('builds TransactionKind bytes and calls client.promotionPrepare', async () => {
     mockPromotionPrepare.mockResolvedValue({
       txBytes: 'b64tx',
-      receiptId: 'r1',
+      receiptId: RECEIPT_ID,
       estimatedGasMist: '5000000',
     });
 
@@ -157,19 +152,19 @@ describe('StelisSDK.preparePromotionSponsored', () => {
 
     const result = await sdk.preparePromotionSponsored(tx, {
       client: makeMockSuiClient(),
-      promotionId: 'promo_abc',
+      promotionId: PROMOTION_ID,
       addr: ADDR,
       developerJwt: 'jwt-token',
     });
 
     expect(result.txBytes).toBe('b64tx');
-    expect(result.receiptId).toBe('r1');
+    expect(result.receiptId).toBe(RECEIPT_ID);
     expect(result.estimatedGasMist).toBe('5000000');
 
     // Verify client.promotionPrepare was called correctly
     expect(mockPromotionPrepare).toHaveBeenCalledTimes(1);
     const [promId, params, jwt] = mockPromotionPrepare.mock.calls[0];
-    expect(promId).toBe('promo_abc');
+    expect(promId).toBe(PROMOTION_ID);
     expect(params.senderAddress).toBe(ADDR);
     expect(typeof params.txKindBytes).toBe('string'); // base64 TX kind bytes
     expect(jwt).toBe('jwt-token');
@@ -190,18 +185,21 @@ describe('StelisSDK.preparePromotionSponsored', () => {
     expect(txBytesArg).toBe('b64tx');
   });
 
-  it('throws when not in studioMode', async () => {
-    const nonStudioSdk = await createNonStudioSDK();
-    const tx = new Transaction();
+  it('preserves STUDIO_UNAVAILABLE returned by the Host', async () => {
+    const { StelisApiException } = await import('../src/client.js');
+    mockPromotionPrepare.mockRejectedValue(
+      new StelisApiException('STUDIO_UNAVAILABLE', 'Service temporarily unavailable', 503),
+    );
 
     await expect(
-      nonStudioSdk.preparePromotionSponsored(tx, {
+      sdk.preparePromotionSponsored(buildTestTx(), {
         client: makeMockSuiClient(),
-        promotionId: 'promo_1',
+        promotionId: PROMOTION_ID,
         addr: ADDR,
         developerJwt: 'jwt',
       }),
-    ).rejects.toThrow('studioEndpoint: true');
+    ).rejects.toMatchObject({ code: 'STUDIO_UNAVAILABLE', status: 503 });
+    expect(mockPromotionPrepare).toHaveBeenCalledOnce();
   });
 });
 
@@ -216,7 +214,7 @@ describe('StelisSDK.sponsorPromotionSponsored', () => {
     mockGetConfig.mockReset();
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
-    sdk = await createStudioSDK();
+    sdk = await createSDK();
   });
 
   it('forwards params to client.promotionSponsor', async () => {
@@ -227,8 +225,8 @@ describe('StelisSDK.sponsorPromotionSponsored', () => {
     });
 
     const result = await sdk.sponsorPromotionSponsored({
-      promotionId: 'promo_abc',
-      receiptId: 'r1',
+      promotionId: PROMOTION_ID,
+      receiptId: RECEIPT_ID,
       txBytes: 'b64tx',
       userSignature: 'sig',
       developerJwt: 'jwt-token',
@@ -239,25 +237,29 @@ describe('StelisSDK.sponsorPromotionSponsored', () => {
 
     expect(mockPromotionSponsor).toHaveBeenCalledTimes(1);
     const [promId, params, jwt] = mockPromotionSponsor.mock.calls[0];
-    expect(promId).toBe('promo_abc');
-    expect(params.receiptId).toBe('r1');
+    expect(promId).toBe(PROMOTION_ID);
+    expect(params.receiptId).toBe(RECEIPT_ID);
     expect(params.txBytes).toBe('b64tx');
     expect(params.userSignature).toBe('sig');
     expect(jwt).toBe('jwt-token');
   });
 
-  it('throws when not in studioMode', async () => {
-    const nonStudioSdk = await createNonStudioSDK();
+  it('preserves STUDIO_UNAVAILABLE returned by the Host', async () => {
+    const { StelisApiException } = await import('../src/client.js');
+    mockPromotionSponsor.mockRejectedValue(
+      new StelisApiException('STUDIO_UNAVAILABLE', 'Service temporarily unavailable', 503),
+    );
 
     await expect(
-      nonStudioSdk.sponsorPromotionSponsored({
-        promotionId: 'promo_1',
-        receiptId: 'r1',
+      sdk.sponsorPromotionSponsored({
+        promotionId: PROMOTION_ID,
+        receiptId: RECEIPT_ID,
         txBytes: 'b64tx',
         userSignature: 'sig',
         developerJwt: 'jwt',
       }),
-    ).rejects.toThrow('studioEndpoint: true');
+    ).rejects.toMatchObject({ code: 'STUDIO_UNAVAILABLE', status: 503 });
+    expect(mockPromotionSponsor).toHaveBeenCalledOnce();
   });
 });
 
@@ -272,13 +274,13 @@ describe('StelisSDK.executePromotionSponsored', () => {
     mockGetConfig.mockReset();
     mockPromotionPrepare.mockReset();
     mockPromotionSponsor.mockReset();
-    sdk = await createStudioSDK();
+    sdk = await createSDK();
   });
 
   it('orchestrates prepare → sign → sponsor and returns combined result', async () => {
     mockPromotionPrepare.mockResolvedValue({
       txBytes: 'b64prepared',
-      receiptId: 'receipt-1',
+      receiptId: RECEIPT_ID,
       estimatedGasMist: '5000000',
     });
     mockPromotionSponsor.mockResolvedValue({
@@ -293,7 +295,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
 
     const result = await sdk.executePromotionSponsored(tx, {
       client: makeMockSuiClient(),
-      promotionId: 'promo_xyz',
+      promotionId: PROMOTION_ID,
       signer,
       addr: ADDR,
       developerJwt: 'auth-jwt',
@@ -302,7 +304,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
     // Result should contain both prepare and sponsor fields
     expect(result.digest).toBe('0xdigest_final');
     expect(result.txBytes).toBe('b64prepared');
-    expect(result.receiptId).toBe('receipt-1');
+    expect(result.receiptId).toBe(RECEIPT_ID);
     expect(result.estimatedGasMist).toBe('5000000');
     expect(result.actualGasMist).toBe('4500000');
 
@@ -313,7 +315,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
     const sponsorParams = mockPromotionSponsor.mock.calls[0][1];
     expect(sponsorParams.userSignature).toBe('user-sig-base64');
     expect(sponsorParams.txBytes).toBe('b64prepared');
-    expect(sponsorParams.receiptId).toBe('receipt-1');
+    expect(sponsorParams.receiptId).toBe(RECEIPT_ID);
   });
 
   it('propagates prepare error without signing', async () => {
@@ -328,7 +330,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
     await expect(
       sdk.executePromotionSponsored(tx, {
         client: makeMockSuiClient(),
-        promotionId: 'promo_1',
+        promotionId: PROMOTION_ID,
         signer,
         addr: ADDR,
         developerJwt: 'jwt',
@@ -345,7 +347,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
     const { StelisApiException } = await import('../src/client.js');
     mockPromotionPrepare.mockResolvedValue({
       txBytes: 'b64tx',
-      receiptId: 'r1',
+      receiptId: RECEIPT_ID,
       estimatedGasMist: '5000000',
     });
     mockPromotionSponsor.mockRejectedValue(
@@ -358,7 +360,7 @@ describe('StelisSDK.executePromotionSponsored', () => {
     await expect(
       sdk.executePromotionSponsored(tx, {
         client: makeMockSuiClient(),
-        promotionId: 'promo_1',
+        promotionId: PROMOTION_ID,
         signer,
         addr: ADDR,
         developerJwt: 'jwt',

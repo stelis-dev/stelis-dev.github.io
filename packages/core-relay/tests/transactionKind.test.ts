@@ -7,12 +7,14 @@ import {
   validateGenericUserTransactionKind,
 } from '../src/validate/transactionKind.js';
 
+const objectId = (byte: string): string => `0x${byte.repeat(64)}`;
+
 const ENV: HostValidationEnv = {
   network: 'testnet',
-  settlementPayoutRecipientAddress: '0xPAYOUT',
-  configId: '0xCONFIG',
-  vaultRegistryId: '0xREGISTRY',
-  packageId: '0xPACKAGE',
+  settlementPayoutRecipientAddress: objectId('1'),
+  configId: objectId('2'),
+  vaultRegistryId: objectId('3'),
+  packageId: objectId('4'),
 };
 
 const PAYMENT_TYPE = '0x2::sui::SUI';
@@ -31,7 +33,7 @@ function moveCall(overrides: Partial<Record<string, unknown>> = {}): Record<stri
   return {
     $kind: 'MoveCall',
     MoveCall: {
-      package: '0xEXTERNAL',
+      package: objectId('5'),
       module: 'market',
       function: 'buy',
       typeArguments: [],
@@ -116,7 +118,7 @@ describe('validateGenericUserTransactionKind', () => {
         {
           $kind: 'TransferObjects',
           TransferObjects: {
-            objects: [{ $kind: 'GasCoin' }],
+            objects: [{ $kind: 'GasCoin', GasCoin: true }],
             address: { $kind: 'Input', Input: 0 },
           },
         },
@@ -130,8 +132,19 @@ describe('validateGenericUserTransactionKind', () => {
   });
 
   it.each([
-    ['Publish', { $kind: 'Publish', Publish: {} }],
-    ['Upgrade', { $kind: 'Upgrade', Upgrade: {} }],
+    ['Publish', { $kind: 'Publish', Publish: { modules: ['AA=='], dependencies: [] } }],
+    [
+      'Upgrade',
+      {
+        $kind: 'Upgrade',
+        Upgrade: {
+          modules: ['AA=='],
+          dependencies: [],
+          package: objectId('5'),
+          ticket: { $kind: 'Input', Input: 0 },
+        },
+      },
+    ],
   ])('rejects forbidden non-MoveCall command %s', (_kind, command) => {
     const result = validateGenericUserTransactionKind(txWithData([command]), ENV, PAYMENT_TYPE);
 
@@ -152,7 +165,7 @@ describe('validateGenericUserTransactionKind', () => {
 
   it('rejects FundsWithdrawal(Sponsor)', () => {
     const result = validateGenericUserTransactionKind(
-      txWithData([], [fundsWithdrawal({ Sponsor: true })]),
+      txWithData([], [fundsWithdrawal({ $kind: 'Sponsor', Sponsor: true })]),
       ENV,
       PAYMENT_TYPE,
     );
@@ -165,7 +178,7 @@ describe('validateGenericUserTransactionKind', () => {
     const result = validateGenericUserTransactionKind(
       txWithData(
         Array.from({ length: 12 }, () => moveCall()),
-        [fundsWithdrawal({ Sponsor: true })],
+        [fundsWithdrawal({ $kind: 'Sponsor', Sponsor: true })],
       ),
       ENV,
       PAYMENT_TYPE,
@@ -177,7 +190,7 @@ describe('validateGenericUserTransactionKind', () => {
 
   it('rejects malformed same-token FundsWithdrawal(Sender)', () => {
     const result = validateGenericUserTransactionKind(
-      txWithData([], [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '0x10')]),
+      txWithData([], [fundsWithdrawal({ $kind: 'Sender', Sender: true }, PAYMENT_TYPE, '0x10')]),
       ENV,
       PAYMENT_TYPE,
     );
@@ -190,7 +203,7 @@ describe('validateGenericUserTransactionKind', () => {
     const result = validateGenericUserTransactionKind(
       txWithData(
         Array.from({ length: 12 }, () => moveCall()),
-        [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '0x10')],
+        [fundsWithdrawal({ $kind: 'Sender', Sender: true }, PAYMENT_TYPE, '0x10')],
       ),
       ENV,
       PAYMENT_TYPE,
@@ -205,8 +218,8 @@ describe('validateGenericUserTransactionKind', () => {
       txWithData(
         [],
         [
-          fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '5000000'),
-          fundsWithdrawal({ Sender: true }, OTHER_TYPE, '7000000'),
+          fundsWithdrawal({ $kind: 'Sender', Sender: true }, PAYMENT_TYPE, '5000000'),
+          fundsWithdrawal({ $kind: 'Sender', Sender: true }, OTHER_TYPE, '7000000'),
         ],
       ),
       ENV,
@@ -220,7 +233,10 @@ describe('validateGenericUserTransactionKind', () => {
 describe('validateGenericSettlementTransaction', () => {
   it('accepts final transactions with one settlement call and Host-created Sender withdrawal', () => {
     const result = validateGenericSettlementTransaction(
-      txWithData([settleCall()], [fundsWithdrawal({ Sender: true }, PAYMENT_TYPE, '5000000')]),
+      txWithData(
+        [settleCall()],
+        [fundsWithdrawal({ $kind: 'Sender', Sender: true }, PAYMENT_TYPE, '5000000')],
+      ),
       ENV,
     );
 

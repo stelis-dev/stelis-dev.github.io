@@ -381,7 +381,7 @@ describe('solveExecutableSwap', () => {
   //
   // Without this bump, requests where the economic SUI target is below the
   // floor produce a zero-tuple quantity-in candidate from DeepBook and the
-  // request fails with SLIPPAGE_QUERY_FAILED. The bump pushes the target
+  // request fails with MARKET_QUOTE_UNAVAILABLE. The bump pushes the target
   // up to the executable boundary; surplus SUI is later absorbed into
   // user-vault credit by `settle_internal`.
   //

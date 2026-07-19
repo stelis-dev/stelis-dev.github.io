@@ -7,13 +7,6 @@ import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import { recordPromotionAbuseEvent, PROMOTION_ABUSE_CODES } from './promotionAbusePolicy.js';
-import { logStructuredEvent } from '../structuredEventLog.js';
-import {
-  LEDGER_RELEASE_FAILED_IN_HANDLER,
-  LEDGER_RELEASE_THREW_IN_HANDLER,
-  LEDGER_CONSUME_FAILED_IN_HANDLER,
-  LEDGER_CONSUME_THREW_IN_HANDLER,
-} from '../observability/events.js';
 import {
   validatePromotionCommandCount,
   validatePromotionPtbStructure,
@@ -47,139 +40,49 @@ interface PromotionPolicyInput {
   verifiedIdentity: VerifiedDeveloperIdentity;
 }
 
-export async function releaseLedgerReservationWithLog(
-  ledger: PromotionExecutionLedger,
-  receiptId: string,
-  triggerReason: string,
+/** Validate transaction-only Promotion policy on the one decoded Transaction. */
+export async function validatePromotionSponsorSubmissionPolicy(
+  ctx: PromotionPolicyContext,
+  input: PromotionPolicyInput,
+  builtTx: Transaction,
 ): Promise<void> {
-  try {
-    const result = await ledger.release(receiptId);
-    if (!result.ok) {
-      logStructuredEvent(
-        LEDGER_RELEASE_FAILED_IN_HANDLER,
-        {
-          receiptId,
-          triggerReason,
-          releaseFailureReason: result.reason,
-        },
-        'error',
-      );
-    }
-  } catch (err) {
-    logStructuredEvent(
-      LEDGER_RELEASE_THREW_IN_HANDLER,
-      {
-        receiptId,
-        triggerReason,
-        error: err instanceof Error ? err.message : String(err),
-      },
-      'error',
+  const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
+
+  // S1 — PTB structure. Sponsor path does NOT repeat the sponsor-withdrawal
+  // check; the runner's hash gate must prove these bytes are the exact
+  // prepare-time transaction before signing can occur.
+  const ptbFailure = validatePromotionPtbStructure(normalizedCommands);
+  if (ptbFailure) {
+    await recordSponsorAbuseForPtbStructure(ctx, input, ptbFailure);
+    throw sponsorPolicyErrorForPtbStructure(ptbFailure);
+  }
+
+  // S2 — allowed targets.
+  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalAllowedTargets);
+  if (targetFailure) {
+    await recordSponsorAbuseForTargetPolicy(ctx, input, targetFailure);
+    throw sponsorPolicyErrorForTargetPolicy(targetFailure);
+  }
+
+  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
+  if (commandCountFailure) {
+    throw new PromotionSponsorPolicyError(
+      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
+      'BAD_REQUEST',
     );
   }
 }
 
 /**
- * Result envelope for the failure-path consume helper.
- *
- * Mirrors the underlying `ConsumeResult` discriminated union but adds an
- * explicit `'threw'` variant so call sites can distinguish an adapter
- * throw from a `ConsumeResult.ok === false` outcome without re-parsing
- * caught errors.
+ * Validate prepared-record identity and Promotion eligibility using the exact
+ * Transaction instance decoded before the record was read.
  */
-export type ConsumeLedgerOutcome =
-  | { ok: true }
-  | { ok: false; kind: 'failed'; reason: string }
-  | { ok: false; kind: 'threw'; error: string };
-
-/**
- * Post-signature ledger consume helper.
- *
- * Used by post-signature/post-submit promotion ledger updates
- * (post-signature uncertainty, on-chain revert with/without `gasUsed`,
- * post-success `GAS_EFFECTS_MISSING`, and success-side entitlement
- * consumption). Behavior contract:
- *
- *   - On `ConsumeResult.ok === true` returns `{ ok: true }`.
- *   - On `ConsumeResult.ok === false` emits
- *     `LEDGER_CONSUME_FAILED_IN_HANDLER` with attempted amount + branch
- *     context and returns `{ ok: false, kind: 'failed', reason }`.
- *   - On adapter throw emits `LEDGER_CONSUME_THREW_IN_HANDLER` with the
- *     same context and returns `{ ok: false, kind: 'threw', error }`.
- *
- * The helper does NOT throw and does NOT fall back to `release()`. A
- * consume failure leaves the reservation eligible for the
- * ExecutionLedger reservation reaper release path, which is documented
- * operator follow-up. Callers derive economic certainty from on-chain gas
- * evidence, never from whether this entitlement update succeeded.
- *
- * Branch-specific failure reasons stay at the call site (they go into the
- * UsageEvent `failureReason`); this helper only logs ledger-call outcome.
- */
-export async function consumeLedgerReservationWithLog(
-  ledger: PromotionExecutionLedger,
-  receiptId: string,
-  amountMist: bigint,
-  triggerReason: string,
-  context: {
-    promotionId: string;
-    userId: string;
-    senderAddress: string;
-    txDigest: string | null;
-  },
-): Promise<ConsumeLedgerOutcome> {
-  try {
-    const result = await ledger.consume(receiptId, amountMist);
-    if (!result.ok) {
-      logStructuredEvent(
-        LEDGER_CONSUME_FAILED_IN_HANDLER,
-        {
-          receiptId,
-          triggerReason,
-          attemptedAmountMist: amountMist.toString(),
-          consumeFailureReason: result.reason,
-          promotionId: context.promotionId,
-          userId: context.userId,
-          senderAddress: context.senderAddress,
-          txDigest: context.txDigest,
-        },
-        'error',
-      );
-      return { ok: false, kind: 'failed', reason: result.reason };
-    }
-    return { ok: true };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    logStructuredEvent(
-      LEDGER_CONSUME_THREW_IN_HANDLER,
-      {
-        receiptId,
-        triggerReason,
-        attemptedAmountMist: amountMist.toString(),
-        error,
-        promotionId: context.promotionId,
-        userId: context.userId,
-        senderAddress: context.senderAddress,
-        txDigest: context.txDigest,
-      },
-      'error',
-    );
-    return { ok: false, kind: 'threw', error };
-  }
-}
-
-/**
- * Validate promotion-specific policy BEFORE consume.
- *
- * Caller (Studio SponsoredExecutionPolicy) owns route-level discrimination: mode guard and
- * promotionId match happen before this function is called. This function receives
- * an already-narrowed PromotionPreparedTxEntry.
- */
-export async function validatePromotionPreconsumePolicy(
+export async function validatePromotionPreparedPolicy(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
   peeked: PromotionPreparedTxEntry,
-  txBytes: Uint8Array,
-): Promise<{ builtTx: Transaction }> {
+  builtTx: Transaction,
+): Promise<void> {
   if (input.verifiedIdentity.senderAddress !== peeked.senderAddress) {
     throw new PromotionSponsorPolicyError(
       'Verified identity senderAddress does not match prepared senderAddress',
@@ -192,48 +95,13 @@ export async function validatePromotionPreconsumePolicy(
       'USER_ID_MISMATCH',
     );
   }
-
-  // Parse the stored-hash-verified `txBytes` into a Transaction. `decodeTxBytes` at the
-  // route boundary already validated base64; BCS deserialization can still
-  // fail on malformed TransactionKind payloads. Classify that as `BAD_REQUEST`
-  // / 400 so route-level 500 `SPONSOR_FAILED` cannot mask a client-visible
-  // input error. The rejection happens before `consume()`, so the prepared
-  // entry remains unconsumed.
-  let builtTx: Transaction;
-  try {
-    builtTx = Transaction.from(txBytes);
-  } catch (err) {
+  if (builtTx.getData().sender !== peeked.senderAddress) {
     throw new PromotionSponsorPolicyError(
-      `Malformed txBytes — cannot deserialize TransactionKind: ${err instanceof Error ? err.message : String(err)}`,
-      'BAD_REQUEST',
-    );
-  }
-  const normalizedCommands = convertSdkCommands(builtTx.getData().commands as unknown[]);
-
-  // S1 — PTB structure. Sponsor path does NOT check sponsor withdrawal
-  // (txBytesHash binding proves TX integrity against prepare-time commit).
-  const ptbFailure = validatePromotionPtbStructure(normalizedCommands);
-  if (ptbFailure) {
-    await recordSponsorAbuseForPtbStructure(ctx, input, peeked, ptbFailure);
-    throw sponsorPolicyErrorForPtbStructure(ptbFailure);
-  }
-
-  // S2 — allowed targets.
-  const targetFailure = validatePromotionTargets(normalizedCommands, ctx.globalAllowedTargets);
-  if (targetFailure) {
-    await recordSponsorAbuseForTargetPolicy(ctx, input, peeked, targetFailure);
-    throw sponsorPolicyErrorForTargetPolicy(targetFailure);
-  }
-
-  const commandCountFailure = validatePromotionCommandCount(normalizedCommands);
-  if (commandCountFailure) {
-    throw new PromotionSponsorPolicyError(
-      `Promotion transaction must contain 1 to ${MAX_FINAL_COMMANDS} commands; received ${commandCountFailure.commandCount}`,
-      'BAD_REQUEST',
+      'canonical tx.sender does not match prepared senderAddress',
+      'SENDER_SIGNATURE_INVALID',
     );
   }
 
-  // S3 — eligibility (promotion active + claimed + use-window).
   const promotion = await ctx.promotionStore.get(input.promotionId);
   const entitlement = promotion
     ? await ctx.executionLedger.getEntitlement(input.promotionId, input.verifiedIdentity.userId)
@@ -242,8 +110,6 @@ export async function validatePromotionPreconsumePolicy(
   if (eligibilityFailure) {
     throw sponsorPolicyErrorForEligibility(eligibilityFailure);
   }
-
-  return { builtTx };
 }
 
 // ─────────────────────────────────────────────
@@ -298,7 +164,6 @@ function sponsorPolicyErrorForEligibility(f: EligibilityFailure): PromotionSpons
 async function recordSponsorAbuseForPtbStructure(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
-  peeked: PromotionPreparedTxEntry,
   f: PtbStructureFailure,
 ): Promise<void> {
   const common = {
@@ -310,7 +175,7 @@ async function recordSponsorAbuseForPtbStructure(
       await recordPromotionAbuseEvent(
         ctx.abuseBlocker,
         input.clientIp,
-        { kind: 'studio_user', userId: peeked.userId },
+        { kind: 'studio_user', userId: input.verifiedIdentity.userId },
         PROMOTION_ABUSE_CODES.FORBIDDEN_COMMAND,
         { ...common, kind: f.kind },
       );
@@ -319,7 +184,7 @@ async function recordSponsorAbuseForPtbStructure(
       await recordPromotionAbuseEvent(
         ctx.abuseBlocker,
         input.clientIp,
-        { kind: 'studio_user', userId: peeked.userId },
+        { kind: 'studio_user', userId: input.verifiedIdentity.userId },
         PROMOTION_ABUSE_CODES.GASCOIN_FORBIDDEN,
         common,
       );
@@ -329,13 +194,12 @@ async function recordSponsorAbuseForPtbStructure(
 async function recordSponsorAbuseForTargetPolicy(
   ctx: PromotionPolicyContext,
   input: PromotionPolicyInput,
-  peeked: PromotionPreparedTxEntry,
   f: TargetPolicyFailure,
 ): Promise<void> {
   await recordPromotionAbuseEvent(
     ctx.abuseBlocker,
     input.clientIp,
-    { kind: 'studio_user', userId: peeked.userId },
+    { kind: 'studio_user', userId: input.verifiedIdentity.userId },
     PROMOTION_ABUSE_CODES.DISALLOWED_TARGET,
     {
       promotionId: input.promotionId,

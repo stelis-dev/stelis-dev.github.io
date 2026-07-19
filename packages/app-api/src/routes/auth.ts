@@ -8,12 +8,7 @@
  * Host: signAdminJwt, verifyAdminJwt, cookie builders from src/adminAuth.ts
  */
 import { Hono } from 'hono';
-import {
-  ClientIpResolutionError,
-  readJsonBodyWithLimit,
-  MAX_SMALL_REQUEST_BODY_BYTES,
-} from '@stelis/core-api';
-import { tryBodyErrorResponse } from '../bodyError.js';
+import { MAX_SMALL_REQUEST_BODY_BYTES, readAdmittedClientIp } from '@stelis/core-api';
 import {
   verifyAdminSignature,
   checkAndIncrement,
@@ -21,12 +16,18 @@ import {
   type AdminRedisClient,
 } from '@stelis/core-api/admin';
 import {
+  ADMIN_AUTH_LOGOUT_ERROR_CODES,
+  ADMIN_AUTH_NONCE_ERROR_CODES,
+  ADMIN_AUTH_VERIFY_ERROR_CODES,
+  ADMIN_SESSION_ERROR_CODES,
   HostWireParseError,
+  parseAdminAuthChallengeResponse,
+  parseAdminAuthSuccessResponse,
   parseAdminAuthVerifyRequest,
-  type AdminAuthChallengeResponse,
-  type AdminAuthSuccessResponse,
+  parseAdminSessionResponse,
+  type HostErrorCode,
 } from '@stelis/contracts';
-import type { AppApiContext } from '../context.js';
+import type { RelayAndStudioAppApiContext } from '../context.js';
 import { createAdminRedisAdapter } from '../adminRedis.js';
 import {
   signAdminJwt,
@@ -35,61 +36,81 @@ import {
   type AdminAuthRuntimeConfig,
 } from '../adminAuth.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
-import type { ResolveClientIp } from '../clientIp.js';
+import {
+  beginRequestAdmission,
+  finishAuthenticatedRequestAdmission,
+  type RequestAdmissionDependencies,
+} from '../requestAdmission.js';
 import { writeAdminAuditLog } from '../adminAuditLog.js';
 import { safeErrorSummary } from '@stelis/core-api/observability';
 import { raiseAppApiAdminSessionNotBefore } from '../adminSessionNotBefore.js';
+import { codedHostError, mapError, respondMapped } from '../errorMap.js';
 
 const NONCE_TTL_MS = 60_000;
 
 export interface AuthRoutesRuntime {
-  readonly resolveClientIp: ResolveClientIp;
-  readonly adminAddress: string | null;
-  readonly adminAuth: AdminAuthRuntimeConfig;
-}
-
-async function getAdminRedis(contextPromise: Promise<AppApiContext>): Promise<AdminRedisClient> {
-  return createAdminRedisAdapter((await contextPromise).redis);
-}
-
-function requireConfiguredAdminAuth(runtime: AuthRoutesRuntime) {
-  if (runtime.adminAddress === null || runtime.adminAuth.jwt === null) {
-    throw new Error('[app-api] admin authentication is not configured');
-  }
-  return {
-    adminAddress: runtime.adminAddress,
-    jwt: runtime.adminAuth.jwt,
+  readonly admission: RequestAdmissionDependencies;
+  readonly admin: {
+    readonly address: string;
+    readonly auth: AdminAuthRuntimeConfig;
+    readonly allowedOrigins: readonly string[];
   };
 }
 
-export function createAuthRoutes(
-  contextPromise: Promise<AppApiContext>,
-  runtime: AuthRoutesRuntime,
-) {
+function getAdminRedis(context: RelayAndStudioAppApiContext): AdminRedisClient {
+  return createAdminRedisAdapter(context.redis);
+}
+
+class AdminAuthRequestContractError extends Error {
+  constructor() {
+    super('Admin auth request does not match the current Host wire contract');
+    this.name = 'AdminAuthRequestContractError';
+  }
+}
+
+function parseAdminAuthRequest(value: unknown) {
+  try {
+    return parseAdminAuthVerifyRequest(value);
+  } catch (err) {
+    if (err instanceof HostWireParseError) throw new AdminAuthRequestContractError();
+    throw err;
+  }
+}
+
+function respondAuthFailure(
+  c: Parameters<typeof respondMapped>[0],
+  err: unknown,
+  allowedCodes: readonly HostErrorCode[],
+): Response {
+  if (err instanceof AdminAuthRequestContractError && allowedCodes.includes('BAD_REQUEST')) {
+    return respondMapped(c, codedHostError('BAD_REQUEST', allowedCodes));
+  }
+  const mapped = mapError(err, allowedCodes, 'INTERNAL_ERROR');
+  if (mapped) return respondMapped(c, mapped);
+  return respondMapped(c, codedHostError('INTERNAL_ERROR', allowedCodes));
+}
+
+export function createAuthRoutes(context: RelayAndStudioAppApiContext, runtime: AuthRoutesRuntime) {
   const app = new Hono();
 
   // ── POST /auth/nonce ───────────────────────────────────────────────
   app.post('/nonce', async (c) => {
     try {
-      const redis = await getAdminRedis(contextPromise);
-      const ip = runtime.resolveClientIp(c);
-
-      const rateCheck = await checkAndIncrement(redis, ip);
-      if (!rateCheck.allowed) {
-        return c.json({ error: 'Too many requests. Try again in 15 minutes.' }, 429);
-      }
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_AUTH_NONCE_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitCheck: async (ip) => checkAndIncrement(getAdminRedis(context), ip),
+      });
+      if (!admitted.ok) return admitted.response;
+      const redis = getAdminRedis(context);
 
       const nonce = `stelis-admin-login:${crypto.randomUUID()}:${Date.now()}`;
       await redis.set(`stelis:admin:nonce:${nonce}`, '1', { px: NONCE_TTL_MS });
-      const response: AdminAuthChallengeResponse = { nonce };
-      return c.json(response);
+      return c.json(parseAdminAuthChallengeResponse({ nonce }));
     } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
       // eslint-disable-next-line no-console
       console.error('[app-api] /auth/nonce failed', safeErrorSummary(err));
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAuthFailure(c, err, ADMIN_AUTH_NONCE_ERROR_CODES);
     }
   });
 
@@ -97,27 +118,27 @@ export function createAuthRoutes(
   app.post('/verify', async (c) => {
     let ip: string | null = null;
     try {
-      const redis = await getAdminRedis(contextPromise);
-      ip = runtime.resolveClientIp(c);
-      // Atomic rate-limit check at entry — counts all verify attempts
-      const rateCheck = await checkAndIncrement(redis, ip);
-      if (!rateCheck.allowed) {
-        await writeAdminAuditLog(redis, { event: 'ADMIN_LOGIN_RATE_LIMITED', ip });
-        return c.json({ error: 'Too many requests. Try again in 15 minutes.' }, 429);
-      }
-
-      const body = parseAdminAuthVerifyRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-      );
+      const configuredAuth = runtime.admin;
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        requiredOrigins: configuredAuth.allowedOrigins,
+        jsonBodyLimitBytes: MAX_SMALL_REQUEST_BODY_BYTES,
+        ipRateLimitCheck: async (candidateIp) =>
+          checkAndIncrement(getAdminRedis(context), candidateIp),
+      });
+      if (!admitted.ok) return admitted.response;
+      ip = readAdmittedClientIp(admitted.value.clientIp);
+      const body = parseAdminAuthRequest(admitted.value.body);
       const { nonce, signature, address } = body;
+      const redis = getAdminRedis(context);
 
       // Verify signature + check address matches ADMIN_ADDRESS
-      const configuredAuth = requireConfiguredAdminAuth(runtime);
       const valid = await verifyAdminSignature({
         nonce,
         signature,
         address,
-        adminAddress: configuredAuth.adminAddress,
+        adminAddress: configuredAuth.address,
       });
       if (!valid) {
         await writeAdminAuditLog(redis, {
@@ -126,8 +147,22 @@ export function createAuthRoutes(
           ip,
           address,
         });
-        return c.json({ error: 'Signature verification failed' }, 401);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_VERIFY_ERROR_CODES),
+        );
       }
+
+      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+        c,
+        runtime.admission,
+        admitted.value,
+        {
+          allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
+          subject: { kind: 'address', address },
+        },
+      );
+      if (!subjectAdmission.ok) return subjectAdmission.response;
 
       // Verify first, then atomically consume. Concurrent valid requests can
       // both verify, but only one DEL can win the single-use nonce.
@@ -140,34 +175,25 @@ export function createAuthRoutes(
           ip,
           address,
         });
-        return c.json({ error: 'Invalid or expired nonce' }, 401);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_VERIFY_ERROR_CODES),
+        );
       }
 
       // Success — complete all fallible work before staging the cookie.
       // Hono preserves staged headers even on catch-path 500 responses,
       // so Set-Cookie must only be set right before the final return.
-      const token = await signAdminJwt(address, configuredAuth.jwt);
-      const cookie = buildAuthCookieHeader(token, runtime.adminAuth.cookie);
+      const token = await signAdminJwt(address, configuredAuth.auth.jwt);
+      const cookie = buildAuthCookieHeader(token, configuredAuth.auth.cookie);
       await resetAttempts(redis, ip);
       await writeAdminAuditLog(redis, { event: 'ADMIN_LOGIN_SUCCESS', ip, address });
       c.header('Set-Cookie', cookie);
-      const response: AdminAuthSuccessResponse = { ok: true };
-      return c.json(response);
+      return c.json(parseAdminAuthSuccessResponse({ ok: true }));
     } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
-      if (err instanceof HostWireParseError) {
-        return c.json(
-          { error: 'Request body does not match the current API contract', code: 'BAD_REQUEST' },
-          400,
-        );
-      }
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
       try {
         if (ip !== null) {
-          const r = await getAdminRedis(contextPromise);
+          const r = getAdminRedis(context);
           await writeAdminAuditLog(r, {
             event: 'ADMIN_LOGIN_ERROR',
             ip,
@@ -177,7 +203,7 @@ export function createAuthRoutes(
       } catch {
         /* Redis unavailable — audit log best-effort */
       }
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAuthFailure(c, err, ADMIN_AUTH_VERIFY_ERROR_CODES);
     }
   });
 
@@ -185,26 +211,26 @@ export function createAuthRoutes(
   app.post('/renew', async (c) => {
     let ip: string | null = null;
     try {
-      const redis = await getAdminRedis(contextPromise);
-      ip = runtime.resolveClientIp(c);
-      // Atomic rate-limit check at entry — counts all renew attempts
-      const rateCheck = await checkAndIncrement(redis, ip);
-      if (!rateCheck.allowed) {
-        await writeAdminAuditLog(redis, { event: 'ADMIN_RENEW_RATE_LIMITED', ip });
-        return c.json({ error: 'Too many requests. Try again in 15 minutes.' }, 429);
-      }
-
-      const body = parseAdminAuthVerifyRequest(
-        await readJsonBodyWithLimit(c.req.raw, MAX_SMALL_REQUEST_BODY_BYTES),
-      );
+      const configuredAuth = runtime.admin;
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        requiredOrigins: configuredAuth.allowedOrigins,
+        jsonBodyLimitBytes: MAX_SMALL_REQUEST_BODY_BYTES,
+        ipRateLimitCheck: async (candidateIp) =>
+          checkAndIncrement(getAdminRedis(context), candidateIp),
+      });
+      if (!admitted.ok) return admitted.response;
+      ip = readAdmittedClientIp(admitted.value.clientIp);
+      const body = parseAdminAuthRequest(admitted.value.body);
       const { nonce, signature, address } = body;
+      const redis = getAdminRedis(context);
 
-      const configuredAuth = requireConfiguredAdminAuth(runtime);
       const valid = await verifyAdminSignature({
         nonce,
         signature,
         address,
-        adminAddress: configuredAuth.adminAddress,
+        adminAddress: configuredAuth.address,
       });
       if (!valid) {
         await writeAdminAuditLog(redis, {
@@ -213,8 +239,22 @@ export function createAuthRoutes(
           ip,
           address,
         });
-        return c.json({ error: 'Signature verification failed' }, 401);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_VERIFY_ERROR_CODES),
+        );
       }
+
+      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+        c,
+        runtime.admission,
+        admitted.value,
+        {
+          allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
+          subject: { kind: 'address', address },
+        },
+      );
+      if (!subjectAdmission.ok) return subjectAdmission.response;
 
       const nonceKey = `stelis:admin:nonce:${nonce}`;
       const deleted = await redis.del(nonceKey);
@@ -225,32 +265,23 @@ export function createAuthRoutes(
           ip,
           address,
         });
-        return c.json({ error: 'Invalid or expired nonce' }, 401);
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_VERIFY_ERROR_CODES),
+        );
       }
 
       // Success — complete all fallible work before staging the cookie.
-      const token = await signAdminJwt(address, configuredAuth.jwt);
-      const cookie = buildAuthCookieHeader(token, runtime.adminAuth.cookie);
+      const token = await signAdminJwt(address, configuredAuth.auth.jwt);
+      const cookie = buildAuthCookieHeader(token, configuredAuth.auth.cookie);
       await resetAttempts(redis, ip);
       await writeAdminAuditLog(redis, { event: 'ADMIN_RENEW_SUCCESS', ip, address });
       c.header('Set-Cookie', cookie);
-      const response: AdminAuthSuccessResponse = { ok: true };
-      return c.json(response);
+      return c.json(parseAdminAuthSuccessResponse({ ok: true }));
     } catch (err) {
-      if (err instanceof ClientIpResolutionError) {
-        return c.json({ error: 'Client IP could not be resolved' }, 400);
-      }
-      if (err instanceof HostWireParseError) {
-        return c.json(
-          { error: 'Request body does not match the current API contract', code: 'BAD_REQUEST' },
-          400,
-        );
-      }
-      const bodyRes = tryBodyErrorResponse(c, err);
-      if (bodyRes) return bodyRes;
       try {
         if (ip !== null) {
-          const r = await getAdminRedis(contextPromise);
+          const r = getAdminRedis(context);
           await writeAdminAuditLog(r, {
             event: 'ADMIN_RENEW_ERROR',
             ip,
@@ -260,45 +291,80 @@ export function createAuthRoutes(
       } catch {
         /* Redis unavailable — audit log best-effort */
       }
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAuthFailure(c, err, ADMIN_AUTH_VERIFY_ERROR_CODES);
     }
   });
 
   // ── POST /auth/logout ──────────────────────────────────────────────
   app.post('/logout', async (c) => {
     try {
-      const session = await requireAdminSessionFromContext(
+      const admitted = await beginRequestAdmission(c, runtime.admission, {
+        allowedErrorCodes: ADMIN_AUTH_LOGOUT_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        requiredOrigins: runtime.admin.allowedOrigins,
+      });
+      if (!admitted.ok) return admitted.response;
+      const configuredAuth = runtime.admin;
+      const session = await requireAdminSessionFromContext(c, context, configuredAuth.auth.jwt);
+      if (!session) {
+        return respondMapped(
+          c,
+          codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_LOGOUT_ERROR_CODES),
+        );
+      }
+      const subjectAdmission = await finishAuthenticatedRequestAdmission(
         c,
-        contextPromise,
-        runtime.adminAuth.jwt,
+        runtime.admission,
+        admitted.value,
+        {
+          allowedErrorCodes: ADMIN_AUTH_LOGOUT_ERROR_CODES,
+          subject: { kind: 'address', address: session.address },
+        },
       );
-      if (!session) return c.json({ error: 'Unauthorized' }, 401);
+      if (!subjectAdmission.ok) return subjectAdmission.response;
 
-      const redis = await getAdminRedis(contextPromise);
+      const redis = getAdminRedis(context);
       await raiseAppApiAdminSessionNotBefore(redis, Math.max(Date.now(), session.iatMs + 1));
-      c.header('Set-Cookie', buildLogoutCookieHeader(runtime.adminAuth.cookie));
-      const response: AdminAuthSuccessResponse = { ok: true };
-      return c.json(response);
+      c.header('Set-Cookie', buildLogoutCookieHeader(configuredAuth.auth.cookie));
+      return c.json(parseAdminAuthSuccessResponse({ ok: true }));
     } catch (err) {
       // Do not expire the cookie or claim success until the durable cutoff is raised.
       console.error('[app-api] /auth/logout failed', safeErrorSummary(err)); // eslint-disable-line no-console
-      return c.json({ error: 'Internal server error' }, 500);
+      return respondAuthFailure(c, err, ADMIN_AUTH_LOGOUT_ERROR_CODES);
     }
   });
 
   // ── GET /auth/session ──────────────────────────────────────────────
   app.get('/session', async (c) => {
-    // JWT + Redis not_before guard (fail-closed)
-    const session = await requireAdminSessionFromContext(c, contextPromise, runtime.adminAuth.jwt);
-    if (!session) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
-
-    return c.json({
-      address: session.address,
-      exp: session.exp,
-      iat: session.iat,
+    const admitted = await beginRequestAdmission(c, runtime.admission, {
+      allowedErrorCodes: ADMIN_SESSION_ERROR_CODES,
+      unexpectedFailureCode: 'INTERNAL_ERROR',
     });
+    if (!admitted.ok) return admitted.response;
+    const configuredAuth = runtime.admin;
+    // JWT + Redis not_before guard (fail-closed)
+    const session = await requireAdminSessionFromContext(c, context, configuredAuth.auth.jwt);
+    if (!session) {
+      return respondMapped(c, codedHostError('ADMIN_UNAUTHORIZED', ADMIN_SESSION_ERROR_CODES));
+    }
+    const subjectAdmission = await finishAuthenticatedRequestAdmission(
+      c,
+      runtime.admission,
+      admitted.value,
+      {
+        allowedErrorCodes: ADMIN_SESSION_ERROR_CODES,
+        subject: { kind: 'address', address: session.address },
+      },
+    );
+    if (!subjectAdmission.ok) return subjectAdmission.response;
+
+    return c.json(
+      parseAdminSessionResponse({
+        address: session.address,
+        exp: session.exp,
+        iat: session.iat,
+      }),
+    );
   });
 
   return app;

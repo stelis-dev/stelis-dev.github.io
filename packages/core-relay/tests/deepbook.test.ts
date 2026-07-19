@@ -1,30 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { SingleHopSettlementSwapPath } from '@stelis/contracts';
+import { createSuiEndpointSnapshot, type SuiEndpointSnapshot } from '../src/sui/suiOperation.js';
+import type { SuiGrpcClient } from '@mysten/sui/grpc';
 
-vi.mock('@mysten/sui/transactions', () => {
-  class MockTransaction {
-    moveCall() {}
-    object(id?: unknown) {
-      return { kind: 'object', id };
-    }
-    pure = {
-      u64: (value: bigint) => ({ kind: 'u64', value }),
-      bool: (value: boolean) => ({ kind: 'bool', value }),
-    };
-    setSender() {}
-    async build() {
-      throw new Error('mock tx.build failure');
-    }
-  }
+const { mockSimulateSuiMoveView } = vi.hoisted(() => ({
+  mockSimulateSuiMoveView: vi.fn(),
+}));
 
-  return {
-    Transaction: MockTransaction,
-  };
-});
+vi.mock('../src/sui/suiTransactionGateways.js', () => ({
+  simulateSuiMoveView: mockSimulateSuiMoveView,
+}));
 
 import { getHopMidPriceRaw, getQuantityOut, getInputForTargetOutput } from '../src/deepbook.js';
 import { decodeExactU64Bytes } from '../src/decodeU64.js';
-import { SlippageQueryError } from '../src/deepbookErrors.js';
+import { SuiOperationError } from '../src/sui/suiOperation.js';
 
 // ─────────────────────────────────────────────
 // Shared test fixtures
@@ -33,8 +22,8 @@ import { SlippageQueryError } from '../src/deepbookErrors.js';
 const MOCK_POOL: SingleHopSettlementSwapPath = {
   hops: [
     {
-      poolId: '0xpool1',
-      baseType: '0x::deep::DEEP',
+      poolId: `0x${'1'.repeat(64)}`,
+      baseType: '0xdee0::deep::DEEP',
       quoteType: '0x2::sui::SUI',
       swapDirection: 'baseForQuote',
       feeBps: 0,
@@ -48,6 +37,23 @@ const MOCK_POOL: SingleHopSettlementSwapPath = {
   effectiveFeeRateBps: 0,
   settlementSwapDirection: 'baseForQuote',
 };
+const DEEPBOOK_PACKAGE_ID = `0x${'d'.repeat(64)}`;
+
+function snapshot(): SuiEndpointSnapshot {
+  return createSuiEndpointSnapshot([{ network: 'testnet' } as SuiGrpcClient]);
+}
+
+beforeEach(() => {
+  mockSimulateSuiMoveView.mockReset();
+});
+
+function buildOperationError(): SuiOperationError {
+  return new SuiOperationError('transport_unavailable', {
+    operation: 'resolve_transaction',
+    attempt: 1,
+    maxAttempts: 1,
+  });
+}
 
 /** Encode a u64 as little-endian 8 bytes (for mock BCS return) */
 function encodeU64LE(value: bigint): Uint8Array {
@@ -65,24 +71,11 @@ function encodeU64LE(value: bigint): Uint8Array {
 describe('getHopMidPriceRaw', () => {
   const hop = MOCK_POOL.hops[0];
 
-  // Same scope as the getQuantityOut / getInputForTargetOutput build-fail
-  // locks later in this file: `Transaction.build()` fails before any RPC runs,
-  // so simulateTransaction must NOT be called. The simulate-rejection branch is
-  // locked separately in `deepbook-decode.test.ts` against a successful mocked
-  // Transaction build.
-  it('throws SlippageQueryError when Transaction.build fails', async () => {
-    const simulateTransaction = vi.fn().mockResolvedValue({
-      commandResults: [{ returnValues: [{ bcs: encodeU64LE(27_000_000_000n) }] }],
-    });
-    const mockClient = { simulateTransaction };
-    await expect(
-      getHopMidPriceRaw(
-        mockClient as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
-        '0xdeepbook',
-        hop,
-      ),
-    ).rejects.toThrow(SlippageQueryError);
-    expect(simulateTransaction).not.toHaveBeenCalled();
+  it('preserves the typed Move-view gateway error', async () => {
+    const error = buildOperationError();
+    mockSimulateSuiMoveView.mockRejectedValueOnce(error);
+    await expect(getHopMidPriceRaw(snapshot(), DEEPBOOK_PACKAGE_ID, hop)).rejects.toBe(error);
+    expect(mockSimulateSuiMoveView).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -93,33 +86,13 @@ describe('getHopMidPriceRaw', () => {
 describe('getQuantityOut', () => {
   const hop = MOCK_POOL.hops[0];
 
-  // Transaction.build() fails before any RPC runs. This locks the fail-closed
-  // behaviour for that build-time path; the simulateTransaction-rejection path
-  // (where build() succeeds and the simulate call rejects) is locked separately
-  // in `deepbook-decode.test.ts` against a successful mocked Transaction build.
-  it('throws SlippageQueryError when Transaction.build fails', async () => {
-    const simulateTransaction = vi.fn().mockResolvedValue({
-      commandResults: [
-        {
-          returnValues: [
-            { bcs: encodeU64LE(100n) },
-            { bcs: encodeU64LE(200n) },
-            { bcs: encodeU64LE(50n) },
-          ],
-        },
-      ],
-    });
-    const mockClient = { simulateTransaction };
-    await expect(
-      getQuantityOut(
-        mockClient as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
-        '0xdeepbook',
-        hop,
-        1_000_000n,
-      ),
-    ).rejects.toThrow(SlippageQueryError);
-    // build() fails first, so simulateTransaction must NOT have been called.
-    expect(simulateTransaction).not.toHaveBeenCalled();
+  it('preserves the typed Move-view gateway error', async () => {
+    const error = buildOperationError();
+    mockSimulateSuiMoveView.mockRejectedValueOnce(error);
+    await expect(getQuantityOut(snapshot(), DEEPBOOK_PACKAGE_ID, hop, 1_000_000n)).rejects.toBe(
+      error,
+    );
+    expect(mockSimulateSuiMoveView).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -130,31 +103,13 @@ describe('getQuantityOut', () => {
 describe('getInputForTargetOutput', () => {
   const hop = MOCK_POOL.hops[0];
 
-  // Same scope as the getQuantityOut test above: locks the build-time fail
-  // path. The simulateTransaction-rejection path is locked in
-  // `deepbook-decode.test.ts` against a successful mocked Transaction build.
-  it('throws SlippageQueryError when Transaction.build fails', async () => {
-    const simulateTransaction = vi.fn().mockResolvedValue({
-      commandResults: [
-        {
-          returnValues: [
-            { bcs: encodeU64LE(100n) },
-            { bcs: encodeU64LE(200n) },
-            { bcs: encodeU64LE(50n) },
-          ],
-        },
-      ],
-    });
-    const mockClient = { simulateTransaction };
+  it('preserves the typed Move-view gateway error', async () => {
+    const error = buildOperationError();
+    mockSimulateSuiMoveView.mockRejectedValueOnce(error);
     await expect(
-      getInputForTargetOutput(
-        mockClient as unknown as import('@mysten/sui/grpc').SuiGrpcClient,
-        '0xdeepbook',
-        hop,
-        1_000_000n,
-      ),
-    ).rejects.toThrow(SlippageQueryError);
-    expect(simulateTransaction).not.toHaveBeenCalled();
+      getInputForTargetOutput(snapshot(), DEEPBOOK_PACKAGE_ID, hop, 1_000_000n),
+    ).rejects.toBe(error);
+    expect(mockSimulateSuiMoveView).toHaveBeenCalledTimes(1);
   });
 });
 

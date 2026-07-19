@@ -1,21 +1,17 @@
 /**
- * ConfigPage — Common config + Studio settings (conditional).
+ * ConfigPage — Host and Studio configuration.
  *
  * Section order (by operator priority):
  * §1: Sponsor Operations — refill controls and thresholds
  * §2: Fee Config — host + on-chain fee parameters
- * §3: Studio Settings — JWT/API key config status (studio-only)
+ * §3: Studio Settings — developer-verification configuration
  * §4: Supported Settlement Swap Paths — settlement token settlement
  * §5: On-chain IDs — contract reference (rarely changes)
  *
  */
 import { useEffect, useState } from 'react';
-import {
-  getSponsorOperations,
-  getStudio,
-  type SponsorOperationsStatus,
-  type StudioStatusResponse,
-} from '../api/client';
+import { getSponsorOperations, getStudio } from '../api/client';
+import type { AdminSponsorOperationsResponse, AdminStudioResponse } from '@stelis/contracts';
 import { mistToSui, truncateId, CopyButton } from '../utils';
 
 function SuiAmount({ mist }: { mist: string }) {
@@ -35,8 +31,8 @@ function formatBpsPercent(bps: number): string {
 }
 
 export function ConfigPage() {
-  const [data, setData] = useState<SponsorOperationsStatus | null>(null);
-  const [studioStatus, setStudioStatus] = useState<StudioStatusResponse | null>(null);
+  const [data, setData] = useState<AdminSponsorOperationsResponse | null>(null);
+  const [studioStatus, setStudioStatus] = useState<AdminStudioResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
@@ -120,12 +116,12 @@ export function ConfigPage() {
               <tr>
                 <td
                   style={{ cursor: 'help' }}
-                  title="Sponsor slots with balance below this value are classified `low_balance` in the shared sponsor operations state and become refill candidates (env: SPONSOR_BALANCE_WARN_MIST)"
+                  title="Sponsor addresses with a fresh balance observation below this value are classified `low_balance` when SponsorOperations status is calculated and become refill candidates (env: SPONSOR_BALANCE_WARN_MIST)"
                 >
                   Low-balance Threshold
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.sponsorBalanceWarnMist ?? '0'} />
+                  <SuiAmount mist={data.sponsorBalanceWarnMist} />
                 </td>
               </tr>
               <tr>
@@ -136,7 +132,22 @@ export function ConfigPage() {
                   Refill Target
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.sponsorBalanceRefillTargetMist ?? '0'} />
+                  {data.sponsorBalanceRefillTargetMist === null ? (
+                    <span style={{ color: '#64748b' }}>Not configured</span>
+                  ) : (
+                    <SuiAmount mist={data.sponsorBalanceRefillTargetMist} />
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style={{ cursor: 'help' }}
+                  title="Minimum Sponsor Refill Account balance retained per configured sponsor address after a refill or withdrawal"
+                >
+                  Minimum Balance per Sponsor
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <SuiAmount mist={data.sponsorRefillAccountRunwayTargetMist} />
                 </td>
               </tr>
             </tbody>
@@ -172,7 +183,7 @@ export function ConfigPage() {
                   Host Fee
                 </td>
                 <td style={{ textAlign: 'right' }}>
-                  <SuiAmount mist={data.quotedHostFeeMist ?? '0'} />
+                  <SuiAmount mist={data.quotedHostFeeMist} />
                 </td>
               </tr>
               <tr>
@@ -239,8 +250,8 @@ export function ConfigPage() {
         </div>
       )}
 
-      {/* ═══════════════ §3: Studio Settings (conditional) ═══════════════ */}
-      {studioStatus?.enabled && (
+      {/* ═══════════════ §3: Studio Settings ═══════════════ */}
+      {studioStatus && (
         <>
           <div
             style={{
@@ -266,59 +277,35 @@ export function ConfigPage() {
             </h2>
           </div>
 
-          {studioStatus.config && (
-            <div className="admin-card">
-              <div className="admin-card-title">Studio Config</div>
-              <table className="admin-table">
-                <tbody>
-                  <tr>
-                    <td
-                      style={{ cursor: 'help' }}
-                      title="STUDIO_DEVELOPER_JWT_TRUST_JSON env status. Required for developer JWT asymmetric verification (RS256/ES256)"
+          <div className="admin-card">
+            <div className="admin-card-title">Studio Config</div>
+            <table className="admin-table">
+              <tbody>
+                <tr>
+                  <td
+                    style={{ cursor: 'help' }}
+                    title="STUDIO_DEVELOPER_JWT_VERIFY_URL env status. Optional callback for additional developer JWT verification"
+                  >
+                    Verify URL
+                  </td>
+                  <td>
+                    <span
+                      style={{
+                        color: studioStatus.config.developerJwtVerifyUrlConfigured
+                          ? '#22c55e'
+                          : '#64748b',
+                        fontWeight: 600,
+                      }}
                     >
-                      Developer JWT Trust
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          color: studioStatus.config.developerJwtTrustConfigured
-                            ? '#22c55e'
-                            : '#f87171',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {studioStatus.config.developerJwtTrustConfigured
-                          ? '● Configured'
-                          : '● Missing'}
-                      </span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td
-                      style={{ cursor: 'help' }}
-                      title="STUDIO_DEVELOPER_JWT_VERIFY_URL env status. Optional callback for additional developer JWT verification"
-                    >
-                      Verify URL
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          color: studioStatus.config.developerJwtVerifyUrlConfigured
-                            ? '#22c55e'
-                            : '#64748b',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {studioStatus.config.developerJwtVerifyUrlConfigured
-                          ? '● Configured'
-                          : '○ Not set (optional)'}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
+                      {studioStatus.config.developerJwtVerifyUrlConfigured
+                        ? '● Configured'
+                        : '○ Not set (optional)'}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </>
       )}
 
@@ -395,7 +382,7 @@ export function ConfigPage() {
       )}
 
       {/* ═══════════════ §5: On-chain IDs ═══════════════ */}
-      {data?.onChainIds && (
+      {data && (
         <div className="admin-card">
           <div className="admin-card-title">On-chain IDs</div>
           <table className="admin-table">

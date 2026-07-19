@@ -17,12 +17,11 @@
  */
 
 import { createVerify, createPublicKey, type KeyObject } from 'node:crypto';
-
-// base64url helpers — canonical owner is @stelis/core-relay/server.
-import { base64urlDecode } from '@stelis/core-relay/server';
+import { isValidStudioUserId, STUDIO_USER_ID_MAX_LENGTH } from '@stelis/contracts';
 
 // Shared Sui address validation helper.
 import { canonicalizeAddress } from '../addressConstraints.js';
+import { decodeBase64url } from './base64url.js';
 
 // ─────────────────────────────────────────────
 // Trust config types (single issuer).
@@ -69,6 +68,8 @@ const ALGORITHM_MAP: Record<string, string> = {
   RS256: 'RSA-SHA256',
   ES256: 'SHA256',
 };
+
+const JWT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 export const DEVELOPER_JWT_CLOCK_LEEWAY_SECONDS = 60;
 
@@ -222,7 +223,7 @@ export async function verifyDeveloperJwt(
   // Header
   let header: { alg?: string; typ?: string };
   try {
-    header = JSON.parse(new TextDecoder().decode(base64urlDecode(headerB64)));
+    header = JSON.parse(JWT_UTF8_DECODER.decode(decodeBase64url(headerB64)));
   } catch {
     throw new Error('developer JWT: invalid header JSON');
   }
@@ -239,7 +240,7 @@ export async function verifyDeveloperJwt(
   // JWT payload
   let payload: Record<string, unknown>;
   try {
-    payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64)));
+    payload = JSON.parse(JWT_UTF8_DECODER.decode(decodeBase64url(payloadB64)));
   } catch {
     throw new Error('developer JWT: invalid payload JSON');
   }
@@ -263,7 +264,13 @@ export async function verifyDeveloperJwt(
 
   // ── 4. Signature verification ────────────────────────────────
   const signingInput = `${headerB64}.${payloadB64}`;
-  const signatureBytes = base64urlDecode(signatureB64);
+  let signatureBytes: Uint8Array;
+  try {
+    if (signatureB64.length === 0) throw new Error('empty signature');
+    signatureBytes = decodeBase64url(signatureB64);
+  } catch {
+    throw new Error('developer JWT: invalid signature encoding');
+  }
   const publicKey: KeyObject = createPublicKey(trustConfig.publicKeyPem);
   validatePublicKeyForAlgorithm(publicKey, trustConfig.algorithm, 'developer JWT publicKeyPem');
 
@@ -346,9 +353,9 @@ export async function verifyDeveloperJwt(
   // Reject control characters, whitespace, and non-printable bytes to
   // avoid log-injection or key-confusion when the value reaches Redis or
   // structured-log consumers.
-  if (!USER_ID_PATTERN.test(rawUserId)) {
+  if (!isValidStudioUserId(rawUserId)) {
     throw new Error(
-      `developer JWT: userId at claim path "${trustConfig.claimPaths.userId}" failed opaque-ID validation (length 1-128, [A-Za-z0-9_:.\\-])`,
+      `developer JWT: userId at claim path "${trustConfig.claimPaths.userId}" failed opaque-ID validation (length 1-${STUDIO_USER_ID_MAX_LENGTH}, [A-Za-z0-9_:.\\-])`,
     );
   }
   const userId = rawUserId;
@@ -373,20 +380,6 @@ export async function verifyDeveloperJwt(
 
   return { userId, senderAddress };
 }
-
-// ─────────────────────────────────────────────
-// userId validation
-// ─────────────────────────────────────────────
-
-/**
- * Bounded opaque-ID pattern. The Studio promotion principal flows
- * directly into Redis keys and structured-log fields, so the value is
- * constrained to a conservative printable set without separators that
- * could collide with Redis-key conventions or pollute structured logs.
- * Length is capped at 128 characters; the floor of 1 character prevents
- * empty principals from reaching enforcement.
- */
-const USER_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,128}$/;
 
 // ─────────────────────────────────────────────
 // Claim path extraction

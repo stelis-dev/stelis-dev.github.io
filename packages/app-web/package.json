@@ -13,8 +13,9 @@
   },
   "dependencies": {
     "@mysten/dapp-kit-react": "^1.0.2",
-    "@mysten/sui": "^2.4.0",
+    "@mysten/sui": "2.17.0",
     "@stelis/agent-q-provider-sui": "^0.2.2",
+    "@stelis/contracts": "*",
     "@stelis/core-relay": "*",
     "@stelis/sdk": "*",
     "mermaid": "^11.4.1",

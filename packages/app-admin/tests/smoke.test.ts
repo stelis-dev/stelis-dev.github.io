@@ -7,6 +7,23 @@
  * 3. Component exports exist and are renderable
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  ADMIN_BLOCKLIST_MAX_LIMIT,
+  hostErrorPublicMessage,
+  SUI_CHAIN_IDENTIFIERS,
+} from '@stelis/contracts';
+
+const { assertSuiNetworkMock } = vi.hoisted(() => ({
+  assertSuiNetworkMock: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@stelis/core-relay/browser', () => ({
+  assertSuiNetwork: assertSuiNetworkMock,
+  createSuiEndpointSnapshot: (endpoints: readonly { network: string }[]) => ({
+    endpointCount: endpoints.length,
+    network: endpoints[0]!.network,
+  }),
+}));
 
 // ── API Client tests ───────────────────────────────────────────────────────
 
@@ -96,13 +113,17 @@ describe('API client', () => {
     );
   });
 
-  it('throws ApiError on non-ok response', async () => {
+  it('parses the current coded error response before throwing ApiError', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: false,
         status: 401,
-        json: () => Promise.resolve({ error: 'UNAUTHORIZED', message: 'Not authenticated' }),
+        json: () =>
+          Promise.resolve({
+            error: hostErrorPublicMessage('ADMIN_UNAUTHORIZED'),
+            code: 'ADMIN_UNAUTHORIZED',
+          }),
       }),
     );
 
@@ -114,8 +135,70 @@ describe('API client', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError);
       expect((e as InstanceType<typeof ApiError>).status).toBe(401);
-      expect((e as InstanceType<typeof ApiError>).code).toBe('UNAUTHORIZED');
+      expect((e as InstanceType<typeof ApiError>).code).toBe('ADMIN_UNAUTHORIZED');
     }
+  });
+
+  it('rejects an uncoded error instead of synthesizing an HTTP code', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: 'UNAUTHORIZED' }),
+      }),
+    );
+
+    const { getSession, ApiError } = await import('../src/api/client');
+    await expect(getSession()).rejects.not.toBeInstanceOf(ApiError);
+    await expect(getSession()).rejects.toThrow(/code must be a string/);
+  });
+
+  it('preserves contracts-validated Host error metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: () =>
+          Promise.resolve({
+            error: hostErrorPublicMessage('WITHDRAWAL_PENDING'),
+            code: 'WITHDRAWAL_PENDING',
+            operationId: 'withdrawal-op-1',
+            digest: '0xdigest',
+          }),
+      }),
+    );
+
+    const { executeSponsorRefillAccountWithdrawal, ApiError } = await import('../src/api/client');
+    try {
+      await executeSponsorRefillAccountWithdrawal({
+        nonce: 'nonce',
+        signature: 'signature',
+        amountMist: '1',
+      });
+      throw new Error('expected ApiError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as InstanceType<typeof ApiError>).meta).toEqual({
+        operationId: 'withdrawal-op-1',
+        digest: '0xdigest',
+      });
+    }
+  });
+
+  it('rejects a malformed success response instead of returning an unchecked cast', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ address: '0xabc', exp: 'not-a-number', iat: 1 }),
+      }),
+    );
+
+    const { getSession } = await import('../src/api/client');
+    await expect(getSession()).rejects.toThrow(/exp must be a safe integer/);
   });
 
   it('getSponsorOperations sends GET /api/sponsor-operations', async () => {
@@ -125,24 +208,53 @@ describe('API client', () => {
       // asserts the request shape and return pass-through.
       sponsorOperations: {
         gateErrorCode: null,
-        availableSlots: 1,
+        healthySlots: 1,
         degradedSlots: 0,
         slotLeases: {
           leasedSlots: 0,
           freeSlots: 1,
-          slots: [],
+          slots: [{ address: '0x' + '11'.repeat(32), leased: false }],
         },
-        slots: [],
+        slots: [
+          {
+            address: '0x' + '11'.repeat(32),
+            state: 'healthy',
+            addressBalanceMist: '1000',
+            lastObservedAtMs: 1_700_000_000_000,
+            lastError: null,
+          },
+        ],
         sponsorRefillAccount: {
           address: '0x' + '55'.repeat(32),
-          balanceMist: '0',
+          totalBalanceMist: '0',
           healthy: true,
-          refillsRemaining: 0,
           lastObservedAtMs: 1_700_000_000_000,
           lastError: null,
         },
       },
+      primaryAddress: '0x' + '11'.repeat(32),
       settlementPayoutRecipientAddress: '0xR',
+      sponsorBalanceWarnMist: '1000',
+      sponsorBalanceRefillTargetMist: '2000',
+      sponsorRefillAccountRunwayTargetMist: '2000',
+      refillEnabled: true,
+      quotedHostFeeMist: '0',
+      feeConfig: null,
+      supportedSettlementSwapPaths: [],
+      onChainIds: {
+        packageId: '0x1',
+        configId: '0x2',
+        vaultRegistryId: '0x3',
+        deepbookPackageId: '0x4',
+      },
+      rpcFleet: {
+        endpoints: [
+          {
+            origin: 'https://primary.rpc.test',
+            role: 'primary',
+          },
+        ],
+      },
     };
     vi.stubGlobal(
       'fetch',
@@ -162,10 +274,69 @@ describe('API client', () => {
       }),
     );
     expect(result.network).toBe('testnet');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...mockPool,
+            rpcFleet: {
+              endpoints: [
+                { origin: 'https://primary.rpc.test', role: 'primary' },
+                { origin: 'https://primary.rpc.test', role: 'secondary' },
+              ],
+            },
+          }),
+      }),
+    );
+    await expect(getSponsorOperations()).resolves.toMatchObject({
+      rpcFleet: {
+        endpoints: [
+          { origin: 'https://primary.rpc.test', role: 'primary' },
+          { origin: 'https://primary.rpc.test', role: 'secondary' },
+        ],
+      },
+    });
+
+    for (const origin of [
+      'https://user:secret@primary.rpc.test',
+      'https://primary.rpc.test/provider/path',
+      'https://primary.rpc.test?token=secret',
+      'https://primary.rpc.test#fragment',
+      'https://primary.rpc.test\n',
+      'https://PRIMARY.rpc.test:443',
+    ]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              ...mockPool,
+              rpcFleet: {
+                endpoints: [{ origin, role: 'primary' }],
+              },
+            }),
+        }),
+      );
+      await expect(getSponsorOperations()).rejects.toThrow(/current Sui RPC origin|canonical/);
+    }
   });
 
   it('getBlocklist returns { blocklist: [...] } matching server contract', async () => {
-    const serverResponse = { blocklist: [{ key: '0x123', ttl: 300 }] };
+    const serverResponse = {
+      blocklist: [
+        {
+          scope: 'ip',
+          subject: '127.0.0.1',
+          reason: 'manipulation',
+          blockedUntilMs: 1_800_000_000_000,
+        },
+      ],
+      nextCursor: 'Y3Vyc29y',
+    };
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -178,8 +349,115 @@ describe('API client', () => {
     const result = await getBlocklist();
 
     expect(result.blocklist).toHaveLength(1);
-    expect(result.blocklist[0].key).toBe('0x123');
-    expect(result.blocklist[0].ttl).toBe(300);
+    expect(result.blocklist[0]).toEqual(serverResponse.blocklist[0]);
+    expect(result.nextCursor).toBe('Y3Vyc29y');
+  });
+
+  const currentBlocklistEntry = {
+    scope: 'ip',
+    subject: '127.0.0.1',
+    reason: 'manipulation',
+    blockedUntilMs: 1_800_000_000_000,
+  } as const;
+
+  it.each([
+    {
+      label: 'a non-current raw-key shape',
+      response: {
+        blocklist: [{ key: 'stelis:abuse:block:ip:127.0.0.1', ttl: 300 }],
+        nextCursor: null,
+      },
+      error: /non-current field/,
+    },
+    {
+      label: 'an unsupported scope',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, scope: 'user' }],
+        nextCursor: null,
+      },
+      error: /current block scope/,
+    },
+    {
+      label: 'an unsupported reason',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, reason: 'manual' }],
+        nextCursor: null,
+      },
+      error: /current block reason/,
+    },
+    {
+      label: 'a non-positive deadline',
+      response: {
+        blocklist: [{ ...currentBlocklistEntry, blockedUntilMs: 0 }],
+        nextCursor: null,
+      },
+      error: /must be positive/,
+    },
+    {
+      label: 'a page above the response bound',
+      response: {
+        blocklist: Array.from(
+          { length: ADMIN_BLOCKLIST_MAX_LIMIT + 1 },
+          () => currentBlocklistEntry,
+        ),
+        nextCursor: null,
+      },
+      error: new RegExp(`at most ${ADMIN_BLOCKLIST_MAX_LIMIT} entries`),
+    },
+  ])('getBlocklist rejects $label through the API client boundary', async ({ response, error }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(response),
+      }),
+    );
+
+    const { getBlocklist } = await import('../src/api/client');
+    await expect(getBlocklist()).rejects.toThrow(error);
+  });
+
+  it('getAuditLogs accepts only the current structured audit entries', async () => {
+    const entry = {
+      ts: '2026-01-02T03:04:05.000Z',
+      event: 'admin_login_success',
+      ip: '127.0.0.1',
+      address: '0x' + 'a'.repeat(64),
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ logs: [entry] }),
+      }),
+    );
+
+    const { getAuditLogs } = await import('../src/api/client');
+    await expect(getAuditLogs()).resolves.toEqual({ logs: [entry] });
+  });
+
+  it('getAuditLogs rejects the removed JSON-string audit shape', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            logs: [
+              JSON.stringify({
+                ts: '2026-01-02T03:04:05.000Z',
+                event: 'admin_login_success',
+                ip: '127.0.0.1',
+              }),
+            ],
+          }),
+      }),
+    );
+
+    const { getAuditLogs } = await import('../src/api/client');
+    await expect(getAuditLogs()).rejects.toThrow(
+      /AdminAuditLogsResponse\.logs\[0\] must be an object/,
+    );
   });
 
   it('issueSponsorRefillAccountWithdrawalChallenge returns the current challenge', async () => {
@@ -249,25 +527,48 @@ describe('API client', () => {
     );
   });
 
-  it('removeBlocklistEntry sends DELETE /api/blocklist with key', async () => {
+  it('removeBlocklistEntry sends DELETE /api/blocklist with a typed identity', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ removed: true }),
       }),
     );
 
     const { removeBlocklistEntry } = await import('../src/api/client');
-    await removeBlocklistEntry('0xbad');
+    await removeBlocklistEntry({ scope: 'studio_user', subject: 'User-A' });
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/blocklist',
       expect.objectContaining({
         method: 'DELETE',
-        body: JSON.stringify({ key: '0xbad' }),
+        body: JSON.stringify({ scope: 'studio_user', subject: 'User-A' }),
       }),
     );
+  });
+
+  it('preserves ADMIN_CONFLICT from a concurrent block removal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () =>
+          Promise.resolve({
+            code: 'ADMIN_CONFLICT',
+            error: hostErrorPublicMessage('ADMIN_CONFLICT'),
+          }),
+      }),
+    );
+
+    const { removeBlocklistEntry } = await import('../src/api/client');
+    await expect(
+      removeBlocklistEntry({ scope: 'studio_user', subject: 'User-A' }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'ADMIN_CONFLICT',
+    });
   });
 });
 
@@ -277,6 +578,29 @@ describe('Sui RPC selection', () => {
 
     expect(getSuiRpcUrl('testnet')).toBe('https://fullnode.testnet.sui.io:443');
     expect(getSuiRpcUrl('mainnet')).toBe('https://fullnode.mainnet.sui.io:443');
+  });
+
+  it('returns an app-admin client only after proving the Host network chain identity', async () => {
+    assertSuiNetworkMock.mockResolvedValueOnce(undefined);
+    const { createVerifiedAdminSuiClient } = await import('../src/suiRpc');
+
+    const client = await createVerifiedAdminSuiClient('testnet');
+
+    expect(client.network).toBe('testnet');
+    expect(assertSuiNetworkMock).toHaveBeenCalledWith(
+      expect.objectContaining({ network: 'testnet', endpointCount: 1 }),
+      {
+        network: 'testnet',
+        chainIdentifier: SUI_CHAIN_IDENTIFIERS.testnet,
+      },
+    );
+  });
+
+  it('does not return a client when live chain identity proof fails', async () => {
+    assertSuiNetworkMock.mockRejectedValueOnce(new Error('chain mismatch'));
+    const { createVerifiedAdminSuiClient } = await import('../src/suiRpc');
+
+    await expect(createVerifiedAdminSuiClient('testnet')).rejects.toThrow('chain mismatch');
   });
 });
 

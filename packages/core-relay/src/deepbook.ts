@@ -8,13 +8,14 @@
  *   - DEFAULT_SLIPPAGE_BPS: shared slippage tolerance constant
  */
 import { Transaction } from '@mysten/sui/transactions';
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
 import type { DeepBookPoolHop } from '@stelis/contracts';
-import { SUI_CLOCK_OBJECT_ID, SUI_ZERO_ADDRESS } from './constants.js';
+import { SUI_CLOCK_OBJECT_ID } from './constants.js';
 import { SlippageQueryError } from './deepbookErrors.js';
-import { bindCurrentSuiResultToBytes } from './suiResultBinding.js';
 import { decodeExactU64Bytes } from './decodeU64.js';
+import { simulateSuiMoveView } from './sui/suiTransactionGateways.js';
+import { suiExecutionErrorMessage } from './sui/suiTransactionShape.js';
+import type { SuiCommandResult, SuiMoveViewResult } from './sui/suiTransactionShape.js';
+import type { SuiEndpointSnapshot } from './sui/suiOperation.js';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -23,26 +24,43 @@ import { decodeExactU64Bytes } from './decodeU64.js';
 /** Default slippage tolerance in basis points. */
 export const DEFAULT_SLIPPAGE_BPS = 200;
 
-type SimulationCommandResults = NonNullable<
-  SuiClientTypes.SimulateTransactionResult<{ commandResults: true }>['commandResults']
->;
-
 function requireSuccessfulSimulationCommandResults(
-  result: unknown,
-  transactionBytes: Uint8Array,
+  result: SuiMoveViewResult,
   operation: string,
-): SimulationCommandResults {
-  const bound = bindCurrentSuiResultToBytes(result, transactionBytes);
-  if (!bound) {
-    throw new SlippageQueryError(`${operation}: malformed or mismatched simulation result`);
+): readonly SuiCommandResult[] {
+  if (result.outcome === 'failure') {
+    throw new SlippageQueryError(
+      `${operation}: simulation failed (${suiExecutionErrorMessage(result.error)})`,
+    );
   }
-  if (bound.outcome === 'failure') {
-    throw new SlippageQueryError(`${operation}: simulation failed (${bound.errorMessage})`);
+  return result.commandResults;
+}
+
+function requireExactViewResults(
+  result: SuiMoveViewResult,
+  operation: string,
+  commandCount: number,
+  returnCount: number,
+): readonly SuiCommandResult[] {
+  const commandResults = requireSuccessfulSimulationCommandResults(result, operation);
+  if (commandResults.length !== commandCount) {
+    throw new SlippageQueryError(
+      `${operation}: expected ${commandCount} command results, got ${commandResults.length}`,
+    );
   }
-  if (!bound.commandResults) {
-    throw new SlippageQueryError(`${operation}: simulation returned no command results`);
-  }
-  return bound.commandResults as SimulationCommandResults;
+  commandResults.forEach((command, index) => {
+    if (command.returnValues.length !== returnCount) {
+      throw new SlippageQueryError(
+        `${operation}: command ${index} expected ${returnCount} return values, got ${command.returnValues.length}`,
+      );
+    }
+    if (command.mutatedReferences.length !== 0) {
+      throw new SlippageQueryError(
+        `${operation}: command ${index} unexpectedly returned mutated references`,
+      );
+    }
+  });
+  return commandResults;
 }
 
 // ─────────────────────────────────────────────
@@ -53,16 +71,17 @@ function requireSuccessfulSimulationCommandResults(
  * Query DeepBook pool mid-price as raw bigint (no Number conversion).
  * Per-hop query — does not depend on SingleHopSettlementSwapPath array position.
  *
- * Returns raw u64 mid_price, or null if the pool has no data (empty returnValues).
+ * Returns the exact raw u64 mid_price. DeepBook represents no orders as zero.
  * Used by slippage measurement path (bigint-only policy).
  *
- * @throws SlippageQueryError on RPC failure (tx.build, simulateTransaction) or BCS decode error.
+ * @throws SuiOperationError when resolution/simulation fails.
+ * @throws SlippageQueryError when the completed view result violates the DeepBook ABI.
  */
 export async function getHopMidPriceRaw(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   hop: DeepBookPoolHop,
-): Promise<bigint | null> {
+): Promise<bigint> {
   const tx = new Transaction();
   tx.moveCall({
     target: `${deepbookPackageId}::pool::mid_price`,
@@ -70,34 +89,11 @@ export async function getHopMidPriceRaw(
     arguments: [tx.object(hop.poolId), tx.object(SUI_CLOCK_OBJECT_ID)],
   });
 
-  tx.setSender(SUI_ZERO_ADDRESS);
+  const result: SuiMoveViewResult = await simulateSuiMoveView(snapshot, {
+    transaction: tx,
+  });
 
-  let txBytes: Uint8Array;
-  try {
-    txBytes = await tx.build({ client });
-  } catch (err) {
-    throw new SlippageQueryError(
-      `mid_price tx.build failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  let result: unknown;
-  try {
-    result = await client.simulateTransaction({
-      transaction: txBytes,
-      include: { commandResults: true },
-    });
-  } catch (err) {
-    throw new SlippageQueryError(
-      `mid_price simulateTransaction failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  // Empty/missing return values = pool has no data → null (not an error)
-  const cmdResults = requireSuccessfulSimulationCommandResults(result, txBytes, 'mid_price');
-  if (!cmdResults?.[0]?.returnValues?.[0]?.bcs) {
-    return null;
-  }
+  const cmdResults = requireExactViewResults(result, 'mid_price', 1, 1);
 
   // BCS decode — the boundary translates exact-width decoder failures to the
   // DeepBook query error contract.
@@ -112,12 +108,13 @@ export async function getHopMidPriceRaw(
  * Packs one mid_price MoveCall per hop into a single Transaction.
  * For 1-hop pools this is equivalent to getHopMidPriceRaw.
  *
- * Returns bigint[] (one per hop). Null mid-price → 0n (same as getHopMidPriceRaw convention).
+ * Returns one exact bigint mid-price per hop. DeepBook represents no orders as zero.
  *
- * @throws SlippageQueryError on build/simulate/BCS failure
+ * @throws SuiOperationError when resolution/simulation fails.
+ * @throws SlippageQueryError when a completed result violates the DeepBook ABI.
  */
 export async function batchGetHopMidPrices(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   hops: readonly DeepBookPoolHop[],
 ): Promise<bigint[]> {
@@ -125,8 +122,8 @@ export async function batchGetHopMidPrices(
 
   // Single hop — delegate to existing per-hop function (no batching overhead)
   if (hops.length === 1) {
-    const mp = await getHopMidPriceRaw(client, deepbookPackageId, hops[0]);
-    return [mp ?? 0n];
+    const mp = await getHopMidPriceRaw(snapshot, deepbookPackageId, hops[0]);
+    return [mp];
   }
 
   // Hop count > 1: batch all mid_price calls into one TX
@@ -138,38 +135,14 @@ export async function batchGetHopMidPrices(
       arguments: [tx.object(hop.poolId), tx.object(SUI_CLOCK_OBJECT_ID)],
     });
   }
-  tx.setSender(SUI_ZERO_ADDRESS);
+  const result: SuiMoveViewResult = await simulateSuiMoveView(snapshot, {
+    transaction: tx,
+  });
 
-  let txBytes: Uint8Array;
-  try {
-    txBytes = await tx.build({ client });
-  } catch (err) {
-    throw new SlippageQueryError(
-      `batch mid_price tx.build failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  let result: unknown;
-  try {
-    result = await client.simulateTransaction({
-      transaction: txBytes,
-      include: { commandResults: true },
-    });
-  } catch (err) {
-    throw new SlippageQueryError(
-      `batch mid_price simulateTransaction failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  const cmdResults = requireSuccessfulSimulationCommandResults(result, txBytes, 'batch mid_price');
+  const cmdResults = requireExactViewResults(result, 'batch mid_price', hops.length, 1);
   const prices: bigint[] = [];
   for (let i = 0; i < hops.length; i++) {
-    const bcsBytes = cmdResults?.[i]?.returnValues?.[0]?.bcs;
-    if (!bcsBytes) {
-      // Empty/missing = pool has no data → 0n (same convention as getHopMidPriceRaw null → 0n)
-      prices.push(0n);
-      continue;
-    }
+    const bcsBytes = cmdResults[i]!.returnValues[0]!.bcs;
     const buf = bcsBytes instanceof Uint8Array ? bcsBytes : new Uint8Array(bcsBytes);
     prices.push(decodeDeepBookU64(buf));
   }
@@ -195,12 +168,13 @@ export async function batchGetHopMidPrices(
  *
  * Source: pool.move:869, pool.move:921
  *
- * @throws SlippageQueryError on RPC failure or unexpected response shape
+ * @throws SuiOperationError when resolution/simulation fails.
+ * @throws SlippageQueryError when a completed result violates the DeepBook ABI.
  */
 export async function getQuantityOut(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
-  hop: DeepBookPoolHop,
+  hop: Pick<DeepBookPoolHop, 'poolId' | 'baseType' | 'quoteType' | 'swapDirection'>,
   inputAmountSmallest: bigint,
 ): Promise<bigint> {
   const isBaseForQuote = hop.swapDirection === 'baseForQuote';
@@ -208,60 +182,36 @@ export async function getQuantityOut(
     ? 'get_quote_quantity_out_input_fee'
     : 'get_base_quantity_out_input_fee';
 
-  try {
-    const tx = new Transaction();
-    tx.moveCall({
-      target: `${deepbookPackageId}::pool::${moveFn}`,
-      typeArguments: [hop.baseType, hop.quoteType],
-      arguments: [
-        tx.object(hop.poolId),
-        tx.pure.u64(inputAmountSmallest),
-        tx.object(SUI_CLOCK_OBJECT_ID),
-      ],
-    });
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${deepbookPackageId}::pool::${moveFn}`,
+    typeArguments: [hop.baseType, hop.quoteType],
+    arguments: [
+      tx.object(hop.poolId),
+      tx.pure.u64(inputAmountSmallest),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
 
-    tx.setSender(SUI_ZERO_ADDRESS);
-    const txBytes = await tx.build({ client });
+  const result = await simulateSuiMoveView(snapshot, { transaction: tx });
 
-    const result = await client.simulateTransaction({
-      transaction: txBytes,
-      include: { commandResults: true },
-    });
+  const commandResults = requireExactViewResults(result, 'get_quantity_out', 1, 3);
+  const rv = commandResults[0]!.returnValues;
 
-    const commandResults = requireSuccessfulSimulationCommandResults(
-      result,
-      txBytes,
-      'get_quantity_out',
-    );
-    const rv = commandResults[0]?.returnValues;
-    if (!rv || rv.length < 3) {
-      throw new SlippageQueryError(
-        `get_quantity_out: expected 3 return values, got ${rv?.length ?? 0}`,
-      );
+  const decode = (idx: number): bigint => {
+    const bcs = rv[idx]?.bcs;
+    if (!bcs) {
+      throw new SlippageQueryError(`get_quantity_out: missing BCS at index ${idx}`);
     }
+    const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
+    return decodeDeepBookU64(buf);
+  };
 
-    // BCS decode each u64
-    const decode = (idx: number): bigint => {
-      const bcs = rv[idx]?.bcs;
-      if (!bcs) {
-        throw new SlippageQueryError(`get_quantity_out: missing BCS at index ${idx}`);
-      }
-      const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
-      return decodeDeepBookU64(buf);
-    };
+  const baseOut = decode(0);
+  const quoteOut = decode(1);
+  decode(2); // deep_required — not used but decoded for shape validation
 
-    const baseOut = decode(0);
-    const quoteOut = decode(1);
-    decode(2); // deep_required — not used but decoded for shape validation
-
-    // Select output based on swap direction
-    return isBaseForQuote ? quoteOut : baseOut;
-  } catch (err) {
-    if (err instanceof SlippageQueryError) throw err;
-    throw new SlippageQueryError(
-      `get_quantity_out RPC failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  return isBaseForQuote ? quoteOut : baseOut;
 }
 
 // ─────────────────────────────────────────────
@@ -303,10 +253,11 @@ export interface QuantityInQuote {
  * returned as-is. Caller policy decides fail-closed handling — the helper
  * does not fail on zero values.
  *
- * @throws SlippageQueryError on RPC failure or unexpected response shape.
+ * @throws SuiOperationError when resolution/simulation fails.
+ * @throws SlippageQueryError when a completed result violates the DeepBook ABI.
  */
 export async function getInputForTargetOutput(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   hop: DeepBookPoolHop,
   targetOutputAmountSmallest: bigint,
@@ -314,57 +265,41 @@ export async function getInputForTargetOutput(
   const isBaseForQuote = hop.swapDirection === 'baseForQuote';
   const moveFn = isBaseForQuote ? 'get_base_quantity_in' : 'get_quote_quantity_in';
 
-  try {
-    const tx = new Transaction();
-    tx.moveCall({
-      target: `${deepbookPackageId}::pool::${moveFn}`,
-      typeArguments: [hop.baseType, hop.quoteType],
-      arguments: [
-        tx.object(hop.poolId),
-        tx.pure.u64(targetOutputAmountSmallest),
-        tx.pure.bool(false),
-        tx.object(SUI_CLOCK_OBJECT_ID),
-      ],
-    });
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${deepbookPackageId}::pool::${moveFn}`,
+    typeArguments: [hop.baseType, hop.quoteType],
+    arguments: [
+      tx.object(hop.poolId),
+      tx.pure.u64(targetOutputAmountSmallest),
+      tx.pure.bool(false),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
 
-    tx.setSender(SUI_ZERO_ADDRESS);
-    const txBytes = await tx.build({ client });
+  const result = await simulateSuiMoveView(snapshot, { transaction: tx });
 
-    const result = await client.simulateTransaction({
-      transaction: txBytes,
-      include: { commandResults: true },
-    });
+  const commandResults = requireExactViewResults(result, moveFn, 1, 3);
+  const rv = commandResults[0]!.returnValues;
 
-    const commandResults = requireSuccessfulSimulationCommandResults(result, txBytes, moveFn);
-    const rv = commandResults[0]?.returnValues;
-    if (!rv || rv.length < 3) {
-      throw new SlippageQueryError(`${moveFn}: expected 3 return values, got ${rv?.length ?? 0}`);
+  const decode = (idx: number): bigint => {
+    const bcs = rv[idx]?.bcs;
+    if (!bcs) {
+      throw new SlippageQueryError(`${moveFn}: missing BCS at index ${idx}`);
     }
+    const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
+    return decodeDeepBookU64(buf);
+  };
 
-    const decode = (idx: number): bigint => {
-      const bcs = rv[idx]?.bcs;
-      if (!bcs) {
-        throw new SlippageQueryError(`${moveFn}: missing BCS at index ${idx}`);
-      }
-      const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs);
-      return decodeDeepBookU64(buf);
-    };
+  const baseValue = decode(0);
+  const quoteValue = decode(1);
+  const deepRequiredAmount = decode(2);
 
-    const baseValue = decode(0);
-    const quoteValue = decode(1);
-    const deepRequiredAmount = decode(2);
-
-    return {
-      inputAmountSmallest: isBaseForQuote ? baseValue : quoteValue,
-      quantityInActualOutputSmallest: isBaseForQuote ? quoteValue : baseValue,
-      deepRequiredAmount,
-    };
-  } catch (err) {
-    if (err instanceof SlippageQueryError) throw err;
-    throw new SlippageQueryError(
-      `${moveFn} RPC failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  return {
+    inputAmountSmallest: isBaseForQuote ? baseValue : quoteValue,
+    quantityInActualOutputSmallest: isBaseForQuote ? quoteValue : baseValue,
+    deepRequiredAmount,
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -377,6 +312,7 @@ function decodeDeepBookU64(bytes: Uint8Array): bigint {
   } catch (error) {
     throw new SlippageQueryError(
       `u64 BCS decode failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }

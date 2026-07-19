@@ -1,14 +1,22 @@
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
+import type { SingleHopSettlementSwapPath, SettleProfile, SuiNetwork } from '@stelis/contracts';
 import type {
+  AllowedSettlementSwapPath,
+  ChainBoundSuiEndpointSnapshot,
+  ValidationResult,
+} from '@stelis/core-relay';
+import type {
+  AddressBalanceGasTransaction,
   PaymentInputSource,
   StaticSettlementSwapPathDescriptor,
 } from '@stelis/core-relay/server';
 import type { Bps, Mist } from '../internal/brand.js';
+import type { ExtractedSettleArgs } from './extractSettleArgs.js';
 
 /** Context needed for the build phase. */
 export interface BuildContext {
-  sui: SuiGrpcClient;
+  sui: ChainBoundSuiEndpointSnapshot;
+  network: SuiNetwork;
+  allowedSettlementSwapPaths: readonly AllowedSettlementSwapPath[];
   packageId: string;
   configId: string;
   vaultRegistryId: string;
@@ -63,8 +71,10 @@ export interface GenericPrepareBuildRequest {
 
 /** Output from the generic prepare build pipeline. */
 export interface GenericPrepareBuildOutput {
-  txBytes: Uint8Array;
-  txBytesHash: string;
+  addressBalanceGasTransaction: AddressBalanceGasTransaction;
+  l1Validation: ValidationResult;
+  /** Present only when the final transaction passed the level-1 structure check. */
+  settleArgs: ExtractedSettleArgs | null;
   /**
    * Branded `Mist`. Consumers inside `core-api` can read this as a
    * bigint subtype without unwrapping; the brand prevents raw bigints

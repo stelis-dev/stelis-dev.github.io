@@ -60,10 +60,10 @@ describe('sponsoredExecution — derive known economics', () => {
       recoveredGasMist: 0n,
       hostPaidGasMist: 12_345n,
       hostFeeMist: 0n,
-      failureReason: 'PROMOTION_LEDGER_CONSUME_FAILED',
+      failureReason: 'recorder_write_failed',
     });
     expect(econ.hostNetMist).toBe(-12_345n);
-    expect(econ.failureReason).toBe('PROMOTION_LEDGER_CONSUME_FAILED');
+    expect(econ.failureReason).toBe('recorder_write_failed');
   });
 
   it('protocol_fee is auxiliary context only — NOT subtracted from hostNetMist', () => {
@@ -123,9 +123,11 @@ describe('sponsoredExecution — derive known economics', () => {
 
 describe('sponsoredExecution — unknown economics', () => {
   it('unknownSponsoredExecutionEconomics carries the explicit failureReason', () => {
-    const u = unknownSponsoredExecutionEconomics('SPONSOR_EXEC_GAS_USED_MISSING');
+    const u = unknownSponsoredExecutionEconomics(
+      'post_signature_uncertainty: Sui RPC transport was unavailable',
+    );
     expect(u.economicsStatus).toBe('unknown');
-    expect(u.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
+    expect(u.failureReason).toBe('post_signature_uncertainty: Sui RPC transport was unavailable');
   });
 
   it('unknown economics has no numeric fields — recorder must not coerce to 0', () => {
@@ -187,11 +189,13 @@ describe('sponsoredExecution — serialize response shape', () => {
 
   it('serializes unknown economics without numeric fields', () => {
     const u: SponsoredExecutionEconomics = unknownSponsoredExecutionEconomics(
-      'SPONSOR_EXEC_GAS_USED_MISSING',
+      'post_signature_uncertainty: Sui RPC transport was unavailable',
     );
     const serialized = serializeSponsoredExecutionEconomics(u);
     expect(serialized.economicsStatus).toBe('unknown');
-    expect(serialized.failureReason).toBe('SPONSOR_EXEC_GAS_USED_MISSING');
+    expect(serialized.failureReason).toBe(
+      'post_signature_uncertainty: Sui RPC transport was unavailable',
+    );
     expect((serialized as Record<string, unknown>).recoveredGasMist).toBeUndefined();
     expect((serialized as Record<string, unknown>).hostNetMist).toBeUndefined();
   });

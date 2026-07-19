@@ -3,37 +3,17 @@
  *
  * StelisSponsoredError — user-facing Host normalization or SDK-local sponsored-flow validation.
  * normalizeApiError   — maps StelisApiException → StelisSponsoredError.
- * isInfraError        — classifies transient network/RPC errors.
  */
 import { StelisApiException } from './client.js';
 import type { HostErrorMeta } from '@stelis/contracts';
-
-/**
- * Returns true for transient network/infrastructure errors that may resolve
- * when routed through a different endpoint (e.g. the Host's RPC node).
- * Deterministic failures (bad tx, wrong args) are NOT infra errors.
- *
- * Used only in sdk.ts — not a core-relay export (string heuristics are
- * SDK runtime policy, not shared trust-root math).
- */
-export function isInfraError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return (
-    msg.includes('fetch') ||
-    msg.includes('timeout') ||
-    msg.includes('network') ||
-    msg.includes('econnrefused') ||
-    msg.includes('grpc') ||
-    err.name === 'AbortError'
-  );
-}
 
 /**
  * User-friendly error thrown by sponsored-flow orchestration and local validation.
  *
  * Codes:
  * - `INSUFFICIENT_FUNDS` — balance or settle input too low.
+ * - `PAYMENT_COIN_CONFLICT` — exact Host code for unresolved settlement-token payment structure.
+ * - `PAYMENT_COIN_LIMIT_EXCEEDED` — exact Host code with Coin consolidation guidance.
  * - `TRANSACTION_FAILED` — dry-run simulation failure.
  * - `EXECUTION_FAILED` — sponsor preflight / on-chain revert.
  * - *(passthrough)* — a current Host code or SDK-local validation code without a
@@ -58,11 +38,7 @@ export class StelisSponsoredError extends Error {
  */
 export function normalizeApiError(err: StelisApiException): StelisSponsoredError {
   // Direct /prepare classification
-  if (
-    err.code === 'INSUFFICIENT_SETTLE_INPUT' ||
-    err.code === 'INSUFFICIENT_BALANCE' ||
-    err.code === 'PAYMENT_COIN_CONFLICT'
-  ) {
+  if (err.code === 'INSUFFICIENT_SETTLE_INPUT' || err.code === 'INSUFFICIENT_BALANCE') {
     return new StelisSponsoredError(
       'INSUFFICIENT_FUNDS',
       'Transaction cost exceeds available balance. Please add funds or reduce the amount.',
@@ -119,13 +95,13 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
   if (
     err.code === 'SLIPPAGE_EXCEEDED' ||
     err.code === 'CLAIM_WOULD_EXCEED_MAX' ||
-    err.code === 'SLIPPAGE_QUERY_FAILED' ||
+    err.code === 'MARKET_QUOTE_UNAVAILABLE' ||
     err.code === 'SLIPPAGE_CONVERGENCE_FAILED' ||
     err.code === 'SPREAD_EXCEEDED'
   ) {
     return new StelisSponsoredError(
       'TRANSACTION_FAILED',
-      err.code === 'SLIPPAGE_QUERY_FAILED'
+      err.code === 'MARKET_QUOTE_UNAVAILABLE'
         ? 'Unable to verify swap conditions. Please try again.'
         : 'Transaction exceeds safety limits. Please try a smaller amount.',
       err,
@@ -148,6 +124,6 @@ export function normalizeApiError(err: StelisApiException): StelisSponsoredError
       err.meta,
     );
   }
-  // Preserve a current Host code, or UNKNOWN for an invalid/uncoded Host response.
+  // Preserve the validated current Host code.
   return new StelisSponsoredError(err.code, err.message, err, err.meta);
 }

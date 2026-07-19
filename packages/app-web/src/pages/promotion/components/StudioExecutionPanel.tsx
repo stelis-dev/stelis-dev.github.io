@@ -230,7 +230,7 @@ export function StudioExecutionPanel({
 
       {!account && <div className="promo-warning">⚠️ Connect your wallet first.</div>}
       {!developerJwt && <div className="promo-warning">⚠️ Provide a developer JWT above.</div>}
-      {!sdk && <div className="promo-warning">⚠️ Connect to a studio endpoint first.</div>}
+      {!sdk && <div className="promo-warning">⚠️ Connect to a Host first.</div>}
       {!promotionId.trim() && <div className="promo-warning">⚠️ Enter a Promotion ID above.</div>}
       <div className="promo-warning">
         Host prerequisite: include <code>{STUDIO_TEST_ALLOWED_TARGETS_CONFIG}</code> in{' '}

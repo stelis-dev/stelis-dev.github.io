@@ -1,119 +1,52 @@
-/**
- * SponsoredExecution — sponsor runner.
- *
- * Walks the sponsor-side states (`DecodeSponsorSubmission` through
- * `Release`) defined in `states.ts` against an injected `SponsoredExecutionPolicy`.
- * The runner owns:
- *   - the atomic-consume sub-runner invocation
- *     (`runSponsorConsumePhase` from `sponsorLifecycle.ts`),
- *   - progressive sponsor-context construction across the consume
- *     boundary (pre-consume hooks see `PreConsumeSponsorContext`;
- *     post-consume hooks see `PostConsumeSponsorContext` once the
- *     runner reconstructs `sponsorSlot`; nonce/ledger reservation
- *     fields fill in as `SharedPostconsumeChecks` /
- *     `PolicyPostconsumeChecks` return reconstruction inputs),
- *   - the `safeSlotCheckin` boundary in `finally` (only fires after
- *     consume succeeds — pre-consume failures carry no slot to release),
- *   - swallowing throws from the post-checkin `Release` hook so the
- *     hook cannot mask the primary success path or the original error.
- *
- * Internal module. The public sponsor handlers now delegate to
- * `runSponsorStateMachine` while preserving their stable entrypoint
- * signatures.
- *
- * Current sponsor-runner rules:
- *   - `Consume` is the single authoritative stored-hash match; reconstruction
- *     starts only after this boundary clears.
- *   - the shared runner owns finally slot checkin.
- *   - sponsor-phase reservation handles is reconstructed from durable inputs after
- *     consume + boundary verification, not acquired afresh.
- */
-
+import { createHash } from 'node:crypto';
+import { computeExecutionCostClaim, SUI_OPERATION_ATTEMPT_TIMEOUT_MS } from '@stelis/core-relay';
+import type { SponsorResultCallback, SponsorResultMetadata } from '../../handlers/sponsorResult.js';
+import type { PreparedTxEntry } from '../../store/prepareTypes.js';
+import type {
+  ExecutingSponsoredExecutionRecord,
+  FinalSponsoredExecutionRecord,
+  SponsoredExecutionRecoveryContext,
+} from '../../store/sponsoredExecutionRecords.js';
+import {
+  sponsorResultMetadata,
+  storedSponsorResultMatchesMetadata,
+} from '../../store/sponsoredExecutionRecords.js';
+import type {
+  PromotionReceiptFinalization,
+  SponsoredExecutionStoreAdapter,
+} from '../../store/sponsoredExecutionStore.js';
+import type {
+  SponsorSubmissionContext,
+  SponsorValidatedContext,
+  SponsoredExecutionPolicy,
+} from './executionPolicy.js';
 import type {
   LedgerReservationHandle,
   NonceReservationHandle,
   SponsorSlotReservationHandle,
 } from './reservationHandles.js';
 import { reconstructReservationHandles } from './reservationHandles.js';
-import type {
-  PostConsumeSponsorContext,
-  SponsoredExecutionPolicy,
-  PreConsumeSponsorContext,
-} from './executionPolicy.js';
 import type { ExecResult } from '../sessionTypes.js';
-import type { PreparedTxEntry, PrepareStoreAdapter } from '../../store/prepareTypes.js';
-import type { SponsorPoolAdapter } from '../../context.js';
-import type { PromotionExecutionLedger } from '../../studio/executionLedger.js';
-import { runSponsorConsumePhase, type SponsorConsumePolicyAdapter } from '../sponsorLifecycle.js';
-import { safeSlotCheckin, SponsorPostSignatureUncertaintyError } from '../sessionPrimitives.js';
-import type { SponsorExecutionStage } from '../../handlers/sponsorResult.js';
+import { SponsorPostSignatureUncertaintyError } from '../sessionPrimitives.js';
 
-// ─────────────────────────────────────────────
-// Host adapters + request shape
-// ─────────────────────────────────────────────
-
-/**
- * Sign-and-submit port the runner consumes for the
- * `SponsorSign` + `Submit` boundary. The production wiring binds this
- * to `signAndSubmit(pool, sui, sponsorAddress, receiptId, txBytes,
- * userSignature)` from `sessionPrimitives.ts`; tests pass a
- * deterministic mock.
- *
- * Failure semantics the port preserves:
- *   - `SponsorLeaseExpiredError` (or other `pool.sign` failures) throw
- *     before the sponsor signature is issued — the runner rethrows
- *     unchanged.
- *   - `SponsorPostSignatureUncertaintyError` throws AFTER the sponsor
- *     signature was issued. The runner captures its typed stage for the
- *     Release metadata and preserves the typed error plus expected digest.
- *   - Any other thrown value propagates unchanged.
- *   - On a normalized failed `ExecResult`, the runner forwards the
- *     result to `ClassifySponsorResult` so the policy can classify
- *     congestion vs on-chain revert.
- */
+/** The only side-effecting execution port. It receives the original validated bytes. */
 export type SignAndSubmitPort = (
   sponsorAddress: string,
   receiptId: string,
   txBytes: Uint8Array,
   userSignature: string,
+  expectedDigest: string,
 ) => Promise<ExecResult>;
 
-/**
- * Production-side adapters the sponsor runner consumes. The runner
- * does not construct fresh reservations — every resource the prepared
- * entry references is owned by the durable store from the
- * `/prepare` boundary. The runner only:
- *   - reads the prepared entry via `prepareStore` (through the
- *     consume sub-runner),
- *   - calls `sponsorPool.checkin` via `safeSlotCheckin` in `finally`,
- *   - reads ledger state via `executionLedger` for Studio policy
- *     verification (the policy hooks themselves call this; the runner
- *     just passes the adapter through the host shape).
- *
- * `executionLedger` is required for promotion policies (Studio
- * postconsume verification needs it) and ignored for generic. The
- * runner does NOT enforce its presence at construction time — a
- * generic policy that never asks for ledger reservation handle does not need a
- * ledger adapter, and a Studio policy hook will report a clear
- * runtime error if it dereferences a missing host.
- */
 export interface SponsorStateMachineHost {
-  readonly prepareStore: PrepareStoreAdapter;
-  readonly sponsorPool: SponsorPoolAdapter;
-  readonly executionLedger?: PromotionExecutionLedger;
+  readonly store: SponsoredExecutionStoreAdapter;
   readonly signAndSubmit: SignAndSubmitPort;
+  readonly endpointCount: number;
+  readonly onSponsorResult: SponsorResultCallback;
+  /** Fresh receipt-specific check for the exact assigned sponsor address. */
+  readonly isSponsorAddressAvailable: (sponsorAddress: string) => Promise<boolean>;
 }
 
-/**
- * Snapshot handed to `request.projectResult` on the success path. The
- * runner builds this immediately after `ClassifySponsorResult` returns
- * (success-only); failure paths throw before reaching the projector.
- *
- * Route-specific public-result projection lives in `projectResult`,
- * not in this snapshot — the snapshot is the structured input the
- * projector reads to assemble its public response (digest + economics
- * for generic, digest + estimatedGas + reservedGas for promotion).
- */
 export interface SponsorResultSnapshot {
   readonly receiptId: string;
   readonly clientIp: string;
@@ -124,47 +57,31 @@ export interface SponsorResultSnapshot {
   readonly execResult: Extract<ExecResult, { success: true }>;
 }
 
-/**
- * Per-request inputs the runner does not derive from the policy
- * policy. The request is generic over `TResult` so each route
- * (generic / Studio) can return its own public response shape from
- * the projector.
- */
 export interface SponsorStateMachineRequest<TResult> {
-  readonly hookContext: PreConsumeSponsorContext;
+  readonly hookContext: SponsorSubmissionContext;
   readonly txBytes: Uint8Array;
   readonly userSignature: string;
-  /**
-   * Builds the route-specific public result from the typed sponsor result
-   * snapshot. Called only on the success path; failure paths throw
-   * before this runs.
-   */
+  readonly buildRecoveryContext: () => SponsoredExecutionRecoveryContext;
+  readonly buildResultMetadata: (
+    executionStage: SponsorResultMetadata['executionStage'],
+  ) => SponsorResultMetadata;
+  readonly stateChangedError: () => Error;
   readonly projectResult: (snapshot: SponsorResultSnapshot) => TResult | Promise<TResult>;
 }
 
-// ─────────────────────────────────────────────
-// Errors raised by the sponsor runner itself
-// ─────────────────────────────────────────────
+/** Route-specific public error and abuse classification. No storage mutation is allowed. */
+export interface SponsorReceiptPolicyAdapter {
+  readonly route: PreparedTxEntry['mode'];
+  onNotFound(receiptId: string): Error;
+  onExpired(receiptId: string): Error;
+  onHashMismatch(receiptId: string): Promise<Error> | Error;
+  onPromotionNotActive(receiptId: string): Error;
+  onSponsorUnavailable(receiptId: string): Error;
+  onStateChanged(receiptId: string): Error;
+  onCorrupt(input: { receiptId: string; error: unknown }): Promise<Error> | Error;
+  validatePreparedEntry(entry: PreparedTxEntry): Promise<void> | void;
+}
 
-/**
- * Thrown when the execution policy declares an handle requirement at
- * the sponsor result boundary that the corresponding postconsume hook did
- * not produce. Specifically: the runner detects this BEFORE
- * `signAndSubmit` fires so the failure is surfaced before any
- * irreversible side-effect.
- *
- * Examples:
- *   - `handleRequirements.sponsorResult.ledgerReservation === true` but
- *     `PolicyPostconsumeChecks` returned no reconstruction inputs —
- *     the Studio sponsor result hook would dereference an undefined
- *     `ledgerReservation` token.
- *   - The execution policy's discriminator is `'promotion'` but
- *     `host.executionLedger` is missing.
- *
- * This is a runner / policy mis-sequencing (or host
- * misconfiguration) signal per Q5, NOT user-driven validation
- * failure.
- */
 export class RunnerSponsorReservationHandleMissingError extends Error {
   constructor(message: string) {
     super(message);
@@ -172,24 +89,6 @@ export class RunnerSponsorReservationHandleMissingError extends Error {
   }
 }
 
-/**
- * Thrown when a policy hook returns in violation of its declared
- * runner contract. Distinct from
- * `RunnerSponsorReservationHandleMissingError`: that one signals a missing
- * reservation handle at a known boundary; this one signals a hook returned
- * (without throwing) under a state where the runner cannot proceed
- * coherently.
- *
- * Currently raised at one site:
- *   - `ClassifySponsorResult` returned without throwing on a failed
- *     `ExecResult`. The runner cannot project a success result from
- *     a failed ExecResult, and silently continuing would bypass the
- *     route's classified-error vocabulary
- *     (SponsorOnchainError / SponsorCongestionError).
- *
- * Like its sibling, this is a runner / policy contract violation
- * per Q5 — not user-driven validation failure.
- */
 export class RunnerSponsorPolicyContractError extends Error {
   constructor(message: string) {
     super(message);
@@ -197,261 +96,250 @@ export class RunnerSponsorPolicyContractError extends Error {
   }
 }
 
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-
-async function callHook<Args extends unknown[]>(
-  hook: ((...args: Args) => Promise<unknown> | unknown) | undefined,
-  ...args: Args
-): Promise<void> {
-  if (!hook) return;
-  await hook(...args);
+function executionBudgetMs(endpointCount: number): number {
+  if (!Number.isSafeInteger(endpointCount) || endpointCount <= 0) {
+    throw new TypeError('Sponsor endpointCount must be a positive safe integer');
+  }
+  const value = (endpointCount + 1) * SUI_OPERATION_ATTEMPT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value)) {
+    throw new TypeError('Sponsored execution deadline exceeds the safe integer range');
+  }
+  return value;
 }
 
-/**
- * Same as `callHook` but swallows + drops any thrown value. Used for
- * post-pivotal observability hooks (`Submit`, `Release`) where a
- * throw must not mask the primary classification or cleanup that the
- * runner is contractually obligated to perform next.
- *
- * Pure swallow: route-specific observability for callback failures
- * belongs in the policy hook that owns the callback contract. The
- * runner-level helper intentionally does not invent a shared log
- * payload for hook-local failures.
- */
-async function callObservabilityHookSwallow<Args extends unknown[]>(
-  hook: ((...args: Args) => Promise<unknown> | unknown) | undefined,
-  ...args: Args
+function txBytesHash(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function promotionFinalization(
+  prepared: PreparedTxEntry,
+  metadata: SponsorResultMetadata,
+  result: ExecResult | null,
+): PromotionReceiptFinalization {
+  if (prepared.mode === 'generic') return { operation: 'none' };
+  if (result?.success || (result && !result.isCongestion)) {
+    return {
+      operation: 'consume',
+      chargedMist: computeExecutionCostClaim(result.gasUsed).simGas,
+    };
+  }
+  if (result && !result.success && result.isCongestion) return { operation: 'release' };
+  return metadata.executionStage === 'before_sponsor_signature'
+    ? { operation: 'release' }
+    : { operation: 'consume', chargedMist: prepared.reservedGasMist };
+}
+
+async function deliverFinalResult(
+  host: SponsorStateMachineHost,
+  record: FinalSponsoredExecutionRecord,
 ): Promise<void> {
-  if (!hook) return;
+  if (record.callbackDelivery === 'delivered') return;
   try {
-    await hook(...args);
+    await host.onSponsorResult(sponsorResultMetadata(record.result));
   } catch {
-    // Swallow — observability hook is post-pivotal and must not
-    // replace the primary success path or the original error.
+    return;
+  }
+  try {
+    await host.store.markCallbackDelivered(record);
+  } catch {
+    // The durable final record remains pending and recovery retries this
+    // acknowledgement. A delivery-marker failure cannot replace the primary
+    // sponsored-execution result, which is already final at this point.
   }
 }
 
-// ─────────────────────────────────────────────
-// Runner
-// ─────────────────────────────────────────────
+async function finalize<TResult>(
+  host: SponsorStateMachineHost,
+  request: SponsorStateMachineRequest<TResult>,
+  expected: ExecutingSponsoredExecutionRecord,
+  prepared: PreparedTxEntry,
+  stage: SponsorResultMetadata['executionStage'],
+  result: ExecResult | null,
+): Promise<void> {
+  const metadata = request.buildResultMetadata(stage);
+  const outcome = await host.store.finalizeSponsoredExecution({
+    expected,
+    result: metadata,
+    promotion: promotionFinalization(prepared, metadata, result),
+  });
+  if (outcome.status === 'state_changed') throw request.stateChangedError();
+  if (
+    outcome.status === 'already_final' &&
+    !storedSponsorResultMatchesMetadata(outcome.record.result, metadata)
+  ) {
+    throw request.stateChangedError();
+  }
+  await deliverFinalResult(host, outcome.record);
+}
+
+async function discard<TResult>(
+  host: SponsorStateMachineHost,
+  request: SponsorStateMachineRequest<TResult>,
+  prepared: PreparedTxEntry,
+): Promise<void> {
+  const metadata = request.buildResultMetadata('before_sponsor_signature');
+  const outcome = await host.store.discardPreparedReceipt({
+    expected: prepared,
+    result: metadata,
+  });
+  if (outcome.status === 'state_changed') throw request.stateChangedError();
+  if (
+    outcome.status === 'already_final' &&
+    !storedSponsorResultMatchesMetadata(outcome.record.result, metadata)
+  ) {
+    throw request.stateChangedError();
+  }
+  await deliverFinalResult(host, outcome.record);
+}
 
 /**
- * Run the sponsor state machine. Owns the procedural sponsor-side order,
- * dispatches the execution policy hook at each step, and returns the
- * route-specific result built by `request.projectResult` on success.
+ * Execute one prepared receipt.
  *
- * Cleanup contract:
- *   - Pre-consume failure paths (DecodeSponsorSubmission,
- *     UserSignatureValidation, Consume) carry no slot to release —
- *     the durable entry was not consumed, so the prepared store still
- *     owns the slot. `runSponsorConsumePhase` itself owns
- *     route-specific cleanup for `not_found` / `expired` /
- *     `hash_mismatch` / `corrupt` (via the consume adapter).
- *   - Post-consume failure paths run `safeSlotCheckin` in `finally`
- *     against the consumed entry's `(sponsorAddress, receiptId, txBytesHash)`
- *     — preserving the public sponsor-route cleanup semantics.
- *   - The post-checkin `Release` hook is swallowed if it throws so a
- *     buggy hook cannot replace the primary success path or the
- *     original error.
+ * The prepared record remains current while the request bytes and policy are
+ * checked. Immediately before signing, the store atomically consumes that
+ * exact record and creates the execution record. The same `Uint8Array` is then
+ * passed to the signing/submission port; the runner never rebuilds it.
  */
 export async function runSponsorStateMachine<TResult>(
   host: SponsorStateMachineHost,
   request: SponsorStateMachineRequest<TResult>,
   policy: SponsoredExecutionPolicy,
-  consumeAdapter: SponsorConsumePolicyAdapter,
+  receiptPolicy: SponsorReceiptPolicyAdapter,
 ): Promise<TResult> {
-  const preCtx = request.hookContext;
+  const receiptId = request.hookContext.receiptId;
+  // The submitted TransactionData and its user signature are authenticated
+  // before any prepared-record, SponsorAvailability, or lease-backed I/O.
+  // Policies retain the one decoded representation and the runner preserves
+  // the original Uint8Array through signAndSubmit.
+  await policy.hooks.DecodeSponsorSubmission(request.hookContext);
+  await policy.hooks.UserSignatureValidation(request.hookContext);
 
-  // Tracked so the `finally` cleanup knows whether consume succeeded.
-  // Undefined until `runSponsorConsumePhase` returns success.
-  let preparedEntry: PreparedTxEntry | undefined;
-  let postCtxSnapshot: PostConsumeSponsorContext | undefined;
-  let executionStage: SponsorExecutionStage = 'before_sponsor_signature';
-
+  let prepared: PreparedTxEntry;
+  let current: PreparedTxEntry | null;
   try {
-    // ── State 1: DecodeSponsorSubmission ──────────────────────────────
-    await callHook(policy.hooks.DecodeSponsorSubmission, preCtx);
-
-    // ── State 2: UserSignatureValidation ──────────────────────────────
-    await callHook(policy.hooks.UserSignatureValidation, preCtx);
-
-    // ── State 3: Consume ──────────────────────────────────────────────
-    // Atomic stored-hash match delegated to the existing shared sub-runner.
-    // Consume errors (not_found / expired / hash_mismatch / corrupt)
-    // propagate as adapter-classified errors — the runner does NOT
-    // re-classify them. Per Q1, the sub-runner is reused as-is.
-    preparedEntry = await runSponsorConsumePhase(
-      host.prepareStore,
-      preCtx.receiptId,
-      request.txBytes,
-      consumeAdapter,
-    );
-
-    // Reconstruct the consumed entry's sponsor-address lifecycle handle.
-    // This is not an HMAC attestation: `pool.sign()` remains the sole
-    // committed-lease verification boundary for the submitted txBytes.
-    const sponsorSlot = reconstructReservationHandles.sponsorSlot({
-      sponsorAddress: preparedEntry.sponsorAddress,
-      receiptId: preparedEntry.receiptId,
-    });
-
-    let nonceHandle: NonceReservationHandle | undefined;
-    let ledgerReservationHandle: LedgerReservationHandle | undefined;
-
-    // Build the post-consume context. Optional fields fill in as the
-    // postconsume hooks return reconstruction inputs.
-    const buildPostCtx = (): PostConsumeSponsorContext => ({
-      receiptId: preCtx.receiptId,
-      clientIp: preCtx.clientIp,
-      executionStage,
-      sponsorSlot,
-      nonce: nonceHandle,
-      ledgerReservation: ledgerReservationHandle,
-    });
-    postCtxSnapshot = buildPostCtx();
-
-    // Consume hook fires here as observability-only — the consume
-    // sub-runner already returned success.
-    await callHook(policy.hooks.Consume, preCtx);
-
-    // ── State 4: SharedPostconsumeChecks ──────────────────────────────
-    // Hook performs route-shared verification (gas owner cross-check,
-    // S-14 in-PTB nonce match for generic, etc.) and may return
-    // `NonceReconstructionInputs` which the runner mints into a live
-    // `NonceReservationHandle`.
-    const sharedOut = await policy.hooks.SharedPostconsumeChecks(postCtxSnapshot);
-    if (sharedOut.nonce) {
-      nonceHandle = reconstructReservationHandles.nonce(sharedOut.nonce);
-      postCtxSnapshot = buildPostCtx();
-    }
-
-    // ── State 5: PolicyPostconsumeChecks ──────────────────────────────
-    // Hook performs route-specific verification (new-user User Vault drift
-    // for generic; promotion ledger lookup verification for Studio)
-    // and may return `LedgerReservationReconstructionInputs` which the
-    // runner mints into a live `LedgerReservationHandle`.
-    const policyOut = await policy.hooks.PolicyPostconsumeChecks(postCtxSnapshot);
-    if (policyOut.ledgerReservation) {
-      ledgerReservationHandle = reconstructReservationHandles.ledgerReservation(
-        policyOut.ledgerReservation,
-      );
-      postCtxSnapshot = buildPostCtx();
-    }
-
-    // ── State 6: Preflight ────────────────────────────────────────────
-    await callHook(policy.hooks.Preflight, postCtxSnapshot);
-
-    // ── State 7: PolicyApproval ───────────────────────────────────────
-    await callHook(policy.hooks.PolicyApproval, postCtxSnapshot);
-
-    // Handle-requirement gate at the sponsor result boundary. The
-    // `sponsorResult` requirements declare which
-    // reservation handle kinds the upcoming Submit + ClassifySponsorResult hooks may
-    // dereference. If a required handle was not produced by the
-    // postconsume hooks, the runner fails closed here per Q5 —
-    // dereferencing an undefined handle in ClassifySponsorResult would
-    // otherwise produce a less-actionable error.
-    if (policy.handleRequirements.sponsorResult.ledgerReservation && !ledgerReservationHandle) {
-      throw new RunnerSponsorReservationHandleMissingError(
-        'policy requires ledger reservation handle at sponsor result boundary, but PolicyPostconsumeChecks did not return reconstruction inputs',
-      );
-    }
-
-    // ── State 8: SponsorSign ──────────────────────────────────────────
-    // Observability before the runner invokes the signAndSubmit port.
-    await callHook(policy.hooks.SponsorSign, postCtxSnapshot);
-
-    // ── State 9: Submit ───────────────────────────────────────────────
-    // Pre-sign failures (`SponsorLeaseExpiredError`) propagate from the
-    // port unchanged. Typed post-signature uncertainty updates the runner-
-    // owned stage before the typed uncertainty is rethrown. On a normalized failed `ExecResult`, the
-    // runner does NOT classify — it forwards the result to
-    // `ClassifySponsorResult` so the policy can decide whether to throw
-    // congestion vs on-chain revert.
-    let execResult: ExecResult;
-    try {
-      execResult = await host.signAndSubmit(
-        preparedEntry.sponsorAddress,
-        preparedEntry.receiptId,
-        request.txBytes,
-        request.userSignature,
-      );
-      executionStage = execResult.executionStage;
-      postCtxSnapshot = buildPostCtx();
-    } catch (err) {
-      if (err instanceof SponsorPostSignatureUncertaintyError) {
-        executionStage = err.executionStage;
-        postCtxSnapshot = buildPostCtx();
-        throw err;
-      }
-      throw err;
-    }
-
-    // Submit hook fires after both success and normalized-failure
-    // results are available, but result classification stays owned by
-    // ClassifySponsorResult. Submit is observability-only and a throw here
-    // MUST NOT replace the result that ClassifySponsorResult will classify next.
-    // Routed through `callObservabilityHookSwallow` so a buggy hook
-    // cannot truncate the state walk before ClassifySponsorResult.
-    await callObservabilityHookSwallow(policy.hooks.Submit, postCtxSnapshot);
-
-    // ── State 10: ClassifySponsorResult ──────────────────────────────────────
-    // Owns route-specific sponsor result classification. On
-    // `result.success === false` the hook throws the classified error
-    // (SponsorCongestionError, SponsorOnchainError, etc.). On
-    // `result.success === true` the hook performs success-side
-    // accounting (Studio ledger consume, generic economics log).
-    await policy.hooks.ClassifySponsorResult(postCtxSnapshot, execResult);
-
-    if (!execResult.success) {
-      // Defensive: ClassifySponsorResult was supposed to throw on
-      // `success === false`. If it did not, the runner does — we
-      // cannot project a success result from a failed ExecResult,
-      // and silently continuing would bypass the route's classified-
-      // error vocabulary (SponsorOnchainError /
-      // SponsorCongestionError).
-      throw new RunnerSponsorPolicyContractError(
-        'ClassifySponsorResult returned without throwing on a failed ExecResult — policy contract violated',
-      );
-    }
-
-    // Build the success-only snapshot and project the route-specific
-    // result. Both `success === true` narrowing and the field
-    // requirements are encoded at the type level via the
-    // `Extract<..., { success: true }>` shape on
-    // `SponsorResultSnapshot`.
-    const snapshot: SponsorResultSnapshot = {
-      receiptId: preCtx.receiptId,
-      clientIp: preCtx.clientIp,
-      prepared: preparedEntry,
-      sponsorSlot,
-      nonce: nonceHandle,
-      ledgerReservation: ledgerReservationHandle,
-      execResult,
-    };
-    return await request.projectResult(snapshot);
-  } finally {
-    // Slot checkin only fires if consume succeeded — pre-consume
-    // failure paths leave nothing to release. `safeSlotCheckin`
-    // itself never throws (it logs `SPONSOR_POOL_CHECKIN_FAILED`
-    // internally and swallows), so it cannot mask the original error
-    // path.
-    if (preparedEntry) {
-      await safeSlotCheckin(
-        host.sponsorPool,
-        preparedEntry.sponsorAddress,
-        preparedEntry.receiptId,
-        preparedEntry.txBytesHash,
-      );
-      // ── State 11: Release ─────────────────────────────────────────
-      // Post-checkin observability hook. Throws are swallowed per Q3
-      // so a buggy Release hook cannot replace the primary success
-      // path or the original error.
-      if (postCtxSnapshot) {
-        await callObservabilityHookSwallow(policy.hooks.Release, postCtxSnapshot);
-      }
-    }
+    current = await host.store.readPreparedReceipt(receiptId);
+  } catch (error) {
+    throw await receiptPolicy.onCorrupt({ receiptId, error });
   }
+  if (!current) throw receiptPolicy.onNotFound(receiptId);
+  prepared = current;
+  await receiptPolicy.validatePreparedEntry(prepared);
+
+  if (txBytesHash(request.txBytes) !== prepared.txBytesHash) {
+    throw await receiptPolicy.onHashMismatch(receiptId);
+  }
+  if (!(await host.isSponsorAddressAvailable(prepared.sponsorAddress))) {
+    throw receiptPolicy.onSponsorUnavailable(receiptId);
+  }
+
+  const sponsorSlot = reconstructReservationHandles.sponsorSlot({
+    sponsorAddress: prepared.sponsorAddress,
+    receiptId: prepared.receiptId,
+  });
+  let nonce: NonceReservationHandle | undefined;
+  let ledgerReservation: LedgerReservationHandle | undefined;
+  const context = (): SponsorValidatedContext => ({
+    receiptId,
+    clientIp: request.hookContext.clientIp,
+    executionStage: 'before_sponsor_signature',
+    sponsorSlot,
+    nonce,
+    ledgerReservation,
+  });
+
+  let execution: ExecutingSponsoredExecutionRecord | null = null;
+  let discardOnFailure = true;
+  try {
+    const shared = await policy.hooks.SharedSponsorChecks(context());
+    if (shared.nonce) nonce = reconstructReservationHandles.nonce(shared.nonce);
+    const route = await policy.hooks.PolicySponsorChecks(context());
+    if (route.ledgerReservation) {
+      ledgerReservation = reconstructReservationHandles.ledgerReservation(route.ledgerReservation);
+    }
+    await policy.hooks.Preflight(context());
+
+    if (policy.handleRequirements.sponsorResult.ledgerReservation && !ledgerReservation) {
+      throw new RunnerSponsorReservationHandleMissingError(
+        'Policy requires a Promotion reservation at the sponsor result boundary',
+      );
+    }
+
+    const begun = await host.store.beginSponsoredExecution({
+      receiptId,
+      txBytes: request.txBytes,
+      expectedMode: receiptPolicy.route,
+      recovery: request.buildRecoveryContext(),
+      executionBudgetMs: executionBudgetMs(host.endpointCount),
+    });
+    switch (begun.status) {
+      case 'executing':
+        execution = begun.execution;
+        prepared = begun.prepared;
+        discardOnFailure = false;
+        break;
+      case 'not_found':
+        throw receiptPolicy.onNotFound(receiptId);
+      case 'expired':
+        throw receiptPolicy.onExpired(receiptId);
+      case 'hash_mismatch':
+        throw await receiptPolicy.onHashMismatch(receiptId);
+      case 'mode_mismatch':
+      case 'state_changed':
+        throw receiptPolicy.onStateChanged(receiptId);
+      case 'promotion_not_active':
+        throw receiptPolicy.onPromotionNotActive(receiptId);
+    }
+  } catch (error) {
+    if (discardOnFailure) await discard(host, request, prepared);
+    throw error;
+  }
+  if (!execution) throw request.stateChangedError();
+
+  let result: ExecResult;
+  try {
+    result = await host.signAndSubmit(
+      prepared.sponsorAddress,
+      prepared.receiptId,
+      request.txBytes,
+      request.userSignature,
+      execution.transactionDigest,
+    );
+  } catch (error) {
+    if (error instanceof SponsorPostSignatureUncertaintyError) throw error;
+    await finalize(host, request, execution, prepared, 'before_sponsor_signature', null);
+    throw error;
+  }
+
+  let classifiedError: unknown;
+  try {
+    await policy.hooks.ClassifySponsorResult(
+      { ...context(), executionStage: result.executionStage },
+      result,
+    );
+    if (!result.success) {
+      classifiedError = new RunnerSponsorPolicyContractError(
+        'ClassifySponsorResult returned without classifying a failed Sui result',
+      );
+    }
+  } catch (error) {
+    classifiedError = error;
+  }
+
+  await finalize(host, request, execution, prepared, result.executionStage, result);
+  if (classifiedError !== undefined) throw classifiedError;
+  if (!result.success) {
+    throw new RunnerSponsorPolicyContractError(
+      'Failed Sui result reached the public success projection',
+    );
+  }
+
+  return await request.projectResult({
+    receiptId,
+    clientIp: request.hookContext.clientIp,
+    prepared,
+    sponsorSlot,
+    nonce,
+    ledgerReservation,
+    execResult: result,
+  });
 }

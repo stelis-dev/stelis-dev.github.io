@@ -32,8 +32,8 @@ export function PromotionPage() {
     <div className="page">
       <h1 className="page-title">Studio Promotion</h1>
       <p className="page-subtitle">
-        End-to-end test page for promotion-sponsored execution. Connect to a Studio-enabled Host,
-        configure your JWT and promotion ID, and execute a promotion-sponsored transaction.
+        End-to-end test page for promotion-sponsored execution. Connect to a Host, configure your
+        JWT and Promotion ID, and execute against its Studio routes.
       </p>
 
       <div className="promo-layout">
@@ -58,7 +58,7 @@ export function PromotionPage() {
               <input
                 type="text"
                 className="promo-input"
-                placeholder="e.g. promo_abc123"
+                placeholder="Promotion ID returned by the Host"
                 value={promotionId}
                 onChange={(e) => setPromotionId(e.target.value)}
               />

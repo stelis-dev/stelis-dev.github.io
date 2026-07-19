@@ -3,14 +3,18 @@
 // Client IP resolution
 export { ClientIpResolutionError, resolveClientIp, parseTrustedProxyHops } from './clientIp.js';
 export {
+  admitClientIp,
   BlockCheckUnavailableError,
-  checkBlockedRequest,
-  toBlockedError,
+  checkBlockedSubject,
+  readAdmittedClientIp,
 } from './abuseBlocking.js';
+export type { AdmittedClientIp } from './abuseBlocking.js';
 
 // Context
 export { createHostContext } from './context.js';
 export type { HostContext } from './context.js';
+export { readHostChainState } from './hostChainState.js';
+export type { HostChainState } from './hostChainState.js';
 
 // Address constraints
 export { canonicalizeAddress, validateAddressConstraints } from './addressConstraints.js';
@@ -25,7 +29,6 @@ export {
   SponsorPreflightError,
   SponsorOnchainError,
   SponsorCongestionError,
-  SponsorTerminalProcessingError,
   SponsorSubmissionUncertainError,
   SponsorLeaseExpiredError,
 } from './handlers/sponsor.js';
@@ -52,10 +55,11 @@ export {
 export type { RedisClientLike, RawRedisClient } from './store/redisClient.js';
 export { wrapRedisClient } from './store/redisClient.js';
 
-export type { PreparedTxEntry } from './store/prepareTypes.js';
-// Prepare-store production adapter. Memory adapter and store interfaces remain
-// package-internal implementation boundaries.
-export { RedisPrepareStore } from './store/redisPrepareStore.js';
+// Production receipt lifecycle and recovery. Memory implementations remain
+// package-internal test boundaries.
+export { RedisSponsoredExecutionStore } from './store/redisSponsoredExecutionStore.js';
+export { SponsoredExecutionRecovery } from './store/sponsoredExecutionRecovery.js';
+export { sponsoredExecutionPreparedRecordKeyPrefix } from './store/sponsoredExecutionRecords.js';
 export { RedisPrepareRequestNonceStore } from './store/prepareRequestNonceStore.js';
 export {
   PrepareSenderQuotaError,
@@ -69,8 +73,10 @@ export { RedisPrepareInflight } from './store/redisPrepareInflight.js';
 // Production rate limiter. Its interface and memory adapter are internal.
 export { RedisRateLimiter } from './store/redisRateLimiter.js';
 
-// Production abuse blocker. Its interface and memory adapter are internal.
+// Production abuse store. The memory adapter remains internal.
 export { RedisAbuseBlocker } from './store/redisAbuseBlocker.js';
+export type { AbuseBlockStore } from './store/abuseBlockStore.js';
+export { AbuseBlockCurrentConflictError, AbuseBlockInputError } from './store/abuseBlockStore.js';
 
 // Sponsor slot leasing — only the production adapter and host-facing key
 // parsers are exported.
@@ -78,12 +84,6 @@ export { RedisAbuseBlocker } from './store/redisAbuseBlocker.js';
 // relative `../src/context.js` path.
 export { parseSponsorKey, parseSponsorKeys } from './context.js';
 export { RedisSponsorPool } from './store/redisSponsorPool.js';
-
-// Current Sui execution-result parser shared by Host execution boundaries.
-export {
-  parseCurrentSuiTerminalForBytes,
-  parseCurrentSuiTerminalForDigest,
-} from './session/sessionPrimitives.js';
 
 // Shared constants and types live in `@stelis/contracts`.
 // `@stelis/core-api` re-exports only its own domain/runtime APIs.

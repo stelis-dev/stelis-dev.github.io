@@ -8,8 +8,6 @@ function makeRedis(): AdminRedisClient {
     get: vi.fn(),
     set: vi.fn(),
     del: vi.fn(),
-    scan: vi.fn(),
-    ttl: vi.fn(),
     lrange: vi.fn(),
     lpush: vi.fn().mockResolvedValue(1),
     ltrim: vi.fn().mockResolvedValue(undefined),
@@ -53,5 +51,18 @@ describe('admin audit log helpers', () => {
     const entry = JSON.parse(line) as { detail: string; ts: string };
     expect(entry.detail).toBe('redis unavailable at redis://redis.example:6379');
     expect(entry.ts).toMatch(/\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('rejects a non-current audit entry before writing it', async () => {
+    const redis = makeRedis();
+
+    await expect(
+      writeAdminAuditLog(redis, {
+        event: 'WITHDRAWAL_ERROR',
+        ip: '127.0.0.1',
+        ts: 'not-a-timestamp',
+      }),
+    ).rejects.toThrow(/must be an ISO-8601 timestamp/);
+    expect(redis.lpush).not.toHaveBeenCalled();
   });
 });

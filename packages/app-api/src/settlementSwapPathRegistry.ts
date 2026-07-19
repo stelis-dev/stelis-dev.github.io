@@ -24,20 +24,33 @@
  * Shared references:
  *   - SingleHopSettlementSwapPath, DeepBookPoolHop: @stelis/contracts
  *   - Pool view functions: deepbook::pool (pool_book_params, pool_trade_params, whitelisted)
- *   - CoinMetadata: SuiGrpcClient.getCoinMetadata()
+ *   - CoinMetadata: core-relay current Sui operation gateway
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
+import {
+  isValidSuiAddress,
+  normalizeStructTag,
+  normalizeSuiAddress,
+  parseStructTag,
+} from '@mysten/sui/utils';
 import type { SingleHopSettlementSwapPath, DeepBookPoolHop, SuiNetwork } from '@stelis/contracts';
-import { SUI_TYPE, settlementSwapDirectionFromSwapDirections } from '@stelis/contracts';
-import { bindCurrentSuiResultToBytes, SUI_ZERO_ADDRESS } from '@stelis/core-relay';
+import {
+  DEEPBOOK_RUNTIME_PACKAGE_ID,
+  SUI_TYPE,
+  settlementSwapDirectionFromSwapDirections,
+} from '@stelis/contracts';
+import {
+  decodeExactU64Bytes,
+  getSuiCoinMetadata,
+  getSuiObject,
+  simulateSuiMoveView,
+  suiExecutionErrorMessage,
+  type SuiCommandResult,
+  type SuiEndpointSnapshot,
+  type SuiMoveViewResult,
+} from '@stelis/core-relay';
 
 const CONFIG_NETWORKS: readonly SuiNetwork[] = ['testnet', 'mainnet'];
-
-type SimulationCommandResults = NonNullable<
-  SuiClientTypes.SimulateTransactionResult<{ commandResults: true }>['commandResults']
->;
 
 /** Host settlement swap path file used by runtime policy. */
 export function getSettlementSwapPathRegistryPath(): string {
@@ -81,12 +94,12 @@ export function parseSettlementSwapPathRegistryJson(
           'settlement-swap-paths.json expects each network section to be a flat array of DeepBook pool IDs.',
       );
     }
-    if (typeof poolId !== 'string' || !poolId.startsWith('0x') || poolId.length < 3) {
+    if (typeof poolId !== 'string' || !isValidSuiAddress(poolId)) {
       throw new Error(
         `[SETTLEMENT_SWAP_PATHS_JSON] Entry [${i}]: invalid pool ID "${String(poolId)}".`,
       );
     }
-    entries.push({ poolId });
+    entries.push({ poolId: normalizeSuiAddress(poolId) });
   }
 
   return entries;
@@ -125,85 +138,90 @@ function selectNetworkPoolIdSection(json: unknown, network: SuiNetwork): unknown
 // On-chain derivation
 // ─────────────────────────────────────────────
 
-function requireViewCommandResults(
-  result: unknown,
-  transactionBytes: Uint8Array,
+function requireExactViewReturnValues(
+  result: SuiMoveViewResult,
   viewFn: string,
-): readonly unknown[] {
-  const bound = bindCurrentSuiResultToBytes(result, transactionBytes);
-  if (!bound) {
+  returnCount: number,
+): SuiCommandResult['returnValues'] {
+  if (result.outcome === 'failure') {
     throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned a malformed or mismatched simulation result`,
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} failed: ${suiExecutionErrorMessage(result.error)}`,
     );
   }
-  if (bound.outcome === 'failure') {
+  if (result.commandResults.length !== 1) {
     throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} failed: ${bound.errorMessage}`,
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned ${result.commandResults.length} command results (expected 1)`,
     );
   }
-  if (!bound.commandResults) {
-    throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned no command results`);
+  const command = result.commandResults[0]!;
+  if (command.returnValues.length !== returnCount) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} returned ${command.returnValues.length} values (expected ${returnCount})`,
+    );
   }
-  return bound.commandResults;
+  if (command.mutatedReferences.length !== 0) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook ${viewFn} unexpectedly returned mutated references`,
+    );
+  }
+  return command.returnValues;
 }
 
 /**
- * Build and simulate a single-argument DeepBook pool view call (zero-sender, no gas).
+ * Simulate a single-argument DeepBook pool view call.
  *
- * Returns the first command's returnValues, or undefined if unavailable.
- * This is a pure transport helper — all semantic validation (length, decode) is
- * performed by the calling query function.
+ * Returns the exact single command's return values after validating the fixed ABI.
  *
- * @throws via tx.build / simulateTransaction on RPC failure
+ * The current Move-view gateway owns zero-sender, gasless request construction.
+ *
+ * @throws via simulateTransaction on RPC failure
  */
 async function runPoolViewCall(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   poolId: string,
   baseType: string,
   quoteType: string,
   viewFn: string,
-) {
+  returnCount: number,
+  signal?: AbortSignal,
+): Promise<SuiCommandResult['returnValues']> {
   const tx = new Transaction();
   tx.moveCall({
     target: `${deepbookPackageId}::pool::${viewFn}`,
     typeArguments: [baseType, quoteType],
     arguments: [tx.object(poolId)],
   });
-  tx.setSender(SUI_ZERO_ADDRESS);
-  const txBytes = await tx.build({ client });
-  const result = await client.simulateTransaction({
-    transaction: txBytes,
-    include: { commandResults: true },
+  const result = await simulateSuiMoveView(snapshot, {
+    transaction: tx,
+    signal,
   });
-  const cmdResults = requireViewCommandResults(result, txBytes, viewFn) as SimulationCommandResults;
-  return cmdResults[0]?.returnValues;
+  return requireExactViewReturnValues(result, viewFn, returnCount);
 }
 
 /**
- * Build and simulate a no-argument DeepBook constants view call.
+ * Simulate a no-argument DeepBook constants view call.
  *
  * DeepBook fee-rate metadata depends on constants owned by the deployed
  * DeepBook package, so app-api reads them at boot instead of hardcoding them.
  */
 async function runConstantsViewCall(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   viewFn: string,
-) {
+  returnCount: number,
+  signal?: AbortSignal,
+): Promise<SuiCommandResult['returnValues']> {
   const tx = new Transaction();
   tx.moveCall({
     target: `${deepbookPackageId}::constants::${viewFn}`,
     arguments: [],
   });
-  tx.setSender(SUI_ZERO_ADDRESS);
-  const txBytes = await tx.build({ client });
-  const result = await client.simulateTransaction({
-    transaction: txBytes,
-    include: { commandResults: true },
+  const result = await simulateSuiMoveView(snapshot, {
+    transaction: tx,
+    signal,
   });
-  const cmdResults = requireViewCommandResults(result, txBytes, viewFn) as SimulationCommandResults;
-  return cmdResults[0]?.returnValues;
+  return requireExactViewReturnValues(result, viewFn, returnCount);
 }
 
 /** Result of reading a Pool object's type parameters. */
@@ -258,26 +276,23 @@ function inputFeeRateBpsFromDeepbookTakerFee(
 }
 
 async function queryDeepbookConstantU64(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   viewFn: string,
+  signal?: AbortSignal,
 ): Promise<bigint> {
-  const rv = await runConstantsViewCall(client, deepbookPackageId, viewFn);
-  if (!rv || rv.length < 1) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] DeepBook constants::${viewFn}() returned no value`,
-    );
-  }
-  return decodeBcsU64(rv[0].bcs);
+  const rv = await runConstantsViewCall(snapshot, deepbookPackageId, viewFn, 1, signal);
+  return decodeExactU64Bytes(rv[0].bcs);
 }
 
 async function queryDeepbookFeeParameters(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
+  signal?: AbortSignal,
 ): Promise<DeepbookFeeParameters> {
   const [feeScaling, inputFeePenaltyMultiplier] = await Promise.all([
-    queryDeepbookConstantU64(client, deepbookPackageId, 'float_scaling'),
-    queryDeepbookConstantU64(client, deepbookPackageId, 'fee_penalty_multiplier'),
+    queryDeepbookConstantU64(snapshot, deepbookPackageId, 'float_scaling', signal),
+    queryDeepbookConstantU64(snapshot, deepbookPackageId, 'fee_penalty_multiplier', signal),
   ]);
 
   if (feeScaling <= 0n) {
@@ -302,27 +317,40 @@ async function queryDeepbookFeeParameters(
  *
  * @throws Error if pool object is not found or type string cannot be parsed
  */
-async function getPoolTypeInfo(client: SuiGrpcClient, poolId: string): Promise<PoolTypeInfo> {
-  const resp = await client.getObject({ objectId: poolId });
-  const typeStr = resp.object.type;
-
-  if (!typeStr) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: object not found or type unavailable.`,
-    );
-  }
-
-  // Parse: 0x...::pool::Pool<BaseType, QuoteType>
-  const match = typeStr.match(/::pool::Pool<(.+),\s*(.+)>$/);
-  if (!match || match.length < 3) {
+async function getPoolTypeInfo(
+  snapshot: SuiEndpointSnapshot,
+  deepbookRuntimePackageId: string,
+  poolId: string,
+  signal?: AbortSignal,
+): Promise<PoolTypeInfo> {
+  const pool = await getSuiObject(snapshot, { objectId: poolId, signal });
+  const typeStr = pool.type;
+  let poolType: ReturnType<typeof parseStructTag>;
+  try {
+    poolType = parseStructTag(typeStr);
+  } catch {
     throw new Error(
       `[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: cannot parse type params from "${typeStr}"`,
     );
   }
 
+  if (
+    !isValidSuiAddress(deepbookRuntimePackageId) ||
+    normalizeSuiAddress(poolType.address) !== normalizeSuiAddress(deepbookRuntimePackageId) ||
+    poolType.module !== 'pool' ||
+    poolType.name !== 'Pool' ||
+    poolType.typeParams.length !== 2 ||
+    typeof poolType.typeParams[0] === 'string' ||
+    typeof poolType.typeParams[1] === 'string'
+  ) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: object is not the current DeepBook Pool type`,
+    );
+  }
+
   return {
-    baseType: match[1].trim(),
-    quoteType: match[2].trim(),
+    baseType: normalizeStructTag(poolType.typeParams[0]),
+    quoteType: normalizeStructTag(poolType.typeParams[1]),
   };
 }
 
@@ -334,29 +362,27 @@ async function getPoolTypeInfo(client: SuiGrpcClient, poolId: string): Promise<P
  * @throws Error on RPC failure or unexpected response shape
  */
 async function queryPoolBookParams(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   poolId: string,
   baseType: string,
   quoteType: string,
+  signal?: AbortSignal,
 ): Promise<PoolBookParams> {
   const rv = await runPoolViewCall(
-    client,
+    snapshot,
     deepbookPackageId,
     poolId,
     baseType,
     quoteType,
     'pool_book_params',
+    3,
+    signal,
   );
-  if (!rv || rv.length < 3) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: pool_book_params returned ${rv?.length ?? 0} values (expected 3)`,
-    );
-  }
   return {
-    tickSize: decodeBcsU64(rv[0].bcs),
-    lotSize: decodeBcsU64(rv[1].bcs),
-    minSize: decodeBcsU64(rv[2].bcs),
+    tickSize: decodeExactU64Bytes(rv[0].bcs),
+    lotSize: decodeExactU64Bytes(rv[1].bcs),
+    minSize: decodeExactU64Bytes(rv[2].bcs),
   };
 }
 
@@ -368,29 +394,27 @@ async function queryPoolBookParams(
  * @throws Error on RPC failure or unexpected response shape
  */
 async function queryPoolTradeParams(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   poolId: string,
   baseType: string,
   quoteType: string,
+  signal?: AbortSignal,
 ): Promise<PoolTradeParams> {
   const rv = await runPoolViewCall(
-    client,
+    snapshot,
     deepbookPackageId,
     poolId,
     baseType,
     quoteType,
     'pool_trade_params',
+    3,
+    signal,
   );
-  if (!rv || rv.length < 3) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: pool_trade_params returned ${rv?.length ?? 0} values (expected 3)`,
-    );
-  }
   return {
-    takerFee: decodeBcsU64(rv[0].bcs),
-    makerFee: decodeBcsU64(rv[1].bcs),
-    stakeRequired: decodeBcsU64(rv[2].bcs),
+    takerFee: decodeExactU64Bytes(rv[0].bcs),
+    makerFee: decodeExactU64Bytes(rv[1].bcs),
+    stakeRequired: decodeExactU64Bytes(rv[2].bcs),
   };
 }
 
@@ -402,23 +426,23 @@ async function queryPoolTradeParams(
  * @throws Error on RPC failure or unexpected response shape
  */
 async function queryPoolWhitelisted(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
   poolId: string,
   baseType: string,
   quoteType: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const rv = await runPoolViewCall(
-    client,
+    snapshot,
     deepbookPackageId,
     poolId,
     baseType,
     quoteType,
     'whitelisted',
+    1,
+    signal,
   );
-  if (!rv || rv.length < 1) {
-    throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] Pool ${poolId}: whitelisted() returned no value`);
-  }
   return decodeBcsBool(rv[0].bcs);
 }
 
@@ -428,14 +452,11 @@ async function queryPoolWhitelisted(
  * @throws Error if CoinMetadata is not found
  */
 async function queryCoinMetadata(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   coinType: string,
+  signal?: AbortSignal,
 ): Promise<{ symbol: string; decimals: number }> {
-  const resp = await client.getCoinMetadata({ coinType });
-  const meta = resp.coinMetadata;
-  if (!meta) {
-    throw new Error(`[SETTLEMENT_SWAP_PATHS_JSON] CoinMetadata not found for type: ${coinType}`);
-  }
+  const meta = await getSuiCoinMetadata(snapshot, { coinType, signal });
 
   if (typeof meta.symbol !== 'string' || meta.symbol.length === 0) {
     throw new Error(
@@ -484,40 +505,61 @@ export function determineSettlementToken(pool: { baseType: string; quoteType: st
  *
  * Makes on-chain queries to derive all fields from pool IDs.
  *
- * @param client       Sui gRPC client
- * @param deepbookPkg  DeepBook v3 package ID
+ * @param snapshot     Qualified current Sui operation boundary
+ * @param deepbookCallPackageId  Published DeepBook package ID used for Move calls
  * @param entry        Parsed registry entry with one pool ID
  *
  * @throws Error on any derivation failure (fail-closed)
  */
 async function resolveSettlementSwapPathConfig(
-  client: SuiGrpcClient,
-  deepbookPkg: string,
+  snapshot: SuiEndpointSnapshot,
+  deepbookCallPackageId: string,
   entry: ParsedSettlementSwapPathRegistryEntry,
   feeParams: DeepbookFeeParameters,
+  signal?: AbortSignal,
 ): Promise<SingleHopSettlementSwapPath> {
   // Step 1: Read type params for the configured pool
-  const typeInfo = await getPoolTypeInfo(client, entry.poolId);
+  const typeInfo = await getPoolTypeInfo(
+    snapshot,
+    DEEPBOOK_RUNTIME_PACKAGE_ID,
+    entry.poolId,
+    signal,
+  );
 
   // Step 2: Determine settlement token and swap direction
   const { settlementTokenType, swapDirection } = determineSettlementToken(typeInfo);
 
   // Step 3: Query on-chain params for the single hop
   const [bookParams, coinMeta, whitelisted] = await Promise.all([
-    queryPoolBookParams(client, deepbookPkg, entry.poolId, typeInfo.baseType, typeInfo.quoteType),
-    queryCoinMetadata(client, settlementTokenType),
-    queryPoolWhitelisted(client, deepbookPkg, entry.poolId, typeInfo.baseType, typeInfo.quoteType),
+    queryPoolBookParams(
+      snapshot,
+      deepbookCallPackageId,
+      entry.poolId,
+      typeInfo.baseType,
+      typeInfo.quoteType,
+      signal,
+    ),
+    queryCoinMetadata(snapshot, settlementTokenType, signal),
+    queryPoolWhitelisted(
+      snapshot,
+      deepbookCallPackageId,
+      entry.poolId,
+      typeInfo.baseType,
+      typeInfo.quoteType,
+      signal,
+    ),
   ]);
 
   // Step 4: Query trade params only when the pool is not whitelisted.
   let effectiveFeeRateBps = 0;
   if (!whitelisted) {
     const trade = await queryPoolTradeParams(
-      client,
-      deepbookPkg,
+      snapshot,
+      deepbookCallPackageId,
       entry.poolId,
       typeInfo.baseType,
       typeInfo.quoteType,
+      signal,
     );
     // Stelis always settles DeepBook swaps with coin::zero<DEEP>(), so public
     // fee metadata must reflect DeepBook input-fee execution. The scaling and
@@ -626,24 +668,35 @@ export function validateSettlementSwapPathRegistry(
  * File ownership stays at the boot boundary so context creation cannot reread
  * or reinterpret a mutable runtime file.
  *
- * @param client       Sui gRPC client (already connected)
- * @param deepbookPkg  DeepBook package ID from DEEPBOOK_IDS
+ * @param snapshot     Qualified current Sui operation boundary
+ * @param deepbookCallPackageId  Published DeepBook package ID from DEEPBOOK_IDS
  * @param entries      Entries parsed once by boot
  *
  * @returns Fully resolved SingleHopSettlementSwapPath[]
  * @throws Error on any failure (fail-closed at boot)
  */
 export async function resolveSettlementSwapPathRegistry(
-  client: SuiGrpcClient,
-  deepbookPkg: string,
+  snapshot: SuiEndpointSnapshot,
+  deepbookCallPackageId: string,
   entries: readonly ParsedSettlementSwapPathRegistryEntry[],
+  signal?: AbortSignal,
 ): Promise<SingleHopSettlementSwapPath[]> {
-  const feeParams = await queryDeepbookFeeParameters(client, deepbookPkg);
+  if (!isValidSuiAddress(deepbookCallPackageId)) {
+    throw new TypeError('DeepBook call package ID must be a Sui address');
+  }
+  const deepbookPackageId = normalizeSuiAddress(deepbookCallPackageId);
+  const feeParams = await queryDeepbookFeeParameters(snapshot, deepbookPackageId, signal);
 
   // 1. Resolve each settlement swap path from on-chain data
   const settlementSwapPaths: SingleHopSettlementSwapPath[] = [];
   for (const entry of entries) {
-    const config = await resolveSettlementSwapPathConfig(client, deepbookPkg, entry, feeParams);
+    const config = await resolveSettlementSwapPathConfig(
+      snapshot,
+      deepbookPackageId,
+      entry,
+      feeParams,
+      signal,
+    );
     settlementSwapPaths.push(config);
   }
 
@@ -657,21 +710,6 @@ export async function resolveSettlementSwapPathRegistry(
 // BCS helpers
 // ─────────────────────────────────────────────
 
-/** Decode a little-endian u64 from BCS bytes. */
-function decodeBcsU64(bcs: unknown): bigint {
-  const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs as ArrayBuffer);
-  if (buf.length !== 8) {
-    throw new Error(
-      `[SETTLEMENT_SWAP_PATHS_JSON] BCS u64 decode: expected 8 bytes, got ${buf.length}`,
-    );
-  }
-  let value = 0n;
-  for (let i = 0; i < 8; i++) {
-    value |= BigInt(buf[i]) << BigInt(i * 8);
-  }
-  return value;
-}
-
 /** Decode a BCS bool (1 byte: 0=false, 1=true). */
 function decodeBcsBool(bcs: unknown): boolean {
   const buf = bcs instanceof Uint8Array ? bcs : new Uint8Array(bcs as ArrayBuffer);
@@ -680,5 +718,10 @@ function decodeBcsBool(bcs: unknown): boolean {
       `[SETTLEMENT_SWAP_PATHS_JSON] BCS bool decode: expected 1 byte, got ${buf.length}`,
     );
   }
-  return buf[0] !== 0;
+  if (buf[0] !== 0 && buf[0] !== 1) {
+    throw new Error(
+      `[SETTLEMENT_SWAP_PATHS_JSON] BCS bool decode: expected 0 or 1, got ${String(buf[0])}`,
+    );
+  }
+  return buf[0] === 1;
 }

@@ -30,9 +30,6 @@ class LockRedis implements RedisClientLike {
   async hgetall() {
     return {};
   }
-  async scan() {
-    return [];
-  }
 }
 
 const ACCOUNT = `0x${'11'.repeat(32)}`;

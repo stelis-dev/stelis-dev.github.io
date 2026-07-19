@@ -7,7 +7,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
-import { assertResponseKeys } from './helpers/schemaAssert.js';
+import { parsePromotionPrepareResponse, parsePromotionSponsorResponse } from '@stelis/contracts';
+import { createTestSponsorOperationsSettings } from './sponsor-operations/settingsFixture.js';
+
+const SPONSOR_OPERATIONS_SETTINGS = createTestSponsorOperationsSettings();
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────
 const {
@@ -25,9 +30,7 @@ const {
   MockSponsorPreflightError,
   MockSponsorOnchainError,
   MockSponsorCongestionError,
-  MockSponsorTerminalProcessingError,
   MockSponsorLeaseExpiredError,
-  MockBlockCheckUnavailableError,
 } = vi.hoisted(() => {
   class _TooLarge extends Error {
     constructor() {
@@ -95,7 +98,13 @@ const {
     constructor(
       public readonly digest: string,
       public readonly onchainError: string,
-      public readonly subcode?: string,
+      public readonly subcode: string | undefined,
+      public readonly gasUsed: {
+        computationCost: string;
+        storageCost: string;
+        storageRebate: string;
+        nonRefundableStorageFee: string;
+      },
     ) {
       super(`Transaction reverted on-chain: ${onchainError}`);
       this.name = 'SponsorOnchainError';
@@ -110,16 +119,6 @@ const {
       this.name = 'SponsorCongestionError';
     }
   }
-  class _SponsorTerminalProcessingError extends Error {
-    readonly code = 'GAS_EFFECTS_MISSING' as const;
-    constructor(
-      message: string,
-      public readonly digest: string,
-    ) {
-      super(message);
-      this.name = 'SponsorTerminalProcessingError';
-    }
-  }
   class _SponsorLeaseExpiredError extends Error {
     readonly code = 'LEASE_EXPIRED' as const;
     constructor(sponsorAddress: string) {
@@ -127,18 +126,14 @@ const {
       this.name = 'SponsorLeaseExpiredError';
     }
   }
-  class _BlockCheckUnavailableError extends Error {
-    readonly code = 'BLOCK_CHECK_UNAVAILABLE' as const;
-    constructor(message = 'Abuse block check is temporarily unavailable') {
-      super(message);
-      this.name = 'BlockCheckUnavailableError';
-    }
-  }
   return {
-    mockHandlePromotionPrepare: vi.fn().mockResolvedValue({
-      txBytes: 'mock-tx-bytes',
-      receiptId: '0xreceipt',
-      estimatedGasMist: '1000000',
+    mockHandlePromotionPrepare: vi.fn().mockImplementation(async (_ctx, _params, admission) => {
+      await admission.assertSponsorAvailable();
+      return {
+        txBytes: 'mock-tx-bytes',
+        receiptId: `0x${'ab'.repeat(32)}`,
+        estimatedGasMist: '1000000',
+      };
     }),
     mockHandlePromotionSponsor: vi.fn().mockResolvedValue({
       digest: '0xdigest',
@@ -160,9 +155,7 @@ const {
     MockSponsorPreflightError: _SponsorPreflightError,
     MockSponsorOnchainError: _SponsorOnchainError,
     MockSponsorCongestionError: _SponsorCongestionError,
-    MockSponsorTerminalProcessingError: _SponsorTerminalProcessingError,
     MockSponsorLeaseExpiredError: _SponsorLeaseExpiredError,
-    MockBlockCheckUnavailableError: _BlockCheckUnavailableError,
   };
 });
 
@@ -182,8 +175,6 @@ vi.mock('@stelis/core-api', async () => {
   return {
     ...actual,
     readJsonBodyWithLimit: vi.fn().mockImplementation(async (req: Request) => req.json()),
-    checkBlockedRequest: vi.fn().mockResolvedValue({ blocked: false }),
-    toBlockedError: vi.fn().mockReturnValue({ error: 'Blocked', code: 'ABUSE_BLOCKED' }),
     MAX_SMALL_REQUEST_BODY_BYTES: 32 * 1024,
     MAX_PREPARE_REQUEST_BODY_BYTES: 96 * 1024,
     MAX_SPONSOR_REQUEST_BODY_BYTES: 128 * 1024,
@@ -196,9 +187,7 @@ vi.mock('@stelis/core-api', async () => {
     SponsorPreflightError: MockSponsorPreflightError,
     SponsorOnchainError: MockSponsorOnchainError,
     SponsorCongestionError: MockSponsorCongestionError,
-    SponsorTerminalProcessingError: MockSponsorTerminalProcessingError,
     SponsorLeaseExpiredError: MockSponsorLeaseExpiredError,
-    BlockCheckUnavailableError: MockBlockCheckUnavailableError,
   };
 });
 
@@ -213,10 +202,10 @@ vi.mock('../src/developerJwtVerifyCallback.js', async () => {
 
 import { createStudioRoutes } from '../src/routes/studio.js';
 import type { ResolveClientIp } from '../src/clientIp.js';
-import type { AppApiContext } from '../src/context.js';
-import { SuiRpcFailoverTransport } from '../src/sui/failoverTransport.js';
+import type { RelayAndStudioAppApiContext } from '../src/context.js';
+import type { RequestAdmissionDependencies } from '../src/requestAdmission.js';
 
-const resolveClientIp: ResolveClientIp = () => '127.0.0.1';
+const resolveClientIp = vi.fn<ResolveClientIp>().mockReturnValue('127.0.0.1');
 
 // Fixed test trust config for developer JWT
 const TEST_TRUST_CONFIG = {
@@ -228,13 +217,39 @@ const TEST_TRUST_CONFIG = {
   claimPaths: { userId: 'sub', senderAddress: 'wallet_address' },
 };
 
-function createMockCtx(studioEnabled: boolean): AppApiContext {
-  return {
+function createMockCtx(_relayAndStudio: true = true): RelayAndStudioAppApiContext {
+  const readSponsorOperationsState = vi.fn().mockResolvedValue({
+    settings: SPONSOR_OPERATIONS_SETTINGS,
+    slots: [
+      {
+        address: '0xslot',
+        state: 'healthy',
+        addressBalanceMist: '10000000000',
+        observationFresh: true,
+        lastError: null,
+        lastObservedAtMs: 1_700_000_000_000,
+        writeSeq: 1,
+      },
+    ],
+    sponsorRefillAccount: {
+      totalBalanceMist: '20000000000',
+      healthy: true,
+      observationFresh: true,
+      lastError: null,
+      lastObservedAtMs: 1_700_000_000_000,
+      writeSeq: 1,
+    },
+  });
+  const base = {
     host: {
       rateLimiter: {
         check: vi.fn().mockResolvedValue({ allowed: true }),
       },
-      abuseBlocker: {} as never,
+      abuseBlocker: {
+        checkIp: vi.fn().mockResolvedValue({ blocked: false }),
+        checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
+        recordSponsorFailure: vi.fn().mockResolvedValue(undefined),
+      },
       sui: {} as never,
       sponsorPool: {
         leaseStatus: vi.fn().mockResolvedValue({
@@ -243,7 +258,6 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
           slots: [{ address: '0xslot', leased: false }],
         }),
       } as never,
-      prepareStore: {} as never,
       prepareInflightLimiter: {
         tryAcquire: vi.fn().mockResolvedValue({ release: vi.fn().mockResolvedValue(undefined) }),
         inflight: 0,
@@ -252,56 +266,55 @@ function createMockCtx(studioEnabled: boolean): AppApiContext {
       getConfig: vi.fn().mockResolvedValue({ maxClaimMist: 50_000_000n }),
     } as never,
     prepareConfig: {} as never,
-    studio: studioEnabled ? ({} as never) : null,
-    // Stores must be non-null when studio is enabled
-    promotionStore: studioEnabled ? ({} as never) : null,
-    usageStore: null,
-    executionLedger: studioEnabled ? ({} as never) : null,
-    studioGlobalAllowedTargets: studioEnabled ? new Set<string>() : null,
-    developerJwtTrustConfig: studioEnabled ? TEST_TRUST_CONFIG : null,
-    developerJwtVerifyUrl: null,
-    failoverTransport: new SuiRpcFailoverTransport([{ url: 'https://rpc.test.invalid' }]),
+    rpcFleet: {
+      endpoints: [{ origin: 'https://rpc.test.invalid', role: 'primary' as const }],
+    },
     redis: {} as never,
+    abuseStore: {} as never,
+    sponsorAvailability: {
+      readState: readSponsorOperationsState,
+    },
     sponsorOperations: {
-      readState: vi.fn().mockResolvedValue({
-        slots: [
-          {
-            address: '0xslot',
-            state: 'healthy',
-            balanceMist: '10000000000',
-            lastError: null,
-            lastObservedAtMs: 1_700_000_000_000,
-            writeSeq: 1,
-          },
-        ],
-        sponsorRefillAccount: {
-          balanceMist: '20000000000',
-          healthy: true,
-          refillsRemaining: 2,
-          lastError: null,
-          lastObservedAtMs: 1_700_000_000_000,
-          writeSeq: 1,
-        },
-      }),
-      probeSponsorRefillAccount: vi.fn().mockResolvedValue(undefined),
-      requestRefill: vi.fn(),
-      slotAddresses: ['0xslot'],
-      sponsorRefillAccountAddress: '0x' + '55'.repeat(32),
-      dispose: vi.fn(),
+      readState: readSponsorOperationsState,
+      settings: SPONSOR_OPERATIONS_SETTINGS,
+      observeBalances: vi.fn().mockResolvedValue(undefined),
     } as never,
     sponsoredLogsStore: {
       append: vi.fn().mockResolvedValue(undefined),
       getSummary: vi.fn(),
       getRecent: vi.fn(),
     },
-    dispose: vi.fn(),
+  };
+
+  return {
+    ...base,
+    mode: 'relay_and_studio',
+    promotionStore: {} as never,
+    executionLedger: {} as never,
+    studioGlobalAllowedTargets: new Set<string>(),
+    developerJwtTrustConfig: TEST_TRUST_CONFIG,
+    developerJwtVerifyUrl: null,
   };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function makeApp(ctx: AppApiContext) {
-  const routes = createStudioRoutes(Promise.resolve(ctx), resolveClientIp);
+function createRequestAdmissionDependencies(
+  ctx: RelayAndStudioAppApiContext,
+  overrides: Partial<RequestAdmissionDependencies> = {},
+): RequestAdmissionDependencies {
+  return {
+    host: ctx.host,
+    resolveClientIp,
+    ...overrides,
+  };
+}
+
+function makeApp(
+  ctx: RelayAndStudioAppApiContext,
+  admission = createRequestAdmissionDependencies(ctx),
+) {
+  const routes = createStudioRoutes(ctx, admission);
   const app = new Hono();
   app.route('/studio', routes);
   return app;
@@ -309,7 +322,7 @@ function makeApp(ctx: AppApiContext) {
 
 const VALID_PREPARE_BODY = { senderAddress: '0x1', txKindBytes: 'base64txkind' };
 const VALID_SPONSOR_BODY = {
-  receiptId: '0xreceipt',
+  receiptId: RECEIPT_ID,
   txBytes: 'base64tx',
   userSignature: 'base64sig',
 };
@@ -319,65 +332,36 @@ const VALID_SPONSOR_BODY = {
 describe('studio routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resolveClientIp.mockReturnValue('127.0.0.1');
     mockBuildSponsorOperationsBlockedResponse.mockReturnValue(null);
   });
 
   // ── POST /studio/promotions/:id/prepare ───────────────────────────
   describe('POST /studio/promotions/:id/prepare', () => {
-    it('returns 503 when studio mode is disabled', async () => {
-      const ctx = createMockCtx(false);
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_PREPARE_BODY),
-      });
-      expect(res.status).toBe(503);
-    });
-
-    it('returns 503 when required stores are missing', async () => {
+    it('parses the bounded body before rejecting a missing credential without domain I/O', async () => {
       const ctx = createMockCtx(true);
-      ctx.promotionStore = null;
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_PREPARE_BODY),
-      });
-      expect(res.status).toBe(503);
-    });
-
-    // Precedence: 503 infrastructure failures must outrank 401 auth.
-    // Locks the guard ordering after Step 10 middleware extraction.
-    it('returns 503 (not 401) when studio is disabled AND Authorization is missing', async () => {
-      const ctx = createMockCtx(false);
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
-      expect(res.status).toBe(503);
+
+      expect(res.status).toBe(401);
+      expect(resolveClientIp).toHaveBeenCalledTimes(1);
+      const coreApi = await import('@stelis/core-api');
+      expect(coreApi.readJsonBodyWithLimit).toHaveBeenCalledTimes(1);
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(ctx.sponsorAvailability.readState).not.toHaveBeenCalled();
       expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
-    });
-
-    it('returns 503 (not 401) when globalAllowedTargets missing AND Authorization is missing', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = null;
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_PREPARE_BODY),
-      });
-      expect(res.status).toBe(503);
+      expect(mockHandlePromotionPrepare).not.toHaveBeenCalled();
     });
 
     it('returns 401 when Authorization header is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -387,9 +371,8 @@ describe('studio routes', () => {
 
     it('returns 401 AUTH_FAILED when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -400,28 +383,32 @@ describe('studio routes', () => {
 
     it('returns 429 when IP is blocked', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const { checkBlockedRequest } = await import('@stelis/core-api');
-      vi.mocked(checkBlockedRequest).mockResolvedValueOnce({
+      const { readJsonBodyWithLimit } = await import('@stelis/core-api');
+      vi.mocked(ctx.host.abuseBlocker.checkIp).mockResolvedValueOnce({
         blocked: true,
         retryAfterMs: 5000,
-      } as never);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      });
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
       });
       expect(res.status).toBe(429);
+      expect(readJsonBodyWithLimit).not.toHaveBeenCalled();
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(mockHandlePromotionPrepare).not.toHaveBeenCalled();
     });
 
     it('returns 503 BLOCK_CHECK_UNAVAILABLE when block check throws BlockCheckUnavailableError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const { checkBlockedRequest, BlockCheckUnavailableError } = await import('@stelis/core-api');
-      vi.mocked(checkBlockedRequest).mockRejectedValueOnce(new BlockCheckUnavailableError());
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const { BlockCheckUnavailableError } = await import('@stelis/core-api');
+      vi.mocked(ctx.host.abuseBlocker.checkIp).mockRejectedValueOnce(
+        new BlockCheckUnavailableError(),
+      );
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -433,7 +420,6 @@ describe('studio routes', () => {
 
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
@@ -441,7 +427,7 @@ describe('studio routes', () => {
         limit: 10,
       });
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -451,9 +437,8 @@ describe('studio routes', () => {
 
     it('returns 400 when required fields are missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -463,9 +448,8 @@ describe('studio routes', () => {
 
     it('returns 200 with prepare result on valid request', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -473,16 +457,49 @@ describe('studio routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.txBytes).toBe('mock-tx-bytes');
-      expect(body.receiptId).toBe('0xreceipt');
+      expect(body.receiptId).toBe(RECEIPT_ID);
 
-      assertResponseKeys(body, 'promotionPrepareResponse');
+      expect(parsePromotionPrepareResponse(body)).toEqual(body);
+    });
+
+    it('orders IP, bounded body, credential, subject, then domain I/O', async () => {
+      const ctx = createMockCtx(true);
+      const app = makeApp(ctx);
+
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
+        body: JSON.stringify(VALID_PREPARE_BODY),
+      });
+
+      expect(res.status).toBe(200);
+      const coreApi = await import('@stelis/core-api');
+      const rateLimitCallOrder = vi.mocked(ctx.host.rateLimiter.check).mock.invocationCallOrder;
+      const orderedCalls = [
+        resolveClientIp.mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.host.abuseBlocker.checkIp).mock.invocationCallOrder[0]!,
+        rateLimitCallOrder[0]!,
+        vi.mocked(coreApi.readJsonBodyWithLimit).mock.invocationCallOrder[0]!,
+        mockVerifyDeveloperJwt.mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.host.abuseBlocker.checkSubject).mock.invocationCallOrder[0]!,
+        rateLimitCallOrder[1]!,
+        rateLimitCallOrder[2]!,
+        mockHandlePromotionPrepare.mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.sponsorAvailability.readState).mock.invocationCallOrder[0]!,
+        vi.mocked(ctx.host.sponsorPool.leaseStatus).mock.invocationCallOrder[0]!,
+        mockBuildSponsorOperationsBlockedResponse.mock.invocationCallOrder[0]!,
+      ];
+      expect(orderedCalls).not.toContain(undefined);
+      expect(orderedCalls).toEqual([...orderedCalls].sort((left, right) => left - right));
+      const admittedClientIp = mockHandlePromotionPrepare.mock.lastCall?.[1].clientIp;
+      expect(admittedClientIp).toBeDefined();
+      expect(coreApi.readAdmittedClientIp(admittedClientIp)).toBe('127.0.0.1');
     });
 
     it('checks IP, userId, and promotionId rate-limit keys on successful prepare', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -491,18 +508,17 @@ describe('studio routes', () => {
       const calls = vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0]);
       expect(calls).toContain('promo_prepare:client-ip:127.0.0.1');
       expect(calls).toContain('promo_prepare:developer-user:mock-user');
-      expect(calls).toContain('promo_prepare:promotion:promo-1');
+      expect(calls).toContain(`promo_prepare:promotion:${PROMOTION_ID}`);
     });
 
     it('derives PromotionPrepareError status from its current code', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionPrepareError } = await import('@stelis/core-api/studio');
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new PromotionPrepareError('Promotion not active', 'PROMOTION_NOT_ACTIVE'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -514,16 +530,12 @@ describe('studio routes', () => {
 
     it('returns 503 when the sponsor operations gate is closed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        body: {
-          error: 'No sponsor slots currently available',
-          code: 'SPONSOR_CAPACITY_UNAVAILABLE',
-        },
+        errorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
         headers: {},
       });
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -532,16 +544,15 @@ describe('studio routes', () => {
       expect(ctx.host.sponsorPool.leaseStatus).toHaveBeenCalledTimes(1);
       expect(mockBuildSponsorOperationsBlockedResponse).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ requireFreeSponsorSlot: true }),
+        expect.objectContaining({ freeSlots: 1 }),
       );
     });
 
     it('returns 401 AUTH_JWT_INVALID when local developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Invalid signature'));
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer bad-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -552,15 +563,16 @@ describe('studio routes', () => {
     });
 
     it('returns 401 AUTH_JWT_INVALID when the developer callback explicitly rejects the JWT', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      ctx.developerJwtVerifyUrl = 'https://developer.example.test/verify';
+      const ctx = {
+        ...createMockCtx(true),
+        developerJwtVerifyUrl: 'https://developer.example.test/verify',
+      } satisfies RelayAndStudioAppApiContext;
       const { DeveloperVerifyRejectedError } = await import('../src/developerJwtVerifyCallback.js');
       mockCallDeveloperVerifyApi.mockRejectedValueOnce(
         new DeveloperVerifyRejectedError('developer callback denied the JWT'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -570,16 +582,17 @@ describe('studio routes', () => {
     });
 
     it('returns 503 AUTH_UNAVAILABLE when the developer callback cannot establish a verdict', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      ctx.developerJwtVerifyUrl = 'https://developer.example.test/verify';
+      const ctx = {
+        ...createMockCtx(true),
+        developerJwtVerifyUrl: 'https://developer.example.test/verify',
+      } satisfies RelayAndStudioAppApiContext;
       const { DeveloperVerifyUnavailableError } =
         await import('../src/developerJwtVerifyCallback.js');
       mockCallDeveloperVerifyApi.mockRejectedValueOnce(
         new DeveloperVerifyUnavailableError('developer callback timed out'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -590,12 +603,11 @@ describe('studio routes', () => {
 
     it('returns 422 when handler throws PrepareValidationError (DRY_RUN_FAILED)', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new MockPrepareValidationError('DRY_RUN_FAILED', 'Dry-run failed: MoveAbort'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -607,12 +619,11 @@ describe('studio routes', () => {
 
     it('returns 429 when handler throws PrepareStudioUserQuotaError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new MockPrepareStudioUserQuotaError('0xVICTIM', 3),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -624,10 +635,9 @@ describe('studio routes', () => {
 
     it('returns 503 PREPARE_OVERLOADED with Retry-After when handler throws PrepareOverloadError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockHandlePromotionPrepare.mockRejectedValueOnce(new MockPrepareOverloadError(5, 5));
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -641,7 +651,6 @@ describe('studio routes', () => {
     // S-15 companion: route-level contract — FundsWithdrawal(Sponsor) rejection
     it('returns 403 with SPONSOR_WITHDRAWAL_FORBIDDEN on PromotionPrepareError', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionPrepareError } = await import('@stelis/core-api/studio');
       mockHandlePromotionPrepare.mockRejectedValueOnce(
         new PromotionPrepareError(
@@ -650,7 +659,7 @@ describe('studio routes', () => {
         ),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/prepare', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/prepare`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_PREPARE_BODY),
@@ -663,68 +672,29 @@ describe('studio routes', () => {
 
   // ── POST /studio/promotions/:id/sponsor ───────────────────────────
   describe('POST /studio/promotions/:id/sponsor', () => {
-    it('returns 503 when studio mode is disabled', async () => {
-      const ctx = createMockCtx(false);
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
-      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
-    });
-
-    it('returns 503 when executionLedger is missing', async () => {
+    it('parses the bounded body before rejecting malformed credentials without domain I/O', async () => {
       const ctx = createMockCtx(true);
-      ctx.executionLedger = null;
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
-      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
-    });
-
-    // Precedence: 503 infrastructure failures must outrank 401 auth.
-    it('returns 503 (not 401) when globalAllowedTargets missing AND Authorization is malformed', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = null;
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
-      expect(res.status).toBe(503);
-    });
 
-    it('returns 503 (not 401) when sponsor operations gate is closed AND Authorization is missing', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        headers: {},
-        body: {
-          error: 'No sponsor slots currently available',
-          code: 'SPONSOR_CAPACITY_UNAVAILABLE',
-        },
-      });
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
+      expect(res.status).toBe(401);
+      expect((await res.json()).code).toBe('AUTH_FAILED');
+      expect(resolveClientIp).toHaveBeenCalledTimes(1);
+      const coreApi = await import('@stelis/core-api');
+      expect(coreApi.readJsonBodyWithLimit).toHaveBeenCalledTimes(1);
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(mockHandlePromotionSponsor).not.toHaveBeenCalled();
     });
 
     it('returns 401 when Authorization header is missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -734,9 +704,8 @@ describe('studio routes', () => {
 
     it('returns 401 AUTH_FAILED when Authorization header is malformed', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'NotBearer xxx', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -747,24 +716,26 @@ describe('studio routes', () => {
 
     it('returns 429 when IP is blocked', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const { checkBlockedRequest } = await import('@stelis/core-api');
-      vi.mocked(checkBlockedRequest).mockResolvedValueOnce({
+      const { readJsonBodyWithLimit } = await import('@stelis/core-api');
+      vi.mocked(ctx.host.abuseBlocker.checkIp).mockResolvedValueOnce({
         blocked: true,
         retryAfterMs: 5000,
-      } as never);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      });
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
       });
       expect(res.status).toBe(429);
+      expect(readJsonBodyWithLimit).not.toHaveBeenCalled();
+      expect(mockVerifyDeveloperJwt).not.toHaveBeenCalled();
+      expect(ctx.host.abuseBlocker.checkSubject).not.toHaveBeenCalled();
+      expect(mockHandlePromotionSponsor).not.toHaveBeenCalled();
     });
 
     it('returns 429 when rate limit is exceeded', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       vi.mocked(ctx.host.rateLimiter.check).mockResolvedValueOnce({
         allowed: false,
         retryAfterMs: 1000,
@@ -772,7 +743,7 @@ describe('studio routes', () => {
         limit: 10,
       });
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -782,9 +753,8 @@ describe('studio routes', () => {
 
     it('returns 400 when required fields are missing', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -794,9 +764,8 @@ describe('studio routes', () => {
 
     it('returns 200 with sponsor result on valid request', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -804,19 +773,22 @@ describe('studio routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.digest).toBe('0xdigest');
+      const coreApi = await import('@stelis/core-api');
+      const admittedClientIp = mockHandlePromotionSponsor.mock.lastCall?.[1].clientIp;
+      expect(admittedClientIp).toBeDefined();
+      expect(coreApi.readAdmittedClientIp(admittedClientIp)).toBe('127.0.0.1');
       // State refresh is owned by the sponsor-terminal host callback
       // inside `handlePromotionSponsor`; the route does not fire a
       // wake. Callback-side state writes are locked in
       // `sponsorPromotionSponsored.test.ts` (core-api).
 
-      assertResponseKeys(body, 'promotionSponsorResponse');
+      expect(parsePromotionSponsorResponse(body)).toEqual(body);
     });
 
     it('checks IP, userId, and promotionId rate-limit keys on successful sponsor', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -825,7 +797,7 @@ describe('studio routes', () => {
       const calls = vi.mocked(ctx.host.rateLimiter.check).mock.calls.map((c) => c[0]);
       expect(calls).toContain('promo_sponsor:client-ip:127.0.0.1');
       expect(calls).toContain('promo_sponsor:developer-user:mock-user');
-      expect(calls).toContain('promo_sponsor:promotion:promo-1');
+      expect(calls).toContain(`promo_sponsor:promotion:${PROMOTION_ID}`);
     });
 
     it('returns promotion sponsor failure as 422 (PromotionSponsorError)', async () => {
@@ -834,13 +806,12 @@ describe('studio routes', () => {
       // not fire a wake signal. Callback-side state writes are locked
       // in `sponsorPromotionSponsored.test.ts`.
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError('TX reverted', 'ONCHAIN_REVERT', { digest: '0xreverted' }),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -850,13 +821,12 @@ describe('studio routes', () => {
 
     it('derives PromotionSponsorError status from its current code', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError('Promotion not active', 'PROMOTION_NOT_ACTIVE'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -872,7 +842,6 @@ describe('studio routes', () => {
     // `SponsorFailureSubcode` values are exposed publicly.
     it('propagates classified PromotionSponsorError subcode into the route response body', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError(
@@ -882,7 +851,7 @@ describe('studio routes', () => {
         ),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -895,13 +864,12 @@ describe('studio routes', () => {
 
     it('omits subcode in the route response body when the PromotionSponsorError is unclassified', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       const { PromotionSponsorError } = await import('@stelis/core-api/studio');
       mockHandlePromotionSponsor.mockRejectedValueOnce(
         new PromotionSponsorError('Preflight simulation failed: unrecognized', 'PREFLIGHT_FAILED'),
       );
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),
@@ -912,32 +880,11 @@ describe('studio routes', () => {
       expect(body.subcode).toBeUndefined();
     });
 
-    it('returns 503 when the sponsor operations gate is closed', async () => {
-      const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
-      mockBuildSponsorOperationsBlockedResponse.mockReturnValueOnce({
-        body: {
-          error: 'No sponsor slots currently available',
-          code: 'SPONSOR_CAPACITY_UNAVAILABLE',
-        },
-        headers: {},
-      });
-      const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer test-jwt', 'Content-Type': 'application/json' },
-        body: JSON.stringify(VALID_SPONSOR_BODY),
-      });
-      expect(res.status).toBe(503);
-      expect(ctx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
-    });
-
     it('returns 401 AUTH_JWT_INVALID when local developer JWT verification fails', async () => {
       const ctx = createMockCtx(true);
-      ctx.studioGlobalAllowedTargets = new Set<string>();
       mockVerifyDeveloperJwt.mockRejectedValueOnce(new Error('Expired token'));
       const app = makeApp(ctx);
-      const res = await app.request('/studio/promotions/promo-1/sponsor', {
+      const res = await app.request(`/studio/promotions/${PROMOTION_ID}/sponsor`, {
         method: 'POST',
         headers: { Authorization: 'Bearer expired-jwt', 'Content-Type': 'application/json' },
         body: JSON.stringify(VALID_SPONSOR_BODY),

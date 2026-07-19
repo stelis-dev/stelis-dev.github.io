@@ -1,20 +1,20 @@
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { getQuantityOut, getInputForTargetOutput, type QuantityInQuote } from '../deepbook.js';
 import { SlippageQueryError } from '../deepbookErrors.js';
+import type { SuiEndpointSnapshot } from '../sui/suiOperation.js';
 import type { MarketQuotePort } from './types.js';
 import { MarketQuoteUnavailableError } from './errors.js';
 
 export function createDeepbookQuotePort(
-  client: SuiGrpcClient,
+  snapshot: SuiEndpointSnapshot,
   deepbookPackageId: string,
 ): MarketQuotePort {
   return {
     async quoteHopOutput(hop, inputAmountSmallest) {
       try {
-        return await getQuantityOut(client, deepbookPackageId, hop, inputAmountSmallest);
+        return await getQuantityOut(snapshot, deepbookPackageId, hop, inputAmountSmallest);
       } catch (err) {
         if (err instanceof SlippageQueryError) {
-          throw new MarketQuoteUnavailableError(err.message);
+          throw new MarketQuoteUnavailableError(err.message, { cause: err });
         }
         throw err;
       }
@@ -22,14 +22,14 @@ export function createDeepbookQuotePort(
     async quoteHopInputForTarget(hop, targetOutputAmountSmallest) {
       try {
         return await getInputForTargetOutput(
-          client,
+          snapshot,
           deepbookPackageId,
           hop,
           targetOutputAmountSmallest,
         );
       } catch (err) {
         if (err instanceof SlippageQueryError) {
-          throw new MarketQuoteUnavailableError(err.message);
+          throw new MarketQuoteUnavailableError(err.message, { cause: err });
         }
         throw err;
       }

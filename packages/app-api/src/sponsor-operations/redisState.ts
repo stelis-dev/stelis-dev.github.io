@@ -1,337 +1,849 @@
 /**
- * [app-api] Redis-shared sponsor operations state store.
+ * Redis-backed SponsorOperations observations and spend record codec.
  *
- * Shared cross-instance state for per-slot and per-sponsor refill account operational
- * state. Slot observations compare the sampled `writeSeq` before Redis
- * authors `lastObservedAtMs` and the next sequence. Sponsor Refill Account
- * observations and spend transitions are owned by `accountSpendState.ts`.
+ * Redis stores three independent facts:
+ *   - one raw balance observation per sponsor address,
+ *   - one raw total-balance observation for the refill account,
+ *   - one exact refill-account spend lifecycle.
  *
- * This matches the Redis server-time pattern used by
- * `packages/core-api/src/store/redisPrepareStore.ts`.
- *
- * Keyspace:
- *   - `stelis:app-api:sponsor-operations:slot:<address>` → HASH per slot.
- *   - `stelis:app-api:sponsor-operations:sponsor-refill-account` → HASH for sponsor refill account.
- *
- * Instance-local wall clocks and unconditional observation writes are not
- * accepted, so an older RPC sample cannot overwrite a newer operation.
+ * Availability and UI status are derived after these records are decoded.
+ * Derived state is never persisted, so a policy change cannot leave stale
+ * status fields in Redis.
  */
 
+import { createHash } from 'node:crypto';
+import {
+  fromBase64,
+  isValidSuiAddress,
+  isValidTransactionDigest,
+  normalizeSuiAddress,
+  toBase64,
+} from '@mysten/sui/utils';
 import type { RedisClientLike } from '@stelis/core-api';
 import {
   isPositiveU64DecimalString,
-  SPONSOR_SLOT_STATES,
   type SponsorSlotState,
+  type SuiNetwork,
 } from '@stelis/contracts';
-
-export const REFILL_RECONCILIATION_RESULTS = [
-  'not_needed',
-  'dispatch_started',
-  'dispatch_ready',
-  'dispatch_submitted',
-  'dispatch_succeeded',
-  'dispatch_failed',
-] as const;
-
-export type RefillReconciliationResult = (typeof REFILL_RECONCILIATION_RESULTS)[number];
-
-// ─────────────────────────────────────────────
-// Keyspace
-// ─────────────────────────────────────────────
+import {
+  calculateSponsorOperationsStatus,
+  SPONSOR_REFILL_OPERATION_STATES,
+  type SponsorRefillOperationState,
+} from './status.js';
+import type { SponsorOperationsSettings } from './settings.js';
 
 export const SPONSOR_OPERATIONS_KEY_PREFIX = 'stelis:app-api:sponsor-operations:';
 export const slotKey = (address: string): string =>
   `${SPONSOR_OPERATIONS_KEY_PREFIX}slot:${address}`;
 export const SPONSOR_REFILL_ACCOUNT_KEY = `${SPONSOR_OPERATIONS_KEY_PREFIX}sponsor-refill-account`;
+export const SPONSOR_REFILL_ACCOUNT_SPEND_KEY = `${SPONSOR_OPERATIONS_KEY_PREFIX}sponsor-refill-account-spend`;
 
-// ─────────────────────────────────────────────
-// Write-field contracts
-// ─────────────────────────────────────────────
+export const SPONSOR_OPERATIONS_MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
+export const SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT = 'SEQUENCE_LIMIT_REACHED';
 
-/**
- * Fields a caller may update on a slot HASH. Server-authored fields
- * (`lastObservedAtMs`, `writeSeq`) are intentionally absent.
- */
+export function throwIfSponsorOperationsSequenceLimitReached(status: string | null): void {
+  if (status === SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT) {
+    throw new Error(
+      `SponsorOperations sequence reached its maximum value ${SPONSOR_OPERATIONS_MAX_SEQUENCE}`,
+    );
+  }
+}
+
+export const SPONSOR_SLOT_HASH_FIELDS = [
+  'addressBalanceMist',
+  'lastError',
+  'lastObservedAtMs',
+  'writeSeq',
+] as const;
+
+export const SPONSOR_REFILL_ACCOUNT_HASH_FIELDS = [
+  'totalBalanceMist',
+  'lastError',
+  'lastObservedAtMs',
+  'writeSeq',
+] as const;
+
+export const SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS = [
+  'network',
+  'operationId',
+  'kind',
+  'sourceAddress',
+  'destinationAddress',
+  'slotAddress',
+  'nonceKey',
+  'amountMist',
+  'gasBudgetMist',
+  'transactionBytesBase64',
+  'signature',
+  'digest',
+  'chainResult',
+  'terminalFailureKind',
+  'requiredSourceBalanceMist',
+  'state',
+  'lastError',
+  'sequence',
+] as const;
+
 export interface SlotWriteFields {
-  /** Current slot state, matching the SponsorSlotState enum. */
-  state?: SponsorSlotState;
-  /**
-   * Last observed balance (decimal mist, as string). Empty string `""`
-   * represents "unknown" (bootstrap pending or RPC unreachable).
-   */
-  balanceMist?: string;
-  /** Last observed error. Normalized by sponsor operations writers. Empty means none. */
-  lastError?: string;
-  /** Refill transaction digest while the attempt still needs balance reconciliation. */
-  pendingRefillDigest?: string;
-  /** Refill transfer amount attempted for the current/last refill lifecycle. */
-  refillAttemptedAmountMist?: string;
-  /** Slot balance observed by the refill lifecycle before or during reconciliation. */
-  refillObservedBalanceMist?: string;
-  /** Current refill reconciliation status. Empty string clears stale status. */
-  refillReconciliationResult?: RefillReconciliationResult | '';
-  /** Durable Sponsor Refill Account spend that owns the refill projection. */
-  refillOperationId?: string;
-  /** Spend-local CAS sequence for the owning refill operation. */
-  refillOperationSequence?: string;
-  /** Current durable state of the owning refill spend. */
-  refillOperationState?: string;
-  /** Source balance required before a runway-blocked refill may be attempted again. */
-  refillRequiredSourceBalanceMist?: string;
+  readonly addressBalanceMist?: string;
+  readonly lastError?: string;
 }
 
-/** Fields a caller may update on the sponsor refill account HASH. */
 export interface SponsorRefillAccountWriteFields {
-  /** Last observed sponsor refill account balance (decimal mist string, or empty for unknown). */
-  balanceMist?: string;
-  /** `'1'` when sponsor refill account observation succeeded, `'0'` when it did not. */
-  healthy?: '1' | '0';
-  /** `floor(balance / refillTargetMist)` as decimal string, or empty when unknown. */
-  refillsRemaining?: string;
-  /** Last observed error. Normalized by sponsor operations writers. Empty means none. */
-  lastError?: string;
+  readonly totalBalanceMist?: string;
+  readonly lastError?: string;
 }
 
-// ─────────────────────────────────────────────
-// Read shapes
-// ─────────────────────────────────────────────
+export const SPONSOR_REFILL_ACCOUNT_SPEND_KINDS = ['refill', 'withdrawal'] as const;
+export type SponsorRefillAccountSpendKind = (typeof SPONSOR_REFILL_ACCOUNT_SPEND_KINDS)[number];
+export type SponsorRefillAccountSpendState = SponsorRefillOperationState;
+export type SponsorRefillAccountSpendTerminalFailureKind = 'runway_blocked' | 'failed';
 
-export interface SlotRead {
+export function createSponsorRefillAccountWithdrawalOperationId(input: {
+  readonly network: SuiNetwork;
+  readonly sourceAddress: string;
+  readonly destinationAddress: string;
+  readonly amountMist: string;
+  readonly nonceKey: string;
+}): string {
+  return `withdrawal:${createHash('sha256')
+    .update(
+      JSON.stringify([
+        'withdrawal',
+        input.network,
+        input.sourceAddress,
+        input.destinationAddress,
+        input.amountMist,
+        input.nonceKey,
+      ]),
+    )
+    .digest('hex')}`;
+}
+
+interface SponsorRefillAccountSpendBase {
+  readonly network: SuiNetwork;
+  readonly operationId: string;
+  readonly sourceAddress: string;
+  readonly destinationAddress: string;
+  readonly amountMist: string;
+  readonly sequence: number;
+}
+
+type SponsorRefillAccountSpendKindFields =
+  | { readonly kind: 'refill'; readonly slotAddress: string; readonly nonceKey: null }
+  | { readonly kind: 'withdrawal'; readonly slotAddress: null; readonly nonceKey: string };
+
+interface SponsorRefillAccountTransactionIdentity {
+  readonly gasBudgetMist: string;
+  readonly transactionBytesBase64: string;
+  readonly signature: string;
+  readonly digest: string;
+}
+
+export type ReservedSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
+  SponsorRefillAccountSpendKindFields & { readonly state: 'reserved' };
+
+export type ReadySponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
+  SponsorRefillAccountSpendKindFields &
+  SponsorRefillAccountTransactionIdentity & { readonly state: 'ready' };
+
+export type ReconcilingSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
+  SponsorRefillAccountSpendKindFields &
+  SponsorRefillAccountTransactionIdentity &
+  (
+    | { readonly state: 'reconciling'; readonly chainResult: 'succeeded' }
+    | {
+        readonly state: 'reconciling';
+        readonly chainResult: 'failed';
+        readonly error: string;
+      }
+  );
+
+export type SucceededSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
+  SponsorRefillAccountSpendKindFields & {
+    readonly state: 'succeeded';
+    readonly digest: string;
+  };
+
+export type FailedSponsorRefillAccountSpend = SponsorRefillAccountSpendBase &
+  SponsorRefillAccountSpendKindFields & {
+    readonly state: 'failed';
+    readonly digest: string | null;
+    readonly failureKind: SponsorRefillAccountSpendTerminalFailureKind;
+    readonly requiredSourceBalanceMist: string | null;
+    readonly error: string;
+  };
+
+export type ActiveSponsorRefillAccountSpend =
+  | ReservedSponsorRefillAccountSpend
+  | ReadySponsorRefillAccountSpend
+  | ReconcilingSponsorRefillAccountSpend;
+export type TerminalSponsorRefillAccountSpend =
+  | SucceededSponsorRefillAccountSpend
+  | FailedSponsorRefillAccountSpend;
+export type SponsorRefillAccountSpend =
+  | ActiveSponsorRefillAccountSpend
+  | TerminalSponsorRefillAccountSpend;
+
+interface SponsorSlotObservationRecord {
   readonly address: string;
-  readonly state: SponsorSlotState | null;
-  readonly balanceMist: string | null;
+  readonly addressBalanceMist: string | null;
   readonly lastError: string | null;
   readonly lastObservedAtMs: number | null;
-  readonly writeSeq: number | null;
-  readonly pendingRefillDigest: string | null;
-  readonly refillAttemptedAmountMist: string | null;
-  readonly refillObservedBalanceMist: string | null;
-  readonly refillReconciliationResult: RefillReconciliationResult | null;
+  readonly writeSeq: number;
+}
+
+export interface SponsorSlotRecord extends SponsorSlotObservationRecord {
+  readonly state: SponsorSlotState;
   readonly refillOperationId: string | null;
   readonly refillOperationSequence: number | null;
-  readonly refillOperationState: string | null;
+  readonly refillOperationState: SponsorRefillOperationState | null;
   readonly refillRequiredSourceBalanceMist: string | null;
 }
 
-export interface SponsorRefillAccountRead {
-  readonly balanceMist: string | null;
-  readonly healthy: boolean | null;
-  readonly refillsRemaining: number | null;
+export interface SponsorRefillAccountRecord {
+  readonly totalBalanceMist: string | null;
+  readonly healthy: boolean;
   readonly lastError: string | null;
   readonly lastObservedAtMs: number | null;
-  readonly writeSeq: number | null;
+  readonly writeSeq: number;
 }
 
-// ─────────────────────────────────────────────
-// Lua script — shared observation writer for slot and Sponsor Refill Account HASHes
-// ─────────────────────────────────────────────
-
-/** Apply an observation only when the sampled entity write sequence is still current. */
-export const UPDATE_ENTITY_IF_SEQUENCE_LUA = [
-  "local current = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
-  "if current ~= ARGV[1] then return { 'STALE' } end",
-  "local refillState = redis.call('HGET', KEYS[1], 'refillOperationState') or ''",
-  "if refillState == 'reserved' or refillState == 'ready' or refillState == 'reconciling' then return { 'ACTIVE_REFILL' } end",
-  "local time = redis.call('TIME')",
-  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
-  "local seq = redis.call('HINCRBY', KEYS[1], 'writeSeq', 1)",
-  "redis.call('HSET', KEYS[1], 'lastObservedAtMs', nowMs)",
-  'local i = 2',
-  'while i <= #ARGV do',
-  "  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])",
-  '  i = i + 2',
-  'end',
-  "return { 'UPDATED', tostring(seq) }",
-].join('\n');
-
-/**
- * Reads every slot HASH and the sponsor refill account HASH in one Redis
- * round trip. Missing HASH fields are returned as empty strings so the
- * TypeScript parser can keep positional fields stable.
- *
- * KEYS[1..N]  slot HASH keys followed by sponsor refill account HASH key.
- * ARGV[1..N]  slot addresses in the same order as the slot keys.
- */
-export const READ_ALL_LUA = [
-  'local slotRows = {}',
-  'for i = 1, #ARGV do',
-  '  local key = KEYS[i]',
-  '  table.insert(slotRows, {',
-  '    ARGV[i],',
-  "    redis.call('HGET', key, 'state') or '',",
-  "    redis.call('HGET', key, 'balanceMist') or '',",
-  "    redis.call('HGET', key, 'lastError') or '',",
-  "    redis.call('HGET', key, 'lastObservedAtMs') or '',",
-  "    redis.call('HGET', key, 'writeSeq') or '',",
-  "    redis.call('HGET', key, 'pendingRefillDigest') or '',",
-  "    redis.call('HGET', key, 'refillAttemptedAmountMist') or '',",
-  "    redis.call('HGET', key, 'refillObservedBalanceMist') or '',",
-  "    redis.call('HGET', key, 'refillReconciliationResult') or '',",
-  "    redis.call('HGET', key, 'refillOperationId') or '',",
-  "    redis.call('HGET', key, 'refillOperationSequence') or '',",
-  "    redis.call('HGET', key, 'refillOperationState') or '',",
-  "    redis.call('HGET', key, 'refillRequiredSourceBalanceMist') or ''",
-  '  })',
-  'end',
-  'local sponsorKey = KEYS[#KEYS]',
-  'local sponsorRefillAccount = {',
-  "  redis.call('HGET', sponsorKey, 'balanceMist') or '',",
-  "  redis.call('HGET', sponsorKey, 'healthy') or '',",
-  "  redis.call('HGET', sponsorKey, 'refillsRemaining') or '',",
-  "  redis.call('HGET', sponsorKey, 'lastError') or '',",
-  "  redis.call('HGET', sponsorKey, 'lastObservedAtMs') or '',",
-  "  redis.call('HGET', sponsorKey, 'writeSeq') or ''",
-  '}',
-  'return { slotRows, sponsorRefillAccount }',
-].join('\n');
-
-// ─────────────────────────────────────────────
-// Factory
-// ─────────────────────────────────────────────
-
-export interface RedisSponsorOperationsStateDeps {
-  readonly client: RedisClientLike;
-  /** Known slot addresses (for reject-unknown-address validation). */
-  readonly slotAddresses: readonly string[];
+export interface SponsorSlotAvailabilityRecord extends SponsorSlotRecord {
+  readonly observationFresh: boolean;
 }
 
-export interface RedisSponsorOperationsState {
-  /** Apply a sampled slot observation only if no intervening writer changed it. */
-  updateSlotIfWriteSeq(
-    address: string,
-    expectedWriteSeq: number,
-    fields: SlotWriteFields,
-  ): Promise<boolean>;
-  /** Read a slot HASH. Returns `null` if the key is missing. */
-  readSlot(address: string): Promise<SlotRead | null>;
-  /** Read the sponsor refill account HASH. Returns `null` if the key is missing. */
-  readSponsorRefillAccount(): Promise<SponsorRefillAccountRead | null>;
-  /**
-   * Batched read of every slot HASH and the sponsor refill account HASH. Returned slots are in
-   * the same order as `deps.slotAddresses`. Missing slot keys yield an
-   * entry with `state === null` etc.; missing sponsor refill account key yields `null`
-   * fields. This is the hot-path read used by the request gate and the
-   * admin `/api/sponsor-operations` endpoint.
-   */
-  readAll(): Promise<{
-    readonly slots: readonly SlotRead[];
-    readonly sponsorRefillAccount: SponsorRefillAccountRead;
-  }>;
+export interface SponsorRefillAccountAvailabilityRecord extends SponsorRefillAccountRecord {
+  readonly observationFresh: boolean;
 }
 
-function parseSlotState(raw: string | undefined): SponsorSlotState | null {
-  if (raw === undefined) return null;
-  return (SPONSOR_SLOT_STATES as readonly string[]).includes(raw)
-    ? (raw as SponsorSlotState)
-    : null;
+function requiredField(hash: Readonly<Record<string, string>>, key: string, label: string): string {
+  if (!Object.prototype.hasOwnProperty.call(hash, key)) {
+    throw new Error(`${label}.${key} is missing`);
+  }
+  return hash[key]!;
 }
 
-function parseIntOrNull(raw: string | undefined): number | null {
-  if (raw === undefined || raw === '') return null;
-  if (!/^(?:0|[1-9]\d*)$/.test(raw)) return null;
-  const n = Number(raw);
-  return Number.isSafeInteger(n) ? n : null;
+function assertExactFields(
+  hash: Readonly<Record<string, string>>,
+  expectedFields: readonly string[],
+  label: string,
+): void {
+  for (const field of expectedFields) {
+    if (!Object.prototype.hasOwnProperty.call(hash, field)) {
+      throw new Error(`${label}.${field} is missing`);
+    }
+  }
+  if (Object.keys(hash).length !== expectedFields.length) {
+    throw new Error(`${label} has an unexpected field set`);
+  }
 }
 
-function parseStringOrNull(raw: string | undefined): string | null {
-  if (raw === undefined) return null;
-  return raw === '' ? null : raw;
+function isU64DecimalString(raw: string): boolean {
+  return raw === '0' || isPositiveU64DecimalString(raw);
 }
 
-function parseRefillReconciliationResultOrNull(
-  raw: string | undefined,
-): RefillReconciliationResult | null {
-  if (raw === undefined || raw === '') return null;
-  return (REFILL_RECONCILIATION_RESULTS as readonly string[]).includes(raw)
-    ? (raw as RefillReconciliationResult)
-    : null;
-}
-
-function parseMistStringOrNull(raw: string | undefined): string | null {
-  if (raw === undefined || raw === '') return null;
-  return /^(?:0|[1-9]\d*)$/.test(raw) ? raw : null;
-}
-
-function parseRefillRequiredSourceBalanceMist(raw: string | undefined): string | null {
-  if (raw === undefined || raw === '') return null;
-  if (!isPositiveU64DecimalString(raw)) {
-    throw new Error('Sponsor slot refill source balance threshold is malformed');
+function parseMistString(raw: string, label: string, positive = false): string | null {
+  if (raw === '') return null;
+  if (positive ? !isPositiveU64DecimalString(raw) : !isU64DecimalString(raw)) {
+    throw new Error(`${label} is malformed`);
   }
   return raw;
 }
 
-function parseHealthyOrNull(raw: string | undefined): boolean | null {
-  if (raw === undefined) return null;
-  if (raw === '1') return true;
-  if (raw === '0') return false;
-  return null;
+function parseSafeInteger(raw: string, label: string, nullable: boolean): number | null {
+  if (nullable && raw === '') return null;
+  if (!/^(?:0|[1-9]\d*)$/.test(raw)) throw new Error(`${label} is malformed`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) throw new Error(`${label} exceeds safe integer range`);
+  return value;
 }
+
+function parseString(raw: string): string | null {
+  return raw === '' ? null : raw;
+}
+
+function parseCanonicalAddress(raw: string, label: string): string {
+  if (!isValidSuiAddress(raw) || normalizeSuiAddress(raw) !== raw) {
+    throw new Error(`${label} is not a canonical Sui address`);
+  }
+  return raw;
+}
+
+function parseCanonicalBase64(raw: string, label: string): string | null {
+  if (raw === '') return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = fromBase64(raw);
+  } catch {
+    throw new Error(`${label} is malformed`);
+  }
+  if (bytes.length === 0 || toBase64(bytes) !== raw) {
+    throw new Error(`${label} is not canonical base64`);
+  }
+  return raw;
+}
+
+export function decodeSponsorRefillAccountSpendRecord(
+  hash: Readonly<Record<string, string>>,
+  settings: SponsorOperationsSettings,
+): SponsorRefillAccountSpend | null {
+  if (Object.keys(hash).length === 0) return null;
+  const label = 'SponsorRefillAccountSpend';
+  assertExactFields(hash, SPONSOR_REFILL_ACCOUNT_SPEND_HASH_FIELDS, label);
+  const network = requiredField(hash, 'network', label);
+  if (network !== settings.network) throw new Error(`${label}.network is invalid`);
+  const operationId = requiredField(hash, 'operationId', label);
+  if (operationId.length === 0) throw new Error(`${label}.operationId is empty`);
+  const kindRaw = requiredField(hash, 'kind', label);
+  if (!(SPONSOR_REFILL_ACCOUNT_SPEND_KINDS as readonly string[]).includes(kindRaw)) {
+    throw new Error(`${label}.kind is invalid`);
+  }
+  const kind = kindRaw as SponsorRefillAccountSpendKind;
+  const sourceAddress = parseCanonicalAddress(
+    requiredField(hash, 'sourceAddress', label),
+    `${label}.sourceAddress`,
+  );
+  const destinationAddress = parseCanonicalAddress(
+    requiredField(hash, 'destinationAddress', label),
+    `${label}.destinationAddress`,
+  );
+  if (sourceAddress !== settings.sponsorRefillAccountAddress) {
+    throw new Error(`${label}.sourceAddress is not the configured refill account`);
+  }
+  const slotAddressRaw = requiredField(hash, 'slotAddress', label);
+  const nonceKeyRaw = requiredField(hash, 'nonceKey', label);
+  const slotAddress =
+    slotAddressRaw === '' ? null : parseCanonicalAddress(slotAddressRaw, `${label}.slotAddress`);
+  const nonceKey = nonceKeyRaw === '' ? null : nonceKeyRaw;
+  if (kind === 'refill') {
+    if (
+      slotAddress === null ||
+      destinationAddress !== slotAddress ||
+      !settings.sponsorAddresses.includes(slotAddress) ||
+      nonceKey !== null
+    ) {
+      throw new Error(`${label} has an invalid refill identity`);
+    }
+  } else if (slotAddress !== null || nonceKey === null) {
+    throw new Error(`${label} has an invalid withdrawal identity`);
+  }
+  const amountMist = parseMistString(
+    requiredField(hash, 'amountMist', label),
+    `${label}.amountMist`,
+    true,
+  );
+  const sequence = parseSafeInteger(
+    requiredField(hash, 'sequence', label),
+    `${label}.sequence`,
+    false,
+  );
+  if (amountMist === null || sequence === null || sequence <= 0) {
+    throw new Error(`${label} has an invalid amount or sequence`);
+  }
+  if (kind === 'refill') {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)
+    ) {
+      throw new Error(`${label}.operationId is not a UUID v4 refill identity`);
+    }
+  } else if (
+    operationId !==
+    createSponsorRefillAccountWithdrawalOperationId({
+      network: settings.network,
+      sourceAddress,
+      destinationAddress,
+      amountMist,
+      nonceKey: nonceKey!,
+    })
+  ) {
+    throw new Error(`${label}.operationId is not bound to the withdrawal request`);
+  }
+  const stateRaw = requiredField(hash, 'state', label);
+  if (!(SPONSOR_REFILL_OPERATION_STATES as readonly string[]).includes(stateRaw)) {
+    throw new Error(`${label}.state is invalid`);
+  }
+  const state = stateRaw as SponsorRefillAccountSpendState;
+  const gasBudgetMist = parseMistString(
+    requiredField(hash, 'gasBudgetMist', label),
+    `${label}.gasBudgetMist`,
+    true,
+  );
+  const transactionBytesBase64 = parseCanonicalBase64(
+    requiredField(hash, 'transactionBytesBase64', label),
+    `${label}.transactionBytesBase64`,
+  );
+  const signature = parseCanonicalBase64(
+    requiredField(hash, 'signature', label),
+    `${label}.signature`,
+  );
+  const digest = parseString(requiredField(hash, 'digest', label));
+  if (digest !== null && !isValidTransactionDigest(digest)) {
+    throw new Error(`${label}.digest is invalid`);
+  }
+  const chainResultRaw = requiredField(hash, 'chainResult', label);
+  const chainResult = chainResultRaw === '' ? null : chainResultRaw;
+  if (chainResult !== null && chainResult !== 'succeeded' && chainResult !== 'failed') {
+    throw new Error(`${label}.chainResult is invalid`);
+  }
+  const failureKindRaw = requiredField(hash, 'terminalFailureKind', label);
+  const failureKind = failureKindRaw === '' ? null : failureKindRaw;
+  if (failureKind !== null && failureKind !== 'runway_blocked' && failureKind !== 'failed') {
+    throw new Error(`${label}.terminalFailureKind is invalid`);
+  }
+  const requiredSourceBalanceMist = parseMistString(
+    requiredField(hash, 'requiredSourceBalanceMist', label),
+    `${label}.requiredSourceBalanceMist`,
+    true,
+  );
+  const lastError = parseString(requiredField(hash, 'lastError', label));
+  const hasCompleteIdentity =
+    gasBudgetMist !== null &&
+    transactionBytesBase64 !== null &&
+    signature !== null &&
+    digest !== null;
+  const hasAnyIdentity =
+    gasBudgetMist !== null ||
+    transactionBytesBase64 !== null ||
+    signature !== null ||
+    digest !== null;
+  const common = {
+    network: settings.network,
+    operationId,
+    sourceAddress,
+    destinationAddress,
+    amountMist,
+    sequence,
+    ...(kind === 'refill'
+      ? { kind, slotAddress: slotAddress!, nonceKey: null }
+      : { kind, slotAddress: null, nonceKey: nonceKey! }),
+  } as const;
+
+  if (state === 'reserved') {
+    if (
+      sequence !== 1 ||
+      hasAnyIdentity ||
+      chainResult !== null ||
+      failureKind !== null ||
+      requiredSourceBalanceMist !== null ||
+      lastError !== null
+    ) {
+      throw new Error(`${label} reserved state is inconsistent`);
+    }
+    return { ...common, state };
+  }
+  if (state === 'ready') {
+    if (
+      sequence !== 2 ||
+      !hasCompleteIdentity ||
+      chainResult !== null ||
+      failureKind !== null ||
+      requiredSourceBalanceMist !== null ||
+      lastError !== null
+    ) {
+      throw new Error(`${label} ready state is inconsistent`);
+    }
+    return {
+      ...common,
+      state,
+      gasBudgetMist: gasBudgetMist!,
+      transactionBytesBase64: transactionBytesBase64!,
+      signature: signature!,
+      digest: digest!,
+    };
+  }
+  if (state === 'reconciling') {
+    if (
+      sequence !== 3 ||
+      !hasCompleteIdentity ||
+      chainResult === null ||
+      failureKind !== null ||
+      requiredSourceBalanceMist !== null ||
+      (chainResult === 'succeeded' ? lastError !== null : lastError === null)
+    ) {
+      throw new Error(`${label} reconciling state is inconsistent`);
+    }
+    const identity = {
+      ...common,
+      state,
+      gasBudgetMist: gasBudgetMist!,
+      transactionBytesBase64: transactionBytesBase64!,
+      signature: signature!,
+      digest: digest!,
+    };
+    return chainResult === 'succeeded'
+      ? { ...identity, chainResult }
+      : { ...identity, chainResult, error: lastError! };
+  }
+  if (state === 'succeeded') {
+    if (
+      sequence !== 4 ||
+      gasBudgetMist !== null ||
+      transactionBytesBase64 !== null ||
+      signature !== null ||
+      digest === null ||
+      chainResult !== 'succeeded' ||
+      failureKind !== null ||
+      requiredSourceBalanceMist !== null ||
+      lastError !== null
+    ) {
+      throw new Error(`${label} succeeded state is inconsistent`);
+    }
+    return { ...common, state, digest };
+  }
+  const validFailure =
+    sequence === (chainResult === null ? 2 : 4) &&
+    gasBudgetMist === null &&
+    transactionBytesBase64 === null &&
+    signature === null &&
+    failureKind !== null &&
+    lastError !== null &&
+    ((chainResult === null && digest === null && failureKind === 'runway_blocked') ||
+      (chainResult === null && digest === null && failureKind === 'failed') ||
+      (chainResult === 'failed' && digest !== null && failureKind === 'failed')) &&
+    (requiredSourceBalanceMist === null || (kind === 'refill' && failureKind === 'runway_blocked'));
+  if (!validFailure) throw new Error(`${label} failed state is inconsistent`);
+  return {
+    ...common,
+    state,
+    digest,
+    failureKind,
+    requiredSourceBalanceMist,
+    error: lastError,
+  };
+}
+
+export function serializeSponsorRefillAccountSpendRecord(
+  spend: SponsorRefillAccountSpend,
+  settings: SponsorOperationsSettings,
+): Readonly<Record<string, string>> {
+  const hash = Object.freeze({
+    network: spend.network,
+    operationId: spend.operationId,
+    kind: spend.kind,
+    sourceAddress: spend.sourceAddress,
+    destinationAddress: spend.destinationAddress,
+    slotAddress: spend.slotAddress ?? '',
+    nonceKey: spend.nonceKey ?? '',
+    amountMist: spend.amountMist,
+    gasBudgetMist: 'gasBudgetMist' in spend ? spend.gasBudgetMist : '',
+    transactionBytesBase64: 'transactionBytesBase64' in spend ? spend.transactionBytesBase64 : '',
+    signature: 'signature' in spend ? spend.signature : '',
+    digest: 'digest' in spend ? (spend.digest ?? '') : '',
+    chainResult:
+      'chainResult' in spend ? spend.chainResult : spend.state === 'succeeded' ? 'succeeded' : '',
+    terminalFailureKind: spend.state === 'failed' ? spend.failureKind : '',
+    requiredSourceBalanceMist:
+      spend.state === 'failed' ? (spend.requiredSourceBalanceMist ?? '') : '',
+    state: spend.state,
+    lastError: 'error' in spend ? spend.error : '',
+    sequence: String(spend.sequence),
+  });
+  decodeSponsorRefillAccountSpendRecord(hash, settings);
+  return hash;
+}
+
+function decodeSponsorSlotObservation(
+  hash: Readonly<Record<string, string>>,
+  address: string,
+): SponsorSlotObservationRecord {
+  const label = `SponsorSlotObservation(${address})`;
+  assertExactFields(hash, SPONSOR_SLOT_HASH_FIELDS, label);
+  const addressBalanceMist = parseMistString(
+    requiredField(hash, 'addressBalanceMist', label),
+    `${label}.addressBalanceMist`,
+  );
+  const lastObservedAtMs = parseSafeInteger(
+    requiredField(hash, 'lastObservedAtMs', label),
+    `${label}.lastObservedAtMs`,
+    true,
+  );
+  if (addressBalanceMist !== null && lastObservedAtMs === null) {
+    throw new Error(`${label} has a balance without an observation time`);
+  }
+  return {
+    address,
+    addressBalanceMist,
+    lastError: parseString(requiredField(hash, 'lastError', label)),
+    lastObservedAtMs,
+    writeSeq: parseSafeInteger(requiredField(hash, 'writeSeq', label), `${label}.writeSeq`, false)!,
+  };
+}
+
+function projectSponsorSlotRecord(
+  observation: SponsorSlotObservationRecord,
+  spend: SponsorRefillAccountSpend | null,
+  settings: SponsorOperationsSettings,
+): SponsorSlotRecord {
+  const refill =
+    spend?.kind === 'refill' && spend.slotAddress === observation.address ? spend : null;
+  const calculated = calculateSponsorOperationsStatus({
+    entity: 'sponsor_slot',
+    settings,
+    observation:
+      observation.addressBalanceMist === null
+        ? { status: 'failed' }
+        : { status: 'succeeded', addressBalanceMist: BigInt(observation.addressBalanceMist) },
+    refillOperationState: refill?.state ?? null,
+  });
+  return {
+    ...observation,
+    state: calculated.state,
+    refillOperationId: refill?.operationId ?? null,
+    refillOperationSequence: refill?.sequence ?? null,
+    refillOperationState: refill?.state ?? null,
+    refillRequiredSourceBalanceMist:
+      refill?.state === 'failed' ? refill.requiredSourceBalanceMist : null,
+    lastError: refill?.state === 'failed' ? refill.error : observation.lastError,
+  };
+}
+
+export function decodeSponsorSlotRecord(
+  hash: Readonly<Record<string, string>>,
+  address: string,
+  settings: SponsorOperationsSettings,
+  spend: SponsorRefillAccountSpend | null = null,
+): SponsorSlotRecord {
+  return projectSponsorSlotRecord(decodeSponsorSlotObservation(hash, address), spend, settings);
+}
+
+export function serializeSponsorSlotRecord(
+  record: Pick<
+    SponsorSlotRecord,
+    'address' | 'addressBalanceMist' | 'lastError' | 'lastObservedAtMs' | 'writeSeq'
+  >,
+): Readonly<Record<string, string>> {
+  const hash = Object.freeze({
+    addressBalanceMist: record.addressBalanceMist ?? '',
+    lastError: record.lastError ?? '',
+    lastObservedAtMs: record.lastObservedAtMs === null ? '' : String(record.lastObservedAtMs),
+    writeSeq: String(record.writeSeq),
+  });
+  decodeSponsorSlotObservation(hash, record.address);
+  return hash;
+}
+
+export function decodeSponsorRefillAccountRecord(
+  hash: Readonly<Record<string, string>>,
+  settings: SponsorOperationsSettings,
+): SponsorRefillAccountRecord {
+  const label = 'SponsorRefillAccountObservation';
+  assertExactFields(hash, SPONSOR_REFILL_ACCOUNT_HASH_FIELDS, label);
+  const totalBalanceMist = parseMistString(
+    requiredField(hash, 'totalBalanceMist', label),
+    `${label}.totalBalanceMist`,
+  );
+  const lastObservedAtMs = parseSafeInteger(
+    requiredField(hash, 'lastObservedAtMs', label),
+    `${label}.lastObservedAtMs`,
+    true,
+  );
+  if (totalBalanceMist !== null && lastObservedAtMs === null) {
+    throw new Error(`${label} has a balance without an observation time`);
+  }
+  const calculated = calculateSponsorOperationsStatus({
+    entity: 'sponsor_refill_account',
+    settings,
+    observation:
+      totalBalanceMist === null
+        ? { status: 'failed' }
+        : { status: 'succeeded', totalBalanceMist: BigInt(totalBalanceMist) },
+  });
+  return {
+    totalBalanceMist,
+    healthy: calculated.healthy,
+    lastError: parseString(requiredField(hash, 'lastError', label)),
+    lastObservedAtMs,
+    writeSeq: parseSafeInteger(requiredField(hash, 'writeSeq', label), `${label}.writeSeq`, false)!,
+  };
+}
+
+export function serializeSponsorRefillAccountRecord(
+  record: Pick<
+    SponsorRefillAccountRecord,
+    'totalBalanceMist' | 'lastError' | 'lastObservedAtMs' | 'writeSeq'
+  >,
+  settings: SponsorOperationsSettings,
+): Readonly<Record<string, string>> {
+  const hash = Object.freeze({
+    totalBalanceMist: record.totalBalanceMist ?? '',
+    lastError: record.lastError ?? '',
+    lastObservedAtMs: record.lastObservedAtMs === null ? '' : String(record.lastObservedAtMs),
+    writeSeq: String(record.writeSeq),
+  });
+  decodeSponsorRefillAccountRecord(hash, settings);
+  return hash;
+}
+
+function exactHashGuardLua(key: string, fields: readonly string[], indent = ''): readonly string[] {
+  return [
+    `${indent}if redis.call('HLEN', ${key}) ~= ${fields.length} then return { 'CORRUPT' } end`,
+    ...fields.map(
+      (field) =>
+        `${indent}if redis.call('HEXISTS', ${key}, '${field}') ~= 1 then return { 'CORRUPT' } end`,
+    ),
+  ];
+}
+
+export const UPDATE_ENTITY_IF_SEQUENCE_LUA = [
+  "local exists = redis.call('EXISTS', KEYS[1])",
+  'if exists == 1 then',
+  ...exactHashGuardLua('KEYS[1]', SPONSOR_SLOT_HASH_FIELDS, '  '),
+  'end',
+  "local current = redis.call('HGET', KEYS[1], 'writeSeq') or '0'",
+  "if current ~= ARGV[1] then return { 'STALE' } end",
+  `if current == '${SPONSOR_OPERATIONS_MAX_SEQUENCE}' then return { '${SPONSOR_OPERATIONS_SEQUENCE_LIMIT_RESULT}' } end`,
+  'local nextSequence = tostring(tonumber(current) + 1)',
+  "local time = redis.call('TIME')",
+  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
+  "redis.call('HSET', KEYS[1], 'addressBalanceMist', ARGV[2], 'lastError', ARGV[3], 'writeSeq', nextSequence)",
+  "if ARGV[2] ~= '' then",
+  "  redis.call('HSET', KEYS[1], 'lastObservedAtMs', nowMs)",
+  'elseif exists == 0 then',
+  "  redis.call('HSET', KEYS[1], 'lastObservedAtMs', '')",
+  'end',
+  "return { 'UPDATED', nextSequence }",
+].join('\n');
+
+export const READ_ALL_LUA = [
+  'local slotRows = {}',
+  'for i = 1, #ARGV do',
+  "  table.insert(slotRows, { ARGV[i], redis.call('HGETALL', KEYS[i]) })",
+  'end',
+  "local account = redis.call('HGETALL', KEYS[#KEYS - 1])",
+  "local spend = redis.call('HGETALL', KEYS[#KEYS])",
+  "local time = redis.call('TIME')",
+  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
+  'return { slotRows, account, spend, nowMs }',
+].join('\n');
+
+export const READ_SLOT_LUA = [
+  "local slot = redis.call('HGETALL', KEYS[1])",
+  "local spend = redis.call('HGETALL', KEYS[2])",
+  "local time = redis.call('TIME')",
+  'local nowMs = tostring(tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000))',
+  'return { slot, spend, nowMs }',
+].join('\n');
 
 function stringAt(row: readonly unknown[], index: number): string | undefined {
   const value = row[index];
   return typeof value === 'string' ? value : undefined;
 }
 
-function flattenWriteFields(fields: Record<string, string | undefined>): string[] {
-  const argv: string[] = [];
-  for (const [k, v] of Object.entries(fields)) {
-    if (v === undefined) continue;
-    argv.push(k, v);
+function hashFromRedisRow(raw: unknown, label: string): Record<string, string> {
+  if (!Array.isArray(raw) || raw.length % 2 !== 0) {
+    throw new Error(`${label} has an unexpected Redis HASH response`);
   }
-  return argv;
+  const hash: Record<string, string> = {};
+  for (let index = 0; index < raw.length; index += 2) {
+    const field = stringAt(raw, index);
+    const value = stringAt(raw, index + 1);
+    if (field === undefined || value === undefined || Object.hasOwn(hash, field)) {
+      throw new Error(`${label} has an unexpected Redis HASH response`);
+    }
+    hash[field] = value;
+  }
+  return hash;
 }
 
-function validateSlotRead(slot: SlotRead): SlotRead {
-  if (slot.state === 'healthy' && slot.refillRequiredSourceBalanceMist !== null) {
-    throw new Error('Healthy sponsor slot cannot retain a refill source balance threshold');
+function recordIsFresh(
+  lastObservedAtMs: number | null,
+  redisTimeMs: number,
+  maxAgeMs: number,
+): boolean {
+  if (lastObservedAtMs === null) return false;
+  if (lastObservedAtMs > redisTimeMs) {
+    throw new Error('SponsorOperations observation time is later than Redis TIME');
   }
-  return slot;
+  return redisTimeMs - lastObservedAtMs <= maxAgeMs;
+}
+
+export interface RedisSponsorOperationsStateDeps {
+  readonly client: RedisClientLike;
+  readonly settings: SponsorOperationsSettings;
+}
+
+export interface RedisSponsorOperationsState {
+  updateSlotIfWriteSeq(
+    address: string,
+    expectedWriteSeq: number,
+    fields: SlotWriteFields,
+  ): Promise<boolean>;
+  readSlot(address: string): Promise<SponsorSlotRecord | null>;
+  readSlotAvailability(address: string): Promise<SponsorSlotAvailabilityRecord | null>;
+  readSponsorRefillAccount(): Promise<SponsorRefillAccountRecord | null>;
+  readAll(): Promise<{
+    readonly settings: SponsorOperationsSettings;
+    readonly slots: readonly SponsorSlotAvailabilityRecord[];
+    readonly sponsorRefillAccount: SponsorRefillAccountAvailabilityRecord;
+  }>;
+}
+
+function assertSequence(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
 }
 
 export function createRedisSponsorOperationsState(
   deps: RedisSponsorOperationsStateDeps,
 ): RedisSponsorOperationsState {
-  const slotSet = new Set(deps.slotAddresses);
+  const { settings } = deps;
+  const slotSet = new Set(settings.sponsorAddresses);
+  const maxObservationAgeMs = settings.maxObservationAgeMs;
 
-  async function readSlot(address: string): Promise<SlotRead | null> {
-    if (!slotSet.has(address)) {
-      throw new Error(`RedisSponsorOperationsState.readSlot: unknown slot address ${address}`);
+  async function readSlotSnapshot(address: string): Promise<{
+    readonly record: SponsorSlotRecord | null;
+    readonly redisTimeMs: number;
+  }> {
+    if (!slotSet.has(address)) throw new Error(`Unknown sponsor address ${address}`);
+    const raw = await deps.client.eval(
+      READ_SLOT_LUA,
+      [slotKey(address), SPONSOR_REFILL_ACCOUNT_SPEND_KEY],
+      [],
+    );
+    if (
+      !Array.isArray(raw) ||
+      !Array.isArray(raw[0]) ||
+      !Array.isArray(raw[1]) ||
+      typeof raw[2] !== 'string'
+    ) {
+      throw new Error('RedisSponsorOperationsState.readSlot: unexpected Redis response');
     }
-    const hash = await deps.client.hgetall(slotKey(address));
-    if (!hash || Object.keys(hash).length === 0) return null;
-    return validateSlotRead({
-      address,
-      state: parseSlotState(hash.state),
-      balanceMist: parseMistStringOrNull(hash.balanceMist),
-      lastError: parseStringOrNull(hash.lastError),
-      lastObservedAtMs: parseIntOrNull(hash.lastObservedAtMs),
-      writeSeq: parseIntOrNull(hash.writeSeq),
-      pendingRefillDigest: parseStringOrNull(hash.pendingRefillDigest),
-      refillAttemptedAmountMist: parseMistStringOrNull(hash.refillAttemptedAmountMist),
-      refillObservedBalanceMist: parseMistStringOrNull(hash.refillObservedBalanceMist),
-      refillReconciliationResult: parseRefillReconciliationResultOrNull(
-        hash.refillReconciliationResult,
-      ),
-      refillOperationId: parseStringOrNull(hash.refillOperationId),
-      refillOperationSequence: parseIntOrNull(hash.refillOperationSequence),
-      refillOperationState: parseStringOrNull(hash.refillOperationState),
-      refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(
-        hash.refillRequiredSourceBalanceMist,
-      ),
-    });
+    const hash = hashFromRedisRow(raw[0], `Sponsor slot ${address}`);
+    const spend = decodeSponsorRefillAccountSpendRecord(
+      hashFromRedisRow(raw[1], 'Sponsor Refill Account spend'),
+      settings,
+    );
+    const redisTimeMs = parseSafeInteger(raw[2], 'Redis TIME', false)!;
+    return {
+      record:
+        Object.keys(hash).length === 0
+          ? null
+          : decodeSponsorSlotRecord(hash, address, settings, spend),
+      redisTimeMs,
+    };
   }
 
-  async function readSponsorRefillAccount(): Promise<SponsorRefillAccountRead | null> {
+  async function readSlot(address: string): Promise<SponsorSlotRecord | null> {
+    return (await readSlotSnapshot(address)).record;
+  }
+
+  async function readSlotAvailability(
+    address: string,
+  ): Promise<SponsorSlotAvailabilityRecord | null> {
+    const { record, redisTimeMs } = await readSlotSnapshot(address);
+    if (record === null) return null;
+    return {
+      ...record,
+      observationFresh: recordIsFresh(record.lastObservedAtMs, redisTimeMs, maxObservationAgeMs),
+    };
+  }
+
+  async function readSponsorRefillAccount(): Promise<SponsorRefillAccountRecord | null> {
     const hash = await deps.client.hgetall(SPONSOR_REFILL_ACCOUNT_KEY);
     if (!hash || Object.keys(hash).length === 0) return null;
-    return {
-      balanceMist: parseMistStringOrNull(hash.balanceMist),
-      healthy: parseHealthyOrNull(hash.healthy),
-      refillsRemaining: parseIntOrNull(hash.refillsRemaining),
-      lastError: parseStringOrNull(hash.lastError),
-      lastObservedAtMs: parseIntOrNull(hash.lastObservedAtMs),
-      writeSeq: parseIntOrNull(hash.writeSeq),
-    };
+    return decodeSponsorRefillAccountRecord(hash, settings);
   }
 
   async function updateSlotIfWriteSeq(
@@ -339,111 +851,94 @@ export function createRedisSponsorOperationsState(
     expectedWriteSeq: number,
     fields: SlotWriteFields,
   ): Promise<boolean> {
-    if (!slotSet.has(address)) {
-      throw new Error(
-        `RedisSponsorOperationsState.updateSlotIfWriteSeq: unknown slot address ${address}`,
-      );
+    if (!slotSet.has(address)) throw new Error(`Unknown sponsor address ${address}`);
+    assertSequence(expectedWriteSeq, 'expectedWriteSeq');
+    const addressBalanceMist = fields.addressBalanceMist ?? '';
+    if (addressBalanceMist !== '' && !isU64DecimalString(addressBalanceMist)) {
+      throw new Error('Sponsor slot balance must be a u64 decimal string');
     }
-    if (!Number.isSafeInteger(expectedWriteSeq) || expectedWriteSeq < 0) {
-      throw new Error(
-        'RedisSponsorOperationsState.updateSlotIfWriteSeq: expectedWriteSeq must be a non-negative safe integer',
-      );
-    }
-    const normalizedFields: SlotWriteFields =
-      fields.state === 'healthy' ? { ...fields, refillRequiredSourceBalanceMist: '' } : fields;
-    const requiredSourceBalanceMist = normalizedFields.refillRequiredSourceBalanceMist;
-    if (
-      requiredSourceBalanceMist !== undefined &&
-      requiredSourceBalanceMist !== '' &&
-      !isPositiveU64DecimalString(requiredSourceBalanceMist)
-    ) {
-      throw new Error(
-        'RedisSponsorOperationsState.updateSlotIfWriteSeq: refill source balance threshold must be a positive u64 decimal string',
-      );
-    }
-    const argv = flattenWriteFields(normalizedFields as Record<string, string | undefined>);
     const raw = await deps.client.eval(
       UPDATE_ENTITY_IF_SEQUENCE_LUA,
       [slotKey(address)],
-      [String(expectedWriteSeq), ...argv],
+      [String(expectedWriteSeq), addressBalanceMist, fields.lastError ?? ''],
     );
-    if (!Array.isArray(raw) || typeof raw[0] !== 'string') {
-      throw new Error(
-        'RedisSponsorOperationsState.updateSlotIfWriteSeq: unexpected Redis response',
-      );
-    }
-    if (raw[0] === 'STALE' || raw[0] === 'ACTIVE_REFILL') return false;
-    if (raw[0] !== 'UPDATED') {
-      throw new Error('RedisSponsorOperationsState.updateSlotIfWriteSeq: invalid Redis result');
-    }
+    const status = Array.isArray(raw) && typeof raw[0] === 'string' ? raw[0] : null;
+    if (status === 'STALE') return false;
+    if (status === 'CORRUPT') throw new Error('Sponsor slot observation is corrupt');
+    throwIfSponsorOperationsSequenceLimitReached(status);
+    if (status !== 'UPDATED')
+      throw new Error('Sponsor slot observation returned an invalid result');
     return true;
   }
 
   async function readAll(): Promise<{
-    readonly slots: readonly SlotRead[];
-    readonly sponsorRefillAccount: SponsorRefillAccountRead;
+    readonly settings: SponsorOperationsSettings;
+    readonly slots: readonly SponsorSlotAvailabilityRecord[];
+    readonly sponsorRefillAccount: SponsorRefillAccountAvailabilityRecord;
   }> {
-    const slotAddresses = deps.slotAddresses;
+    const slotAddresses = settings.sponsorAddresses;
     const raw = await deps.client.eval(
       READ_ALL_LUA,
-      [...slotAddresses.map((addr) => slotKey(addr)), SPONSOR_REFILL_ACCOUNT_KEY],
+      [
+        ...slotAddresses.map((address) => slotKey(address)),
+        SPONSOR_REFILL_ACCOUNT_KEY,
+        SPONSOR_REFILL_ACCOUNT_SPEND_KEY,
+      ],
       [...slotAddresses],
     );
-
-    if (!Array.isArray(raw) || !Array.isArray(raw[0]) || !Array.isArray(raw[1])) {
-      throw new Error('RedisSponsorOperationsState.readAll: unexpected Redis response shape');
+    if (
+      !Array.isArray(raw) ||
+      !Array.isArray(raw[0]) ||
+      !Array.isArray(raw[1]) ||
+      !Array.isArray(raw[2]) ||
+      typeof raw[3] !== 'string'
+    ) {
+      throw new Error('RedisSponsorOperationsState.readAll: unexpected Redis response');
     }
-
-    const rawSlots = raw[0] as readonly unknown[];
-    const sponsorRefillAccountRow = raw[1] as readonly unknown[];
-    if (rawSlots.length !== slotAddresses.length) {
-      throw new Error('RedisSponsorOperationsState.readAll: unexpected slot row count');
-    }
-
-    const slots: SlotRead[] = rawSlots.map((rawSlot, i) => {
-      if (!Array.isArray(rawSlot)) {
-        throw new Error('RedisSponsorOperationsState.readAll: unexpected slot row shape');
+    const redisTimeMs = parseSafeInteger(raw[3], 'Redis TIME', false)!;
+    const spend = decodeSponsorRefillAccountSpendRecord(
+      hashFromRedisRow(raw[2], 'Sponsor Refill Account spend'),
+      settings,
+    );
+    const rows = raw[0] as readonly unknown[];
+    if (rows.length !== slotAddresses.length) throw new Error('Unexpected sponsor slot row count');
+    const slots = rows.map((rawRow, index): SponsorSlotAvailabilityRecord => {
+      if (!Array.isArray(rawRow) || rawRow.length !== 2 || rawRow[0] !== slotAddresses[index]) {
+        throw new Error('Unexpected sponsor slot row');
       }
-      const row = rawSlot as readonly unknown[];
-      const address = slotAddresses[i]!;
-      const rowAddress = stringAt(row, 0);
-      if (rowAddress !== address) {
-        throw new Error('RedisSponsorOperationsState.readAll: unexpected slot row address');
-      }
-
-      return validateSlotRead({
-        address,
-        state: parseSlotState(stringAt(row, 1)),
-        balanceMist: parseMistStringOrNull(stringAt(row, 2)),
-        lastError: parseStringOrNull(stringAt(row, 3)),
-        lastObservedAtMs: parseIntOrNull(stringAt(row, 4)),
-        writeSeq: parseIntOrNull(stringAt(row, 5)),
-        pendingRefillDigest: parseStringOrNull(stringAt(row, 6)),
-        refillAttemptedAmountMist: parseMistStringOrNull(stringAt(row, 7)),
-        refillObservedBalanceMist: parseMistStringOrNull(stringAt(row, 8)),
-        refillReconciliationResult: parseRefillReconciliationResultOrNull(stringAt(row, 9)),
-        refillOperationId: parseStringOrNull(stringAt(row, 10)),
-        refillOperationSequence: parseIntOrNull(stringAt(row, 11)),
-        refillOperationState: parseStringOrNull(stringAt(row, 12)),
-        refillRequiredSourceBalanceMist: parseRefillRequiredSourceBalanceMist(stringAt(row, 13)),
-      });
+      const record = decodeSponsorSlotRecord(
+        hashFromRedisRow(rawRow[1], `Sponsor slot ${slotAddresses[index]}`),
+        slotAddresses[index]!,
+        settings,
+        spend,
+      );
+      return {
+        ...record,
+        observationFresh: recordIsFresh(record.lastObservedAtMs, redisTimeMs, maxObservationAgeMs),
+      };
     });
-
-    const sponsorRefillAccount: SponsorRefillAccountRead = {
-      balanceMist: parseMistStringOrNull(stringAt(sponsorRefillAccountRow, 0)),
-      healthy: parseHealthyOrNull(stringAt(sponsorRefillAccountRow, 1)),
-      refillsRemaining: parseIntOrNull(stringAt(sponsorRefillAccountRow, 2)),
-      lastError: parseStringOrNull(stringAt(sponsorRefillAccountRow, 3)),
-      lastObservedAtMs: parseIntOrNull(stringAt(sponsorRefillAccountRow, 4)),
-      writeSeq: parseIntOrNull(stringAt(sponsorRefillAccountRow, 5)),
+    const accountRecord = decodeSponsorRefillAccountRecord(
+      hashFromRedisRow(raw[1], 'Sponsor Refill Account observation'),
+      settings,
+    );
+    return {
+      settings,
+      slots,
+      sponsorRefillAccount: {
+        ...accountRecord,
+        observationFresh: recordIsFresh(
+          accountRecord.lastObservedAtMs,
+          redisTimeMs,
+          maxObservationAgeMs,
+        ),
+      },
     };
-
-    return { slots, sponsorRefillAccount };
   }
 
   return {
     updateSlotIfWriteSeq,
     readSlot,
+    readSlotAvailability,
     readSponsorRefillAccount,
     readAll,
   };

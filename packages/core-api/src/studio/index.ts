@@ -5,9 +5,6 @@
  * Runtime host concerns (env, singleton, boot) remain in app-api.
  */
 
-// Domain types
-export type { StudioHostContext } from './types.js';
-
 // Auth token extraction (framework-agnostic Bearer token parser)
 export { extractBearerToken } from './extractBearerToken.js';
 
@@ -31,25 +28,22 @@ export {
 export type { Promotion, PromotionStatus } from './domain.js';
 export { computeTotalRequiredBudgetMist } from './domain.js';
 
-// Promotion store adapter API (store-owned DTOs + transition control).
+// Promotion store adapter API (contracts-owned inputs + store transition control).
 // Memory adapter is a test-only fixture and is not exported from this
 // production barrel; tests reach it through `@stelis/core-api/testing/studio`
 // (cross-package) or relative `../src/studio/promotionStore.js` (within
 // core-api).
-export type {
-  CreatePromotionInput,
-  UpdatePromotionInput,
-  PromotionStoreAdapter,
+export type { PromotionStoreAdapter } from './promotionStore.js';
+export {
+  InvalidStatusTransitionError,
+  PromotionCurrentConflictError,
+  PromotionFieldImmutableError,
+  RedisPromotionStore,
 } from './promotionStore.js';
-export { RedisPromotionStore, PromotionCurrentConflictError } from './promotionStore.js';
+export { PromotionLedgerValueError } from './executionLedgerValueGuards.js';
 
 // Promotion execution accounting is owned by PromotionExecutionLedger
 // (see executionLedger.ts).
-
-// Usage/event store adapter API (value types live in domain.ts).
-// Memory adapter is a test-only fixture; see comment above.
-export type { PromotionUsageStoreAdapter } from './promotionUsageStore.js';
-export { RedisPromotionUsageStore } from './promotionUsageStore.js';
 
 // Derived summary
 export type { PromotionAdminSummary } from './promotionDerivedSummary.js';
@@ -64,7 +58,6 @@ export {
 // ─────────────────────────────────────────────
 
 export type { PromotionExecutionLedger } from './executionLedger.js';
-export { MAX_PROMOTION_LEDGER_VALUE_MIST } from './executionLedger.js';
 // Memory ledger is a test-only fixture reachable through
 // `@stelis/core-api/testing/studio` or
 // `../src/studio/executionLedgerMemory.js`.

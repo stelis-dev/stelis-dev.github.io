@@ -7,9 +7,13 @@
  */
 
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
-import { bindCurrentSuiResultToDigest } from '@stelis/core-relay/browser';
-import { decodeSettleEvent, SETTLE_EVENT_TYPE } from './settleEventDecoder.js';
+import {
+  getSuiTransactionEvents,
+  suiExecutionErrorMessage,
+  type SuiTransactionWithEventsResult,
+} from '@stelis/core-relay/browser';
+import { decodeCanonicalSettleEvent, type DecodedSettleEvent } from './settleEventDecoder.js';
+import { createSettlementSuiEndpoint } from './settlementSuiEndpoint.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -51,16 +55,12 @@ export async function extractSettleEvents(
   logger: (msg: string) => void,
 ): Promise<ExtractedSettleEventSummary[]> {
   const results: ExtractedSettleEventSummary[] = [];
+  const endpoint = await createSettlementSuiEndpoint(client);
 
   for (const digest of digests) {
-    let result: import('@mysten/sui/client').SuiClientTypes.TransactionResult<{
-      events: true;
-    }>;
+    let result: SuiTransactionWithEventsResult;
     try {
-      result = await client.getTransaction({
-        digest,
-        include: { events: true },
-      });
+      result = await getSuiTransactionEvents(endpoint, { digest });
     } catch (err) {
       logger(
         `[reconciliation] Transaction ${digest}: fetch failed (${err instanceof Error ? err.message : String(err)}); skipping.`,
@@ -68,25 +68,24 @@ export async function extractSettleEvents(
       continue;
     }
 
-    const bound = bindCurrentSuiResultToDigest(result, digest);
-    if (!bound) {
-      logger(`[reconciliation] Transaction ${digest}: malformed or mismatched result; skipping.`);
-      continue;
-    }
-    if (bound.outcome === 'failure') {
+    if (result.outcome === 'failure') {
       logger(
-        `[reconciliation] Transaction ${digest}: execution failed (${bound.errorMessage}); skipping.`,
+        `[reconciliation] Transaction ${digest}: execution failed (${suiExecutionErrorMessage(result.error)}); skipping.`,
       );
       continue;
     }
 
-    const eventsValue = bound.transaction.events;
-    if (!Array.isArray(eventsValue)) {
-      logger(`[reconciliation] Transaction ${digest}: requested events were missing; skipping.`);
+    let settleEvents: DecodedSettleEvent[];
+    try {
+      settleEvents = result.events
+        .map(decodeCanonicalSettleEvent)
+        .filter((event): event is DecodedSettleEvent => event !== null);
+    } catch (decodeErr) {
+      logger(
+        `[reconciliation] Transaction ${digest}: invalid SettleEvent (${decodeErr instanceof Error ? decodeErr.message : String(decodeErr)}); skipping.`,
+      );
       continue;
     }
-    const events = eventsValue as SuiClientTypes.Event[];
-    const settleEvents = events.filter((event) => event.eventType === SETTLE_EVENT_TYPE);
 
     if (settleEvents.length === 0) {
       continue;
@@ -98,15 +97,7 @@ export async function extractSettleEvents(
       continue;
     }
 
-    let decoded;
-    try {
-      decoded = decodeSettleEvent(settleEvents[0]!.bcs);
-    } catch (decodeErr) {
-      logger(
-        `[reconciliation] Transaction ${digest}: invalid SettleEvent BCS (${decodeErr instanceof Error ? decodeErr.message : String(decodeErr)}); skipping.`,
-      );
-      continue;
-    }
+    const decoded = settleEvents[0]!;
 
     results.push({
       digest,

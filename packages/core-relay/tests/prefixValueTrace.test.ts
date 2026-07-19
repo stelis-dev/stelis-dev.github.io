@@ -187,7 +187,6 @@ describe('traceUserPrefixValue — Sender address-balance debit', () => {
 
     expect(trace(tx)).toMatchObject({
       senderWithdrawalDebit: 10_000n,
-      unaccountableSenderWithdrawal: false,
     });
   });
 });

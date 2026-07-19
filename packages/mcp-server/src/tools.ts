@@ -1,5 +1,13 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  isPromotionId,
+  isReceiptId,
+  PROMOTION_ID_FORMAT,
+  RECEIPT_ID_FORMAT,
+  NODE_TIMER_MAX_DELAY_MS,
+  PROMOTION_PAGE_MAX_LIMIT,
+} from '@stelis/contracts';
 import { z } from 'zod';
 import type { StelisMcpServerConfig } from './config.js';
 import { StelisMcpHttpError } from './http.js';
@@ -23,7 +31,8 @@ const RELAY_API_FIELDS = {
   timeoutMs: z
     .number()
     .int()
-    .positive()
+    .min(1)
+    .max(NODE_TIMER_MAX_DELAY_MS)
     .optional()
     .describe('Per-call HTTP timeout in milliseconds.'),
 };
@@ -32,7 +41,22 @@ const DEVELOPER_JWT = z
   .string()
   .min(1)
   .describe('Developer JWT for Studio promotion endpoints. Kept request-local.');
-const PROMOTION_ID = z.string().min(1).describe('Promotion ID.');
+const PROMOTION_PAGE_CURSOR = z
+  .string()
+  .refine(isPromotionId, `cursor must be ${PROMOTION_ID_FORMAT}`)
+  .optional()
+  .describe('Exclusive cursor returned as nextCursor by the preceding Promotion page.');
+const PROMOTION_PAGE_LIMIT = z
+  .number()
+  .int()
+  .min(1)
+  .max(PROMOTION_PAGE_MAX_LIMIT)
+  .optional()
+  .describe(`Maximum Promotions to return, from 1 through ${PROMOTION_PAGE_MAX_LIMIT}.`);
+const PROMOTION_ID = z
+  .string()
+  .refine(isPromotionId, `promotionId must be ${PROMOTION_ID_FORMAT}`)
+  .describe(`Promotion ID in ${PROMOTION_ID_FORMAT} form.`);
 const SUI_ADDRESS = z
   .string()
   .regex(/^0x[0-9a-fA-F]+$/)
@@ -40,8 +64,8 @@ const SUI_ADDRESS = z
 const BASE64_BYTES = z.string().min(1).describe('Base64-encoded transaction bytes.');
 const RECEIPT_ID = z
   .string()
-  .regex(/^0x[0-9a-fA-F]+$/)
-  .describe('Receipt ID returned by prepare.');
+  .refine(isReceiptId, `receiptId must be ${RECEIPT_ID_FORMAT}`)
+  .describe(`Receipt ID returned by prepare: ${RECEIPT_ID_FORMAT}.`);
 
 export function registerStelisTools(server: McpServer, config: StelisMcpServerConfig): void {
   server.registerTool(
@@ -130,6 +154,8 @@ export function registerStelisTools(server: McpServer, config: StelisMcpServerCo
       inputSchema: {
         ...RELAY_API_FIELDS,
         developerJwt: DEVELOPER_JWT,
+        cursor: PROMOTION_PAGE_CURSOR,
+        limit: PROMOTION_PAGE_LIMIT,
       },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
@@ -238,7 +264,7 @@ function serializeError(error: unknown): Record<string, unknown> {
       error: error.message,
       code: error.code,
       status: error.status,
-      body: error.body,
+      ...(error.meta ? { meta: error.meta } : {}),
     };
   }
   if (error instanceof Error) {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { FetchLike, StelisMcpServerConfig } from '../src/config.js';
+import { loadConfig, type FetchLike, type StelisMcpServerConfig } from '../src/config.js';
 import { requestJson, resolveRelayApiUrl, StelisMcpHttpError } from '../src/http.js';
 import {
   claimPromotion,
@@ -9,7 +9,14 @@ import {
   prepareSponsoredTransaction,
   submitPromotionSponsoredTransaction,
 } from '../src/operations.js';
-import { RELAY_CONFIG_ERROR_CODES } from '@stelis/contracts';
+import {
+  hostErrorPublicMessage,
+  NODE_TIMER_MAX_DELAY_MS,
+  RELAY_CONFIG_ERROR_CODES,
+} from '@stelis/contracts';
+
+const PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
 
 function createConfig(fetchFn: FetchLike): StelisMcpServerConfig {
   return {
@@ -44,12 +51,78 @@ describe('resolveRelayApiUrl', () => {
   });
 });
 
+describe('Node timer bounds', () => {
+  it('rejects environment and per-call timeouts that Node would truncate', async () => {
+    expect(() =>
+      loadConfig({ STELIS_REQUEST_TIMEOUT_MS: String(NODE_TIMER_MAX_DELAY_MS + 1) }),
+    ).toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+
+    const fetchFn = vi.fn<FetchLike>();
+    await expect(
+      requestJson(createConfig(fetchFn), {
+        path: '/config',
+        timeoutMs: NODE_TIMER_MAX_DELAY_MS + 1,
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      }),
+    ).rejects.toThrow(String(NODE_TIMER_MAX_DELAY_MS));
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
 describe('current Host error boundary', () => {
+  it('uses the Host boundary term for local timeout failures', async () => {
+    const fetchFn = vi.fn<FetchLike>(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) {
+            reject(new Error('Expected an abort signal'));
+            return;
+          }
+          if (signal.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+            return;
+          }
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+
+    await expect(
+      requestJson(createConfig(fetchFn), {
+        path: '/config',
+        timeoutMs: 1,
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      }),
+    ).rejects.toThrow('Stelis Host request timed out after 1 ms.');
+  });
+
+  it('rejects a successful non-JSON response without retaining its body', async () => {
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(new Response('<html>sk-live-secret</html>', { status: 200 }));
+
+    try {
+      await requestJson(createConfig(fetchFn), {
+        path: '/config',
+        allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
+      });
+      expect.fail('Expected a non-JSON response error');
+    } catch (error) {
+      const hostError = error as Error;
+      expect(hostError.message).toBe('Invalid non-JSON response from Stelis Host (HTTP 200).');
+      expect(JSON.stringify(hostError)).not.toContain('sk-live-secret');
+    }
+  });
+
   it('preserves only a valid closed Host error response', async () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse(
         {
-          error: 'Relay config unavailable',
+          error: hostErrorPublicMessage('CONFIG_UNAVAILABLE'),
           code: 'CONFIG_UNAVAILABLE',
         },
         503,
@@ -62,12 +135,9 @@ describe('current Host error boundary', () => {
         allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
       }),
     ).rejects.toMatchObject({
-      message: 'Relay config unavailable',
+      message: hostErrorPublicMessage('CONFIG_UNAVAILABLE'),
       code: 'CONFIG_UNAVAILABLE',
-      body: {
-        error: 'Relay config unavailable',
-        code: 'CONFIG_UNAVAILABLE',
-      },
+      meta: undefined,
     });
   });
 
@@ -81,15 +151,13 @@ describe('current Host error boundary', () => {
         path: '/config',
         allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
       });
-      expect.fail('Expected StelisMcpHttpError');
+      expect.fail('Expected a Host contract error');
     } catch (error) {
-      expect(error).toBeInstanceOf(StelisMcpHttpError);
-      const hostError = error as StelisMcpHttpError;
+      expect(error).not.toBeInstanceOf(StelisMcpHttpError);
+      const hostError = error as Error;
       expect(hostError.message).toBe(
         'Stelis Host returned a non-current error response (HTTP 500)',
       );
-      expect(hostError.code).toBe('HTTP_ERROR');
-      expect(hostError.body).toBeUndefined();
       expect(JSON.stringify(hostError)).not.toContain('must-not-leak');
       expect(JSON.stringify(hostError)).not.toContain('sk-live-secret');
     }
@@ -99,7 +167,7 @@ describe('current Host error boundary', () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse(
         {
-          error: 'Prepare body invalid',
+          error: hostErrorPublicMessage('BAD_REQUEST'),
           code: 'BAD_REQUEST',
         },
         400,
@@ -111,30 +179,101 @@ describe('current Host error boundary', () => {
         path: '/config',
         allowedErrorCodes: RELAY_CONFIG_ERROR_CODES,
       }),
-    ).rejects.toMatchObject({
-      message: 'Stelis Host returned a non-current error response (HTTP 400)',
-      code: 'HTTP_ERROR',
-      body: undefined,
-    });
+    ).rejects.toThrow('Stelis Host returned a non-current error response (HTTP 400)');
   });
 
-  it('keeps Studio read and claim error ownership distinct', async () => {
+  it('keeps each Studio operation on its contracts-owned error vocabulary', async () => {
     const claimFetch = vi
       .fn<FetchLike>()
-      .mockResolvedValue(jsonResponse({ error: 'Claim body invalid', code: 'BAD_REQUEST' }, 400));
+      .mockResolvedValue(
+        jsonResponse({ error: hostErrorPublicMessage('BAD_REQUEST'), code: 'BAD_REQUEST' }, 400),
+      );
     await expect(
       claimPromotion(createConfig(claimFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promotion',
+        promotionId: PROMOTION_ID,
       }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST', status: 400 });
 
     const readFetch = vi
       .fn<FetchLike>()
-      .mockResolvedValue(jsonResponse({ error: 'Wrong route', code: 'BAD_REQUEST' }, 400));
+      .mockResolvedValue(
+        jsonResponse({ error: hostErrorPublicMessage('BAD_REQUEST'), code: 'BAD_REQUEST' }, 400),
+      );
     await expect(
       listPromotions(createConfig(readFetch), { developerJwt: 'jwt' }),
-    ).rejects.toMatchObject({ code: 'HTTP_ERROR', body: undefined });
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST', status: 400 });
+
+    const unrelatedReadFetch = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: hostErrorPublicMessage('PROMOTION_NOT_FOUND'),
+          code: 'PROMOTION_NOT_FOUND',
+        },
+        404,
+      ),
+    );
+    await expect(
+      listPromotions(createConfig(unrelatedReadFetch), { developerJwt: 'jwt' }),
+    ).rejects.toThrow('Stelis Host returned a non-current error response (HTTP 404)');
+  });
+
+  it('preserves the bounded Coin object read code and contracts-owned guidance', async () => {
+    const message = hostErrorPublicMessage('PAYMENT_COIN_LIMIT_EXCEEDED');
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: message,
+          code: 'PAYMENT_COIN_LIMIT_EXCEEDED',
+        },
+        422,
+      ),
+    );
+
+    await expect(
+      prepareSponsoredTransaction(createConfig(fetchFn), {
+        txKindBytes: 'kind',
+        senderAddress: '0x1234',
+        settlementTokenType: '0x2::sui::SUI',
+        txKindBytesHash: '0x' + '11'.repeat(32),
+        prepareAuthorizationTimestampMs: 1_700_000_000_000,
+        prepareAuthorizationRequestNonce: 'nonce-1',
+        prepareAuthorizationSignature: 'prepare-signature',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PAYMENT_COIN_LIMIT_EXCEEDED',
+      status: 422,
+      message,
+    });
+  });
+
+  it('preserves a payment Coin conflict without reporting insufficient balance', async () => {
+    const message = hostErrorPublicMessage('PAYMENT_COIN_CONFLICT');
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: message,
+          code: 'PAYMENT_COIN_CONFLICT',
+        },
+        422,
+      ),
+    );
+
+    await expect(
+      prepareSponsoredTransaction(createConfig(fetchFn), {
+        txKindBytes: 'kind',
+        senderAddress: '0x1234',
+        settlementTokenType: '0x2::sui::SUI',
+        txKindBytesHash: '0x' + '11'.repeat(32),
+        prepareAuthorizationTimestampMs: 1_700_000_000_000,
+        prepareAuthorizationRequestNonce: 'nonce-1',
+        prepareAuthorizationSignature: 'prepare-signature',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PAYMENT_COIN_CONFLICT',
+      status: 422,
+      message,
+    });
   });
 });
 
@@ -162,7 +301,7 @@ describe('Stelis MCP operations', () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse({
         txBytes: 'tx',
-        receiptId: '0xabc',
+        receiptId: RECEIPT_ID,
         nonce: '1',
         cost: {
           simGas: '1',
@@ -208,7 +347,9 @@ describe('Stelis MCP operations', () => {
   });
 
   it('sends developer JWT only as an Authorization header for promotion reads', async () => {
-    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(jsonResponse({ promotions: [] }));
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ promotions: [], nextCursor: null }));
 
     await listPromotions(createConfig(fetchFn), {
       developerJwt: 'jwt-secret',
@@ -220,27 +361,52 @@ describe('Stelis MCP operations', () => {
     expect(init?.body).toBeUndefined();
   });
 
-  it('posts promotion sponsor to the studio base URL', async () => {
+  it('serializes only supplied Promotion page fields and validates them before I/O', async () => {
+    const fetchFn = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(jsonResponse({ promotions: [], nextCursor: null }));
+
+    await listPromotions(createConfig(fetchFn), {
+      developerJwt: 'jwt-secret',
+      cursor: PROMOTION_ID,
+      limit: 100,
+    });
+
+    expect(fetchFn.mock.calls[0][0]).toBe(
+      `https://host.example/studio/promotions?cursor=${PROMOTION_ID}&limit=100`,
+    );
+
+    const invalidFetch = vi.fn<FetchLike>();
+    await expect(
+      listPromotions(createConfig(invalidFetch), {
+        developerJwt: 'jwt-secret',
+        cursor: 'promotion-1',
+      }),
+    ).rejects.toThrow(/canonical lowercase UUID-v4/);
+    expect(invalidFetch).not.toHaveBeenCalled();
+  });
+
+  it('posts a current Promotion sponsor request to the Studio base URL', async () => {
     const fetchFn = vi
       .fn<FetchLike>()
       .mockResolvedValue(jsonResponse({ digest: 'abc', effects: {}, actualGasMist: '1' }));
 
     await submitPromotionSponsoredTransaction(createConfig(fetchFn), {
       developerJwt: 'jwt',
-      promotionId: 'promo/1',
-      receiptId: '0xabc',
+      promotionId: PROMOTION_ID,
+      receiptId: RECEIPT_ID,
       txBytes: 'tx',
       userSignature: 'sig',
     });
 
     const [url, init] = fetchFn.mock.calls[0];
-    expect(url).toBe('https://host.example/studio/promotions/promo%2F1/sponsor');
+    expect(url).toBe(`https://host.example/studio/promotions/${PROMOTION_ID}/sponsor`);
     expect(init?.headers).toEqual({
       'Content-Type': 'application/json',
       Authorization: 'Bearer jwt',
     });
     expect(JSON.parse(String(init?.body))).toEqual({
-      receiptId: '0xabc',
+      receiptId: RECEIPT_ID,
       txBytes: 'tx',
       userSignature: 'sig',
     });
@@ -250,16 +416,16 @@ describe('Stelis MCP operations', () => {
     const prepareFetch = vi
       .fn<FetchLike>()
       .mockResolvedValue(
-        jsonResponse({ txBytes: 'tx', receiptId: 'receipt', estimatedGasMist: '1' }),
+        jsonResponse({ txBytes: 'tx', receiptId: RECEIPT_ID, estimatedGasMist: '1' }),
       );
     await expect(
       preparePromotionSponsoredTransaction(createConfig(prepareFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
+        promotionId: PROMOTION_ID,
         senderAddress: '0x1',
         txKindBytes: 'kind',
       }),
-    ).resolves.toMatchObject({ receiptId: 'receipt' });
+    ).resolves.toMatchObject({ receiptId: RECEIPT_ID });
 
     const malformedSponsorFetch = vi
       .fn<FetchLike>()
@@ -267,8 +433,8 @@ describe('Stelis MCP operations', () => {
     await expect(
       submitPromotionSponsoredTransaction(createConfig(malformedSponsorFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
-        receiptId: 'receipt',
+        promotionId: PROMOTION_ID,
+        receiptId: RECEIPT_ID,
         txBytes: 'tx',
         userSignature: 'signature',
       }),
@@ -279,7 +445,7 @@ describe('Stelis MCP operations', () => {
     const malformedClaimFetch = vi.fn<FetchLike>().mockResolvedValue(
       jsonResponse({
         entitlement: {
-          promotionId: 'promo',
+          promotionId: PROMOTION_ID,
           userId: 'user',
           claimedAt: '2026-07-14T00:00:00.000Z',
           useUntilAt: null,
@@ -296,10 +462,12 @@ describe('Stelis MCP operations', () => {
     await expect(
       claimPromotion(createConfig(malformedClaimFetch), {
         developerJwt: 'jwt',
-        promotionId: 'promo',
+        promotionId: PROMOTION_ID,
       }),
     ).rejects.toThrow(
       'PromotionEntitlement.remainingGasAllowanceMist must be a canonical non-negative decimal string',
     );
+    const [, init] = malformedClaimFetch.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({});
   });
 });

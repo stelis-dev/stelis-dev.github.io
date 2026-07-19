@@ -1,3 +1,5 @@
+import { isNodeTimerDelayMs, NODE_TIMER_MAX_DELAY_MS } from '@stelis/contracts';
+
 /**
  * Developer JWT verify URL callback — host/runtime concern.
  *
@@ -21,6 +23,12 @@
  * the developer JWT is rejected.
  */
 export const DEVELOPER_VERIFY_TIMEOUT_MS = 5_000;
+
+if (!isNodeTimerDelayMs(DEVELOPER_VERIFY_TIMEOUT_MS)) {
+  throw new Error(
+    `DEVELOPER_VERIFY_TIMEOUT_MS must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}`,
+  );
+}
 
 export class DeveloperVerifyRejectedError extends Error {
   constructor(message: string) {
@@ -73,6 +81,7 @@ function parseDeveloperVerifyResponse(value: unknown): { valid: boolean; reason?
  *
  * Fail-closed on:
  * - Network error
+ * - Redirect response
  * - Non-2xx response
  * - Invalid response body
  * - Timeout (`DEVELOPER_VERIFY_TIMEOUT_MS`)
@@ -94,6 +103,8 @@ export async function callDeveloperVerifyApi(jwt: string, verifyUrl: string): Pr
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jwt }),
+      redirect: 'error',
+      credentials: 'omit',
       signal: controller.signal,
     });
 

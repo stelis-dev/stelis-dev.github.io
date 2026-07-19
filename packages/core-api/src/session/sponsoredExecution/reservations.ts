@@ -7,12 +7,10 @@
  *   - `NonceReservation`
  *   - `LedgerBudgetReservation`
  *
- * Each reservation owns its own acquire/release semantics. Specialized verbs
- * (commit, consume, refund) live on the specialized type, not on a shared
- * interface.
+ * Each reservation owns its own acquire/release semantics.
  *
- * The prepare and sponsor runners bind these reservations directly to the sponsor
- * pool, prepare store, execution ledger, and inflight limiter.
+ * The prepare runner binds these reservations directly to the sponsor pool,
+ * sponsored execution store, Promotion ledger, and in-flight limiter.
  *
  * Internal module. Not re-exported from the package barrel.
  */
@@ -25,7 +23,7 @@ import type {
 import { internalReservationHandleFactory } from './reservationHandles.js';
 
 import type { SponsorPoolAdapter } from '../../context.js';
-import type { PrepareStoreAdapter } from '../../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../../store/sponsoredExecutionStore.js';
 import type { InflightHandle, PrepareInflightLimiter } from '../../store/prepareInflightTypes.js';
 import type { PromotionExecutionLedger } from '../../studio/executionLedger.js';
 import type { ReserveFailureReason, ReserveParams } from '../../studio/domain.js';
@@ -63,10 +61,10 @@ export interface ReservationLifecycle {
 
 /**
  * Subset of the lifecycle for reservations whose handles outlive the
- * prepare scope: ownership transfers to the prepared-store entry on
+ * prepare scope: ownership transfers to the durable prepared receipt on
  * success and `release()` becomes a no-op. Implemented ONLY by the
  * reservation kinds whose resource lives on the durable store after
- * durable prepare-store commit — sponsor slot, nonce, ledger budget.
+ * prepared receipt commit — sponsor slot, nonce, ledger budget.
  *
  * Inflight admission is intentionally NOT transferable: the inflight
  * gate caps in-process concurrency and MUST release on every path,
@@ -143,7 +141,7 @@ abstract class ReservationBase implements ReservationLifecycle {
 
 /**
  * Specialized base for reservations whose resource ownership transfers
- * to the durable prepared-store entry after store success. Sponsor
+ * to the durable prepared receipt after store success. Sponsor
  * slot, nonce, and ledger reservation are the three kinds that sit on this
  * boundary.
  *
@@ -203,19 +201,13 @@ export abstract class InflightReservation extends ReservationBase {
 
 /**
  * Sponsor slot reservation. `acquire()` checks out a slot from the sponsor
- * pool and issues `SponsorSlotReservationHandle` that downstream gas-bound build,
- * lease commit, and sponsor sign sites consume.
- *
- * `commitToTxBytesHash()` promotes the slot's HMAC lease from reserved →
- * committed against the prepare commit hash. This verb is sponsor-slot
- * specific and intentionally does not live on the generic `Reservation`
- * interface.
+ * pool and issues `SponsorSlotReservationHandle` that the gas-bound build and
+ * receipt store uses. The sponsored execution store owns the atomic lease commit.
  */
 export abstract class SponsorSlotReservation extends TransferableReservationBase {
   protected issuedHandle: ReturnType<
     typeof internalReservationHandleFactory.newSponsorSlot
   > | null = null;
-  protected committedTxBytesHash: string | null = null;
 
   /**
    * Check out a sponsor slot reserved against `receiptId`. On success the
@@ -225,16 +217,6 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
    * (`NO_SPONSOR_SLOT` etc.).
    */
   abstract acquire(receiptId: string): Promise<SponsorSlotReservationHandle | null>;
-
-  /**
-   * Promote the slot's HMAC lease from reserved → committed. Binds the
-   * lease to `txBytesHash` so the sponsor pool's later `sign()` only
-   * accepts a submission whose canonical hash matches.
-   *
-   * Type-level note: this verb is unique to sponsor-slot reservations.
-   * Calling it on any other reservation type is a compile-time error.
-   */
-  abstract commitToTxBytesHash(txBytesHash: string): Promise<void>;
 }
 
 // ─────────────────────────────────────────────
@@ -246,7 +228,7 @@ export abstract class SponsorSlotReservation extends TransferableReservationBase
  * gas-bound settlement build because the nonce is embedded in the settle
  * PTB at build time.
  *
- * Ownership transfers to the prepared-store entry on success
+ * Ownership transfers to the durable prepared receipt on success
  * (`transferOwnership()`); reverse cleanup calls `release()`. There is no
  * nonce-specific commit operation.
  */
@@ -257,7 +239,7 @@ export abstract class NonceReservation extends TransferableReservationBase {
   /**
    * Reserve `max(onchainLastNonce, …) + 1` for `senderAddress`. Returns
    * `NonceReservationHandle` carrying the reserved value. Implementations bind
-   * to the prepare store's `reserveNonce()` implementation.
+   * to the sponsored execution store's `reserveNonce()` implementation.
    */
   abstract acquire(
     senderAddress: string,
@@ -274,16 +256,12 @@ export abstract class NonceReservation extends TransferableReservationBase {
  * Studio promotion ledger reservation. Required by Studio prepared commit
  * and sponsor result policy. The amount is the gas-measured ceiling, so this
  * reservation is acquired after `GasBoundBuild`, unlike the nonce which
- * runs before build. The acquire step happens at
- * `RouteReservationAfterBuild`, never inside `GasBoundBuild`.
+ * runs before build. The prepare runner owns this acquisition step; the
+ * policy's `GasBoundBuild` hook never acquires the ledger reservation.
  *
- * Specialized sponsor result verbs:
- *   - `consume(actualGasMist)` — final entitlement debit on success,
- *   - `release()` — entitlement refund on sponsor result failure.
- *
- * `LedgerBudgetReservation.consume(...)` is sponsor-sponsor result policy, not a
- * generic prepare-runner commit. The runner does not call `consume()`; the
- * sponsor result policy hook does.
+ * Final entitlement debit or release is owned by the atomic
+ * sponsored-execution store. This prepare-side reservation only acquires and
+ * reverses an uncommitted reservation.
  */
 export abstract class LedgerBudgetReservation extends TransferableReservationBase {
   protected issuedHandle: ReturnType<
@@ -302,14 +280,6 @@ export abstract class LedgerBudgetReservation extends TransferableReservationBas
     userId: string;
     amountMist: bigint;
   }): Promise<LedgerReservationHandle | null>;
-
-  /**
-   * Final entitlement debit. Called only by the sponsor result policy hook
-   * after successful submit; never by reverse-order cleanup. The amount
-   * may be less than the reserved ceiling (gas-overrun delta returns to
-   * the entitlement automatically).
-   */
-  abstract consume(actualGasMist: bigint): Promise<void>;
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -325,8 +295,8 @@ export abstract class LedgerBudgetReservation extends TransferableReservationBas
 //                                   which already swallows + emits
 //                                   `SPONSOR_POOL_CHECKIN_FAILED`
 //                                   internally.
-//   - NonceReservationImpl        → `PrepareStoreAdapter` (`reserveNonce`
-//                                   / `releaseReservation`). Release
+//   - NonceReservationImpl        → `SponsoredExecutionStoreAdapter` (`reserveNonce`
+//                                   / `releaseNonceReservation`). Release
 //                                   errors are silently swallowed. The
 //                                   pending reservation falls out via
 //                                   sender-metadata TTL compaction.
@@ -397,12 +367,6 @@ export class InflightReservationImpl extends InflightReservation {
  * `sponsorAddress`; on null (pool exhausted) the reservation
  * stays in the `pending` state so reverse cleanup is a no-op.
  *
- * `commitToTxBytesHash(hash)` calls `pool.commit(sponsorAddress, receiptId, hash)`
- * to promote the lease from reserved → committed. Lease-commit
- * failures propagate to the public handler adapter for route-specific mapping
- * (`SponsorLeaseCommitError` →
- * `PrepareValidationError('SPONSOR_LEASE_COMMIT_FAILED')`).
- *
  * `releaseImpl` delegates to `safeSlotCheckin`, which is internally
  * non-throwing and emits `SPONSOR_POOL_CHECKIN_FAILED` on its own —
  * `onReleaseError` is therefore not overridden.
@@ -426,25 +390,11 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
     return this.issuedHandle;
   }
 
-  async commitToTxBytesHash(txBytesHash: string): Promise<void> {
-    if (!this.issuedHandle || !this.receiptId) {
-      throw new Error('SponsorSlotReservationImpl.commitToTxBytesHash called before acquire');
-    }
-    await this.pool.commit(this.issuedHandle.sponsorAddress, this.receiptId, txBytesHash);
-    this.committedTxBytesHash = txBytesHash;
-  }
-
   protected async releaseImpl(): Promise<void> {
     if (!this.issuedHandle || !this.receiptId) return;
     // `safeSlotCheckin` never throws; the inner CAS verifies the lease
-    // proof and skips the slot if it does not match (rolling-deploy
-    // hand-off safety).
-    await safeSlotCheckin(
-      this.pool,
-      this.issuedHandle.sponsorAddress,
-      this.receiptId,
-      this.committedTxBytesHash,
-    );
+    // proof so stale cleanup cannot delete a different lease.
+    await safeSlotCheckin(this.pool, this.issuedHandle.sponsorAddress, this.receiptId);
   }
 }
 
@@ -453,9 +403,9 @@ export class SponsorSlotReservationImpl extends SponsorSlotReservation {
 // ─────────────────────────────────────────────
 
 /**
- * Concrete nonce reservation that binds to a `PrepareStoreAdapter`.
+ * Concrete nonce reservation that binds to the sponsored execution store.
  * `acquire()` calls `store.reserveNonce(...)`; release calls
- * `store.releaseReservation(receiptId, senderAddress)`.
+ * `store.releaseNonceReservation(receiptId, senderAddress)`.
  *
  * Release errors are silently swallowed — the pending reservation falls
  * out via sender-metadata TTL compaction
@@ -466,7 +416,7 @@ export class NonceReservationImpl extends NonceReservation {
   private receiptId: string | null = null;
   private senderAddress: string | null = null;
 
-  constructor(private readonly store: PrepareStoreAdapter) {
+  constructor(private readonly store: SponsoredExecutionStoreAdapter) {
     super();
   }
 
@@ -489,7 +439,7 @@ export class NonceReservationImpl extends NonceReservation {
     const sender = this.senderAddress;
     this.receiptId = null;
     this.senderAddress = null;
-    await this.store.releaseReservation(receiptId, sender);
+    await this.store.releaseNonceReservation(receiptId, sender);
   }
 }
 
@@ -497,7 +447,7 @@ export class NonceReservationImpl extends NonceReservation {
 // LedgerBudgetReservationImpl
 // ─────────────────────────────────────────────
 
-const PREPARE_STORE_RELEASE_TRIGGER = 'prepare_store_failed';
+const PREPARED_RECEIPT_NOT_COMMITTED_TRIGGER = 'prepared_receipt_not_committed';
 
 /**
  * Concrete Studio ledger reservation that binds to a
@@ -505,8 +455,8 @@ const PREPARE_STORE_RELEASE_TRIGGER = 'prepare_store_failed';
  *
  * `acquire(params)` calls `ledger.reserve(...)`; on `ok` the reservation
  * issues `LedgerReservationHandle` carrying the receiptId / promotionId
- * / userId / amount, and the receiptId is captured for the sponsor result
- * `consume(actualGasMist)` and reverse-cleanup `release()` paths. On
+ * / userId / amount, and the receiptId is captured for reverse-cleanup
+ * `release()`. On
  * failure the reservation stays pending and returns null — the caller
  * raises the route-specific domain error.
  *
@@ -516,8 +466,8 @@ const PREPARE_STORE_RELEASE_TRIGGER = 'prepare_store_failed';
  *   - On `ledger.release()` throwing, emit
  *     `LEDGER_RELEASE_THREW_IN_HANDLER` (level: warn).
  *
- * Release failures are attributed to the prepare-store boundary because this
- * reservation class is used only by the prepare runner's pre-store cleanup.
+ * Release failures are attributed to the prepared-receipt boundary because
+ * this reservation class is used only by prepare cleanup before durable commit.
  */
 export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
   private receiptId: string | null = null;
@@ -556,14 +506,6 @@ export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
     return this.issuedHandle;
   }
 
-  async consume(actualGasMist: bigint): Promise<void> {
-    if (!this.receiptId) {
-      throw new Error('LedgerBudgetReservationImpl.consume called before acquire');
-    }
-    await this.ledger.consume(this.receiptId, actualGasMist);
-    if (this.issuedHandle) this.issuedHandle.consume();
-  }
-
   protected async releaseImpl(): Promise<void> {
     // `receiptId` is preserved until after `ledger.release` resolves so
     // both the `result.ok === false` and the throw path see the same
@@ -578,7 +520,7 @@ export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
         LEDGER_RELEASE_FAILED_IN_HANDLER,
         {
           receiptId: this.receiptId,
-          triggerReason: PREPARE_STORE_RELEASE_TRIGGER,
+          triggerReason: PREPARED_RECEIPT_NOT_COMMITTED_TRIGGER,
           releaseFailureReason: result.reason,
         },
         'error',
@@ -593,7 +535,7 @@ export class LedgerBudgetReservationImpl extends LedgerBudgetReservation {
     if (!this.receiptId) return;
     logStructuredEvent(
       LEDGER_RELEASE_THREW_IN_HANDLER,
-      { receiptId: this.receiptId, triggerReason: PREPARE_STORE_RELEASE_TRIGGER },
+      { receiptId: this.receiptId, triggerReason: PREPARED_RECEIPT_NOT_COMMITTED_TRIGGER },
       'warn',
     );
   }

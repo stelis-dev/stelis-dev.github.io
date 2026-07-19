@@ -11,12 +11,39 @@ export * from './browser.js';
 
 // ── Server-side only (not in browser barrel) ─────────────────────────────────
 
+// Host-only PTB materialization consumed by core-api's settlement compiler.
+export { buildSwapAndSettlePtb, buildSettleWithCreditPtb } from './ptb/builders.js';
+export { SUI_OPERATION_ATTEMPT_TIMEOUT_MS } from './sui/suiOperation.js';
+export { createChainBoundSuiEndpointSnapshot } from './sui/suiOperation.js';
+export type { ChainBoundSuiEndpointSnapshot } from './sui/suiOperation.js';
+export {
+  getSuiTransactionBalanceChanges,
+  getSuiTransactionEffects,
+  simulateSuiMoveView,
+} from './sui/suiTransactionGateways.js';
+export type {
+  SuiCommandResult,
+  SuiExecutionError,
+  SuiExecutionErrorKind,
+  SuiMoveViewResult,
+  SuiTransactionResult,
+} from './sui/suiTransactionShape.js';
+export {
+  getSuiChainIdentifier,
+  getSuiCoinMetadata,
+  getSuiObject,
+  getSuiObjects,
+} from './sui/suiStateGateways.js';
+export type { SuiObject } from './sui/suiStateGateways.js';
+export { decodeExactU64Bytes } from './decodeU64.js';
+
 export { MAX_FINAL_COMMANDS } from './constants.js';
 export type {
   AllowedSettlementSwapPath,
   OnchainConfig,
   HostValidationEnv,
   SettleArgs,
+  ValidationResult,
 } from './types.js';
 export { validateSettleArgs } from './validate/static.js';
 export { validateNonlossSponsor } from './validate/nonloss.js';
@@ -31,10 +58,6 @@ export { parseSettleArgs, ParseSettleArgsError } from './parseSettleArgs.js';
 export { DEFAULT_SLIPPAGE_BPS } from './deepbook.js';
 export { SlippageQueryError } from './deepbookErrors.js';
 export { validateGenericSettlementTransaction } from './validate/transactionKind.js';
-
-// Vault object-field extractors are needed by core-api host context, but have
-// no verified browser/SDK consumer.
-export { extractVaultTableId, extractMoveObjectFields } from './creditQuery.js';
 
 // Prefix value trace: used in the core-api prepare path, not in the browser.
 export {

@@ -1,10 +1,11 @@
 /**
  * /prepare handler — public adapter over the SponsoredExecution prepare runner.
  *
- * The app-api route owns HTTP body validation and route-local gates. This
- * handler preserves the public `handlePrepare(ctx, params, extraCfg)` API
- * while delegating lifecycle order, reservation ownership, prepared-draft
- * construction, store commit, and cleanup to `runPrepareStateMachine`.
+ * The app-api route owns HTTP body validation and route-local gates. The
+ * final admission dependency lets the Host defer sponsor-capacity I/O
+ * until signed wallet authorization and sender admission have succeeded.
+ * Lifecycle order, reservation ownership, prepared-draft construction,
+ * store commit, and cleanup remain delegated to `runPrepareStateMachine`.
  */
 import {
   GAS_MARGIN_CAP_BPS,
@@ -15,7 +16,11 @@ import {
 import type { AllowedSettlementSwapPath } from '@stelis/core-relay';
 import type { StaticSettlementSwapPathDescriptorMap } from '@stelis/core-relay/server';
 import type { HostContext } from '../context.js';
-import { checkBlockedRequest } from '../abuseBlocking.js';
+import {
+  checkBlockedSubject,
+  readAdmittedClientIp,
+  type AdmittedClientIp,
+} from '../abuseBlocking.js';
 import { PrepareValidationError } from '../prepare/replay.js';
 import { verifyPrepareAuthorization } from '../prepare/prepareAuthorization.js';
 import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
@@ -46,8 +51,8 @@ export interface PrepareParams {
   slippageBps?: number;
   /** Gas margin in BPS. Default: `DEFAULT_GAS_MARGIN_BPS`. */
   gasMarginBps?: number;
-  /** Client IP address (for IP concurrency tracking) */
-  clientIp: string;
+  /** Opaque proof of successful Host IP admission. */
+  clientIp: AdmittedClientIp;
   /** Optional order ID — external reference for payment tracking. Max 128 UTF-8 bytes. */
   orderId?: string;
   /** SHA-256 hash of txKindBytes, encoded as hex. */
@@ -106,6 +111,14 @@ export interface PrepareResult {
   orderId?: string;
 }
 
+export interface PrepareRequestAdmission {
+  /**
+   * Run Host-owned sponsor-capacity admission after the signed wallet
+   * authorization and authenticated sender block check have succeeded.
+   */
+  assertSponsorAvailable(): Promise<void>;
+}
+
 // ─────────────────────────────────────────────
 // Handler
 // ─────────────────────────────────────────────
@@ -114,22 +127,23 @@ export async function handlePrepare(
   ctx: HostContext,
   params: PrepareParams,
   extraCfg: PrepareHandlerConfig,
+  admission: PrepareRequestAdmission,
 ): Promise<PrepareResult> {
+  const clientIp = readAdmittedClientIp(params.clientIp);
   validatePrepareRequestShape(params);
 
   await verifyPrepareAuthorization(ctx, params);
-  const blockedBySender = await checkBlockedRequest(ctx.abuseBlocker, params.clientIp, {
+  const blockedBySender = await checkBlockedSubject(ctx.abuseBlocker, params.clientIp, {
     kind: 'address',
     address: params.senderAddress,
   });
   if (blockedBySender.blocked) {
     throw new PrepareValidationError('ABUSE_BLOCKED', 'Request temporarily blocked');
   }
-
   const options = {
     hostContext: ctx,
     prepare: {
-      params,
+      params: { ...params, clientIp },
       config: extraCfg,
     },
   } as const;
@@ -140,11 +154,12 @@ export async function handlePrepare(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
-        prepareStore: ctx.prepareStore,
+        sponsoredExecutionStore: ctx.sponsoredExecutionStore,
       },
       {
         senderAddress: params.senderAddress,
-        clientIp: params.clientIp,
+        clientIp,
+        assertSponsorAvailable: admission.assertSponsorAvailable,
         preparedDraftFields: () => buildGenericPreparedDraftFields(options, state),
         projectResponse: (input) => projectGenericPrepareResult(options, state, input),
       },

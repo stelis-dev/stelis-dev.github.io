@@ -12,39 +12,38 @@
  *   SPREAD_EXCEEDED           - settle.move ESpreadTooWide
  *   SLIPPAGE_EXCEEDED         - DeepBook pool::swap_exact_quantity EMinimumQuantityOutNotMet
  *   DRY_RUN_FAILED            - unclassified dry-run failure
- *   DRY_RUN_NO_GAS            - dry-run returned no gas usage
  *
  * Numeric abort codes are resolved through the generated
  * `@stelis/contracts` settlement contract. The generator reads the exact
  * compiled modules produced from the locked Move graph.
  *
- * Slippage query errors (SLIPPAGE_QUERY_FAILED) are handled in the
+ * Market-quote errors (MARKET_QUOTE_UNAVAILABLE) are handled in the
  * build-time market-policy solve path.
  *
- * Package + occurrence + outer-command binding:
+ * Package + command binding:
  *   Stelis helpers take the active Stelis package ID. DeepBook uses the
  *   original/runtime ModuleId generated from the consumed bytecode; its
- *   published storage/call-target ID is a different identity. Each match
- *   must satisfy all of:
- *     1. the abort string mentions the trusted `<pkg>::<modulePath>`
- *        substring, and
- *     2. the package/module, optional clever-error constant, numeric abort
- *        code, and command position are parsed from one supported occurrence:
- *        an abort tuple or the installed numeric/clever formatter, and
- *     3. that occurrence reports the same outer PTB command that the current
- *        transaction graph proves can execute the trusted call.
- *   External packages with the same module name (`vault`, `settle`,
- *   `pool::swap_exact_quantity`) and the same numeric code do not
- *   classify, and free-floating numeric tokens like `command N`,
- *   `5th command`, or `(instruction N)` cannot impersonate the abort
- *   code. The active Stelis ID comes from the Host/Build context; the
- *   DeepBook runtime identity comes only from the generated contract module.
+ *   published storage/call-target ID is a different identity. Classification
+ *   consumes the installed SDK's structured execution-error union and requires
+ *   the package, module, optional function/constant, abort code, and outer PTB
+ *   command to agree. Provider display text is discarded; the remaining
+ *   normalized kind-only message is diagnostic and never classification authority.
  */
 
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { Transaction } from '@mysten/sui/transactions';
-import { convertSdkCommands } from '@stelis/core-relay';
-import { findUniqueSettleCommandIndex } from '@stelis/core-relay/server';
+import { Transaction } from '@mysten/sui/transactions';
+import {
+  convertSdkCommands,
+  suiExecutionErrorMessage,
+  type ChainBoundSuiEndpointSnapshot,
+  type SuiExecutionError,
+} from '@stelis/core-relay';
+import {
+  buildAddressBalanceGasTransaction,
+  findUniqueSettleCommandIndex,
+  getSuiRejectedExecutionError,
+  SuiAddressBalanceGasUnavailableError,
+  type AddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
 import {
   DEEPBOOK_MIN_OUT_ABORT,
   SETTLE_ABORT,
@@ -61,15 +60,6 @@ import { PrepareValidationError, type PrepareErrorMeta } from './replay.js';
 // Settle/vault/deepbook abort detection (package-bound)
 // ---------------------------------------------------------------------------
 
-interface MoveAbortOccurrence {
-  packageId: string;
-  moduleName: string;
-  functionName?: string;
-  code: number;
-  constantName?: string;
-  commandIndex: number;
-}
-
 export type SponsorFailureCommandScope =
   | {
       kind: 'settlement';
@@ -81,211 +71,50 @@ export type SponsorFailureCommandScope =
       deepbookPackageId: string;
     };
 
-const MOVE_IDENTIFIER = String.raw`[A-Za-z_][A-Za-z0-9_]*`;
-const MOVE_PATH = String.raw`(0x[0-9a-fA-F]{1,64})::(${MOVE_IDENTIFIER})(?:::(${MOVE_IDENTIFIER}))?`;
-const MOVE_LOCATION_PREFIX = String.raw`(?:\bin\b[\s,:()=-]*(?:module\b[\s,:()=-]*)?|\bmodule\b[\s,:()=-]*)`;
-const MOVE_LOCATION_TAIL = String.raw`(?:\s*\((?:instruction|line)\s+\d+\))?\s*$`;
-
 function normalizePackageId(packageId: string): string | undefined {
   const match = /^0x([0-9a-fA-F]{1,64})$/.exec(packageId);
   if (!match) return undefined;
   return `0x${match[1]!.toLowerCase().padStart(64, '0')}`;
 }
 
-function moveAbortSegments(reason: string): string[] {
-  const segments: string[] = [];
-
-  for (const clause of reason.split(/[;\r\n]+/)) {
-    const moveAbortStarts = [...clause.matchAll(/\bMoveAbort\b/gi)].map((match) => match.index!);
-    for (const [index, start] of moveAbortStarts.entries()) {
-      segments.push(clause.slice(start, moveAbortStarts[index + 1] ?? clause.length));
-    }
-  }
-
-  return segments;
-}
-
-function parseAbortCode(value: string): number | undefined {
-  if (!/^\d+$/.test(value)) return undefined;
-  const code = Number(value);
-  return Number.isSafeInteger(code) ? code : undefined;
-}
-
-function parseCommandIndex(value: string): number | undefined {
-  if (!/^\d+$/.test(value)) return undefined;
-  const commandIndex = Number(value);
-  return Number.isSafeInteger(commandIndex) ? commandIndex : undefined;
-}
-
-function parseOrdinalCommandIndex(value: string, suffix: string): number | undefined {
-  const ordinal = parseCommandIndex(value);
-  if (ordinal === undefined || ordinal <= 0) return undefined;
-  const lastTwoDigits = ordinal % 100;
-  const expectedSuffix =
-    lastTwoDigits >= 11 && lastTwoDigits <= 13
-      ? 'th'
-      : ordinal % 10 === 1
-        ? 'st'
-        : ordinal % 10 === 2
-          ? 'nd'
-          : ordinal % 10 === 3
-            ? 'rd'
-            : 'th';
-  return suffix.toLowerCase() === expectedSuffix ? ordinal - 1 : undefined;
-}
-
-function appendOccurrence(
-  occurrences: MoveAbortOccurrence[],
-  packageId: string,
-  moduleName: string,
-  functionName: string | undefined,
-  codeText: string,
-  constantName: string | undefined,
-  commandIndex: number | undefined,
-): void {
-  const normalizedPackageId = normalizePackageId(packageId);
-  const code = parseAbortCode(codeText);
-  if (
-    !normalizedPackageId ||
-    code === undefined ||
-    commandIndex === undefined ||
-    !Number.isSafeInteger(commandIndex) ||
-    commandIndex < 0
-  ) {
-    return;
-  }
-  occurrences.push({
-    packageId: normalizedPackageId,
-    moduleName,
-    ...(functionName ? { functionName } : {}),
-    code,
-    ...(constantName ? { constantName } : {}),
-    commandIndex,
-  });
-}
-
-function parseMoveLocation(
-  value: string,
-): { packageId: string; moduleName: string; functionName?: string } | undefined {
-  const prefixed = new RegExp(String.raw`^[\s,:()=-]*${MOVE_LOCATION_PREFIX}(.+)$`, 'i').exec(
-    value,
-  );
-  if (!prefixed) return undefined;
-  const location = prefixed[1]!.trim();
-  for (const pattern of [
-    new RegExp(String.raw`^'${MOVE_PATH}'${MOVE_LOCATION_TAIL}`, 'i'),
-    new RegExp(String.raw`^"${MOVE_PATH}"${MOVE_LOCATION_TAIL}`, 'i'),
-    new RegExp(String.raw`^${MOVE_PATH}${MOVE_LOCATION_TAIL}`, 'i'),
-  ]) {
-    const match = pattern.exec(location);
-    if (match) {
-      return {
-        packageId: match[1]!,
-        moduleName: match[2]!,
-        ...(match[3] ? { functionName: match[3] } : {}),
-      };
-    }
-  }
-  return undefined;
-}
-
-/** Parse each supported Sui MoveAbort occurrence without joining data across occurrences. */
-function parseMoveAbortOccurrences(reason: string): MoveAbortOccurrence[] {
-  const occurrences: MoveAbortOccurrence[] = [];
-  const formatterPrefix = String.raw`MoveAbort\s+in\s+(\d+)(st|nd|rd|th)\s+command`;
-  const tuplePattern = new RegExp(
-    String.raw`^MoveAbort\s*\(\s*${MOVE_PATH}\s*,\s*(\d+)\s*\)\s+in\s+command\s+(\d+)(?![A-Za-z0-9_.])`,
-    'i',
-  );
-  const formatterCodePattern = new RegExp(
-    String.raw`^${formatterPrefix}\s*,\s*abort code\s*:\s*(\d+)(?![\d.])\s*,([^;\r\n]*)$`,
-    'i',
-  );
-  const formatterCleverPattern = new RegExp(
-    String.raw`^${formatterPrefix}\s*,\s*'(${MOVE_IDENTIFIER})'\s*:\s*(\d+)(?![\d.])\s*,([^;\r\n]*)$`,
-    'i',
-  );
-  for (const segment of moveAbortSegments(reason)) {
-    const tuple = segment.match(tuplePattern);
-    if (tuple) {
-      appendOccurrence(
-        occurrences,
-        tuple[1]!,
-        tuple[2]!,
-        tuple[3],
-        tuple[4]!,
-        undefined,
-        parseCommandIndex(tuple[5]!),
-      );
-      continue;
-    }
-
-    const clever = segment.match(formatterCleverPattern);
-    if (clever) {
-      const location = parseMoveLocation(clever[5]!);
-      if (location) {
-        appendOccurrence(
-          occurrences,
-          location.packageId,
-          location.moduleName,
-          location.functionName,
-          clever[4]!,
-          clever[3]!,
-          parseOrdinalCommandIndex(clever[1]!, clever[2]!),
-        );
-      }
-      continue;
-    }
-
-    const formatterCode = segment.match(formatterCodePattern);
-    if (formatterCode) {
-      const location = parseMoveLocation(formatterCode[4]!);
-      if (location) {
-        appendOccurrence(
-          occurrences,
-          location.packageId,
-          location.moduleName,
-          location.functionName,
-          formatterCode[3]!,
-          undefined,
-          parseOrdinalCommandIndex(formatterCode[1]!, formatterCode[2]!),
-        );
-      }
-      continue;
-    }
-  }
-
-  return occurrences;
-}
-
 function hasMoveAbort(
-  reason: string,
+  error: SuiExecutionError,
   packageId: string,
   modulePath: string,
   constantName: string,
   code: number,
   commandIndex: number,
 ): boolean {
-  if (!Number.isSafeInteger(commandIndex) || commandIndex < 0) return false;
+  if (
+    error.kind !== 'MoveAbort' ||
+    error.command !== commandIndex ||
+    !Number.isSafeInteger(commandIndex) ||
+    commandIndex < 0
+  ) {
+    return false;
+  }
   const normalizedPackageId = normalizePackageId(packageId);
   if (!normalizedPackageId) return false;
   const [expectedModuleName, expectedFunctionName, ...unexpectedSegments] = modulePath.split('::');
   if (!expectedModuleName || unexpectedSegments.length > 0) return false;
-  return parseMoveAbortOccurrences(reason).some(
-    (occurrence) =>
-      occurrence.packageId === normalizedPackageId &&
-      occurrence.code === code &&
-      occurrence.commandIndex === commandIndex &&
-      (occurrence.constantName === undefined || occurrence.constantName === constantName) &&
-      occurrence.moduleName === expectedModuleName &&
-      (expectedFunctionName === undefined || occurrence.functionName === expectedFunctionName),
+  const abort = error.moveAbort;
+  return (
+    abort.packageId === normalizedPackageId &&
+    abort.abortCode === String(code) &&
+    (abort.constantName === undefined || abort.constantName === constantName) &&
+    abort.module === expectedModuleName &&
+    (expectedFunctionName === undefined || abort.functionName === expectedFunctionName)
   );
 }
 
 /** settle.move EPaused */
-export function isPaused(reason: string, stelisPackageId: string, commandIndex: number): boolean {
+export function isPaused(
+  error: SuiExecutionError,
+  stelisPackageId: string,
+  commandIndex: number,
+): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'EPaused',
@@ -296,12 +125,12 @@ export function isPaused(reason: string, stelisPackageId: string, commandIndex: 
 
 /** vault.move EVaultAlreadyRegistered */
 export function isVaultAlreadyRegistered(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'vault',
     'EVaultAlreadyRegistered',
@@ -312,12 +141,12 @@ export function isVaultAlreadyRegistered(
 
 /** vault.move EReplayNonce */
 export function isReplayNonce(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'vault',
     'EReplayNonce',
@@ -328,12 +157,12 @@ export function isReplayNonce(
 
 /** settle.move EClaimTooHigh */
 export function isClaimTooHigh(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'EClaimTooHigh',
@@ -344,12 +173,12 @@ export function isClaimTooHigh(
 
 /** settle.move ETotalInTooLow */
 export function isTotalInTooLow(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'ETotalInTooLow',
@@ -360,12 +189,12 @@ export function isTotalInTooLow(
 
 /** settle.move ESpreadTooWide */
 export function isSpreadTooWide(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'ESpreadTooWide',
@@ -376,12 +205,12 @@ export function isSpreadTooWide(
 
 /** settle.move EInsufficientFunds */
 export function isInsufficientFunds(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'EInsufficientFunds',
@@ -392,12 +221,12 @@ export function isInsufficientFunds(
 
 /** settle.move EInvalidReceiptId */
 export function isInvalidReceiptId(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'EInvalidReceiptId',
@@ -408,12 +237,12 @@ export function isInvalidReceiptId(
 
 /** settle.move EInvalidPolicyHash */
 export function isInvalidPolicyHash(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
 ): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     stelisPackageId,
     'settle',
     'EInvalidPolicyHash',
@@ -431,13 +260,12 @@ export function isInvalidPolicyHash(
  *
  * Package-bound to the generated DeepBook runtime ModuleId so external
  * packages with module `pool::swap_exact_quantity` and the same abort code cannot
- * classify as `SLIPPAGE_EXCEEDED`. Code-position-bound via
- * occurrence-bound parsing so a free-floating `(instruction 12)` token cannot
- * satisfy the code.
+ * classify as `SLIPPAGE_EXCEEDED`. The structured execution error also has to
+ * identify the exact outer PTB command.
  */
-export function isDeepbookMinOutNotMet(reason: string, commandIndex: number): boolean {
+export function isDeepbookMinOutNotMet(error: SuiExecutionError, commandIndex: number): boolean {
   return hasMoveAbort(
-    reason,
+    error,
     DEEPBOOK_MIN_OUT_ABORT.runtimePackageId,
     DEEPBOOK_MIN_OUT_ABORT.modulePath,
     DEEPBOOK_MIN_OUT_ABORT.constantName,
@@ -507,7 +335,7 @@ function settlementEntryCanSwap(functionName: string): boolean {
 }
 
 function classifyStelisFailureAtCommand(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commandIndex: number,
   functionName: string,
@@ -516,29 +344,29 @@ function classifyStelisFailureAtCommand(
   if (!entry) return undefined;
   const canSwap = entry.parameters.some((parameter) => parameter.name === 'pool');
 
-  if (isClaimTooHigh(reason, stelisPackageId, commandIndex)) return 'CLAIM_WOULD_EXCEED_MAX';
-  if (canSwap && isTotalInTooLow(reason, stelisPackageId, commandIndex)) {
+  if (isClaimTooHigh(error, stelisPackageId, commandIndex)) return 'CLAIM_WOULD_EXCEED_MAX';
+  if (canSwap && isTotalInTooLow(error, stelisPackageId, commandIndex)) {
     return 'INSUFFICIENT_SETTLE_INPUT';
   }
-  if (isInsufficientFunds(reason, stelisPackageId, commandIndex)) return 'INSUFFICIENT_FUNDS';
-  if (isInvalidReceiptId(reason, stelisPackageId, commandIndex)) return 'INVALID_RECEIPT_ID';
-  if (isInvalidPolicyHash(reason, stelisPackageId, commandIndex)) return 'INVALID_POLICY_HASH';
-  if (canSwap && isSpreadTooWide(reason, stelisPackageId, commandIndex)) {
+  if (isInsufficientFunds(error, stelisPackageId, commandIndex)) return 'INSUFFICIENT_FUNDS';
+  if (isInvalidReceiptId(error, stelisPackageId, commandIndex)) return 'INVALID_RECEIPT_ID';
+  if (isInvalidPolicyHash(error, stelisPackageId, commandIndex)) return 'INVALID_POLICY_HASH';
+  if (canSwap && isSpreadTooWide(error, stelisPackageId, commandIndex)) {
     return 'SPREAD_EXCEEDED';
   }
-  if (isPaused(reason, stelisPackageId, commandIndex)) return 'PAUSED';
+  if (isPaused(error, stelisPackageId, commandIndex)) return 'PAUSED';
   if (
     entry.variantClass === 'new_user' &&
-    isVaultAlreadyRegistered(reason, stelisPackageId, commandIndex)
+    isVaultAlreadyRegistered(error, stelisPackageId, commandIndex)
   ) {
     return 'VAULT_ALREADY_REGISTERED';
   }
-  if (isReplayNonce(reason, stelisPackageId, commandIndex)) return 'REPLAY_NONCE';
+  if (isReplayNonce(error, stelisPackageId, commandIndex)) return 'REPLAY_NONCE';
   return undefined;
 }
 
 export function classifySponsorFailureSubcode(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   scope: SponsorFailureCommandScope,
 ): SponsorFailureSubcode | undefined {
@@ -550,8 +378,8 @@ export function classifySponsorFailureSubcode(
     const functionName = (command as MoveCallCommand).function;
     const canSwap = settlementEntryCanSwap(functionName);
     return (
-      classifyStelisFailureAtCommand(reason, stelisPackageId, commandIndex, functionName) ??
-      (canSwap && isDeepbookMinOutNotMet(reason, commandIndex) ? 'SLIPPAGE_EXCEEDED' : undefined)
+      classifyStelisFailureAtCommand(error, stelisPackageId, commandIndex, functionName) ??
+      (canSwap && isDeepbookMinOutNotMet(error, commandIndex) ? 'SLIPPAGE_EXCEEDED' : undefined)
     );
   }
 
@@ -560,19 +388,19 @@ export function classifySponsorFailureSubcode(
     if (isStelisSettlementCommand(command, stelisPackageId)) {
       const functionName = (command as MoveCallCommand).function;
       const stelisSubcode = classifyStelisFailureAtCommand(
-        reason,
+        error,
         stelisPackageId,
         commandIndex,
         functionName,
       );
       if (stelisSubcode) return stelisSubcode;
-      if (settlementEntryCanSwap(functionName) && isDeepbookMinOutNotMet(reason, commandIndex)) {
+      if (settlementEntryCanSwap(functionName) && isDeepbookMinOutNotMet(error, commandIndex)) {
         return 'SLIPPAGE_EXCEEDED';
       }
     }
     if (
       isDirectDeepbookSwapCommand(command, scope.deepbookPackageId) &&
-      isDeepbookMinOutNotMet(reason, commandIndex)
+      isDeepbookMinOutNotMet(error, commandIndex)
     ) {
       return 'SLIPPAGE_EXCEEDED';
     }
@@ -583,55 +411,50 @@ export function classifySponsorFailureSubcode(
 
 /**
  * Classify known prepare failures into typed validation errors.
- * Returns null when the reason is unknown and should fall back to DRY_RUN_FAILED.
+ * Returns null when the structured error is not a known prepare failure and
+ * should fall back to DRY_RUN_FAILED.
  */
 function classifyKnownPrepareFailure(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   scope: SponsorFailureCommandScope,
   meta?: PrepareErrorMeta,
 ): PrepareValidationError | null {
-  if (reason.includes('InsufficientCoinBalance')) {
+  const message = suiExecutionErrorMessage(error);
+  if (error.kind === 'InsufficientCoinBalance' || error.kind === 'InsufficientFundsForWithdraw') {
     return new PrepareValidationError(
       'INSUFFICIENT_BALANCE',
-      `Insufficient coin balance: ${reason}`,
-      meta,
-    );
-  }
-  if (reason.includes('Available amount') && reason.includes('less than requested')) {
-    return new PrepareValidationError(
-      'INSUFFICIENT_BALANCE',
-      `Insufficient address balance: ${reason}`,
+      `Insufficient coin balance: ${message}`,
       meta,
     );
   }
 
-  const subcode = classifySponsorFailureSubcode(reason, stelisPackageId, scope);
+  const subcode = classifySponsorFailureSubcode(error, stelisPackageId, scope);
   if (subcode === 'CLAIM_WOULD_EXCEED_MAX') {
     return new PrepareValidationError(
       'CLAIM_WOULD_EXCEED_MAX',
-      `Computed execution cost claim exceeds configured max: ${reason}`,
+      `Computed execution cost claim exceeds configured max: ${message}`,
       meta,
     );
   }
   if (subcode === 'INSUFFICIENT_SETTLE_INPUT') {
     return new PrepareValidationError(
       'INSUFFICIENT_SETTLE_INPUT',
-      `Settle input too low: ${reason}`,
+      `Settle input too low: ${message}`,
       meta,
     );
   }
   if (subcode === 'SPREAD_EXCEEDED') {
     return new PrepareValidationError(
       'SPREAD_EXCEEDED',
-      `DeepBook spread too wide or book empty: ${reason}`,
+      `DeepBook spread too wide or book empty: ${message}`,
       meta,
     );
   }
   if (subcode === 'SLIPPAGE_EXCEEDED') {
     return new PrepareValidationError(
       'SLIPPAGE_EXCEEDED',
-      `Minimum output not met during swap: ${reason}`,
+      `Minimum output not met during swap: ${message}`,
       meta,
     );
   }
@@ -644,7 +467,7 @@ function classifyKnownPrepareFailure(
 // ---------------------------------------------------------------------------
 
 /**
- * Classify a dry-run failure reason into a specific error code.
+ * Classify a structured dry-run execution error into a specific error code.
  *
  * Priority order:
  *   InsufficientCoinBalance -> INSUFFICIENT_BALANCE
@@ -660,13 +483,13 @@ function classifyKnownPrepareFailure(
  * aborts fall through to `DRY_RUN_FAILED`.
  */
 export function classifyDryRunFailure(
-  reason: string,
+  error: SuiExecutionError,
   stelisPackageId: string,
   commands: readonly PtbCommand[],
   meta?: PrepareErrorMeta,
 ): PrepareValidationError {
   const known = classifyKnownPrepareFailure(
-    reason,
+    error,
     stelisPackageId,
     {
       kind: 'settlement',
@@ -675,7 +498,11 @@ export function classifyDryRunFailure(
     meta,
   );
   if (known) return known;
-  return new PrepareValidationError('DRY_RUN_FAILED', `Dry-run failed: ${reason}`, meta);
+  return new PrepareValidationError(
+    'DRY_RUN_FAILED',
+    `Dry-run failed: ${suiExecutionErrorMessage(error)}`,
+    meta,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +510,8 @@ export function classifyDryRunFailure(
 // ---------------------------------------------------------------------------
 
 /**
- * Wrap Transaction.build() to classify SDK errors as PrepareValidationError.
+ * Build through the exact current Sui operation authority and classify only
+ * its parsed execution failure. Display text is never parsed.
  *
  * Without this, known build-time MoveAborts and coin-balance failures
  * propagate as untyped Error -> 500.
@@ -692,27 +520,37 @@ export function classifyDryRunFailure(
  * pass the trusted Stelis package ID from the surrounding context. DeepBook's
  * abort identity is generated from compiled bytecode.
  */
-export async function safeBuild(
+export async function safeBuildAddressBalanceGasTransaction(
   tx: Transaction,
-  client: SuiGrpcClient,
+  sui: ChainBoundSuiEndpointSnapshot,
+  sponsorAddress: string,
+  gasBudget: bigint,
   stelisPackageId: string,
   meta?: PrepareErrorMeta,
-): Promise<Uint8Array> {
+): Promise<AddressBalanceGasTransaction> {
   const commands = convertSdkCommands(tx.getData().commands as unknown[]);
   const scope = { kind: 'settlement', commands } as const;
   try {
-    return await tx.build({ client });
+    return await buildAddressBalanceGasTransaction(sui, {
+      transaction: tx,
+      sponsorAddress,
+      gasBudget,
+    });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    const known = classifyKnownPrepareFailure(msg, stelisPackageId, scope, meta);
-    if (known) throw known;
-
-    // Catch-all: MoveAbort or transaction resolution failures that don't match
-    // specific patterns above. Classify as DRY_RUN_FAILED (422) instead of
-    // letting them propagate as untyped Error (500).
-    if (msg.includes('MoveAbort') || msg.includes('Transaction resolution failed')) {
-      throw classifyDryRunFailure(msg, stelisPackageId, commands, meta);
+    if (err instanceof SuiAddressBalanceGasUnavailableError) {
+      throw new PrepareValidationError(
+        'SPONSOR_CAPACITY_UNAVAILABLE',
+        'The assigned sponsor address cannot supply the requested gas budget',
+      );
+    }
+    const error = getSuiRejectedExecutionError(err);
+    if (error) {
+      // Only the address-balance builder can bind a parsed current execution failure to
+      // the server-only authority extractor. Caller-created errors cannot enter
+      // this classification path.
+      const known = classifyKnownPrepareFailure(error, stelisPackageId, scope, meta);
+      if (known) throw known;
+      throw classifyDryRunFailure(error, stelisPackageId, commands, meta);
     }
 
     throw err;

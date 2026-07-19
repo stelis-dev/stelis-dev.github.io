@@ -3,14 +3,11 @@ import { StelisSDK, STELIS_CONTRACT_IDS } from '@stelis/sdk';
 import { useAppConfig } from '../../../AppConfigContext';
 
 /**
- * useStudioSDK — dynamic studio-endpoint SDK connection hook.
+ * useStudioSDK — dynamic Host SDK connection hook for the Studio test page.
  *
  * Unlike sandbox's useSDK (singleton against RELAY_API_BASE), this hook:
  *   - Accepts a user-provided endpoint URL
- *   - Passes studioEndpoint: true to SDK.connect()
  *   - Re-connects when endpoint changes
- *
- * Reference: StelisSDK.connect() with { studioEndpoint: true }
  */
 
 export interface StudioSDKState {
@@ -41,7 +38,6 @@ export function useStudioSDK() {
 
       try {
         const sdk = await StelisSDK.connect(endpoint, {
-          studioEndpoint: true,
           pinnedPackageId,
         });
         if (abortRef.current !== id) return; // stale

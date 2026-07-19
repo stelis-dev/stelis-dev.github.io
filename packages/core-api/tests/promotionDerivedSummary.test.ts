@@ -63,7 +63,7 @@ describe('computePromotionAdminSummary', () => {
       { availableMist: 40_000_000n, reservedMist: 5_000_000n, consumedMist: 5_000_000n },
     );
 
-    expect(summary.claimedUsers).toBe(3);
+    expect(summary.claimedCount).toBe(3);
     expect(summary.remainingParticipantSlots).toBe(7);
     expect(summary.totalRequiredBudgetMist).toBe('50000000'); // 10 × 5M
     expect(summary.totalRemainingBudgetMist).toBe('40000000');

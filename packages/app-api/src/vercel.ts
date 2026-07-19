@@ -8,9 +8,12 @@
  * TODO: Remove this adapter after the stable API deployment moves to Cloud Run
  * or another long-running Node/OCI host.
  */
-import { createApp } from './app.js';
+import { createApplicationRuntime } from './app.js';
 import { getVercelClientIpSource } from './vercelClientIp.js';
 
-const { app } = await createApp({ clientIpSourceProvider: getVercelClientIpSource });
+const runtime = createApplicationRuntime({
+  clientIpSourceProvider: getVercelClientIpSource,
+});
+await runtime.start();
 
-export default app;
+export default { fetch: runtime.fetch };

@@ -14,24 +14,33 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { MAX_PROMOTION_LEDGER_VALUE_MIST } from '@stelis/contracts';
 import type { PromotionExecutionLedger } from '../src/studio/executionLedger.js';
-import type { ClaimOpts, ReserveParams } from '../src/studio/domain.js';
+import type { BudgetSummary, ClaimOpts, ReserveParams } from '../src/studio/domain.js';
+import {
+  CAPACITY_PROMO,
+  CLAMP_PROMO,
+  EXHAUST_PROMO,
+  PAGE_PROMO_A,
+  PAGE_PROMO_B,
+  PROMO_ID,
+  PROMO_X,
+  PROMO_Y,
+} from './helpers/promotionLedgerFixture.js';
 
 // ─────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────
 
-const PROMO_ID = 'test-promo-1';
 const USER_A = 'user-a';
 const USER_B = 'user-b';
 const USER_C = 'user-c';
 const PER_USER_ALLOWANCE = '5000000'; // 5M MIST
 const RESERVE_AMOUNT = 1_000_000n; // 1M MIST
+const PAGE_PROMO_MISSING = '00000000-0000-4000-8000-000000000003';
 
 function defaultClaimOpts(overrides?: Partial<ClaimOpts>): ClaimOpts {
   return {
-    maxParticipants: 10,
-    perUserGasAllowanceMist: PER_USER_ALLOWANCE,
     useUntilAt: null,
     ...overrides,
   };
@@ -45,6 +54,13 @@ function defaultReserveParams(overrides?: Partial<ReserveParams>): ReserveParams
     amountMist: RESERVE_AMOUNT,
     ...overrides,
   };
+}
+
+async function readBudget(
+  ledger: PromotionExecutionLedger,
+  promotionId: string,
+): Promise<BudgetSummary> {
+  return (await ledger.getPromotionLedgerStatus(promotionId, null)).budget;
 }
 
 // ─────────────────────────────────────────────
@@ -90,75 +106,24 @@ export function runLedgerConformanceTests(
     });
 
     it('allows same user to claim different promotions', async () => {
-      const r1 = await ledger.claim('promo-x', USER_A, defaultClaimOpts());
-      const r2 = await ledger.claim('promo-y', USER_A, defaultClaimOpts());
+      const r1 = await ledger.claim(PROMO_X, USER_A, defaultClaimOpts());
+      const r2 = await ledger.claim(PROMO_Y, USER_A, defaultClaimOpts());
       expect(r1.ok).toBe(true);
       expect(r2.ok).toBe(true);
     });
 
     it('enforces capacity guard (maxParticipants)', async () => {
-      const opts = defaultClaimOpts({ maxParticipants: 2 });
-      await ledger.claim(PROMO_ID, USER_A, opts);
-      await ledger.claim(PROMO_ID, USER_B, opts);
-      const result = await ledger.claim(PROMO_ID, USER_C, opts);
+      const opts = defaultClaimOpts();
+      await ledger.claim(CAPACITY_PROMO, USER_A, opts);
+      await ledger.claim(CAPACITY_PROMO, USER_B, opts);
+      const result = await ledger.claim(CAPACITY_PROMO, USER_C, opts);
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.reason).toBe('capacity_exceeded');
     });
 
-    it('rejects maxParticipants = 0 instead of creating an uncapped budget', async () => {
-      await expect(
-        ledger.claim(PROMO_ID, USER_A, defaultClaimOpts({ maxParticipants: 0 })),
-      ).rejects.toThrow('maxParticipants must be a positive safe integer');
-    });
-
-    it('rejects non-safe participant counts and non-decimal allowance strings', async () => {
-      await expect(
-        ledger.claim(
-          PROMO_ID,
-          USER_A,
-          defaultClaimOpts({ maxParticipants: Number.MAX_SAFE_INTEGER + 1 }),
-        ),
-      ).rejects.toThrow('maxParticipants must be a positive safe integer');
-
-      await expect(
-        ledger.claim(PROMO_ID, USER_A, defaultClaimOpts({ perUserGasAllowanceMist: '1e6' })),
-      ).rejects.toThrow('perUserGasAllowanceMist must be a non-negative decimal integer string');
-    });
-
-    it('rejects perUserGasAllowanceMist > MAX_PROMOTION_LEDGER_VALUE_MIST (Number.MAX_SAFE_INTEGER)', async () => {
-      // Defensive bound parity with the activation gate. Any out-of-band
-      // caller that bypasses `validateActivationPrerequisites` and tries
-      // to claim a promotion with an over-bound `perUserGasAllowanceMist`
-      // must be refused at the ledger layer so the Redis budget keys
-      // never receive a value that breaks Lua int64 arithmetic.
-      const overBound = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
-      await expect(
-        ledger.claim(PROMO_ID, USER_A, defaultClaimOpts({ perUserGasAllowanceMist: overBound })),
-      ).rejects.toThrow(
-        /perUserGasAllowanceMist.*MAX_PROMOTION_LEDGER_VALUE_MIST|MAX_PROMOTION_LEDGER_VALUE_MIST.*perUserGasAllowanceMist/,
-      );
-    });
-
-    it('rejects maxParticipants × perUserGasAllowanceMist > MAX_PROMOTION_LEDGER_VALUE_MIST', async () => {
-      // Per-user fits the bound, but the product overflows it. Both
-      // adapters must refuse so a bypass cannot poison the budget
-      // counters. 1_000_000 × 9_007_199_254_740 ≈ 9.0 × 10^18 >
-      // Number.MAX_SAFE_INTEGER (≈ 9.007 × 10^15).
-      await expect(
-        ledger.claim(
-          PROMO_ID,
-          USER_A,
-          defaultClaimOpts({
-            maxParticipants: 1_000_000,
-            perUserGasAllowanceMist: '9007199254740',
-          }),
-        ),
-      ).rejects.toThrow(/total budget.*MAX_PROMOTION_LEDGER_VALUE_MIST/);
-    });
-
     it('sets useUntilAt from opts when provided', async () => {
-      const useUntil = '2026-12-31T23:59:59Z';
+      const useUntil = '2026-12-31T23:59:59.000Z';
       const result = await ledger.claim(
         PROMO_ID,
         USER_A,
@@ -189,6 +154,35 @@ export function runLedgerConformanceTests(
       );
     });
 
+    it('returns the same reservation state for an exact same-receipt retry', async () => {
+      const first = await ledger.reserve(defaultReserveParams());
+      const budgetAfterFirst = await readBudget(ledger, PROMO_ID);
+      const retry = await ledger.reserve(defaultReserveParams());
+      const budgetAfterRetry = await readBudget(ledger, PROMO_ID);
+
+      expect(retry).toEqual(first);
+      expect(budgetAfterRetry).toEqual(budgetAfterFirst);
+    });
+
+    it('rejects a conflicting same-receipt retry without changing accounting', async () => {
+      await ledger.reserve(defaultReserveParams());
+      const budgetBeforeConflict = await readBudget(ledger, PROMO_ID);
+      const conflict = await ledger.reserve(
+        defaultReserveParams({ amountMist: RESERVE_AMOUNT - 1n }),
+      );
+
+      expect(conflict).toEqual({ ok: false, reason: 'record_changed' });
+      await expect(readBudget(ledger, PROMO_ID)).resolves.toEqual(budgetBeforeConflict);
+    });
+
+    it('rejects a same-receipt retry bound to a different user without changing that user', async () => {
+      await ledger.reserve(defaultReserveParams());
+      const conflict = await ledger.reserve(defaultReserveParams({ userId: USER_B }));
+
+      expect(conflict).toEqual({ ok: false, reason: 'record_changed' });
+      await expect(ledger.getEntitlement(PROMO_ID, USER_B)).resolves.toBeNull();
+    });
+
     it('rejects concurrent reservation (same user)', async () => {
       await ledger.reserve(defaultReserveParams({ receiptId: 'r-1' }));
       const r2 = await ledger.reserve(defaultReserveParams({ receiptId: 'r-2' }));
@@ -213,13 +207,13 @@ export function runLedgerConformanceTests(
       );
     });
 
-    it('rejects reservation amount > MAX_PROMOTION_LEDGER_VALUE_MIST (defensive ledger-boundary lock; mirrors the activation-gate cap)', async () => {
-      // The activation gate normally caps `perUserGasAllowanceMist` at
+    it('rejects reservation amount > MAX_PROMOTION_LEDGER_VALUE_MIST (defensive ledger-boundary lock; mirrors the Promotion write cap)', async () => {
+      // The Promotion write boundary normally caps `perUserGasAllowanceMist` at
       // the bound, so realistic reservations are well below it. This
       // conformance case exercises the defensive ledger-side guard so
-      // any out-of-band caller that bypasses activation cannot push
+      // any out-of-band caller that bypasses the store cannot push
       // Redis-Lua arithmetic above the 2^53−1 precision boundary.
-      const overBound = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+      const overBound = MAX_PROMOTION_LEDGER_VALUE_MIST + 1n;
       await expect(ledger.reserve(defaultReserveParams({ amountMist: overBound }))).rejects.toThrow(
         /amountMist.*MAX_PROMOTION_LEDGER_VALUE_MIST/,
       );
@@ -233,9 +227,25 @@ export function runLedgerConformanceTests(
       expect(result.reason).toBe('entitlement_insufficient');
     });
 
+    it('uses the shared transition order when entitlement and budget are both insufficient', async () => {
+      await ledger.claim(EXHAUST_PROMO, USER_B, defaultClaimOpts());
+      const before = await ledger.getPromotionLedgerStatus(EXHAUST_PROMO, USER_B);
+      expect(before.entitlement?.remainingGasAllowanceMist).toBe('1000');
+      expect(before.budget.availableMist).toBe(1000n);
+
+      const result = await ledger.reserve({
+        promotionId: EXHAUST_PROMO,
+        userId: USER_B,
+        receiptId: 'both-insufficient',
+        amountMist: 1001n,
+      });
+
+      expect(result).toEqual({ ok: false, reason: 'entitlement_insufficient' });
+    });
+
     it('deducts from budget available', async () => {
       await ledger.reserve(defaultReserveParams());
-      const afterBudget = await ledger.getBudgetSummary(PROMO_ID);
+      const afterBudget = await readBudget(ledger, PROMO_ID);
       expect(afterBudget.reservedMist).toBe(RESERVE_AMOUNT);
       // Budget total = maxParticipants(10) * perUserAllowance(5M) = 50M
       // Available = total - reserved
@@ -270,7 +280,7 @@ export function runLedgerConformanceTests(
       expect(BigInt(result.entitlement.remainingGasAllowanceMist)).toBe(expectedRemaining);
 
       // Budget: delta (reserved - actual) returned to available
-      const budget = await ledger.getBudgetSummary(PROMO_ID);
+      const budget = await readBudget(ledger, PROMO_ID);
       expect(budget.consumedMist).toBe(actualGas);
       expect(budget.reservedMist).toBe(0n);
     });
@@ -285,7 +295,7 @@ export function runLedgerConformanceTests(
         BigInt(PER_USER_ALLOWANCE) - RESERVE_AMOUNT,
       );
 
-      const budget = await ledger.getBudgetSummary(PROMO_ID);
+      const budget = await readBudget(ledger, PROMO_ID);
       expect(budget.consumedMist).toBe(RESERVE_AMOUNT);
       expect(budget.reservedMist).toBe(0n);
     });
@@ -304,7 +314,7 @@ export function runLedgerConformanceTests(
       // out-of-band caller that hands the ledger an absurd `actualGasMist`
       // cannot push Redis-Lua DECRBY/INCRBY arithmetic above the
       // 2^53−1 precision boundary on the budget/entitlement counters.
-      const overBound = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+      const overBound = MAX_PROMOTION_LEDGER_VALUE_MIST + 1n;
       await expect(ledger.consume('receipt-1', overBound)).rejects.toThrow(
         /actualGasMist.*MAX_PROMOTION_LEDGER_VALUE_MIST/,
       );
@@ -331,7 +341,7 @@ export function runLedgerConformanceTests(
       if (!result.ok) return;
 
       const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
-      const budget = await ledger.getBudgetSummary(PROMO_ID);
+      const budget = await readBudget(ledger, PROMO_ID);
       expect(budget.availableMist).toBe(expectedTotal - actualGas);
       expect(budget.reservedMist).toBe(0n);
       expect(budget.consumedMist).toBe(actualGas);
@@ -347,16 +357,9 @@ export function runLedgerConformanceTests(
       // memory and Redis implementations must floor the result at 0 so
       // admin summaries and later reserve()s never observe a negative
       // available budget.
-      await ledger.claim(
-        'clamp-promo',
-        USER_B,
-        defaultClaimOpts({
-          maxParticipants: 1,
-          perUserGasAllowanceMist: '2000000',
-        }),
-      );
+      await ledger.claim(CLAMP_PROMO, USER_B, defaultClaimOpts());
       await ledger.reserve({
-        promotionId: 'clamp-promo',
+        promotionId: CLAMP_PROMO,
         userId: USER_B,
         receiptId: 'clamp-receipt',
         amountMist: 500_000n,
@@ -365,7 +368,7 @@ export function runLedgerConformanceTests(
       expect(result.ok).toBe(true);
       if (!result.ok) return;
 
-      const budget = await ledger.getBudgetSummary('clamp-promo');
+      const budget = await readBudget(ledger, CLAMP_PROMO);
       expect(budget.availableMist).toBe(0n);
       expect(budget.reservedMist).toBe(0n);
       expect(budget.consumedMist).toBe(10_500_000n);
@@ -378,12 +381,23 @@ export function runLedgerConformanceTests(
       expect(result.reason).toBe('reservation_not_found');
     });
 
-    it('prevents double consume (same receiptId)', async () => {
-      await ledger.consume('receipt-1', 500_000n);
+    it('returns the stored result for an exact consume retry', async () => {
+      const first = await ledger.consume('receipt-1', 500_000n);
       const result = await ledger.consume('receipt-1', 500_000n);
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.reason).toBe('reservation_not_found');
+      expect(result).toEqual(first);
+    });
+
+    it('returns the stored consume snapshot after later entitlement changes', async () => {
+      const first = await ledger.consume('receipt-1', 500_000n);
+      await ledger.reserve(defaultReserveParams({ receiptId: 'receipt-2' }));
+      await ledger.consume('receipt-2', 100_000n);
+      await expect(ledger.consume('receipt-1', 500_000n)).resolves.toEqual(first);
+    });
+
+    it('rejects a conflicting consume retry', async () => {
+      await ledger.consume('receipt-1', 500_000n);
+      const result = await ledger.consume('receipt-1', 500_001n);
+      expect(result).toEqual({ ok: false, reason: 'record_changed' });
     });
 
     // Post-signature/post-submit failure branches consume the full
@@ -401,10 +415,6 @@ export function runLedgerConformanceTests(
         const consumeResult = await ledgerWithSweep.consume('receipt-1', 1_000_000n);
         expect(consumeResult.ok).toBe(true);
 
-        // Allow the TTL=0 expiry window to pass (matches the sweep test
-        // pattern below). After the wait the reservation is no longer
-        // tracked; sweep must report 0 swept.
-        await new Promise((resolve) => setTimeout(resolve, 5));
         const swept = await ledgerWithSweep.sweepExpiredReservations();
         expect(swept).toBe(0);
 
@@ -423,15 +433,9 @@ export function runLedgerConformanceTests(
 
     it('marks entitlement as exhausted when remaining hits zero', async () => {
       // Claim with small allowance, reserve all, consume all
-      await ledger.claim(
-        'promo-exhaust',
-        USER_B,
-        defaultClaimOpts({
-          perUserGasAllowanceMist: '1000',
-        }),
-      );
+      await ledger.claim(EXHAUST_PROMO, USER_B, defaultClaimOpts());
       await ledger.reserve({
-        promotionId: 'promo-exhaust',
+        promotionId: EXHAUST_PROMO,
         userId: USER_B,
         receiptId: 'receipt-exhaust',
         amountMist: 1000n,
@@ -464,7 +468,7 @@ export function runLedgerConformanceTests(
       expect(result.entitlement.remainingGasAllowanceMist).toBe(PER_USER_ALLOWANCE);
 
       // Budget fully restored
-      const budget = await ledger.getBudgetSummary(PROMO_ID);
+      const budget = await readBudget(ledger, PROMO_ID);
       expect(budget.reservedMist).toBe(0n);
     });
 
@@ -475,12 +479,18 @@ export function runLedgerConformanceTests(
       expect(result.reason).toBe('reservation_not_found');
     });
 
-    it('prevents double release', async () => {
-      await ledger.release('receipt-1');
+    it('returns the stored result for an exact release retry', async () => {
+      const first = await ledger.release('receipt-1');
       const result = await ledger.release('receipt-1');
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.reason).toBe('reservation_not_found');
+      expect(result).toEqual(first);
+    });
+
+    it('rejects a release after consume as a conflicting final operation', async () => {
+      await ledger.consume('receipt-1', 500_000n);
+      await expect(ledger.release('receipt-1')).resolves.toEqual({
+        ok: false,
+        reason: 'record_changed',
+      });
     });
 
     it('allows new reservation after release', async () => {
@@ -498,6 +508,11 @@ export function runLedgerConformanceTests(
       expect(ent).toBeNull();
     });
 
+    it('getEntitlement returns null when accounting exists for a different user', async () => {
+      await ledger.claim(PROMO_ID, USER_B, defaultClaimOpts());
+      await expect(ledger.getEntitlement(PROMO_ID, USER_A)).resolves.toBeNull();
+    });
+
     it('getEntitlement returns entitlement after claim', async () => {
       await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
       const ent = await ledger.getEntitlement(PROMO_ID, USER_A);
@@ -505,72 +520,106 @@ export function runLedgerConformanceTests(
       expect(ent!.userId).toBe(USER_A);
     });
 
-    it('getClaimedCount reflects claims', async () => {
-      expect(await ledger.getClaimedCount(PROMO_ID)).toBe(0);
+    it('returns one aligned bounded Promotion list ledger status', async () => {
+      await ledger.claim(PAGE_PROMO_A, USER_A, defaultClaimOpts());
+      await ledger.claim(PAGE_PROMO_A, USER_B, defaultClaimOpts());
+      await ledger.claim(PAGE_PROMO_B, USER_B, defaultClaimOpts());
+      await ledger.reserve(defaultReserveParams({ promotionId: PAGE_PROMO_A, userId: USER_A }));
+
+      const statuses = await ledger.getPromotionListLedgerStatuses(
+        [PAGE_PROMO_B, PAGE_PROMO_A, PAGE_PROMO_MISSING],
+        USER_A,
+      );
+
+      expect(statuses.map((status) => status.promotionId)).toEqual([
+        PAGE_PROMO_B,
+        PAGE_PROMO_A,
+        PAGE_PROMO_MISSING,
+      ]);
+      expect(statuses[0]).toEqual({
+        promotionId: PAGE_PROMO_B,
+        entitlement: null,
+        claimedCount: 1,
+        availableBudgetMist: 50_000_000n,
+      });
+      expect(statuses[1]).toMatchObject({
+        promotionId: PAGE_PROMO_A,
+        claimedCount: 2,
+        availableBudgetMist: 49_000_000n,
+        entitlement: {
+          promotionId: PAGE_PROMO_A,
+          userId: USER_A,
+          activeReservationReceiptId: 'receipt-1',
+        },
+      });
+      expect(statuses[2]).toEqual({
+        promotionId: PAGE_PROMO_MISSING,
+        entitlement: null,
+        claimedCount: 0,
+        availableBudgetMist: 0n,
+      });
+    });
+
+    it('rejects a Promotion list ledger batch above the contracts page bound', async () => {
+      const ids = Array.from(
+        { length: 101 },
+        (_, index) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+      );
+      await expect(ledger.getPromotionListLedgerStatuses(ids, USER_A)).rejects.toThrow(
+        /cannot exceed 100 IDs/,
+      );
+    });
+
+    it('returns an empty aligned status for an empty Promotion page', async () => {
+      await expect(ledger.getPromotionListLedgerStatuses([], USER_A)).resolves.toEqual([]);
+    });
+
+    it('keeps one coherent status through unclaimed, claimed, and reserved states', async () => {
+      const unclaimed = await ledger.getPromotionLedgerStatus(PROMO_ID, USER_A);
+      expect(unclaimed).toEqual({
+        promotionId: PROMO_ID,
+        entitlement: null,
+        claimedCount: 0,
+        budget: {
+          availableMist: 0n,
+          reservedMist: 0n,
+          consumedMist: 0n,
+        },
+      });
+
       await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      expect(await ledger.getClaimedCount(PROMO_ID)).toBe(1);
+      const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
+      const claimed = await ledger.getPromotionLedgerStatus(PROMO_ID, USER_A);
+      expect(claimed).toEqual({
+        promotionId: PROMO_ID,
+        entitlement: expect.objectContaining({
+          userId: USER_A,
+          activeReservationReceiptId: null,
+        }),
+        claimedCount: 1,
+        budget: {
+          availableMist: expectedTotal,
+          reservedMist: 0n,
+          consumedMist: 0n,
+        },
+      });
+
       await ledger.claim(PROMO_ID, USER_B, defaultClaimOpts());
-      expect(await ledger.getClaimedCount(PROMO_ID)).toBe(2);
-    });
-
-    it('getBudgetSummary returns zero-init for unclaimed promotion', async () => {
-      const summary = await ledger.getBudgetSummary('promo-empty');
-      expect(summary.availableMist).toBe(0n);
-      expect(summary.reservedMist).toBe(0n);
-      expect(summary.consumedMist).toBe(0n);
-    });
-
-    it('getBudgetSummary returns total budget after claim, before first reserve', async () => {
-      await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      const summary = await ledger.getBudgetSummary(PROMO_ID);
-      // total = maxParticipants(10) * perUserAllowance(5M) = 50M
-      const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
-      expect(summary.availableMist).toBe(expectedTotal);
-      expect(summary.reservedMist).toBe(0n);
-      expect(summary.consumedMist).toBe(0n);
-    });
-
-    // Budget summaries before claim are pure reads. They must not create
-    // durable budget accounting state that can affect the first claim or
-    // the first successful reserve.
-    it('summary-before-claim → claim → reserve succeeds', async () => {
-      // Step 1: summary read against an unclaimed promotion. Must be
-      // pure read — no permanent budget snapshot.
-      const preSummary = await ledger.getBudgetSummary(PROMO_ID);
-      expect(preSummary.availableMist).toBe(0n);
-      expect(preSummary.reservedMist).toBe(0n);
-      expect(preSummary.consumedMist).toBe(0n);
-
-      // Step 2: first claim must install the real total budget.
-      const claimResult = await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      expect(claimResult.ok).toBe(true);
-
-      const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
-      const postClaimSummary = await ledger.getBudgetSummary(PROMO_ID);
-      expect(postClaimSummary.availableMist).toBe(expectedTotal);
-
-      // Step 3: reserve must decrement the real total.
-      const reserveResult = await ledger.reserve(defaultReserveParams());
-      expect(reserveResult.ok).toBe(true);
-
-      const postReserveSummary = await ledger.getBudgetSummary(PROMO_ID);
-      expect(postReserveSummary.availableMist).toBe(expectedTotal - RESERVE_AMOUNT);
-      expect(postReserveSummary.reservedMist).toBe(RESERVE_AMOUNT);
-    });
-
-    // Repeated read-only summary calls before any claim must not
-    // accumulate side-effects.
-    it('repeated summary-before-claim reads are pure', async () => {
-      for (let i = 0; i < 3; i++) {
-        const summary = await ledger.getBudgetSummary(PROMO_ID);
-        expect(summary.availableMist).toBe(0n);
-      }
-      const claimResult = await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      expect(claimResult.ok).toBe(true);
-
-      const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
-      const postClaimSummary = await ledger.getBudgetSummary(PROMO_ID);
-      expect(postClaimSummary.availableMist).toBe(expectedTotal);
+      await ledger.reserve(defaultReserveParams());
+      const reserved = await ledger.getPromotionLedgerStatus(PROMO_ID, USER_A);
+      expect(reserved).toEqual({
+        promotionId: PROMO_ID,
+        entitlement: expect.objectContaining({
+          userId: USER_A,
+          activeReservationReceiptId: 'receipt-1',
+        }),
+        claimedCount: 2,
+        budget: {
+          availableMist: expectedTotal - RESERVE_AMOUNT,
+          reservedMist: RESERVE_AMOUNT,
+          consumedMist: 0n,
+        },
+      });
     });
 
     // A `reserve()` call against a not-yet-claimed promotion returns
@@ -587,7 +636,7 @@ export function runLedgerConformanceTests(
 
       // Step 2: budget summary must still report unclaimed-promotion
       // shape (reserve failure must be non-mutating).
-      const midSummary = await ledger.getBudgetSummary(PROMO_ID);
+      const midSummary = await readBudget(ledger, PROMO_ID);
       expect(midSummary.availableMist).toBe(0n);
       expect(midSummary.reservedMist).toBe(0n);
       expect(midSummary.consumedMist).toBe(0n);
@@ -598,40 +647,16 @@ export function runLedgerConformanceTests(
       expect(claimResult.ok).toBe(true);
 
       const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
-      const postClaimSummary = await ledger.getBudgetSummary(PROMO_ID);
+      const postClaimSummary = await readBudget(ledger, PROMO_ID);
       expect(postClaimSummary.availableMist).toBe(expectedTotal);
 
       // Step 4: reserve now succeeds against the real budget total.
       const reserveResult = await ledger.reserve(defaultReserveParams());
       expect(reserveResult.ok).toBe(true);
 
-      const postReserveSummary = await ledger.getBudgetSummary(PROMO_ID);
+      const postReserveSummary = await readBudget(ledger, PROMO_ID);
       expect(postReserveSummary.availableMist).toBe(expectedTotal - RESERVE_AMOUNT);
       expect(postReserveSummary.reservedMist).toBe(RESERVE_AMOUNT);
-    });
-
-    it('listClaimedUsers returns enriched projection', async () => {
-      await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      await ledger.claim(PROMO_ID, USER_B, defaultClaimOpts());
-      const users = await ledger.listClaimedUsers(PROMO_ID);
-      expect(users).toHaveLength(2);
-      const userA = users.find((u) => u.userId === USER_A);
-      expect(userA).toBeDefined();
-      expect(userA!.remainingGasAllowanceMist).toBe(PER_USER_ALLOWANCE);
-      expect(userA!.status).toBe('active');
-    });
-
-    it('listClaimedUsers reflects reservation state', async () => {
-      await ledger.claim(PROMO_ID, USER_A, defaultClaimOpts());
-      await ledger.reserve(defaultReserveParams());
-      const users = await ledger.listClaimedUsers(PROMO_ID);
-      const userA = users.find((u) => u.userId === USER_A);
-      expect(userA!.activeReservationReceiptId).toBe('receipt-1');
-    });
-
-    it('listClaimedUsers returns empty for unclaimed promotion', async () => {
-      const users = await ledger.listClaimedUsers('promo-none');
-      expect(users).toHaveLength(0);
     });
   });
 
@@ -656,7 +681,7 @@ export function runLedgerConformanceTests(
       expect(ent!.consumedGasAllowanceMist).toBe('500000'); // 300k + 200k
       expect(BigInt(ent!.remainingGasAllowanceMist)).toBe(BigInt(PER_USER_ALLOWANCE) - 500_000n);
 
-      const budget = await ledger.getBudgetSummary(PROMO_ID);
+      const budget = await readBudget(ledger, PROMO_ID);
       expect(budget.consumedMist).toBe(500_000n);
       expect(budget.reservedMist).toBe(0n);
     });
@@ -696,10 +721,6 @@ export function runLedgerConformanceTests(
         const entBefore = await sweepLedger.getEntitlement(PROMO_ID, USER_A);
         expect(entBefore!.activeReservationReceiptId).toBe('receipt-1');
 
-        // Allow TTL to expire (TTL=0 → already expired at creation)
-        // Small yield to ensure Date.now() advances past expiresAt
-        await new Promise((resolve) => setTimeout(resolve, 5));
-
         const swept = await sweepLedger.sweepExpiredReservations();
         expect(swept).toBe(1);
 
@@ -709,10 +730,22 @@ export function runLedgerConformanceTests(
         expect(entAfter!.remainingGasAllowanceMist).toBe(PER_USER_ALLOWANCE);
 
         // Budget fully restored
-        const budget = await sweepLedger.getBudgetSummary(PROMO_ID);
+        const budget = await readBudget(sweepLedger, PROMO_ID);
         expect(budget.reservedMist).toBe(0n);
         const expectedTotal = 10n * BigInt(PER_USER_ALLOWANCE);
         expect(budget.availableMist).toBe(expectedTotal);
+      });
+
+      it('shares one in-flight sweep result across overlapping callers', async () => {
+        await sweepLedger.claim(PROMO_ID, USER_A, defaultClaimOpts());
+        await sweepLedger.reserve(defaultReserveParams());
+
+        await expect(
+          Promise.all([
+            sweepLedger.sweepExpiredReservations(),
+            sweepLedger.sweepExpiredReservations(),
+          ]),
+        ).resolves.toEqual([1, 1]);
       });
 
       it('does not sweep non-expired reservations', async () => {
@@ -732,7 +765,6 @@ export function runLedgerConformanceTests(
         await sweepLedger.claim(PROMO_ID, USER_A, defaultClaimOpts());
         await sweepLedger.reserve(defaultReserveParams({ receiptId: 'r-old' }));
 
-        await new Promise((resolve) => setTimeout(resolve, 5));
         await sweepLedger.sweepExpiredReservations();
 
         // New reservation should succeed

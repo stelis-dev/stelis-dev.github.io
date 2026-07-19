@@ -4,7 +4,6 @@ import {
   normalizeSuiAddress,
 } from '@mysten/sui/utils';
 import { HOST_ERROR_META_POLICY, RELAY_SPONSOR_ERROR_CODES } from '@stelis/contracts';
-import { parseCurrentSuiTerminalForDigest } from '@stelis/core-api';
 
 const U64_MAX = (1n << 64n) - 1n;
 const UNSIGNED_DECIMAL = /^(?:0|[1-9]\d*)$/;
@@ -71,14 +70,29 @@ function transactionDigest(value, label) {
 
 export function currentSuiTerminalProof(result, expectedDigest) {
   transactionDigest(expectedDigest, 'expectedDigest');
-  const terminal = parseCurrentSuiTerminalForDigest(result, expectedDigest);
-  if (terminal === null) {
-    throw new Error('Current Sui terminal proof requires a current raw transaction result');
+  if (!isRecord(result) || (result.outcome !== 'success' && result.outcome !== 'failure')) {
+    throw new Error('Current Sui terminal proof requires an exact gateway result');
+  }
+  const digest = transactionDigest(result.digest, 'result.digest');
+  if (digest !== expectedDigest || !isRecord(result.effects)) {
+    throw new Error('Current Sui terminal proof requires an exact gateway result');
+  }
+  const effectsDigest = transactionDigest(
+    result.effects.transactionDigest,
+    'result.effects.transactionDigest',
+  );
+  if (effectsDigest !== expectedDigest || !isRecord(result.effects.status)) {
+    throw new Error('Current Sui terminal proof requires an exact gateway result');
+  }
+  const succeeded = result.effects.status.success === true && result.effects.status.error === null;
+  const failed = result.effects.status.success === false && isRecord(result.effects.status.error);
+  if ((result.outcome === 'success' && !succeeded) || (result.outcome === 'failure' && !failed)) {
+    throw new Error('Current Sui terminal proof requires an exact gateway result');
   }
   return {
     source: SUI_TERMINAL_PROOF_SOURCE,
-    digest: transactionDigest(terminal.digest, 'terminal.digest'),
-    resultKind: terminal.kind,
+    digest,
+    resultKind: result.outcome,
   };
 }
 

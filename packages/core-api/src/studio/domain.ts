@@ -2,14 +2,12 @@
  * Studio Promotion Domain Types — shared domain/value types.
  *
  * Authoritative source for promotion value types (`Promotion`,
- * `Entitlement`, `UsageEvent`, …), ExecutionLedger operation result types,
+ * `Entitlement`), ExecutionLedger operation result types,
  * and pure domain helpers (`computeTotalRequiredBudgetMist`). Handlers and
  * derived read models import from here.
  *
- * Adapter-local shapes (input DTOs like `CreatePromotionInput`, status
- * transition constant and guard, activation-prerequisite check, transition
- * error classes) live alongside their adapter in `promotionStore.ts` — they
- * are tightly coupled to the store API and not shared vocabulary.
+ * The Promotion store consumes the current contracts-owned Admin request
+ * shapes and owns only persistence and lifecycle transitions.
  *
  * @module studio/domain
  */
@@ -20,6 +18,7 @@ import type {
   PromotionStatus as HostPromotionStatus,
   PromotionType as HostPromotionType,
 } from '@stelis/contracts';
+import { parsePromotionLedgerBudget } from './executionLedgerValueGuards.js';
 
 // ─────────────────────────────────────────────
 // Promotion (operator-configured definition)
@@ -40,9 +39,7 @@ export type PromotionType = HostPromotionType;
  */
 export type PromotionStatus = HostPromotionStatus;
 
-// Status-transition constant, activation guard, and error classes live in
-// `promotionStore.ts` — they are tightly coupled to the adapter API and
-// share a single owner there.
+// Status-transition rules and errors live with the Promotion store adapter.
 
 /**
  * Promotion — operator-configured definition and lifecycle state.
@@ -63,7 +60,7 @@ export interface Promotion {
   status: PromotionStatus;
   /**
    * Maximum number of users that can claim this promotion.
-   * gas_sponsorship requires maxParticipants > 0 (enforced at activation).
+   * gas_sponsorship requires maxParticipants > 0 at every write boundary.
    */
   maxParticipants: number;
   /** Per-user gas allowance in MIST (string for bigint precision). */
@@ -87,8 +84,7 @@ export interface Promotion {
   updatedAt: string;
 }
 
-// Input DTOs for the promotion store live in `promotionStore.ts`
-// (`CreatePromotionInput`, `UpdatePromotionInput`) alongside the adapter.
+// Promotion store methods consume the contracts-owned Admin requests directly.
 
 // ─────────────────────────────────────────────
 // Entitlement (per-user execution state)
@@ -112,7 +108,7 @@ export type Entitlement = PromotionEntitlement;
 /**
  * BudgetSummary — promotion-level budget snapshot for read models.
  *
- * All values in MIST (bigint). Returned by ExecutionLedger.getBudgetSummary().
+ * All values in MIST (bigint). Returned in a Promotion ledger status.
  */
 export interface BudgetSummary {
   /** Available budget (total - reserved - consumed). */
@@ -124,63 +120,11 @@ export interface BudgetSummary {
 }
 
 // ─────────────────────────────────────────────
-// Claimed User Projection (admin read model)
-// ─────────────────────────────────────────────
-
-/**
- * ClaimedUserProjection — enriched projection for admin claimed-user list.
- *
- * Single read model returned by `ExecutionLedger.listClaimedUsers()` — it
- * joins the claimed-user index and per-user entitlement state in one call,
- * so callers never need a per-user follow-up read.
- */
-export interface ClaimedUserProjection {
-  userId: string;
-  claimedAt: string;
-  remainingGasAllowanceMist: string | null;
-  consumedGasAllowanceMist: string | null;
-  status: EntitlementStatus | null;
-  activeReservationReceiptId: string | null;
-}
-
-// ─────────────────────────────────────────────
-// Usage Event (append-only audit)
-// ─────────────────────────────────────────────
-
-/** Usage event result classification. */
-export type UsageEventResult = 'reserved' | 'consumed' | 'released' | 'failed';
-
-/**
- * UsageEvent — append-only audit record for each sponsored action lifecycle event.
- */
-export interface UsageEvent {
-  promotionId: string;
-  userId: string;
-  senderAddress: string;
-  receiptId: string;
-  txDigest: string | null;
-  reservedGasMist: string;
-  consumedGasMist: string;
-  releasedGasMist: string;
-  result: UsageEventResult;
-  createdAt: string;
-  failureReason: string | null;
-  policyCheckResult: string | null;
-}
-
-/** Input for appending a usage event. createdAt is auto-generated. */
-export type CreateUsageEventInput = Omit<UsageEvent, 'createdAt'>;
-
-// ─────────────────────────────────────────────
 // Claim types
 // ─────────────────────────────────────────────
 
 /** Options for ExecutionLedger.claim(). */
 export interface ClaimOpts {
-  /** Maximum allowed participants. Must be a positive safe integer. */
-  maxParticipants: number;
-  /** Per-user gas allowance in MIST. */
-  perUserGasAllowanceMist: string;
   /** Post-claim use window end. null = unlimited. */
   useUntilAt: string | null;
 }
@@ -193,18 +137,15 @@ export type ClaimResult =
 /**
  * Internal ExecutionLedger claim failure reasons.
  *
- * `promotion_not_active` is emitted only by `RedisPromotionExecutionLedger`
- * when the atomic claim script re-reads the canonical promotion record
- * and finds `status !== 'active'`. This closes the race window between
- * `promotionStore.get()` at the claim route and the Lua claim CAS (admin
- * pause/archive can slip in between). Memory ledger does not emit this
- * reason — there is no practical cross-process race at that scale and the
- * shared conformance suite treats reason set as adapter-implementation
- * detail. `packages/core-api/src/studio/promotionClaimHandler.ts` maps
- * this internal reason to the existing public `promotion_not_active`
- * claim reason.
+ * `promotion_not_active` means the current Promotion is absent or inactive.
+ * `record_changed` means an otherwise active Promotion or ledger record
+ * changed before the atomic claim mutation.
  */
-export type ClaimFailureReason = 'duplicate' | 'capacity_exceeded' | 'promotion_not_active';
+export type ClaimFailureReason =
+  | 'duplicate'
+  | 'capacity_exceeded'
+  | 'promotion_not_active'
+  | 'record_changed';
 
 // ─────────────────────────────────────────────
 // Reserve / Consume / Release types
@@ -228,21 +169,23 @@ export type ReserveFailureReason =
   | 'entitlement_not_found'
   | 'entitlement_not_active'
   | 'entitlement_insufficient'
-  | 'concurrent_reservation';
+  | 'concurrent_reservation'
+  | 'promotion_not_active'
+  | 'record_changed';
 
 /** Discriminated union result from ExecutionLedger.consume(). */
 export type ConsumeResult =
   | { ok: true; entitlement: Entitlement }
   | { ok: false; reason: ConsumeFailureReason };
 
-export type ConsumeFailureReason = 'reservation_not_found';
+export type ConsumeFailureReason = 'reservation_not_found' | 'record_changed';
 
 /** Discriminated union result from ExecutionLedger.release(). */
 export type ReleaseResult =
   | { ok: true; entitlement: Entitlement }
   | { ok: false; reason: ReleaseFailureReason };
 
-export type ReleaseFailureReason = 'reservation_not_found';
+export type ReleaseFailureReason = 'reservation_not_found' | 'record_changed';
 
 // ─────────────────────────────────────────────
 // Pure domain helpers
@@ -254,21 +197,14 @@ export type ReleaseFailureReason = 'reservation_not_found';
  * Pure derivation: maxParticipants * perUserGasAllowanceMist.
  * Returns string for bigint-safe representation.
  *
- * This is a read-model / display helper, not an execution safety gate. It
- * intentionally returns the exact BigInt product even when a draft promotion's
- * product exceeds `MAX_PROMOTION_LEDGER_VALUE_MIST`, so operators can see the
- * offending value before activation rejects it. The activation gate and
- * ExecutionLedger boundaries own the runtime bound enforcement.
+ * This read-model uses the same semantic authority as every write and ledger
+ * boundary, so it cannot project a value the current ledger cannot represent.
  */
 export function computeTotalRequiredBudgetMist(
   promotion: Pick<Promotion, 'maxParticipants' | 'perUserGasAllowanceMist'>,
 ): string {
-  if (!Number.isSafeInteger(promotion.maxParticipants) || promotion.maxParticipants <= 0) {
-    throw new Error('maxParticipants must be a positive safe integer');
-  }
-  if (!/^(?:0|[1-9]\d*)$/.test(promotion.perUserGasAllowanceMist)) {
-    throw new Error('perUserGasAllowanceMist must be a non-negative decimal integer string');
-  }
-  const perUserGasAllowanceMist = BigInt(promotion.perUserGasAllowanceMist);
-  return (BigInt(promotion.maxParticipants) * perUserGasAllowanceMist).toString();
+  return parsePromotionLedgerBudget(
+    promotion.maxParticipants,
+    promotion.perUserGasAllowanceMist,
+  ).totalBudgetMist.toString();
 }

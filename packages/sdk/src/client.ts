@@ -1,5 +1,5 @@
 /**
- * StelisClient — thin HTTP wrapper around the Relay API.
+ * StelisClient — thin HTTP wrapper around a Stelis Host's Relay API and Studio routes.
  *
  * Usage:
  *   const client = new StelisClient({ endpoint: 'http://localhost:3200/relay' });
@@ -17,26 +17,36 @@ import type {
   PromotionPrepareResponse,
   PromotionSponsorRequest,
   PromotionSponsorResponse,
+  PromotionPageQuery,
   PromotionListResponse,
   PromotionDetailResponse,
 } from './types.js';
 import {
   parsePromotionPrepareResponse,
+  parsePromotionPrepareRequest,
   parsePromotionSponsorResponse,
+  parsePromotionSponsorRequest,
+  parsePromotionId,
+  parsePromotionPageQuery,
   parsePromotionListResponse,
   parsePromotionDetailResponse,
   parseRelayConfigResponse,
   parseRelayPrepareResponse,
+  parseRelayPrepareRequest,
   parseHostErrorResponse,
   parseRelaySponsorResponse,
+  parseRelaySponsorRequest,
   parseRelayStatusResponse,
   PROMOTION_PREPARE_ERROR_CODES,
   PROMOTION_SPONSOR_ERROR_CODES,
   RELAY_CONFIG_ERROR_CODES,
   RELAY_PREPARE_ERROR_CODES,
   RELAY_SPONSOR_ERROR_CODES,
+  RELAY_STATUS_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
+  isNodeTimerDelayMs,
+  NODE_TIMER_MAX_DELAY_MS,
   type HostErrorCode,
   type HostErrorMeta,
   type RelayStatusResponse,
@@ -62,7 +72,7 @@ const DEFAULT_REQUEST_TIMEOUTS: ResolvedRequestTimeouts = {
 
 export class StelisApiException extends Error {
   constructor(
-    public readonly code: HostErrorCode | 'UNKNOWN',
+    public readonly code: HostErrorCode,
     message: string,
     public readonly status: number,
     /** Closed current Host error fields other than `error` and `code`. */
@@ -96,7 +106,9 @@ export class StelisClient {
   // ─────────────────────────────────────────
 
   async getStatus(): Promise<RelayStatusResponse> {
-    return parseRelayStatusResponse(await this.get('/status', this.timeouts.statusMs, []));
+    return parseRelayStatusResponse(
+      await this.get('/status', this.timeouts.statusMs, RELAY_STATUS_ERROR_CODES),
+    );
   }
 
   async getConfig(): Promise<RelayConfigResponse> {
@@ -113,10 +125,11 @@ export class StelisClient {
     params: RelayPrepareRequest,
     headers?: Record<string, string>,
   ): Promise<RelayPrepareResponse> {
+    const request = parseRelayPrepareRequest(params);
     return parseRelayPrepareResponse(
       await this.post(
         '/prepare',
-        params,
+        request,
         this.timeouts.prepareMs,
         RELAY_PREPARE_ERROR_CODES,
         headers,
@@ -132,10 +145,11 @@ export class StelisClient {
     params: RelaySponsorRequest,
     headers?: Record<string, string>,
   ): Promise<RelaySponsorResponse> {
+    const request = parseRelaySponsorRequest(params);
     return parseRelaySponsorResponse(
       await this.post(
         '/sponsor',
-        params,
+        request,
         this.timeouts.sponsorMs,
         RELAY_SPONSOR_ERROR_CODES,
         headers,
@@ -152,10 +166,12 @@ export class StelisClient {
     params: PromotionPrepareRequest,
     developerJwt: string,
   ): Promise<PromotionPrepareResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
+    const request = parsePromotionPrepareRequest(params);
     return parsePromotionPrepareResponse(
       await this.studioPost(
-        `/studio/promotions/${encodeURIComponent(promotionId)}/prepare`,
-        params,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}/prepare`,
+        request,
         this.timeouts.studioWriteMs,
         PROMOTION_PREPARE_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
@@ -168,10 +184,12 @@ export class StelisClient {
     params: PromotionSponsorRequest,
     developerJwt: string,
   ): Promise<PromotionSponsorResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
+    const request = parsePromotionSponsorRequest(params);
     return parsePromotionSponsorResponse(
       await this.studioPost(
-        `/studio/promotions/${encodeURIComponent(promotionId)}/sponsor`,
-        params,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}/sponsor`,
+        request,
         this.timeouts.studioWriteMs,
         PROMOTION_SPONSOR_ERROR_CODES,
         { Authorization: `Bearer ${developerJwt}` },
@@ -183,10 +201,19 @@ export class StelisClient {
   // Promotion discovery (GET /studio/promotions, developer JWT)
   // ─────────────────────────────────────────
 
-  async listPromotions(developerJwt: string): Promise<PromotionListResponse> {
+  async listPromotions(
+    developerJwt: string,
+    query: PromotionPageQuery = {},
+  ): Promise<PromotionListResponse> {
+    const page = parsePromotionPageQuery(query);
+    const search = new URLSearchParams();
+    if (page.cursor !== null) search.set('cursor', page.cursor);
+    if (query.limit !== undefined) search.set('limit', String(page.limit));
+    const serializedQuery = search.toString();
+    const suffix = serializedQuery === '' ? '' : `?${serializedQuery}`;
     return parsePromotionListResponse(
       await this.studioGet(
-        '/studio/promotions',
+        `/studio/promotions${suffix}`,
         {
           Authorization: `Bearer ${developerJwt}`,
         },
@@ -200,9 +227,10 @@ export class StelisClient {
     promotionId: string,
     developerJwt: string,
   ): Promise<PromotionDetailResponse> {
+    const currentPromotionId = parsePromotionId(promotionId);
     return parsePromotionDetailResponse(
       await this.studioGet(
-        `/studio/promotions/${encodeURIComponent(promotionId)}`,
+        `/studio/promotions/${encodeURIComponent(currentPromotionId)}`,
         { Authorization: `Bearer ${developerJwt}` },
         this.timeouts.studioReadMs,
         STUDIO_DETAIL_ERROR_CODES,
@@ -284,27 +312,22 @@ export class StelisClient {
       try {
         apiError = parseHostErrorResponse(data, allowedErrorCodes, res.status);
       } catch {
-        apiError = undefined;
+        throw new Error(`Stelis Host returned a non-current error response (HTTP ${res.status})`);
       }
-      const code = apiError?.code ?? 'UNKNOWN';
-      const message =
-        apiError?.error ?? `Relay API returned a non-current error response (HTTP ${res.status})`;
       let extra: HostErrorMeta | undefined;
-      if (apiError) {
-        const { error: _error, code: _code, ...currentMeta } = apiError;
-        if (Object.keys(currentMeta).length > 0) extra = currentMeta;
-      }
+      const { error: _error, code: _code, ...currentMeta } = apiError;
+      if (Object.keys(currentMeta).length > 0) extra = currentMeta;
       throw new StelisApiException(
-        code,
-        message,
+        apiError.code,
+        apiError.error,
         res.status,
         extra && Object.keys(extra).length > 0 ? extra : undefined,
       );
     }
 
     if (data === undefined) {
-      // Successful HTTP status with a non-JSON body indicates an invalid Relay API response.
-      throw new Error(`Relay API returned a non-JSON success response (HTTP ${res.status})`);
+      // Successful HTTP status with a non-JSON body indicates an invalid Host response.
+      throw new Error(`Stelis Host returned a non-JSON success response (HTTP ${res.status})`);
     }
 
     return data;
@@ -332,13 +355,13 @@ function resolveRequestTimeouts(overrides?: StelisRequestTimeouts): ResolvedRequ
 }
 
 function resolveTimeoutMs(name: string, value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value <= 0) {
+  const resolved = value ?? fallback;
+  if (!isNodeTimerDelayMs(resolved)) {
     throw new Error(
-      `[StelisClient] requestTimeouts.${name} must be a positive integer within Number.MAX_SAFE_INTEGER, got ${String(value)}`,
+      `[StelisClient] requestTimeouts.${name} must be an integer from 1 through ${NODE_TIMER_MAX_DELAY_MS}, got ${String(resolved)}`,
     );
   }
-  return value;
+  return resolved;
 }
 
 function parseJsonIfPossible(raw: string): unknown | undefined {

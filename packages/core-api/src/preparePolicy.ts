@@ -4,8 +4,8 @@
  *
  * This module owns:
  *   1. `PREPARE_TTL_MS` — how long a /prepare receipt is valid. Consumed
- *      by prepare store adapters, sponsor policy, inflight limiter, and
- *      the barrel re-export.
+ *      by the sponsored execution store, sponsor policy, in-flight limiter,
+ *      and the barrel re-export.
  *   2. `buildPolicyFields()` — shared assembly from `OnchainConfig`
  *      to `PolicyFields`. `/prepare` issuance and `/sponsor`
  *      revalidation both use this function.

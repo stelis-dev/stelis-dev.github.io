@@ -10,17 +10,16 @@
  *     The recorded receipt fingerprint MUST persist for the adapter's
  *     full lifetime (Redis: no TTL; DB-style stores: unique receipt
  *     constraint plus current-result fingerprint).
- *     `receiptId` is non-null by `SponsoredExecutionLogEntry` contract
- *     (the recorder is invoked from `finally` after `consume()`, where
- *     the sponsor result callback contract guarantees a non-null receiptId).
- *   - aggregate updates and the recent-list append are NOT required to be
- *     co-atomic across the two projections. Aggregate updates MUST be
- *     atomic per emit (Lua/Redis or DB transaction); recent-list append
- *     is best-effort.
+ *     `receiptId` is non-null by `SponsoredExecutionLogEntry` contract.
+ *     The recorder receives the callback from the durable final receipt,
+ *     whose identity always includes `receiptId`.
+ *   - aggregate updates, receipt replay identity, and recent-list append are
+ *     one atomic mutation. A callback retry therefore cannot create a partial
+ *     aggregate or log projection.
  *   - `getSummary('all' | 'generic' | 'promotion')` reads the requested
  *     scope. `'all'` is updated in lockstep with the per-mode scope on
  *     append.
- *   - `getRecent(mode, limit)` returns newest-first entries. The store
+ *   - `getRecent(mode, limit)` returns most recently accepted entries first. The store
  *     MAY cap retention; readers MUST NOT compute lifetime totals from
  *     recent rows.
  */
@@ -44,8 +43,8 @@ export interface SponsoredLogsStoreAdapter {
   getSummary(mode: SponsoredExecutionAggregateMode): Promise<SponsoredExecutionAggregate>;
 
   /**
-   * Read up to `limit` newest-first entries for the given mode scope.
-   * `mode === 'all'` interleaves both modes by `createdAt` order.
+   * Read up to `limit` entries in reverse accepted-append order for the given mode scope.
+   * `mode === 'all'` interleaves both modes in accepted append order.
    */
   getRecent(
     mode: SponsoredExecutionAggregateMode,

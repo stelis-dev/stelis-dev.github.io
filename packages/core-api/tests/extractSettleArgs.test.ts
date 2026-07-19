@@ -83,6 +83,14 @@ const DUMMY_ENV: HostValidationEnv = {
   allowedSettlementSwapPaths: [],
 };
 
+const CONFIG_ID = DUMMY_ENV.configId;
+const REGISTRY_ID = DUMMY_ENV.vaultRegistryId;
+const CLOCK_ID = `0x${'44'.repeat(32)}`;
+const VAULT_ID = `0x${'55'.repeat(32)}`;
+const POOL_ID = `0x${'66'.repeat(32)}`;
+const PAYMENT_COIN_ID = `0x${'77'.repeat(32)}`;
+const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
+
 describe('extractSettleArgsFromBuiltTx — unit tests', () => {
   it('throws L2_EXTRACT_FAILED when no settle command present', () => {
     const commands: PtbCommand[] = [{ kind: 'TransferObjects' }];
@@ -115,10 +123,10 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
     //  quoteTs(15), policyHash(16), orderIdHash(17)]
     const policyHashData = new Uint8Array(32).fill(0xdd);
     const inputs: unknown[] = [
-      makeObjectInput('0xCONFIG'), // 0: config
-      makeObjectInput('0xREGISTRY'), // 1: registry
-      makeObjectInput('0xCLOCK'), // 2: clock
-      makeObjectInput('0xVAULT'), // 3: vault
+      makeObjectInput(CONFIG_ID), // 0: config
+      makeObjectInput(REGISTRY_ID), // 1: registry
+      makeObjectInput(CLOCK_ID), // 2: clock
+      makeObjectInput(VAULT_ID), // 3: vault
       makePureU64Input(1000n), // 4: useCreditAmount
       makePureU64Input(5_000_000n), // 5: executionCostClaim
       makePureAddressInput('0x' + 'aa'.repeat(32)), // 6: settlementPayoutRecipient
@@ -148,8 +156,8 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
     const result = extractSettleArgsFromBuiltTx(commands, inputs, DUMMY_ENV);
     expect(result.extractedSettlementSwapPath).toBeUndefined();
     expect(result.executionCostClaim).toBe(5_000_000n);
-    expect(result.configObjectId).toBe('0xCONFIG');
-    expect(result.registryObjectId).toBe('0xREGISTRY');
+    expect(result.configObjectId).toBe(CONFIG_ID);
+    expect(result.registryObjectId).toBe(REGISTRY_ID);
     expect(result.policyHash).toEqual(policyHashData);
     // 5 tx-derived fields:
     expect(result.receiptId).toEqual(new Uint8Array(0));
@@ -166,11 +174,11 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
     //  quoteTs(17), policyHash(18), orderIdHash(19)]
     const policyHashData = new Uint8Array(32).fill(0xee);
     const inputs: unknown[] = [
-      makeObjectInput('0xCONFIG'), // 0: config
-      makeObjectInput('0xREGISTRY'), // 1: registry
-      makeObjectInput('0xCLOCK'), // 2: clock
-      makeObjectInput('0xPOOL1'), // 3: pool
-      makeObjectInput('0xCOIN'), // 4: paymentCoin
+      makeObjectInput(CONFIG_ID), // 0: config
+      makeObjectInput(REGISTRY_ID), // 1: registry
+      makeObjectInput(CLOCK_ID), // 2: clock
+      makeObjectInput(POOL_ID), // 3: pool
+      makeObjectInput(PAYMENT_COIN_ID), // 4: paymentCoin
       makePureU64Input(1000n), // 5: swapAmount
       makePureU64Input(500n), // 6: minSuiOut
       makePureU64Input(3_000_000n), // 7: executionCostClaim
@@ -193,15 +201,15 @@ describe('extractSettleArgsFromBuiltTx — unit tests', () => {
         packageId: '0x' + '11'.repeat(32),
         module: 'settle',
         function: SETTLEMENT_SWAP_DIRECTION_FUNCTIONS.baseForQuote.newUser,
-        typeArguments: ['0xDEEP::deep::DEEP'],
+        typeArguments: [SETTLEMENT_TOKEN_TYPE],
         arguments: inputs.map((_, i) => makeInputRef(i)),
       },
     ];
 
     const result = extractSettleArgsFromBuiltTx(commands, inputs, DUMMY_ENV);
     expect(result.extractedSettlementSwapPath).toBeDefined();
-    expect(result.extractedSettlementSwapPath!.tokenType).toBe('0xDEEP::deep::DEEP');
-    expect(result.extractedSettlementSwapPath!.hops).toEqual(['0xPOOL1']);
+    expect(result.extractedSettlementSwapPath!.tokenType).toBe(SETTLEMENT_TOKEN_TYPE);
+    expect(result.extractedSettlementSwapPath!.hops).toEqual([POOL_ID]);
     expect(result.extractedSettlementSwapPath!.settlementSwapDirection).toBe('baseForQuote');
     expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.policyHash).toEqual(policyHashData);

@@ -20,21 +20,10 @@ const EXPECTED_DIGEST = toBase58(new Uint8Array(32).fill(3));
 const REPORTED_DIGEST = toBase58(new Uint8Array(32).fill(4));
 
 function currentSuiResult(digest, kind) {
-  const status =
-    kind === 'success'
-      ? { success: true, error: null }
-      : {
-          success: false,
-          error: { $kind: 'Unknown', message: 'failed', Unknown: null },
-        };
-  const transaction = {
-    digest,
-    status,
-    effects: { status, transactionDigest: digest },
-  };
-  return kind === 'success'
-    ? { $kind: 'Transaction', Transaction: transaction }
-    : { $kind: 'FailedTransaction', FailedTransaction: transaction };
+  const error = { kind: 'InsufficientGas', message: 'failed' };
+  const status = kind === 'success' ? { success: true, error: null } : { success: false, error };
+  const result = { outcome: kind, digest, effects: { status, transactionDigest: digest } };
+  return kind === 'success' ? result : { ...result, error };
 }
 
 function provenance() {

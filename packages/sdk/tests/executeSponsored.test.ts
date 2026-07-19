@@ -5,7 +5,8 @@
  *   1. Success path: pass-through from executeSponsored
  *   2. INSUFFICIENT_SETTLE_INPUT → INSUFFICIENT_FUNDS
  *   3. INSUFFICIENT_BALANCE → INSUFFICIENT_FUNDS
- *   3b. PAYMENT_COIN_CONFLICT → INSUFFICIENT_FUNDS (R-9)
+ *   3b. PAYMENT_COIN_CONFLICT remains exact
+ *   3c. PAYMENT_COIN_LIMIT_EXCEEDED remains exact with consolidation guidance
  *   4. SPONSOR_PREFLIGHT_FAILED + subcode INSUFFICIENT_SETTLE_INPUT → INSUFFICIENT_FUNDS
  *   5. SPONSOR_ONCHAIN_FAILED + subcode INSUFFICIENT_SETTLE_INPUT → INSUFFICIENT_FUNDS
  *   5b. SPONSOR_PREFLIGHT_FAILED + subcode INSUFFICIENT_FUNDS → INSUFFICIENT_FUNDS
@@ -26,11 +27,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
+import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { StelisSDK } from '../src/sdk.js';
 import { StelisSponsoredError } from '../src/errors.js';
 import type { RelayConfigResponse } from '../src/types.js';
 import { STELIS_CONTRACT_IDS } from '@stelis/contracts';
-import { makeCreditResult } from './helpers/currentFixtures.js';
 
 const { mockExtractSettleFields, mockValidateSettleFields } = vi.hoisted(() => ({
   mockExtractSettleFields: vi.fn(),
@@ -52,7 +53,6 @@ vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
-    queryUserCredit: vi.fn(async () => makeCreditResult()),
     extractSettleTransactionFieldsFromTxBytes: mockExtractSettleFields,
     validateSettleTransactionFields: mockValidateSettleFields,
   };
@@ -120,10 +120,7 @@ const RELAY_CONFIG_RESPONSE: RelayConfigResponse = {
 };
 
 function makeMockSuiClient(): SuiGrpcClient {
-  return {
-    getReferenceGasPrice: vi.fn().mockResolvedValue(1000n),
-    listCoins: vi.fn().mockResolvedValue({ objects: [{ objectId: '0xcoin' }] }),
-  } as unknown as SuiGrpcClient;
+  return withSuiClientIdentity({});
 }
 
 async function createSDK(): Promise<StelisSDK> {
@@ -223,11 +220,13 @@ describe('StelisSDK.executeSponsored', () => {
     }
   });
 
-  // ── 3b: PAYMENT_COIN_CONFLICT → INSUFFICIENT_FUNDS (R-9) ──────────────
-  it('normalizes PAYMENT_COIN_CONFLICT to INSUFFICIENT_FUNDS', async () => {
+  // ── 3b: PAYMENT_COIN_CONFLICT remains exact ───────────────────────────
+  it('preserves PAYMENT_COIN_CONFLICT instead of reporting insufficient funds', async () => {
     const { StelisApiException } = await import('../src/client.js');
+    const { hostErrorPublicMessage } = await import('@stelis/contracts');
+    const message = hostErrorPublicMessage('PAYMENT_COIN_CONFLICT');
     mockPrepare.mockRejectedValueOnce(
-      new StelisApiException('PAYMENT_COIN_CONFLICT', 'All coins consumed by user TX', 422),
+      new StelisApiException('PAYMENT_COIN_CONFLICT', message, 422),
     );
 
     try {
@@ -235,7 +234,33 @@ describe('StelisSDK.executeSponsored', () => {
       expect.unreachable('Should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(StelisSponsoredError);
-      expect((err as StelisSponsoredError).code).toBe('INSUFFICIENT_FUNDS');
+      expect(err).toMatchObject({
+        code: 'PAYMENT_COIN_CONFLICT',
+        message,
+        cause: expect.objectContaining({ code: 'PAYMENT_COIN_CONFLICT' }),
+      });
+      expect((err as StelisSponsoredError).code).not.toBe('INSUFFICIENT_FUNDS');
+    }
+  });
+
+  it('preserves PAYMENT_COIN_LIMIT_EXCEEDED with Coin consolidation guidance', async () => {
+    const { StelisApiException } = await import('../src/client.js');
+    const { hostErrorPublicMessage } = await import('@stelis/contracts');
+    const message = hostErrorPublicMessage('PAYMENT_COIN_LIMIT_EXCEEDED');
+    mockPrepare.mockRejectedValueOnce(
+      new StelisApiException('PAYMENT_COIN_LIMIT_EXCEEDED', message, 422),
+    );
+
+    try {
+      await sdk.executeSponsored(new Transaction(), defaultOpts());
+      expect.unreachable('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(StelisSponsoredError);
+      expect(err).toMatchObject({
+        code: 'PAYMENT_COIN_LIMIT_EXCEEDED',
+        message,
+      });
+      expect((err as StelisSponsoredError).code).not.toBe('INSUFFICIENT_FUNDS');
     }
   });
 
@@ -384,11 +409,11 @@ describe('StelisSDK.executeSponsored', () => {
     }
   });
 
-  // ── 11: SLIPPAGE_QUERY_FAILED → TRANSACTION_FAILED (pre-wired) ────────
-  it('normalizes SLIPPAGE_QUERY_FAILED to TRANSACTION_FAILED', async () => {
+  // ── 11: MARKET_QUOTE_UNAVAILABLE → TRANSACTION_FAILED ─────────────────
+  it('normalizes MARKET_QUOTE_UNAVAILABLE to TRANSACTION_FAILED', async () => {
     const { StelisApiException } = await import('../src/client.js');
     mockPrepare.mockRejectedValueOnce(
-      new StelisApiException('SLIPPAGE_QUERY_FAILED', 'RPC query failed', 422),
+      new StelisApiException('MARKET_QUOTE_UNAVAILABLE', 'RPC query failed', 422),
     );
 
     try {

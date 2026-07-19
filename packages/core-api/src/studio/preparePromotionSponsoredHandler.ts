@@ -2,16 +2,21 @@
  * preparePromotionSponsoredHandler — public Studio prepare adapter over the
  * SponsoredExecution prepare runner.
  */
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { PromotionPrepareErrorCode } from '@stelis/contracts';
-import type { OnchainConfig } from '@stelis/core-relay';
+import type {
+  PromotionPrepareErrorCode,
+  PromotionPrepareRequest,
+  PromotionPrepareResponse,
+} from '@stelis/contracts';
+import type { ChainBoundSuiEndpointSnapshot, OnchainConfig } from '@stelis/core-relay';
 import type { PromotionStoreAdapter } from './promotionStore.js';
 import type { PromotionExecutionLedger } from './executionLedger.js';
 import type { SponsorPoolAdapter } from '../context.js';
-import type { PrepareStoreAdapter } from '../store/prepareTypes.js';
+import type { SponsoredExecutionStoreAdapter } from '../store/sponsoredExecutionStore.js';
 import type { PrepareInflightLimiter } from '../store/prepareInflightTypes.js';
 import type { VerifiedDeveloperIdentity } from './developerJwtVerifier.js';
 import type { ReserveFailureReason } from './domain.js';
+import { readAdmittedClientIp, type AdmittedClientIp } from '../abuseBlocking.js';
+import type { PrepareRequestAdmission } from '../handlers/prepare.js';
 import { SponsorLeaseCommitError } from '../store/sponsorLeaseProof.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_SLOT_EXHAUSTED } from '../observability/events.js';
@@ -32,16 +37,16 @@ import {
 
 /** Dependencies injected by the host (app-api context). */
 export interface PromotionPrepareContext {
-  /** Sui gRPC client for dry-run / simulation. */
-  sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for dry-run / simulation. */
+  sui: ChainBoundSuiEndpointSnapshot;
   /** Promotion store — loads promotion record. */
   promotionStore: PromotionStoreAdapter;
   /** Execution ledger — entitlement read + atomic reserve/release. */
   executionLedger: PromotionExecutionLedger;
   /** Sponsor pool — slot checkout/checkin/sign. */
   sponsorPool: SponsorPoolAdapter;
-  /** Prepare store — receipt binding. */
-  prepareStore: PrepareStoreAdapter;
+  /** Receipt lifecycle store. */
+  sponsoredExecutionStore: SponsoredExecutionStoreAdapter;
   /** In-flight gate for expensive prepare work. */
   prepareInflightLimiter: PrepareInflightLimiter;
   /**
@@ -54,27 +59,13 @@ export interface PromotionPrepareContext {
 }
 
 /** Request parameters for promotion prepare. */
-export interface PromotionPrepareParams {
+interface PromotionPrepareParams extends PromotionPrepareRequest {
   /** Promotion ID (from path parameter). */
   promotionId: string;
-  /** User's Sui wallet address. */
-  senderAddress: string;
-  /** User's TransactionKind (base64). */
-  txKindBytes: string;
   /** Pre-verified developer identity (route owns crypto verification). */
   verifiedIdentity: VerifiedDeveloperIdentity;
-  /** Client IP for tracking. */
-  clientIp: string;
-}
-
-/** Successful promotion prepare result. */
-export interface PromotionPrepareResult {
-  /** Full transaction bytes — user-signable (base64). */
-  txBytes: string;
-  /** Unique receipt ID. */
-  receiptId: string;
-  /** Estimated gas cost (MIST) — the amount reserved from budget+allowance. */
-  estimatedGasMist: string;
+  /** Opaque proof of successful Host IP admission. */
+  clientIp: AdmittedClientIp;
 }
 
 // ─────────────────────────────────────────────
@@ -103,6 +94,10 @@ function reservationFailureCode(reason: ReserveFailureReason): PromotionPrepareE
       return 'ENTITLEMENT_INSUFFICIENT';
     case 'concurrent_reservation':
       return 'ENTITLEMENT_CONCURRENT_RESERVATION';
+    case 'record_changed':
+      return 'PROMOTION_CURRENT_CONFLICT';
+    case 'promotion_not_active':
+      return 'PROMOTION_NOT_ACTIVE';
   }
 }
 
@@ -113,19 +108,21 @@ function reservationFailureCode(reason: ReserveFailureReason): PromotionPrepareE
 export async function handlePromotionPrepare(
   ctx: PromotionPrepareContext,
   params: PromotionPrepareParams,
-): Promise<PromotionPrepareResult> {
+  admission: PrepareRequestAdmission,
+): Promise<PromotionPrepareResponse> {
+  const clientIp = readAdmittedClientIp(params.clientIp);
   const options = {
     context: {
       sui: ctx.sui,
       promotionStore: ctx.promotionStore,
       executionLedger: ctx.executionLedger,
       sponsorPool: ctx.sponsorPool,
-      prepareStore: ctx.prepareStore,
+      sponsoredExecutionStore: ctx.sponsoredExecutionStore,
       globalAllowedTargets: ctx.globalAllowedTargets,
       getConfig: ctx.getConfig,
     },
     prepare: {
-      params,
+      params: { ...params, clientIp },
       errors: {
         prepare: (message: string, code: PromotionPrepareErrorCode) =>
           new PromotionPrepareError(message, code),
@@ -139,12 +136,13 @@ export async function handlePromotionPrepare(
       {
         inflightLimiter: ctx.prepareInflightLimiter,
         sponsorPool: ctx.sponsorPool,
-        prepareStore: ctx.prepareStore,
+        sponsoredExecutionStore: ctx.sponsoredExecutionStore,
         executionLedger: ctx.executionLedger,
       },
       {
         senderAddress: params.senderAddress,
-        clientIp: params.clientIp,
+        clientIp,
+        assertSponsorAvailable: admission.assertSponsorAvailable,
         ledgerAcquireParams: {
           promotionId: params.promotionId,
           userId: params.verifiedIdentity.userId,

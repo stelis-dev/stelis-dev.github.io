@@ -48,19 +48,23 @@ Network is auto-detected from the Relay API, and the sample page selects the mat
 
 ## Pages
 
-| Route         | Description                                               |
-| ------------- | --------------------------------------------------------- |
-| `/`           | Home — project overview                                   |
-| `/status`     | Live Host status                                          |
-| `/docs`       | Public API and capability reference UI for deployed Hosts |
-| `/playground` | Interactive request runner for direct Host calls          |
-| `/sandbox`    | Full transaction sandbox with wallet integration          |
-| `/promotion`  | Studio-mode promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
+| Route         | Description                                                                             |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `/`           | Home — project overview                                                                 |
+| `/status`     | Live Host status                                                                        |
+| `/docs`       | Public API and capability reference UI for deployed Hosts                               |
+| `/playground` | Interactive request runner for direct Host calls                                        |
+| `/sandbox`    | Full transaction sandbox with wallet integration                                        |
+| `/promotion`  | `relay_and_studio` promotion and developer-JWT test page (`VITE_STELIS_UI_MODE=studio`) |
 
 The `/promotion` test transaction calls `0x2::coin::zero` and
 `0x2::coin::destroy_zero`. A Host operator must include both raw targets in
 `STUDIO_ALLOWED_TARGETS` before booting or restarting the Host. The page and the
 developer JWT do not change this Host-wide policy.
+
+The page does not enable Studio through an SDK connection option. Promotion calls
+use the Host's Studio routes directly; a `relay_only` Host returns the current
+`STUDIO_UNAVAILABLE` Host error.
 
 ## Handoff
 
@@ -103,10 +107,10 @@ Build this app from the workspace root with the dependency order shown above so 
 
 Required build-time variables:
 
-| Variable                  | Required | Example                                          |
-| ------------------------- | -------- | ------------------------------------------------ |
+| Variable                    | Required | Example                                          |
+| --------------------------- | -------- | ------------------------------------------------ |
 | `VITE_STELIS_RELAY_API_URL` | ✅       | `https://your-app-api.vercel.app/relay`          |
-| `VITE_REPO_DOCS_BASE_URL` | optional | `https://github.com/stelis-dev/stelis/blob/main` |
+| `VITE_REPO_DOCS_BASE_URL`   | optional | `https://github.com/stelis-dev/stelis/blob/main` |
 
 > **Important**: `VITE_STELIS_RELAY_API_URL` must point to your `app-api` deployment URL with the `/relay` suffix.
 

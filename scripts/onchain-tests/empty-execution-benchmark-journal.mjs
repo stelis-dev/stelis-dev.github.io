@@ -536,9 +536,8 @@ export class EmptyExecutionBenchmarkJournal {
  * Resolve only the previous process's active attempt.
  *
  * `lookupCanonicalTerminal` is the sole external evidence port. It must
- * return the raw current Sui transaction-result union; the journal applies
- * the current parser itself. A failed
- * or mismatched lookup leaves active.json untouched and therefore blocks all
+ * return the exact result produced by the current Sui gateway. A failed or
+ * mismatched lookup leaves active.json untouched and therefore blocks all
  * later transaction work for this wallet on this machine.
  */
 export async function recoverBenchmarkAttempt(journal, lookupCanonicalTerminal) {

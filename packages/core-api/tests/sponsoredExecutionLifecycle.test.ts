@@ -7,11 +7,11 @@
  *   - policy hook vocabulary,
  *   - branded reservation handle construction (factory-key gate, internal-only
  *     factory access),
- *   - post-release / post-consume runtime guard
+ *   - post-release runtime guard
  *     (`ReservationHandleClosedError`),
  *   - per-stage reservation handle shapes (GasBoundBuild excludes
- *     `LedgerReservationHandle`; prepare-store commit and ClassifySponsorResult carry
- *     it),
+ *     `LedgerReservationHandle`; prepared commit and sponsor-result reconstruction
+ *     carry it),
  *   - GasBoundBuildInput reservation handle presence + liveness check,
  *   - sponsor-phase reconstruction shape parity,
  *   - SponsoredExecutionPolicy hook signatures + registry exhaustiveness with
@@ -21,6 +21,7 @@
  * `__testingReservationHandleInternals` direct owner export.
  */
 import { describe, test, expect } from 'vitest';
+import type { AddressBalanceGasTransaction } from '@stelis/core-relay/server';
 import {
   ReservationHandleClosedError,
   ReservationHandleConstructionError,
@@ -102,10 +103,10 @@ describe('SponsoredExecution — reservation handle construction guard', () => {
 });
 
 // ─────────────────────────────────────────────
-// Section 2 — post-release / post-consume guard
+// Section 2 — post-release guard
 // ─────────────────────────────────────────────
 
-describe('SponsoredExecution — post-release / post-consume guard', () => {
+describe('SponsoredExecution — post-release guard', () => {
   test('after release(), every payload getter throws ReservationHandleClosedError(reason="released")', () => {
     const slot = reconstructReservationHandles.sponsorSlot({
       sponsorAddress: '0xSPONSOR',
@@ -124,26 +125,6 @@ describe('SponsoredExecution — post-release / post-consume guard', () => {
     }
   });
 
-  test('after consume(), every payload getter throws ReservationHandleClosedError(reason="consumed")', () => {
-    const ledger = reconstructReservationHandles.ledgerReservation({
-      receiptId: '0xR',
-      promotionId: 'promo-1',
-      userId: 'user-1',
-      reservedGasMist: 1_400_000n,
-      ledgerLookupVerified: true,
-    });
-    ledger.consume();
-    expect(ledger.isLive()).toBe(false);
-    try {
-      void ledger.reservedGasMist;
-      expect.fail('expected throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ReservationHandleClosedError);
-      expect((err as ReservationHandleClosedError).reason).toBe('consumed');
-      expect((err as ReservationHandleClosedError).reservationKind).toBe('LedgerReservation');
-    }
-  });
-
   test('release() is idempotent on an already-released handle; no double-throw', () => {
     const nonce = reconstructReservationHandles.nonce({
       nonce: 1n,
@@ -154,42 +135,6 @@ describe('SponsoredExecution — post-release / post-consume guard', () => {
     nonce.release();
     expect(() => nonce.release()).not.toThrow();
     expect(nonce.isLive()).toBe(false);
-  });
-
-  test('release() after consume() throws — releasing a consumed token would mask the entitlement debit', () => {
-    const ledger = reconstructReservationHandles.ledgerReservation({
-      receiptId: '0xR',
-      promotionId: 'p',
-      userId: 'u',
-      reservedGasMist: 1n,
-      ledgerLookupVerified: true,
-    });
-    ledger.consume();
-    expect(() => ledger.release()).toThrow(ReservationHandleClosedError);
-  });
-
-  test('consume() after release() throws — a released token cannot be debited', () => {
-    const ledger = reconstructReservationHandles.ledgerReservation({
-      receiptId: '0xR',
-      promotionId: 'p',
-      userId: 'u',
-      reservedGasMist: 1n,
-      ledgerLookupVerified: true,
-    });
-    ledger.release();
-    expect(() => ledger.consume()).toThrow(ReservationHandleClosedError);
-  });
-
-  test('double consume() throws — entitlement double-spend prevention', () => {
-    const ledger = reconstructReservationHandles.ledgerReservation({
-      receiptId: '0xR',
-      promotionId: 'p',
-      userId: 'u',
-      reservedGasMist: 1n,
-      ledgerLookupVerified: true,
-    });
-    ledger.consume();
-    expect(() => ledger.consume()).toThrow(ReservationHandleClosedError);
   });
 });
 
@@ -220,7 +165,7 @@ describe('SponsoredExecution — per-stage reservation handle shapes', () => {
 
   test('SponsorResultReservationHandles carries ledgerReservation but NOT nonce', () => {
     // Type-level lock: nonce has no sponsor result verb. The in-PTB nonce match
-    // already happened at SharedPostconsumeChecks.
+    // already happened at SharedSponsorChecks.
     const slot = reconstructReservationHandles.sponsorSlot({
       sponsorAddress: '0xSPONSOR',
       receiptId: '0xR',
@@ -352,35 +297,23 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
     chainSnapshot: PolicyHooks<D>['ChainSnapshot'],
   ): PolicyHooks<D> {
     const noop = (): void => {};
-    const sharedPostconsumeChecks: PolicyHooks<D>['SharedPostconsumeChecks'] = () => ({});
-    const policyPostconsumeChecks: PolicyHooks<D>['PolicyPostconsumeChecks'] = () => ({});
+    const sharedSponsorChecks: PolicyHooks<D>['SharedSponsorChecks'] = () => ({});
+    const policySponsorChecks: PolicyHooks<D>['PolicySponsorChecks'] = () => ({});
     const gasBoundBuild: PolicyHooks<D>['GasBoundBuild'] = () => ({
-      txBytes: new Uint8Array(),
-      txBytesHash: '',
+      addressBalanceGasTransaction: Object.freeze({}) as AddressBalanceGasTransaction,
       measuredGasMist: 0n,
     });
     return {
       Intent: noop,
       RequestValidation: noop,
-      InflightAdmission: noop,
       ChainSnapshot: chainSnapshot,
-      ExecutionPolicySelected: noop,
-      SlotFreePlan: noop,
-      SponsorSlotReservationAcquired: noop,
       GasBoundBuild: gasBoundBuild,
-      SelfCheck: noop,
-      SponsorLeaseCommitted: noop,
       DecodeSponsorSubmission: noop,
       UserSignatureValidation: noop,
-      Consume: noop,
-      SharedPostconsumeChecks: sharedPostconsumeChecks,
-      PolicyPostconsumeChecks: policyPostconsumeChecks,
+      SharedSponsorChecks: sharedSponsorChecks,
+      PolicySponsorChecks: policySponsorChecks,
       Preflight: noop,
-      PolicyApproval: noop,
-      SponsorSign: noop,
-      Submit: noop,
       ClassifySponsorResult: noop,
-      Release: noop,
     };
   }
 
@@ -470,18 +403,6 @@ describe('SponsoredExecution — SponsoredExecutionPolicy registry', () => {
     }
     expect(caught).toBeInstanceOf(SponsoredExecutionPolicyRegistryError);
     expect((caught as SponsoredExecutionPolicyRegistryError).reason).toBe('discriminator_mismatch');
-  });
-
-  test('SponsoredExecutionPolicy hook shape compiles with a route-specific RouteReservation hook', () => {
-    const generic = makeNoopPolicy('generic');
-    const withReservation: SponsoredExecutionPolicy = {
-      ...generic,
-      hooks: {
-        ...generic.hooks,
-        RouteReservationBeforeBuild: () => undefined,
-      },
-    };
-    expect(withReservation.hooks.RouteReservationBeforeBuild).toBeDefined();
   });
 });
 

@@ -4,40 +4,35 @@
  * Implements the host-side of the `core-api`-owned
  * `SponsorResultCallback` contract (see
  * `packages/core-api/src/handlers/sponsorResult.ts`). The callback is
- * invoked by sponsor SponsoredExecutionPolicy `Release` hooks after the sponsor
- * runner's `safeSlotCheckin()` boundary. It drives per-action
- * sponsor operations state updates:
+ * invoked from the durable final sponsored-execution receipt. It drives
+ * per-action sponsor operations state updates:
  *
  *   1. Bounded `getBalance` probe on the consumed slot, bounded by
  *      `SPONSOR_OPERATIONS_SLOT_BALANCE_TIMEOUT_MS`. Result is written to the
- *      slot HASH via `updateEntityLuaScript` (Redis authors ordering
- *      fields).
+ *      slot observation through the shared state adapter (Redis authors the
+ *      ordering fields).
  *   2. When the sponsor refill account address equals `SETTLEMENT_PAYOUT_RECIPIENT_ADDRESS`
  *      and `outcome === 'success'`, run a bounded sponsor refill account
  *      `getBalance` probe and write the sponsor refill account HASH.
  *
- * The callback is a never-throws contract: every async step is wrapped
- * in try/catch and rejections are logged via `logStructuredEvent`.
- * Callers (the sponsor SponsoredExecutionPolicy Release hooks) also wrap the call in
- * try/catch as defence-in-depth.
+ * Delivery succeeds only after the required Redis observations are written.
+ * A write failure is logged and rethrown so the durable final receipt remains
+ * pending and recovery can retry this idempotent observation callback.
  *
  * Observability contract:
- *   - A failed chain probe with a successful degraded-state fallback
- *     write (the common case — RPC blip, write a single
- *     `rpc_unreachable` / `healthy=0` row) is **not** an observability
- *     event; the degraded state itself is the signal.
+ *   - A failed chain probe with a successful failed-observation write is
+ *     **not** an observability event; the current status derived from that
+ *     observation is the signal.
  *   - `SPONSOR_OPERATIONS_STATE_WRITE_FAILED` is emitted whenever the shared
- *     Redis state store cannot accept the callback's slot or sponsor refill account update,
- *     or when an unexpected error escapes the outer `try`. The
+ *     Redis state store cannot accept the callback's slot or sponsor refill account update. The
  *     `source` payload field discriminates the concrete site:
  *     `sponsor_result_state_update_slot_update` /
- *     `sponsor_result_state_update_sponsor_refill_account_update` /
- *     `sponsor_result_state_update_unhandled`.
+ *     `sponsor_result_state_update_sponsor_refill_account_update`.
  */
 
-import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { SponsorResultCallback, SponsorResultMetadata } from '@stelis/core-api';
 import type { SponsorSlotState } from '@stelis/contracts';
+import { getSuiBalance, type SuiEndpointSnapshot } from '@stelis/core-relay';
 import {
   logStructuredEvent,
   SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
@@ -46,70 +41,46 @@ import type { RedisSponsorOperationsState } from './redisState.js';
 import { normalizeSponsorOperationsLastError } from './lastError.js';
 import { probeAndWriteSponsorRefillAccountState } from './sponsorRefillAccountProbe.js';
 import { withTimeout } from './timeout.js';
-import { SPONSOR_BALANCE_WARN_MIST } from './defaults.js';
 import { parseChainBalanceMist } from './balanceParsing.js';
 import type { SponsorRefillAccountSpendStateStore } from './accountSpendState.js';
+import type { SponsorOperationsSettings } from './settings.js';
+import { calculateSponsorOperationsStatus, isActiveSponsorRefillOperationState } from './status.js';
 
 export interface SponsorResultCallbackDeps {
-  /** Sui gRPC client for bounded balance probes. */
-  readonly sui: SuiGrpcClient;
+  /** Qualified Sui endpoint snapshot for bounded balance probes. */
+  readonly sui: SuiEndpointSnapshot;
   /** Shared Redis state store (write + read). */
   readonly state: RedisSponsorOperationsState;
   /** Account spend sequence used to reject stale Sponsor Refill Account probes. */
   readonly spendState: SponsorRefillAccountSpendStateStore;
-  /** Sponsor refill account address for bounded sponsor refill account balance probes. */
-  readonly sponsorRefillAccountAddress: string;
-  /** Settlement payout recipient address. Used to detect sponsor refill account-as-recipient mode. */
-  readonly settlementPayoutRecipientAddress: string;
-  /**
-   * Slot balance probe upper bound (ms). Required — caller must justify
-   * per `docs/parameters.md`. No default is supplied here.
-   */
-  readonly slotBalanceTimeoutMs: number;
-  /**
-   * Sponsor refill account balance probe upper bound (ms). Required — same contract as
-   * `slotBalanceTimeoutMs`.
-   */
-  readonly sponsorRefillAccountBalanceTimeoutMs: number;
-  /**
-   * Per-slot warn threshold used to classify probe results into
-   * `healthy` vs `low_balance`. Defaults to `SPONSOR_BALANCE_WARN_MIST`.
-   */
-  readonly warnThresholdMist?: bigint;
-  /**
-   * Per-slot refill target in MIST. Used to compute
-   * `refillsRemaining = floor(sponsorRefillAccountBalance / refillTargetMist)` when present.
-   */
-  readonly refillTargetMist: bigint | null;
+  readonly settings: SponsorOperationsSettings;
   /**
    * Optional hook fired after a slot state write resolves (regardless of
    * whether the probe succeeded or the degraded fallback was written).
-   * The host wires this to `refillWorker.requestRefill` so a slot
+   * The host wires this to `SponsorOperationsTaskScheduler.requestObservedSlotRefill` so a slot
    * transitioning to `low_balance` immediately enqueues a refill attempt.
    *
-   * Must be synchronous, best-effort, and never throw. The callback
-   * invokes it in a try/catch as defence-in-depth.
+   * Must be synchronous and best-effort. The callback invokes it in a
+   * try/catch so an optional refill nudge cannot invalidate a durable state
+   * observation that was already written.
    */
   readonly onSlotStateChanged?: (slotAddress: string, state: SponsorSlotState) => void;
-  /** Nudge refill eligibility only after a source-account balance was observed and stored. */
-  readonly onSponsorRefillAccountObserved?: () => void | Promise<void>;
+  /**
+   * Best-effort synchronous nudge after a source-account balance is stored.
+   * The SponsorOperations scheduler owns and retains the resulting work.
+   */
+  readonly onSponsorRefillAccountObserved?: () => void;
 }
 
 /**
- * Build the host-side post-sponsor result callback. The returned function is the
- * value you pass to the `createHostContext` onSponsorResult callback /
- * `PromotionSponsorContext.onSponsorResult`.
+ * Build the host-side post-sponsor result observer. The SponsorOperations
+ * scheduler retains this callback before the Host result callback invokes it.
  */
 export function createSponsorResultStateUpdater(
   deps: SponsorResultCallbackDeps,
 ): SponsorResultCallback {
-  const warnThresholdMist = deps.warnThresholdMist ?? SPONSOR_BALANCE_WARN_MIST;
   const sponsorRefillAccountIsSettlementPayoutRecipient =
-    deps.sponsorRefillAccountAddress === deps.settlementPayoutRecipientAddress;
-
-  function classifySlot(balance: bigint): SponsorSlotState {
-    return balance >= warnThresholdMist ? 'healthy' : 'low_balance';
-  }
+    deps.settings.sponsorRefillAccountAddress === deps.settings.settlementPayoutRecipientAddress;
 
   function notifySlotStateChanged(slotAddress: string, state: SponsorSlotState): void {
     if (!deps.onSlotStateChanged) return;
@@ -122,8 +93,23 @@ export function createSponsorResultStateUpdater(
     }
   }
 
-  async function probeAndWriteSlot(slotAddress: string): Promise<void> {
+  function notifySponsorRefillAccountObserved(): void {
+    if (!deps.onSponsorRefillAccountObserved) return;
+    try {
+      deps.onSponsorRefillAccountObserved();
+    } catch {
+      // The periodic scheduler will re-evaluate eligibility. A best-effort
+      // nudge cannot invalidate the required durable balance observation.
+    }
+  }
+
+  async function probeAndWriteSlot(slotAddress: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const previous = await deps.state.readSlot(slotAddress);
+    signal?.throwIfAborted();
+    if (isActiveSponsorRefillOperationState(previous?.refillOperationState ?? null)) {
+      return;
+    }
     const expectedWriteSeq = previous?.writeSeq ?? 0;
     function logSlotWriteFailure(
       writeErr: unknown,
@@ -149,80 +135,92 @@ export function createSponsorResultStateUpdater(
     try {
       balance = await withTimeout(
         `sponsorResultStateUpdater.getSlotBalance(${slotAddress})`,
-        deps.slotBalanceTimeoutMs,
-        async () => {
-          const res = await deps.sui.getBalance({ owner: slotAddress });
-          return parseChainBalanceMist(res.balance.balance, `Slot ${slotAddress} balance`);
+        deps.settings.slotBalanceTimeoutMs,
+        async (operationSignal) => {
+          const res = await getSuiBalance(deps.sui, {
+            owner: slotAddress,
+            signal: operationSignal,
+          });
+          return parseChainBalanceMist(
+            res.addressBalance,
+            `Sponsor address ${slotAddress} address balance`,
+          );
         },
+        signal,
       );
     } catch (err) {
+      signal?.throwIfAborted();
       const message = err instanceof Error ? err.message : String(err);
+      const calculated = calculateSponsorOperationsStatus({
+        entity: 'sponsor_slot',
+        settings: deps.settings,
+        observation: { status: 'failed' },
+        refillOperationState: previous?.refillOperationState ?? null,
+      });
       try {
+        signal?.throwIfAborted();
         const updated = await deps.state.updateSlotIfWriteSeq(slotAddress, expectedWriteSeq, {
-          state: 'rpc_unreachable',
-          balanceMist: '',
+          addressBalanceMist: '',
           lastError: normalizeSponsorOperationsLastError(err),
         });
-        if (updated) notifySlotStateChanged(slotAddress, 'rpc_unreachable');
+        if (!updated) {
+          throw new Error(`Sponsor slot ${slotAddress} changed during result observation`);
+        }
       } catch (writeErr) {
-        logSlotWriteFailure(writeErr, { state: 'rpc_unreachable', probeError: message });
+        logSlotWriteFailure(writeErr, { state: calculated.state, probeError: message });
+        throw writeErr instanceof Error ? writeErr : new Error(String(writeErr));
       }
+      signal?.throwIfAborted();
+      notifySlotStateChanged(slotAddress, calculated.state);
       return;
     }
 
-    const nextState = classifySlot(balance);
+    const calculated = calculateSponsorOperationsStatus({
+      entity: 'sponsor_slot',
+      settings: deps.settings,
+      observation: { status: 'succeeded', addressBalanceMist: balance },
+      refillOperationState: previous?.refillOperationState ?? null,
+    });
+    const nextState = calculated.state;
     try {
+      signal?.throwIfAborted();
       const updated = await deps.state.updateSlotIfWriteSeq(slotAddress, expectedWriteSeq, {
-        state: nextState,
-        balanceMist: balance.toString(),
+        addressBalanceMist: balance.toString(),
         lastError: '',
       });
-      if (updated) notifySlotStateChanged(slotAddress, nextState);
+      if (!updated) {
+        throw new Error(`Sponsor slot ${slotAddress} changed during result observation`);
+      }
     } catch (writeErr) {
       logSlotWriteFailure(writeErr, { state: nextState });
+      throw writeErr instanceof Error ? writeErr : new Error(String(writeErr));
+    }
+    signal?.throwIfAborted();
+    notifySlotStateChanged(slotAddress, nextState);
+  }
+
+  async function probeAndWriteSponsorRefillAccount(signal?: AbortSignal): Promise<void> {
+    const balance = await probeAndWriteSponsorRefillAccountState({
+      sui: deps.sui,
+      spendState: deps.spendState,
+      settings: deps.settings,
+      signal,
+    });
+    if (balance !== null) {
+      signal?.throwIfAborted();
+      notifySponsorRefillAccountObserved();
     }
   }
 
-  async function probeAndWriteSponsorRefillAccount(): Promise<void> {
-    const balance = await probeAndWriteSponsorRefillAccountState(
-      {
-        sui: deps.sui,
-        spendState: deps.spendState,
-        sponsorRefillAccountAddress: deps.sponsorRefillAccountAddress,
-        refillTargetMist: deps.refillTargetMist,
-        sponsorRefillAccountBalanceTimeoutMs: deps.sponsorRefillAccountBalanceTimeoutMs,
-      },
-      {
-        operation: 'sponsorResultStateUpdater.getSponsorRefillAccountBalance',
-        source: 'sponsor_result_state_update_sponsor_refill_account_update',
-        writeFailureMode: 'swallow',
-      },
-    );
-    if (balance !== null && deps.onSponsorRefillAccountObserved) {
-      await deps.onSponsorRefillAccountObserved();
-    }
-  }
-
-  return async function onSponsorResult(metadata: SponsorResultMetadata): Promise<void> {
-    try {
-      await probeAndWriteSlot(metadata.sponsorAddress);
-      if (sponsorRefillAccountIsSettlementPayoutRecipient && metadata.outcome === 'success') {
-        await probeAndWriteSponsorRefillAccount();
-      }
-    } catch (outerErr) {
-      // Defence-in-depth: the two helpers above are expected to catch
-      // their own errors. If something still escapes, log + swallow so
-      // the never-throws contract holds.
-      logStructuredEvent(
-        SPONSOR_OPERATIONS_STATE_WRITE_FAILED,
-        {
-          source: 'sponsor_result_state_update_unhandled',
-          sponsor_address: metadata.sponsorAddress,
-          outcome: metadata.outcome,
-          error: outerErr instanceof Error ? outerErr.message : String(outerErr),
-        },
-        'warn',
-      );
+  return async function onSponsorResult(
+    metadata: SponsorResultMetadata,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    await probeAndWriteSlot(metadata.sponsorAddress, signal);
+    signal?.throwIfAborted();
+    if (sponsorRefillAccountIsSettlementPayoutRecipient && metadata.outcome === 'success') {
+      await probeAndWriteSponsorRefillAccount(signal);
     }
   };
 }

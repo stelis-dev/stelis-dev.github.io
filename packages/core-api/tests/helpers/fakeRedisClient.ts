@@ -11,7 +11,7 @@ interface FakeRedisEntry {
  * Minimal in-memory Redis implementation for adapter unit tests.
  *
  * It intentionally supports only the subset used by Stelis adapters:
- * `GET`, `SET NX PX`, `DEL`, `HGETALL`, `SCAN`, and the small Lua scripts
+ * `GET`, `SET NX PX`, `DEL`, `HGETALL`, and the small Lua scripts
  * embedded in the Redis-backed stores. Counter and TTL mutations inside Lua
  * scripts are emulated by private helpers, not exposed on RedisClientLike.
  *
@@ -70,6 +70,10 @@ export class FakeRedisClient implements RedisClientLike {
   }
 
   async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
+    if (script.includes('RedisSponsorPool REDIS_TIME_MS_SCRIPT')) {
+      return String(Date.now());
+    }
+
     // ── RedisSponsorPool LEASE_STATUS_SCRIPT emulation ──
     // Reads lease-key presence for all configured sponsor slots and returns
     // the same positional rows as the production Lua script.
@@ -104,31 +108,6 @@ export class FakeRedisClient implements RedisClientLike {
       return null;
     }
 
-    // ── Sponsor operations state updateEntityLuaScript emulation ──
-    // Distinct marker: the script stamps both `lastObservedAtMs` via TIME
-    // and `writeSeq` via HINCRBY, then applies caller-supplied field/value
-    // pairs from ARGV. Emulate the monotonic-seq + server-time contract
-    // exactly: each call increments the entity's writeSeq and refreshes
-    // lastObservedAtMs.
-    if (
-      script.includes("redis.call('TIME')") &&
-      script.includes('HINCRBY') &&
-      script.includes('writeSeq')
-    ) {
-      const key = keys[0];
-      const nowMs = String(Date.now());
-      const nextSeq = this._hashIncr(key, 'writeSeq', 1);
-      this._hashSet(key, 'lastObservedAtMs', nowMs);
-      for (let i = 0; i < args.length; i += 2) {
-        const field = args[i];
-        const value = args[i + 1];
-        if (field !== undefined && value !== undefined) {
-          this._hashSet(key, field, value);
-        }
-      }
-      return [nowMs, String(nextSeq)];
-    }
-
     if (script.includes("redis.call('INCR'")) {
       const key = keys[0];
       const ttlMs = Number(args[0]);
@@ -138,20 +117,6 @@ export class FakeRedisClient implements RedisClientLike {
       }
       const ttl = this.pttl(key);
       return [current, ttl];
-    }
-
-    // ── RedisSponsorPool LEASE_COMMIT_CAS_SCRIPT emulation ──
-    // if GET == reserved → SET committed with PX; else LEASE_MISSING/CAS_FAILED.
-    if (script.includes("return 'LEASE_COMMIT_CAS_FAILED'")) {
-      const key = keys[0];
-      const reservedProof = args[0];
-      const committedProof = args[1];
-      const pxMs = Number(args[2]);
-      const current = await this.get(key);
-      if (current === null) return 'LEASE_MISSING';
-      if (current !== reservedProof) return 'LEASE_COMMIT_CAS_FAILED';
-      await this.set(key, committedProof, { px: pxMs });
-      return 'OK';
     }
 
     // ── RedisSponsorPool LEASE_CHECKIN_CAS_SCRIPT emulation ──
@@ -167,521 +132,41 @@ export class FakeRedisClient implements RedisClientLike {
       return 'MISMATCH';
     }
 
-    if (
-      script.includes("redis.call('GET', KEYS[1])") &&
-      script.includes("redis.call('DEL', KEYS[1])") &&
-      !script.includes('cjson.decode')
-    ) {
-      const value = await this.get(keys[0]);
-      if (value !== null) {
-        await this.del(keys[0]);
-      }
-      if (keys[1]) {
-        await this.del(keys[1]);
-      }
-      return value;
-    }
-
-    // ── RedisPrepareStore CHECK_USER_QUOTA_SCRIPT emulation ──
-    // Mirrors STORE_SCRIPT's `liveUser` semantics so the precheck and
-    // the authoritative store-time quota agree on which entries count
-    // when reading the same Redis snapshot (concurrent stores between
-    // precheck and store() can still diverge — STORE_SCRIPT is the
-    // only authoritative gate). Logical TTL (`item.t + ttlMs < nowMs`)
-    // drops an entry even while its physical key survives in the PX
-    // grace window.
-    if (script.includes('if not userRaw then return 0 end')) {
-      const userKey = keys[0];
-      const prefix = args[0] ?? '';
-      const ttlMs = Number(args[1] ?? '60000');
-      const maxPerStudioUser = Number(args[2] ?? '0');
-      const nowMs = Date.now();
-
-      const userRaw = userKey ? await this.get(userKey) : null;
-      if (!userRaw) return 0;
-
-      const userList = JSON.parse(userRaw) as Array<Record<string, unknown>>;
-      let live = 0;
-      for (const item of userList) {
-        const t = item['t'];
-        if (typeof t === 'number' && t + ttlMs < nowMs) continue;
-        const exists = await this.get(prefix + String(item['pid']));
-        if (exists !== null) {
-          live += 1;
-          if (live >= maxPerStudioUser) return live;
-        }
-      }
-      return live;
-    }
-
-    // ── RedisPrepareStore STORE_SCRIPT emulation ──
-    if (script.includes('RedisPrepareStore STORE_SCRIPT')) {
-      const entryKey = keys[0];
-      const ipKey = keys[1];
-      const senderKey = keys[2];
-      const userKey = keys[3] ?? '';
-      const draftJson = args[0] ?? '';
-      const entryPx = Number(args[1]);
-      const maxPerIp = Number(args[2]);
-      const ipPx = Number(args[3]);
-      const prefix = args[4] ?? '';
-      const maxPerStudioUser = Number(args[5]);
-      const senderPx = Number(args[6]);
-      const ttlMs = Number(args[7] ?? '60000');
-      const userPx = Number(args[8] ?? '120000');
-      const nowMs = Date.now();
-      const issuedAt = nowMs;
-
-      const draft = JSON.parse(draftJson) as Record<string, unknown>;
-      const pid = draft.receiptId;
-      const nonce = draft.nonce;
-      const entryMode = draft.mode;
-      if (
-        typeof pid !== 'string' ||
-        typeof nonce !== 'string' ||
-        (entryMode !== 'generic' && entryMode !== 'promotion')
-      ) {
-        throw new Error('invalid prepared draft');
-      }
-
-      // ── Sender index — live-compact regardless of mode (S-14 nonce coordination) ──
-      const senderRaw = senderKey ? await this.get(senderKey) : null;
-      let senderList: Array<Record<string, unknown>> = [];
-      if (senderRaw) {
-        senderList = JSON.parse(senderRaw) as typeof senderList;
-      }
-      const liveSender: Array<Record<string, unknown>> = [];
-      for (const item of senderList) {
-        if (
-          typeof item.pid === 'string' &&
-          typeof item.t === 'number' &&
-          typeof item.nonce === 'string'
-        ) {
-          if (item.pending === true) {
-            if (item.t + ttlMs >= nowMs) {
-              liveSender.push({
-                pid: item.pid,
-                nonce: item.nonce,
-                pending: true,
-                t: item.t,
-              });
-            }
-          } else if (item.pending === undefined) {
-            if (item.t + ttlMs < nowMs) {
-              // Logical TTL expired — drop even if physical key still exists
-            } else {
-              const exists = await this.get(prefix + item.pid);
-              if (exists !== null) {
-                liveSender.push({ pid: item.pid, nonce: item.nonce, t: item.t });
-              }
-            }
-          }
-        }
-      }
-
-      // ── Studio user quota — promotion-mode only, keyed by userIndex ──
-      const liveUser: Array<Record<string, unknown>> = [];
-      if (entryMode === 'promotion' && userKey !== '') {
-        const userRaw = await this.get(userKey);
-        if (userRaw) {
-          const userList = JSON.parse(userRaw) as Array<Record<string, unknown>>;
-          for (const item of userList) {
-            const t = item['t'];
-            const itemPid = item['pid'];
-            if (typeof t !== 'number' || typeof itemPid !== 'string') continue;
-            if (t + ttlMs < nowMs) continue;
-            const exists = await this.get(prefix + itemPid);
-            if (exists !== null) liveUser.push({ pid: itemPid, t });
-          }
-        }
-        if (liveUser.length >= maxPerStudioUser) {
-          return '__user_quota__';
-        }
-      }
-
-      // Read and decode the IP index before any mutation. This ordering is
-      // the branch-parity evidence for the real Lua no-partial-commit guard.
-      const ipRaw = await this.get(ipKey);
-      let list: Array<{ pid: string; t: number }> = [];
-      if (ipRaw) {
-        list = JSON.parse(ipRaw) as typeof list;
-      }
-
-      // Prune stale entries
-      const live: typeof list = [];
-      for (const item of list) {
-        if (typeof item.pid !== 'string' || typeof item.t !== 'number') continue;
-        const exists = await this.get(prefix + item.pid);
-        if (exists !== null) {
-          live.push({ pid: item.pid, t: item.t });
-        }
-      }
-
-      // Evict oldest if over limit
-      const evicted: Array<{ pid: string; entryJson: string }> = [];
-      while (live.length >= maxPerIp) {
-        const oldest = live.shift()!;
-        const evictedEntryJson = (await this.get(prefix + oldest.pid)) ?? '';
-        evicted.push({ pid: oldest.pid, entryJson: evictedEntryJson });
-      }
-
-      // Construct every stored/result projection before the first mutation.
-      live.push({ pid, t: issuedAt });
-
-      const evictedPids = new Set(evicted.map((e) => e.pid));
-      const updatedSender = liveSender.filter((item) => {
-        const itemPid = (item as Record<string, unknown>).pid;
-        return itemPid !== pid && !evictedPids.has(itemPid as string);
-      });
-      updatedSender.push({ pid, t: issuedAt, nonce });
-
-      let updatedUser: Array<Record<string, unknown>> | null = null;
-      if (entryMode === 'promotion' && userKey !== '') {
-        updatedUser = liveUser.filter((item) => {
-          const itemPid = item['pid'];
-          return itemPid !== pid && !evictedPids.has(itemPid as string);
-        });
-        updatedUser.push({ pid, t: issuedAt });
-      }
-
-      const committedJson = JSON.stringify({ ...draft, issuedAt });
-      const encodedIp = JSON.stringify(live);
-      const encodedSender = JSON.stringify(updatedSender);
-      const encodedUser = updatedUser ? JSON.stringify(updatedUser) : null;
-      const encodedEvicted = JSON.stringify(evicted);
-
-      // Mutation section mirrors the production Lua after all fallible
-      // data-derived work has completed.
-      for (const item of evicted) {
-        await this.del(prefix + item.pid);
-      }
-      await this.set(entryKey, committedJson, { px: entryPx });
-      await this.set(ipKey, encodedIp, { px: ipPx });
-      if (senderKey) {
-        await this.set(senderKey, encodedSender, { px: senderPx });
-      }
-      if (encodedUser !== null) {
-        await this.set(userKey, encodedUser, { px: userPx });
-      }
-
-      return [String(issuedAt), encodedEvicted];
-    }
-
-    // ── RedisPrepareStore PEEK_SCRIPT emulation ──
-    if (script.includes('RedisPrepareStore PEEK_SCRIPT')) {
-      const raw = await this.get(keys[0]);
-      if (!raw) return null;
-      let entry: unknown;
-      try {
-        entry = JSON.parse(raw) as unknown;
-      } catch {
-        return raw;
-      }
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return raw;
-      const issuedAt = (entry as Record<string, unknown>).issuedAt;
-      if (typeof issuedAt !== 'number') return raw;
-      const ttlMs = Number(args[0] ?? '60000');
-      return issuedAt + ttlMs < Date.now() ? null : raw;
-    }
-
-    // ── RedisPrepareStore reserveNonce emulation (sender-local, no HWM key) ──
-    if (script.includes('compareDecStrings') && script.includes('addOneDecString')) {
-      const senderKey = keys[0];
-      const onchain = BigInt(args[0] ?? '0');
-      const resId = args[1] ?? '';
-      const senderPx = Number(args[2] ?? '120000');
-      const prefix = args[3] ?? '';
-      const reserveTtlMs = Number(args[4] ?? '60000');
-      const maxOutstandingPerSender = Number(args[5] ?? '3');
-      const reserveNowMs = Date.now();
-
-      // Compact: keep non-expired pending + logically-live entries only (same as real Lua)
-      let senderMax = 0n;
-      const senderRaw = senderKey ? await this.get(senderKey) : null;
-      const rawList: Array<Record<string, unknown>> = senderRaw ? JSON.parse(senderRaw) : [];
-      const senderList: Array<Record<string, unknown>> = [];
-      for (const item of rawList) {
-        if (
-          typeof item.pid === 'string' &&
-          typeof item.t === 'number' &&
-          typeof item.nonce === 'string'
-        ) {
-          const nonce = BigInt(item.nonce);
-          if (item.pending === true) {
-            if (item.t + reserveTtlMs >= reserveNowMs) {
-              senderList.push({
-                pid: item.pid,
-                nonce: nonce.toString(),
-                pending: true,
-                t: item.t,
-              });
-              if (nonce > senderMax) senderMax = nonce;
-            }
-          } else if (item.pending === undefined) {
-            if (item.t + reserveTtlMs < reserveNowMs) {
-              // Logical TTL expired — drop
-            } else {
-              const exists = await this.get(prefix + item.pid);
-              if (exists !== null) {
-                senderList.push({ pid: item.pid, nonce: nonce.toString(), t: item.t });
-                if (nonce > senderMax) senderMax = nonce;
-              }
-            }
-          }
-        }
-      }
-
-      if (senderList.length >= maxOutstandingPerSender) {
-        return '__sender_quota__';
-      }
-
-      const next = (onchain > senderMax ? onchain : senderMax) + 1n;
-
-      // Add pending reservation to sender-local metadata
-      senderList.push({ pid: resId, nonce: next.toString(), pending: true, t: reserveNowMs });
-      await this.set(senderKey, JSON.stringify(senderList), { px: senderPx });
-
-      return next.toString();
-    }
-
-    // ── RedisPrepareStore EVICT_PREPARED_ENTRY_SCRIPT emulation ──
-    if (script.includes('local function rewriteList') && script.includes('return raw')) {
-      const entryKey = keys[0];
-      const pid = args[0] ?? '';
-      const prefix = args[1] ?? '';
-      const ttlMs = Number(args[2] ?? '60000');
-      const raw = await this.get(entryKey);
-      if (raw === null) return null;
-      await this.del(entryKey);
-
-      let entry: Record<string, unknown>;
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (typeof parsed !== 'object' || parsed === null) return raw;
-        entry = parsed as Record<string, unknown>;
-      } catch {
-        return raw;
-      }
-
-      const nowMs = Date.now();
-      const rewriteList = async (key: string, indexKind: 'ip' | 'sender' | 'user') => {
-        const listRaw = await this.get(key);
-        if (!listRaw) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(listRaw) as unknown;
-        } catch {
-          return;
-        }
-        if (typeof parsed !== 'object' || parsed === null) return;
-        const list = Array.isArray(parsed) ? parsed : [];
-        const updated: Array<Record<string, unknown>> = [];
-        for (const candidate of list) {
-          if (typeof candidate !== 'object' || candidate === null) continue;
-          const item = candidate as Record<string, unknown>;
-          if (typeof item.pid !== 'string' || typeof item.t !== 'number') continue;
-          if (item.pid === pid) continue;
-          if (indexKind === 'sender') {
-            if (item.pending === true && typeof item.nonce === 'string') {
-              if (item.t + ttlMs >= nowMs) {
-                updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
-              }
-            } else if (item.pending === undefined && typeof item.nonce === 'string') {
-              if (item.t + ttlMs < nowMs) {
-                // Logical TTL expired — drop
-              } else if ((await this.get(prefix + item.pid)) !== null) {
-                updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
-              }
-            }
-          } else {
-            if (item.t + ttlMs < nowMs) {
-              // Logical TTL expired — drop
-            } else if ((await this.get(prefix + item.pid)) !== null) {
-              updated.push({ pid: item.pid, t: item.t });
-            }
-          }
-        }
-        if (updated.length === 0) {
-          await this.del(key);
-        } else {
-          const currentTtl = this.pttl(key);
-          await this.set(
-            key,
-            JSON.stringify(updated),
-            currentTtl > 0 ? { px: currentTtl } : undefined,
-          );
-        }
-      };
-
-      if (typeof entry.clientIp === 'string') {
-        await rewriteList(prefix + 'ip:' + entry.clientIp, 'ip').catch(() => {});
-      }
-      if (typeof entry.senderAddress === 'string') {
-        await rewriteList(prefix + 'sender:' + entry.senderAddress, 'sender').catch(() => {});
-      }
-      if (entry.mode === 'promotion' && typeof entry.userId === 'string') {
-        await rewriteList(prefix + 'user:' + entry.userId, 'user').catch(() => {});
-      }
-
-      return raw;
-    }
-
-    // ── RedisPrepareStore releaseReservation emulation ──
-    if (
-      script.includes('item.pending and item.pid == resId') ||
-      (script.includes('resId') &&
-        script.includes('updated') &&
-        !script.includes('addOneDecString'))
-    ) {
-      const senderKey = keys[0];
-      const resId = args[0] ?? '';
-      const senderPx = Number(args[1] ?? '120000');
-
-      const senderRaw = await this.get(senderKey);
-      if (!senderRaw) return 0;
-
-      const senderList = JSON.parse(senderRaw) as Array<Record<string, unknown>>;
-      // Drop only the matching pending reservation. Live entries (no
-      // `pending` flag) are preserved even when their `pid` matches, so
-      // a post-store call cannot damage the promoted live entry's
-      // metadata. Mirrors the real Lua script in redisPrepareStore.ts.
-      const updated: Array<Record<string, unknown>> = [];
-      for (const item of senderList) {
-        if (
-          typeof item.pid !== 'string' ||
-          typeof item.t !== 'number' ||
-          typeof item.nonce !== 'string'
-        ) {
-          continue;
-        }
-        if (item.pending === true) {
-          if (item.pid !== resId) {
-            updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
-          }
-        } else if (item.pending === undefined) {
-          updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
-        }
-      }
-
-      if (updated.length === 0) {
-        await this.del(senderKey);
-      } else {
-        await this.set(senderKey, JSON.stringify(updated), { px: senderPx });
-      }
-      return 1;
-    }
-
-    // ── RedisPrepareStore CONSUME_SCRIPT_WITH_IP emulation ──
-    if (script.includes('__expired_entry__') && script.includes('__hash_mismatch_entry__')) {
-      const entryKey = keys[0];
-      const expectedHash = args[0];
-      const ttlMs = Number(args[1]);
-      const pid = args[2];
-      const prefix = args[3];
-
-      const raw = await this.get(entryKey);
-      if (raw === null) return null;
-
-      let entry: Record<string, unknown> | null = null;
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (typeof parsed === 'object' && parsed !== null) {
-          entry = parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Real Lua deletes malformed JSON and returns the raw value so the
-        // TypeScript layer can run its best-effort lease recovery.
-      }
-
-      const nowMs = Date.now();
-
-      const removeFromIndex = async (key: string, indexKind: 'ip' | 'sender') => {
-        const indexRaw = await this.get(key);
-        if (!indexRaw) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(indexRaw) as unknown;
-        } catch {
-          return;
-        }
-        if (typeof parsed !== 'object' || parsed === null) return;
-        const list = Array.isArray(parsed) ? parsed : [];
-        const updated: Array<Record<string, unknown>> = [];
-        for (const candidate of list) {
-          if (typeof candidate !== 'object' || candidate === null) continue;
-          const item = candidate as Record<string, unknown>;
-          if (typeof item.pid !== 'string' || item.pid === pid || typeof item.t !== 'number') {
-            continue;
-          }
-          if (indexKind === 'sender') {
-            if (item.pending === true && typeof item.nonce === 'string') {
-              updated.push({ pid: item.pid, nonce: item.nonce, pending: true, t: item.t });
-            } else if (item.pending === undefined && typeof item.nonce === 'string') {
-              updated.push({ pid: item.pid, nonce: item.nonce, t: item.t });
-            }
-          } else {
-            updated.push({ pid: item.pid, t: item.t });
-          }
-        }
-        if (updated.length > 0) {
-          const currentTtl = this.pttl(key);
-          await this.set(
-            key,
-            JSON.stringify(updated),
-            currentTtl > 0 ? { px: currentTtl } : undefined,
-          );
-        } else {
-          await this.del(key);
-        }
-      };
-
-      let resultKind: 'success' | 'expired' | 'hash_mismatch' = 'success';
-      if (entry && typeof entry.issuedAt === 'number' && entry.issuedAt + ttlMs < nowMs) {
-        resultKind = 'expired';
-      } else if (
-        entry &&
-        typeof entry.txBytesHash === 'string' &&
-        entry.txBytesHash !== expectedHash
-      ) {
-        resultKind = 'hash_mismatch';
-      }
-
-      await this.del(entryKey);
-      if (entry && typeof entry.clientIp === 'string') {
-        await removeFromIndex(prefix + 'ip:' + entry.clientIp, 'ip').catch(() => {});
-      }
-      if (entry && typeof entry.senderAddress === 'string') {
-        await removeFromIndex(prefix + 'sender:' + entry.senderAddress, 'sender').catch(() => {});
-      }
-
-      if (resultKind === 'expired') return '__expired_entry__:' + raw;
-      if (resultKind === 'hash_mismatch') return '__hash_mismatch_entry__:' + raw;
-      return raw;
-    }
-
     // ── PromotionStore CREATE_LUA emulation ──
     if (
       script.includes("redis.call('EXISTS', KEYS[1])") &&
-      script.includes("redis.call('SADD', KEYS[2], ARGV[2])") &&
-      script.includes("redis.call('SADD', KEYS[3], ARGV[2])")
+      script.includes("redis.call('ZADD', KEYS[2], 0, ARGV[2])") &&
+      script.includes("redis.call('ZADD', KEYS[3], 0, ARGV[2])")
     ) {
       if ((await this.get(keys[0])) !== null) return 'CURRENT_CONFLICT';
+      if (keys.slice(1).some((key) => this._zscore(key, args[1]) !== null)) {
+        return 'INDEX_CONFLICT';
+      }
       await this.set(keys[0], args[0]);
-      this._sadd(keys[1], args[1]);
-      this._sadd(keys[2], args[1]);
+      this._zadd(keys[1], 0, args[1]);
+      this._zadd(keys[2], 0, args[1]);
       return 'OK';
     }
 
-    // ── PromotionStore LIST_LUA emulation ──
+    // ── PromotionStore PAGE_LUA emulation ──
     if (
-      script.includes("redis.call('SMEMBERS', KEYS[1])") &&
+      script.includes("redis.call('ZRANGEBYLEX', KEYS[1]") &&
       script.includes("redis.call('MGET', unpack(keys))")
     ) {
-      const ids = this._smembers(keys[0]);
-      if (ids.length === 0) return [];
-      const results: (string | null)[] = [];
+      const cursor = args[1] === '' ? null : args[1];
+      const count = Number(args[2]);
+      const ids = this._zrangeByLex(keys[0], cursor, count);
+      const results: string[] = ['OK'];
       for (const id of ids) {
-        results.push(await this.get(args[0] + id));
+        const raw = await this.get(args[0] + id);
+        if (raw === null) return ['INDEX_RECORD_MISSING', id];
+        const memberships: string[] = [];
+        for (const indexKey of keys.slice(1, 6)) {
+          const score = this._zscore(indexKey, id);
+          if (score !== null && score !== 0) return ['INDEX_SCORE_INVALID', id];
+          memberships.push(score === null ? '0' : '1');
+        }
+        results.push(id, raw, ...memberships);
       }
       return results;
     }
@@ -690,7 +175,8 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      !script.includes("redis.call('SREM', KEYS[2], ARGV[3])")
+      !script.includes("redis.call('ZREM', KEYS[2], ARGV[3])") &&
+      !script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
@@ -702,69 +188,81 @@ export class FakeRedisClient implements RedisClientLike {
     if (
       script.includes('currentRaw ~= ARGV[1]') &&
       script.includes("redis.call('SET', KEYS[1], ARGV[2])") &&
-      script.includes("redis.call('SREM', KEYS[2], ARGV[3])") &&
-      script.includes("redis.call('SADD', KEYS[3], ARGV[3])")
+      script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[3])") &&
+      script.includes("redis.call('ZADD', KEYS[targetIndex], 0, ARGV[3])")
     ) {
       const raw = await this.get(keys[0]);
       if (raw === null || raw !== args[0]) return 'CURRENT_CONFLICT';
+      const currentIndex = Number(args[3]) - 1;
+      const targetIndex = Number(args[4]) - 1;
+      if (
+        currentIndex < 2 ||
+        currentIndex > 5 ||
+        targetIndex < 2 ||
+        targetIndex > 5 ||
+        currentIndex === targetIndex ||
+        this._zscore(keys[1], args[2]) !== 0
+      )
+        return 'INDEX_CONFLICT';
+      for (let index = 2; index <= 5; index++) {
+        const score = this._zscore(keys[index], args[2]);
+        if (index === currentIndex ? score !== 0 : score !== null) return 'INDEX_CONFLICT';
+      }
       await this.set(keys[0], args[1]);
-      this._srem(keys[1], args[2]);
-      this._sadd(keys[2], args[2]);
+      this._zrem(keys[currentIndex], args[2]);
+      this._zadd(keys[targetIndex], 0, args[2]);
       return 'OK';
     }
 
     // ── PromotionStore DELETE_LUA emulation ──
     if (
-      script.includes("current.status ~= 'draft'") &&
+      script.includes("ARGV[3] ~= 'delete'") &&
+      script.includes("redis.call('EXISTS', KEYS[7])") &&
       script.includes("redis.call('DEL', KEYS[1])") &&
-      script.includes("redis.call('SREM', KEYS[2], ARGV[2])") &&
-      script.includes("redis.call('SREM', KEYS[3], ARGV[2])")
+      script.includes("redis.call('ZREM', KEYS[2], ARGV[2])") &&
+      script.includes("redis.call('ZREM', KEYS[currentIndex], ARGV[2])")
     ) {
       const raw = await this.get(keys[0]);
-      if (raw === null) return args[0] === '' ? 'NOT_FOUND' : 'CURRENT_CONFLICT';
+      if (raw === null) {
+        if (args[0] !== '') return 'CURRENT_CONFLICT';
+        for (const indexKey of keys.slice(1, 6)) {
+          if (this._zscore(indexKey, args[1]) !== null) return 'INDEX_CONFLICT';
+        }
+        if (
+          (await this.get(keys[6])) !== null ||
+          Object.keys(await this.hgetall(keys[6])).length > 0
+        )
+          return 'ACCOUNTING_PRESENT';
+        return 'NOT_FOUND';
+      }
       if (args[0] === '' || raw !== args[0]) return 'CURRENT_CONFLICT';
-      const current = JSON.parse(raw) as { status?: string };
-      if (current.status !== 'draft') return 'NOT_DELETABLE';
+      const currentIndex = Number(args[3]) - 1;
+      if (currentIndex < 2 || currentIndex > 5 || this._zscore(keys[1], args[1]) !== 0) {
+        return 'INDEX_CONFLICT';
+      }
+      for (let index = 2; index <= 5; index++) {
+        const score = this._zscore(keys[index], args[1]);
+        if (index === currentIndex ? score !== 0 : score !== null) return 'INDEX_CONFLICT';
+      }
+      if (args[2] !== 'delete') return 'NOT_DELETABLE';
+      if (currentIndex !== 2) return 'INDEX_CONFLICT';
+      if (
+        (await this.get(keys[6])) !== null ||
+        Object.keys(await this.hgetall(keys[6])).length > 0
+      ) {
+        return 'ACCOUNTING_PRESENT';
+      }
       await this.del(keys[0]);
-      this._srem(keys[1], args[1]);
-      this._srem(keys[2], args[1]);
+      this._zrem(keys[1], args[1]);
+      this._zrem(keys[currentIndex], args[1]);
       return 'OK';
     }
 
     throw new Error(`FakeRedisClient: unsupported eval script\n${script}`);
   }
 
-  async hgetall(key: string): Promise<Record<string, string>> {
-    const h = this._hashes.get(key);
-    if (!h) return {};
-    const result: Record<string, string> = {};
-    for (const [field, value] of h.entries()) {
-      result[field] = value;
-    }
-    return result;
-  }
-
-  async ping(): Promise<string> {
-    return 'PONG';
-  }
-
-  async quit(): Promise<void> {
-    this._store.clear();
-  }
-
-  async scan(pattern: string, _count?: number): Promise<string[]> {
-    // Convert Redis MATCH glob to regex (supports only * and ?)
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    const regexStr = escaped.replace(/\*/g, '.*').replace(/\?/g, '.');
-    const regex = new RegExp(`^${regexStr}$`);
-    const results: string[] = [];
-    for (const key of this._store.keys()) {
-      this.evictIfExpired(key);
-      if (this._store.has(key) && regex.test(key)) {
-        results.push(key);
-      }
-    }
-    return results;
+  async hgetall(_key: string): Promise<Record<string, string>> {
+    return {};
   }
 
   private pttl(key: string): number {
@@ -783,59 +281,42 @@ export class FakeRedisClient implements RedisClientLike {
     }
   }
 
-  // ── Redis SET data structure emulation ──────────────────────────────
+  // ── Redis sorted-set data structure emulation ─────────────────────
 
-  private readonly _sets = new Map<string, Set<string>>();
+  private readonly _zsets = new Map<string, Map<string, number>>();
 
-  /** SADD equivalent — add member to a set. */
-  private _sadd(key: string, member: string): void {
-    let s = this._sets.get(key);
-    if (!s) {
-      s = new Set<string>();
-      this._sets.set(key, s);
+  /** ZADD equivalent used by PromotionStore's same-score lex indexes. */
+  private _zadd(key: string, score: number, member: string): void {
+    let zset = this._zsets.get(key);
+    if (!zset) {
+      zset = new Map<string, number>();
+      this._zsets.set(key, zset);
     }
-    s.add(member);
+    zset.set(member, score);
   }
 
-  /** SMEMBERS equivalent — return all members of a set. */
-  private _smembers(key: string): string[] {
-    const s = this._sets.get(key);
-    return s ? Array.from(s) : [];
+  private _zscore(key: string, member: string): number | null {
+    return this._zsets.get(key)?.get(member) ?? null;
   }
 
-  /** SREM equivalent — remove member from a set. */
-  private _srem(key: string, member: string): void {
-    const s = this._sets.get(key);
-    if (s) {
-      s.delete(member);
-      if (s.size === 0) this._sets.delete(key);
-    }
+  /** Bounded exclusive ZRANGEBYLEX for equal-score members. */
+  private _zrangeByLex(key: string, cursor: string | null, count: number): string[] {
+    const zset = this._zsets.get(key);
+    if (!zset) return [];
+    return Array.from(zset.entries())
+      .filter(([, score]) => score === 0)
+      .map(([member]) => member)
+      .sort()
+      .filter((member) => cursor === null || member > cursor)
+      .slice(0, count);
   }
 
-  // ── Redis HASH data structure emulation ─────────────────────────────
-
-  private readonly _hashes = new Map<string, Map<string, string>>();
-
-  /** HSET equivalent — set a field on a hash. */
-  private _hashSet(key: string, field: string, value: string): void {
-    let h = this._hashes.get(key);
-    if (!h) {
-      h = new Map<string, string>();
-      this._hashes.set(key, h);
+  /** ZREM equivalent. */
+  private _zrem(key: string, member: string): void {
+    const zset = this._zsets.get(key);
+    if (zset) {
+      zset.delete(member);
+      if (zset.size === 0) this._zsets.delete(key);
     }
-    h.set(field, value);
-  }
-
-  /** HINCRBY equivalent — increment a numeric field atomically. */
-  private _hashIncr(key: string, field: string, delta: number): number {
-    let h = this._hashes.get(key);
-    if (!h) {
-      h = new Map<string, string>();
-      this._hashes.set(key, h);
-    }
-    const current = Number(h.get(field) ?? '0');
-    const next = current + delta;
-    h.set(field, String(next));
-    return next;
   }
 }

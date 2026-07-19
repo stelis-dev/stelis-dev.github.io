@@ -27,11 +27,7 @@ function mockFetchResponses(responses: Record<string, unknown>) {
   return vi.fn().mockImplementation((url: string) => {
     const body = responses[url];
     if (body === undefined) {
-      return Promise.resolve({
-        ok: false,
-        status: 404,
-        json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-      });
+      return Promise.reject(new Error(`Unhandled test request: ${url}`));
     }
     return Promise.resolve({
       ok: true,
@@ -51,39 +47,69 @@ const SPONSOR_OPERATIONS_DATA = {
   network: 'testnet',
   primaryAddress: '0x' + 'd'.repeat(64),
   settlementPayoutRecipientAddress: '0x' + 'b'.repeat(64),
+  sponsorBalanceWarnMist: '1000000000',
+  sponsorBalanceRefillTargetMist: '2000000000',
+  sponsorRefillAccountRunwayTargetMist: '2000000000',
+  refillEnabled: true,
+  quotedHostFeeMist: '100000',
+  onChainIds: {
+    packageId: '0x' + '1'.repeat(64),
+    configId: '0x' + '2'.repeat(64),
+    vaultRegistryId: '0x' + '3'.repeat(64),
+    deepbookPackageId: '0x' + '4'.repeat(64),
+  },
   rpcFleet: {
     endpoints: [
       {
-        url: 'https://primary.rpc.test',
+        origin: 'https://primary.rpc.test',
         role: 'primary',
-        status: 'healthy',
-        cooldownRemainingMs: 0,
       },
       {
-        url: 'https://secondary.rpc.test',
+        origin: 'https://secondary.rpc.test',
         role: 'secondary',
-        status: 'cooldown',
-        cooldownRemainingMs: 12_000,
       },
     ],
-    totalEndpoints: 2,
-    healthyEndpoints: 1,
   },
   sponsorOperations: {
     gateErrorCode: null,
-    availableSlots: 3,
+    healthySlots: 3,
     degradedSlots: 0,
     slotLeases: {
       leasedSlots: 0,
       freeSlots: 3,
-      slots: [],
+      slots: [
+        { address: '0x' + 'd'.repeat(64), leased: false },
+        { address: '0x' + 'e'.repeat(64), leased: false },
+        { address: '0x' + 'f'.repeat(64), leased: false },
+      ],
     },
-    slots: [],
+    slots: [
+      {
+        address: '0x' + 'd'.repeat(64),
+        state: 'healthy',
+        addressBalanceMist: '3000000000',
+        lastObservedAtMs: 1_700_000_000_000,
+        lastError: null,
+      },
+      {
+        address: '0x' + 'e'.repeat(64),
+        state: 'healthy',
+        addressBalanceMist: '3000000000',
+        lastObservedAtMs: 1_700_000_000_000,
+        lastError: null,
+      },
+      {
+        address: '0x' + 'f'.repeat(64),
+        state: 'healthy',
+        addressBalanceMist: '3000000000',
+        lastObservedAtMs: 1_700_000_000_000,
+        lastError: null,
+      },
+    ],
     sponsorRefillAccount: {
       address: '0x' + 'c'.repeat(64),
-      balanceMist: '2000000000',
+      totalBalanceMist: '2000000000',
       healthy: true,
-      refillsRemaining: 5,
       lastObservedAtMs: 1_700_000_000_000,
       lastError: null,
     },
@@ -134,7 +160,7 @@ describe('AuthGuard integration', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 401,
-        json: () => Promise.resolve({ error: 'UNAUTHORIZED' }),
+        json: () => Promise.resolve({ error: 'Authentication failed', code: 'ADMIN_UNAUTHORIZED' }),
       }),
     );
 
@@ -294,11 +320,7 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -355,7 +377,7 @@ describe('DashboardPage integration', () => {
     expect(screen.queryByText('Loss Count')).toBeNull();
   });
 
-  it('renders RPC Fleet above Service Accounts', async () => {
+  it('renders the immutable qualified RPC endpoints above Service Accounts', async () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
@@ -367,10 +389,10 @@ describe('DashboardPage integration', () => {
     render(<DirectOutletProvider element={<DashboardPage />} />);
 
     await waitFor(() => {
-      expect(screen.getByText('RPC Fleet (1/2 healthy)')).toBeDefined();
+      expect(screen.getByText('RPC Endpoints (2 qualified)')).toBeDefined();
     });
 
-    const rpcFleetCard = screen.getByText('RPC Fleet (1/2 healthy)').closest('.admin-card');
+    const rpcFleetCard = screen.getByText('RPC Endpoints (2 qualified)').closest('.admin-card');
     const serviceAccountsCard = screen.getByText('Service Accounts').closest('.admin-card');
     expect(rpcFleetCard).not.toBeNull();
     expect(serviceAccountsCard).not.toBeNull();
@@ -379,7 +401,7 @@ describe('DashboardPage integration', () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.getByText('https://primary.rpc.test')).toBeDefined();
-    expect(screen.getByText('12s')).toBeDefined();
+    expect(screen.getByText('https://secondary.rpc.test')).toBeDefined();
   });
 
   it('renders sponsor operations gate status in the Sponsor Slots stat card', async () => {
@@ -387,7 +409,22 @@ describe('DashboardPage integration', () => {
       ...SPONSOR_OPERATIONS_DATA,
       sponsorOperations: {
         ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
-        gateErrorCode: 'NO_HEALTHY_SPONSOR',
+        gateErrorCode: 'SPONSOR_CAPACITY_UNAVAILABLE',
+        healthySlots: 0,
+        degradedSlots: 3,
+        slots: SPONSOR_OPERATIONS_DATA.sponsorOperations.slots.map((slot) => ({
+          ...slot,
+          state: 'rpc_unreachable',
+          lastError: 'RPC unavailable',
+        })),
+        slotLeases: {
+          leasedSlots: 3,
+          freeSlots: 0,
+          slots: SPONSOR_OPERATIONS_DATA.sponsorOperations.slotLeases.slots.map((slot) => ({
+            ...slot,
+            leased: true,
+          })),
+        },
       },
     };
     vi.stubGlobal(
@@ -401,7 +438,7 @@ describe('DashboardPage integration', () => {
     render(<DirectOutletProvider element={<DashboardPage />} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Closed — NO_HEALTHY_SPONSOR')).toBeDefined();
+      expect(screen.getByText('Closed — SPONSOR_CAPACITY_UNAVAILABLE')).toBeDefined();
     });
   });
 
@@ -411,18 +448,12 @@ describe('DashboardPage integration', () => {
       ...SPONSOR_OPERATIONS_DATA,
       sponsorOperations: {
         ...SPONSOR_OPERATIONS_DATA.sponsorOperations,
-        slots: [
-          {
-            address: '0x' + 'e'.repeat(64),
-            state: 'healthy',
-            balanceMist: hugeMist,
-            lastObservedAtMs: 1_700_000_000_000,
-            lastError: null,
-          },
-        ],
+        slots: SPONSOR_OPERATIONS_DATA.sponsorOperations.slots.map((slot, index) =>
+          index === 0 ? { ...slot, addressBalanceMist: hugeMist } : slot,
+        ),
         sponsorRefillAccount: {
           ...SPONSOR_OPERATIONS_DATA.sponsorOperations.sponsorRefillAccount,
-          balanceMist: hugeMist,
+          totalBalanceMist: hugeMist,
         },
       },
     };
@@ -495,11 +526,7 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -582,7 +609,8 @@ describe('DashboardPage integration', () => {
               json: () =>
                 Promise.resolve({
                   code: 'WITHDRAWAL_PENDING',
-                  error: 'Withdrawal outcome is pending recovery.',
+                  error: 'Service temporarily unavailable',
+                  operationId: 'withdrawal-op-pending',
                 }),
             });
           }
@@ -597,11 +625,7 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -636,17 +660,19 @@ describe('DashboardPage integration', () => {
       request: {
         adminAddress: VALID_SESSION.address,
         network: 'mainnet',
-        nonce: 'stelis-withdraw:mainnet:123',
-        signature: '0xMAINNET_SIG',
-        amountMist: '1500000000',
+        request: {
+          nonce: 'stelis-withdraw:mainnet:123',
+          signature: '0xMAINNET_SIG',
+          amountMist: '1500000000',
+        },
       },
     },
     {
-      name: 'legacy-without-network',
+      name: 'invalid-without-network',
       request: {
         adminAddress: VALID_SESSION.address,
-        nonce: 'stelis-withdraw:legacy:123',
-        signature: '0xLEGACY_SIG',
+        nonce: 'stelis-withdraw:invalid:123',
+        signature: '0xINVALID_SIG',
         amountMist: '1500000000',
       },
     },
@@ -708,15 +734,12 @@ describe('DashboardPage integration', () => {
             json: () =>
               Promise.resolve({
                 code: 'WITHDRAWAL_PENDING',
-                error: 'Withdrawal outcome is pending recovery.',
+                error: 'Service temporarily unavailable',
+                operationId: 'withdrawal-op-pending',
               }),
           });
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -739,12 +762,14 @@ describe('DashboardPage integration', () => {
     {
       status: 409,
       code: 'WITHDRAWAL_NOT_ACCEPTED',
-      error: 'This withdrawal was not accepted.',
+      error: 'Request conflicts with current state',
+      operationId: 'withdrawal-op-not-accepted',
     },
     {
       status: 401,
       code: 'WITHDRAWAL_SIGNATURE_INVALID',
-      error: 'Invalid signature',
+      error: 'Authentication failed',
+      operationId: undefined,
     },
   ])('clears a stored request after terminal response $code', async (response) => {
     sessionStorage.setItem(
@@ -752,9 +777,11 @@ describe('DashboardPage integration', () => {
       JSON.stringify({
         adminAddress: VALID_SESSION.address,
         network: 'testnet',
-        nonce: 'stelis-withdraw:unaccepted:123',
-        signature: '0xUNACCEPTED',
-        amountMist: '1500000000',
+        request: {
+          nonce: 'stelis-withdraw:unaccepted:123',
+          signature: '0xUNACCEPTED',
+          amountMist: '1500000000',
+        },
       }),
     );
     vi.stubGlobal(
@@ -772,14 +799,17 @@ describe('DashboardPage integration', () => {
           return Promise.resolve({
             ok: false,
             status: response.status,
-            json: () => Promise.resolve({ code: response.code, error: response.error }),
+            json: () =>
+              Promise.resolve({
+                code: response.code,
+                error: response.error,
+                ...(response.operationId === undefined
+                  ? {}
+                  : { operationId: response.operationId }),
+              }),
           });
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -1027,16 +1057,15 @@ describe('SecurityPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/blocklist': { blocklist: [] },
+        '/api/blocklist': { blocklist: [], nextCursor: null },
         '/api/logs': {
           logs: [
-            JSON.stringify({
+            {
               ts: '2026-01-02T03:04:05.000Z',
               event: 'admin_login_success',
-              level: 'info',
               ip: '127.0.0.1',
               address: '0x' + 'a'.repeat(64),
-            }),
+            },
           ],
         },
       }),
@@ -1057,11 +1086,94 @@ describe('SecurityPage integration', () => {
       { timeout: 3000 },
     );
   });
+
+  it('pages block records without reloading the independent audit log', async () => {
+    const cursor = 'Y3Vyc29y';
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
+        if (url === '/api/blocklist') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                blocklist: [
+                  {
+                    scope: 'ip',
+                    subject: '127.0.0.1',
+                    reason: 'manipulation',
+                    blockedUntilMs: 1_800_000_000_000,
+                  },
+                ],
+                nextCursor: cursor,
+              }),
+          });
+        }
+        if (url === `/api/blocklist?cursor=${cursor}`) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                blocklist: [
+                  {
+                    scope: 'studio_user',
+                    subject: 'User-A',
+                    reason: 'dry_run_failure_threshold',
+                    blockedUntilMs: 1_800_000_001_000,
+                  },
+                ],
+                nextCursor: null,
+              }),
+          });
+        }
+        if (url === '/api/logs') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                logs: [
+                  {
+                    ts: '2026-01-02T03:04:05.000Z',
+                    event: 'admin_login_success',
+                    ip: '127.0.0.1',
+                  },
+                ],
+              }),
+          });
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    const { SecurityPage } = await import('../src/pages/SecurityPage');
+    render(<DirectOutletProvider element={<SecurityPage />} />);
+    await waitFor(() => expect(screen.getByText('manipulation')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByText('User-A')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    await waitFor(() => expect(screen.getByText('manipulation')).toBeDefined());
+
+    expect(requestedUrls.filter((url) => url === '/api/logs')).toHaveLength(1);
+    expect(requestedUrls.filter((url) => url.startsWith('/api/blocklist'))).toEqual([
+      '/api/blocklist',
+      `/api/blocklist?cursor=${cursor}`,
+      '/api/blocklist',
+    ]);
+  });
 });
 
 describe('PromotionsPage integration', () => {
+  const CURRENT_PROMOTION_ID = '00000000-0000-4000-8000-000000000001';
+  const CONFLICT_PROMOTION_ID = '00000000-0000-4000-8000-000000000002';
   const promotionRecord = {
-    promotionId: 'promo-current',
+    promotionId: CURRENT_PROMOTION_ID,
     type: 'gas_sponsorship',
     displayName: 'Current Promotion',
     description: 'Current description',
@@ -1087,7 +1199,7 @@ describe('PromotionsPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/promotions': { promotions: [] },
+        '/api/promotions': { promotions: [], nextCursor: null },
       }),
     );
 
@@ -1107,10 +1219,63 @@ describe('PromotionsPage integration', () => {
     expect(maxParticipantsInput.min).toBe('1');
   });
 
+  it('uses the returned exclusive cursor for next and previous pages', async () => {
+    const secondPromotionId = '00000000-0000-4000-8000-000000000003';
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        requestedUrls.push(url);
+        if (url === '/api/promotions') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({ promotions: [promotionRecord], nextCursor: CURRENT_PROMOTION_ID }),
+          });
+        }
+        if (url === `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                promotions: [
+                  {
+                    ...promotionRecord,
+                    promotionId: secondPromotionId,
+                    displayName: 'Second Promotion',
+                  },
+                ],
+                nextCursor: null,
+              }),
+          });
+        }
+        return Promise.reject(new Error(`Unhandled test request: ${url}`));
+      }),
+    );
+
+    const { PromotionsPage } = await import('../src/pages/PromotionsPage');
+    render(<DirectOutletProvider element={<PromotionsPage />} />);
+    await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByText('Second Promotion')).toBeDefined());
+    expect(screen.getByText('Page 2')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
+    expect(requestedUrls).toEqual([
+      '/api/promotions',
+      `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`,
+      '/api/promotions',
+    ]);
+  });
+
   it('reloads the current promotion and closes stale edits after current conflicts', async () => {
     const original = {
       ...promotionRecord,
-      promotionId: 'promo-conflict',
+      promotionId: CONFLICT_PROMOTION_ID,
       displayName: 'Original Promotion',
       description: 'Before concurrent update',
     };
@@ -1146,10 +1311,11 @@ describe('PromotionsPage integration', () => {
                         updatedAt: '2026-01-01T00:00:01.000Z',
                       },
                 ],
+                nextCursor: null,
               }),
           });
         }
-        if (url === '/api/promotions/promo-conflict' && method === 'PUT') {
+        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}` && method === 'PUT') {
           updateWrites += 1;
           return updateConflictGate.then(() => ({
             ok: false,
@@ -1157,11 +1323,11 @@ describe('PromotionsPage integration', () => {
             json: () =>
               Promise.resolve({
                 code: 'PROMOTION_CURRENT_CONFLICT',
-                error: 'Promotion promo-conflict changed while attempting update',
+                error: 'Request conflicts with current state',
               }),
           }));
         }
-        if (url === '/api/promotions/promo-conflict/status' && method === 'POST') {
+        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}/status` && method === 'POST') {
           statusWrites += 1;
           return statusConflictGate.then(() => ({
             ok: false,
@@ -1169,15 +1335,11 @@ describe('PromotionsPage integration', () => {
             json: () =>
               Promise.resolve({
                 code: 'PROMOTION_CURRENT_CONFLICT',
-                error: 'Promotion promo-conflict changed while attempting status',
+                error: 'Request conflicts with current state',
               }),
           }));
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -1198,9 +1360,7 @@ describe('PromotionsPage integration', () => {
     releaseUpdateConflict();
     await waitFor(() => expect(screen.getByText('Concurrent Promotion')).toBeDefined());
     expect(screen.queryByRole('heading', { name: 'Edit Promotion' })).toBeNull();
-    expect(
-      screen.getByText('Promotion promo-conflict changed while attempting update'),
-    ).toBeDefined();
+    expect(screen.getByText('Request conflicts with current state')).toBeDefined();
     expect(listReads).toBe(2);
     expect(updateWrites).toBe(1);
 
@@ -1213,9 +1373,7 @@ describe('PromotionsPage integration', () => {
     releaseStatusConflict();
 
     await waitFor(() =>
-      expect(
-        screen.getByText('Promotion promo-conflict changed while attempting status'),
-      ).toBeDefined(),
+      expect(screen.getByText('Request conflicts with current state')).toBeDefined(),
     );
     expect(screen.queryByRole('heading', { name: 'Edit Promotion' })).toBeNull();
     expect(listReads).toBe(3);
@@ -1226,13 +1384,13 @@ describe('PromotionsPage integration', () => {
       label: 'activation',
       action: 'Activate',
       method: 'POST',
-      path: '/api/promotions/promo-current/status',
+      path: `/api/promotions/${CURRENT_PROMOTION_ID}/status`,
     },
     {
       label: 'deletion',
       action: 'Delete',
       method: 'DELETE',
-      path: '/api/promotions/promo-current',
+      path: `/api/promotions/${CURRENT_PROMOTION_ID}`,
     },
   ])('closes the same-record editor after successful $label', async (testCase) => {
     let listReads = 0;
@@ -1257,7 +1415,7 @@ describe('PromotionsPage integration', () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: () => Promise.resolve({ promotions }),
+            json: () => Promise.resolve({ promotions, nextCursor: null }),
           });
         }
         if (url === testCase.path && method === testCase.method) {
@@ -1273,11 +1431,7 @@ describe('PromotionsPage integration', () => {
               ),
           }));
         }
-        return Promise.resolve({
-          ok: false,
-          status: 404,
-          json: () => Promise.resolve({ error: 'NOT_FOUND' }),
-        });
+        return Promise.reject(new Error(`Unhandled test request: ${method} ${url}`));
       }),
     );
 
@@ -1335,7 +1489,10 @@ describe('ConfigPage integration', () => {
         {
           settlementTokenSymbol: 'DEEP',
           settlementTokenType: DEEP_TYPE,
+          settlementTokenDecimals: 9,
           settlementSwapDirection: 'baseForQuote',
+          lotSize: 1,
+          minSize: 1,
           hops: [
             {
               poolId: '0x' + 'a1'.repeat(32),
@@ -1353,7 +1510,7 @@ describe('ConfigPage integration', () => {
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': sponsorOperationsDataWith1hop,
-        '/api/studio': { enabled: false },
+        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 
@@ -1369,12 +1526,12 @@ describe('ConfigPage integration', () => {
     );
   });
 
-  it('does not render RPC Fleet on the config page', async () => {
+  it('does not render the qualified RPC endpoint snapshot on the config page', async () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
         '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
-        '/api/studio': { enabled: false },
+        '/api/studio': { config: { developerJwtVerifyUrlConfigured: false } },
       }),
     );
 
@@ -1385,7 +1542,7 @@ describe('ConfigPage integration', () => {
       expect(screen.getByText('Sponsor Operations')).toBeDefined();
     });
 
-    expect(screen.queryByText('RPC Fleet (1/2 healthy)')).toBeNull();
+    expect(screen.queryByText('RPC Endpoints (2 qualified)')).toBeNull();
     expect(screen.queryByText('Sponsor Operations Gate')).toBeNull();
   });
 });
