@@ -29,8 +29,6 @@ export interface InitialRequestAdmissionPolicy {
   readonly ipRateLimitCheck?: (
     ip: string,
   ) => Promise<{ readonly allowed: boolean; readonly retryAfterMs: number }>;
-  /** Exact origins accepted by this route; when present, Origin is required. */
-  readonly requiredOrigins?: readonly string[];
   readonly jsonBodyLimitBytes?: number;
 }
 
@@ -42,6 +40,29 @@ export interface InitialRequestAdmission {
 export type RequestAdmissionResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly response: Response };
+
+export interface AuthenticatedRequestAdmissionOptions {
+  readonly allowedErrorCodes: readonly HostErrorCode[];
+  readonly subject: AbuseSubject;
+  readonly rateLimitKeys?: readonly string[];
+}
+
+/**
+ * Complete Admin request-admission owner. App composition captures the one
+ * Admin browser origin and the common admission dependencies here so route
+ * callers cannot omit or replace that policy.
+ */
+export interface AdminRequestAdmission {
+  begin(
+    c: Context,
+    policy: InitialRequestAdmissionPolicy,
+  ): Promise<RequestAdmissionResult<InitialRequestAdmission>>;
+  finishAuthenticated(
+    c: Context,
+    initial: InitialRequestAdmission,
+    options: AuthenticatedRequestAdmissionOptions,
+  ): Promise<RequestAdmissionResult<InitialRequestAdmission>>;
+}
 
 function reject(
   c: Context,
@@ -141,10 +162,11 @@ function hasValidMediaTypeParameterSyntax(value: string): boolean {
   return true;
 }
 
-export async function beginRequestAdmission(
+async function runInitialRequestAdmission(
   c: Context,
   dependencies: RequestAdmissionDependencies,
   policy: InitialRequestAdmissionPolicy,
+  allowedBrowserOrigin: string | null | undefined,
 ): Promise<RequestAdmissionResult<InitialRequestAdmission>> {
   let clientIp: AdmittedClientIp;
   try {
@@ -188,9 +210,9 @@ export async function beginRequestAdmission(
     return mapAdmissionError(c, error, policy.allowedErrorCodes, policy.unexpectedFailureCode);
   }
 
-  if (policy.requiredOrigins !== undefined) {
+  if (allowedBrowserOrigin !== undefined) {
     const origin = c.req.header('origin');
-    if (origin === undefined || !policy.requiredOrigins.includes(origin)) {
+    if (origin !== undefined && origin !== allowedBrowserOrigin) {
       return reject(c, 'ADMIN_UNAUTHORIZED', policy.allowedErrorCodes);
     }
   }
@@ -210,15 +232,37 @@ export async function beginRequestAdmission(
   return { ok: true, value: Object.freeze({ clientIp, body }) };
 }
 
+export function beginRequestAdmission(
+  c: Context,
+  dependencies: RequestAdmissionDependencies,
+  policy: InitialRequestAdmissionPolicy,
+): Promise<RequestAdmissionResult<InitialRequestAdmission>> {
+  return runInitialRequestAdmission(c, dependencies, policy, undefined);
+}
+
+export function createAdminRequestAdmission(
+  dependencies: RequestAdmissionDependencies,
+  allowedBrowserOrigin: string | null,
+): AdminRequestAdmission {
+  return Object.freeze({
+    begin(c: Context, policy: InitialRequestAdmissionPolicy) {
+      return runInitialRequestAdmission(c, dependencies, policy, allowedBrowserOrigin);
+    },
+    finishAuthenticated(
+      c: Context,
+      initial: InitialRequestAdmission,
+      options: AuthenticatedRequestAdmissionOptions,
+    ) {
+      return finishAuthenticatedRequestAdmission(c, dependencies, initial, options);
+    },
+  });
+}
+
 export async function finishAuthenticatedRequestAdmission(
   c: Context,
   dependencies: RequestAdmissionDependencies,
   initial: InitialRequestAdmission,
-  options: {
-    readonly allowedErrorCodes: readonly HostErrorCode[];
-    readonly subject: AbuseSubject;
-    readonly rateLimitKeys?: readonly string[];
-  },
+  options: AuthenticatedRequestAdmissionOptions,
 ): Promise<RequestAdmissionResult<InitialRequestAdmission>> {
   try {
     const blocked = await checkBlockedSubject(

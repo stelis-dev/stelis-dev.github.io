@@ -115,7 +115,7 @@ export interface SponsorRefillAccountStatus {
 }
 
 /**
- * Composite sponsor operations payload returned by `/api/sponsor-operations` as the
+ * Composite sponsor operations payload returned by `/admin/sponsor-operations` as the
  * `sponsorOperations` field. The route requests one bounded balance observation and reads the
  * shared state on every request, so the payload has no empty bootstrap
  * sentinel.

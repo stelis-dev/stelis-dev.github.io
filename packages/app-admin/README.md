@@ -36,15 +36,18 @@ This dashboard does not publish or upgrade contracts; it only displays and opera
 
 `@stelis/app-admin` depends on a live `@stelis/app-api` Host for:
 
-- `/auth/*` admin session flows
-- `/api/*` operator data and controls
+- `/admin/auth/*` admin session flows
+- `/admin/*` operator data and controls
 
 Configure the UI with a `relay_with_admin` or
 `relay_with_admin_and_studio` Host when deploying the operator dashboard.
 The dashboard does not require Studio configuration; a `relay_with_admin` Host
 uses only the complete Admin environment group.
-The dashboard reads `GET /api/studio` as the Studio availability authority and
+The dashboard reads `GET /admin/studio` as the Studio availability authority and
 does not enable Promotion operations when that response is disabled.
+For browser deployment, the Host's `ADMIN_APP_ORIGIN` must equal this app's
+exact origin and the Admin cookie domain must be compatible with the Host and
+app sites.
 
 ## Quick Start
 

@@ -25,13 +25,13 @@ This README is an entry point for the package. It does not replace the route and
 
 ## Mounted Endpoints
 
-| Prefix      | Purpose                                                                                            | Available modes                                   |
-| ----------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `/health`   | Root health probe returning `{ status: 'ok', mode }`                                               | All modes                                         |
-| `/relay/*`  | Public Relay API endpoints: status, config, prepare, sponsor                                       | All modes                                         |
-| `/studio/*` | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | `relay_with_admin_and_studio`                     |
-| `/auth/*`   | Admin session authentication (nonce, verify, renew, logout, session)                               | `relay_with_admin`, `relay_with_admin_and_studio` |
-| `/api/*`    | Admin dashboard, sponsor pool operations, blocklist, auth audit, Studio status, promotions         | `relay_with_admin`, `relay_with_admin_and_studio` |
+| Prefix          | Purpose                                                                                            | Available modes                                   |
+| --------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `/health`       | Root health probe returning `{ status: 'ok', mode }                                                | All modes                                         |
+| `/relay/*`      | Public Relay API endpoints: status, config, prepare, sponsor                                       | All modes                                         |
+| `/studio/*`     | Studio endpoints: developer JWT verification, promotion discovery/claim, promotion prepare/sponsor | `relay_with_admin_and_studio`                     |
+| `/admin/auth/*` | Admin session authentication (nonce, verify, renew, logout, session)                               | `relay_with_admin`, `relay_with_admin_and_studio` |
+| `/admin/*`      | Admin dashboard, sponsor pool operations, blocklist, auth audit, Studio status, promotions         | `relay_with_admin`, `relay_with_admin_and_studio` |
 
 ## Runtime Role
 
@@ -49,17 +49,22 @@ in [docs/operations.md](../../docs/operations.md).
 
 ## Capability Configuration
 
-With no Admin or Studio setting, the Host runs as `relay_only`. The complete
-Admin group consists of `ADMIN_ADDRESS`, `ADMIN_JWT_SECRET`, and
-`CORS_ORIGINS`; with that group and no Studio setting, the Host runs as
-`relay_with_admin`. The complete Studio group consists of
+`HOST_MODE` is required and is the only operating-mode selector. Set it to
+`relay_only`, `relay_with_admin`, or `relay_with_admin_and_studio`. The
+complete Admin group consists of `ADMIN_ADDRESS` and `ADMIN_JWT_SECRET`. The
+complete Studio group consists of
 `STUDIO_ALLOWED_TARGETS` and `STUDIO_DEVELOPER_JWT_TRUST_JSON` and requires the
-complete Admin group; that Host runs as `relay_with_admin_and_studio`.
+complete Admin group.
 
-`ADMIN_SESSION_EXPIRY` and `COOKIE_DOMAIN` belong to the Admin group.
-`STUDIO_DEVELOPER_JWT_VERIFY_URL` belongs to the Studio group. Setting any value
-in a group selects that group, and boot fails when its required settings are
-incomplete.
+`ADMIN_APP_ORIGIN`, `ADMIN_SESSION_EXPIRY`, and `ADMIN_COOKIE_DOMAIN` are
+optional in Admin modes. `STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional in full
+Studio mode. Boot rejects settings forbidden by the selected mode and stops
+when required settings are missing; it never infers or changes the mode.
+
+`/relay/*` and `/studio/*` accept every browser origin without credentials.
+`ADMIN_APP_ORIGIN` controls only credentialed browser access to `/admin/*`.
+When it is absent, requests carrying `Origin` are rejected while Origin-less
+clients may continue through the complete Admin authentication process.
 
 ## Quick Start
 

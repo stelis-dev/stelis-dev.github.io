@@ -140,27 +140,29 @@ The Host has three operating modes:
 | `relay_with_admin`            | available   | unavailable |
 | `relay_with_admin_and_studio` | available   | available   |
 
+`HOST_MODE` is required and is the only mode selector. Boot does not infer a
+mode from the presence of another setting.
+
 Admin configuration is one group with these required settings:
 
 - `ADMIN_ADDRESS`
 - `ADMIN_JWT_SECRET`
-- `CORS_ORIGINS`
 
 These Admin settings are optional after the required group is complete:
 
 - `ADMIN_SESSION_EXPIRY`
-- `COOKIE_DOMAIN`
+- `ADMIN_APP_ORIGIN`
+- `ADMIN_COOKIE_DOMAIN`
 
 Studio configuration is a second group with these required settings:
 
 - `STUDIO_ALLOWED_TARGETS`
 - `STUDIO_DEVELOPER_JWT_TRUST_JSON`
 
-`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional after the required Studio group
-is complete. Any Admin setting selects the Admin group and requires every
-required Admin setting. Any Studio setting selects the Studio group and
-requires every required Studio setting plus complete Admin configuration.
-Partial configuration fails boot.
+`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional in
+`relay_with_admin_and_studio`. Boot rejects a missing required setting and any
+non-empty Admin or Studio setting forbidden by the selected mode. The error
+lists the setting names and then stops boot.
 
 The developer JWT verification URL must use HTTPS, except that HTTP is accepted
 for the exact parsed hostnames `localhost`, `127.0.0.1`, and `[::1]`. It must

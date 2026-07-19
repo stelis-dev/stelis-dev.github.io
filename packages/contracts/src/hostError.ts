@@ -220,7 +220,7 @@ export const PROMOTION_SPONSOR_ERROR_CODES = [
   'SPONSOR_FAILED',
 ] as const;
 
-/** Current errors for `POST /auth/nonce`. */
+/** Current errors for `POST /admin/auth/nonce`. */
 export const ADMIN_AUTH_NONCE_ERROR_CODES = [
   ...HOST_REQUEST_ADMISSION_ERROR_CODES,
   'RATE_LIMITED',
@@ -228,7 +228,7 @@ export const ADMIN_AUTH_NONCE_ERROR_CODES = [
   'INTERNAL_ERROR',
 ] as const;
 
-/** Current errors shared by `POST /auth/verify` and `POST /auth/renew`. */
+/** Current errors shared by `POST /admin/auth/verify` and `POST /admin/auth/renew`. */
 export const ADMIN_AUTH_VERIFY_ERROR_CODES = [
   ...ADMIN_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -236,22 +236,22 @@ export const ADMIN_AUTH_VERIFY_ERROR_CODES = [
   'RATE_LIMITED',
 ] as const;
 
-/** Current errors for `POST /auth/logout`. */
+/** Current errors for `POST /admin/auth/logout`. */
 export const ADMIN_AUTH_LOGOUT_ERROR_CODES = [...ADMIN_ROUTE_BASE_ERROR_CODES] as const;
 
-/** Current errors for `GET /auth/session`. */
+/** Current errors for `GET /admin/auth/session`. */
 export const ADMIN_SESSION_ERROR_CODES = [...ADMIN_ROUTE_BASE_ERROR_CODES] as const;
 
 /** Current errors for Admin reads without route parameters. */
 export const ADMIN_READ_ERROR_CODES = [...ADMIN_ROUTE_BASE_ERROR_CODES] as const;
 
-/** Current errors for `GET /api/blocklist`. */
+/** Current errors for `GET /admin/blocklist`. */
 export const ADMIN_BLOCKLIST_READ_ERROR_CODES = [
   ...ADMIN_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
 ] as const;
 
-/** Current errors for `DELETE /api/blocklist`. */
+/** Current errors for `DELETE /admin/blocklist`. */
 export const ADMIN_BLOCKLIST_DELETE_ERROR_CODES = [
   ...ADMIN_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -265,7 +265,7 @@ export const ADMIN_SPONSORED_LOGS_ERROR_CODES = [
   'BAD_REQUEST',
 ] as const;
 
-/** Current errors for `GET /api/promotions`. */
+/** Current errors for `GET /admin/promotions`. */
 export const ADMIN_PROMOTION_LIST_ERROR_CODES = [
   ...ADMIN_PROMOTION_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -278,7 +278,7 @@ export const ADMIN_PROMOTION_READ_ERROR_CODES = [
   'ADMIN_NOT_FOUND',
 ] as const;
 
-/** Current errors for `POST /api/promotions`. */
+/** Current errors for `POST /admin/promotions`. */
 export const ADMIN_PROMOTION_CREATE_ERROR_CODES = [
   ...ADMIN_PROMOTION_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -287,7 +287,7 @@ export const ADMIN_PROMOTION_CREATE_ERROR_CODES = [
   'PROMOTION_CURRENT_CONFLICT',
 ] as const;
 
-/** Current errors for `PUT /api/promotions/:id`. */
+/** Current errors for `PUT /admin/promotions/:id`. */
 export const ADMIN_PROMOTION_UPDATE_ERROR_CODES = [
   ...ADMIN_PROMOTION_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -298,7 +298,7 @@ export const ADMIN_PROMOTION_UPDATE_ERROR_CODES = [
   'PROMOTION_CURRENT_CONFLICT',
 ] as const;
 
-/** Current errors for `POST /api/promotions/:id/status`. */
+/** Current errors for `POST /admin/promotions/:id/status`. */
 export const ADMIN_PROMOTION_STATUS_ERROR_CODES = [
   ...ADMIN_PROMOTION_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',
@@ -309,7 +309,7 @@ export const ADMIN_PROMOTION_STATUS_ERROR_CODES = [
   'PROMOTION_CURRENT_CONFLICT',
 ] as const;
 
-/** Current errors for `DELETE /api/promotions/:id`. */
+/** Current errors for `DELETE /admin/promotions/:id`. */
 export const ADMIN_PROMOTION_DELETE_ERROR_CODES = [
   ...ADMIN_PROMOTION_ROUTE_BASE_ERROR_CODES,
   'BAD_REQUEST',

@@ -471,7 +471,7 @@ export function DashboardPage() {
     );
   }
 
-  // `/api/sponsor-operations` always returns a concrete sponsor operations payload. Boot
+  // `/admin/sponsor-operations` always returns a concrete sponsor operations payload. Boot
   // sync populates sponsor operations state before requests, and the admin
   // route probes the sponsor refill account before it reads the shared state.
   const sponsorOperations = data.sponsorOperations;

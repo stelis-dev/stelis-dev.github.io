@@ -1,5 +1,5 @@
 /**
- * [app-api] Auth routes — /auth/nonce, /auth/verify, /auth/renew, /auth/logout, /auth/session
+ * [app-api] Admin auth routes — /admin/auth/{nonce,verify,renew,logout,session}
  *
  * Admin wallet-based authentication using core-api/admin DI functions.
  * Cookie = `stelis_admin`; Redis not-before key = `stelis:app-api:admin:not_before`.
@@ -36,11 +36,7 @@ import {
   type AdminAuthRuntimeConfig,
 } from '../adminAuth.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
-import {
-  beginRequestAdmission,
-  finishAuthenticatedRequestAdmission,
-  type RequestAdmissionDependencies,
-} from '../requestAdmission.js';
+import type { AdminRequestAdmission } from '../requestAdmission.js';
 import { writeAdminAuditLog } from '../adminAuditLog.js';
 import { safeErrorSummary } from '@stelis/core-api/observability';
 import { raiseAppApiAdminSessionNotBefore } from '../adminSessionNotBefore.js';
@@ -49,11 +45,10 @@ import { codedHostError, mapError, respondMapped } from '../errorMap.js';
 const NONCE_TTL_MS = 60_000;
 
 export interface AuthRoutesRuntime {
-  readonly admission: RequestAdmissionDependencies;
+  readonly admission: AdminRequestAdmission;
   readonly admin: {
     readonly address: string;
     readonly auth: AdminAuthRuntimeConfig;
-    readonly allowedOrigins: readonly string[];
   };
 }
 
@@ -93,10 +88,10 @@ function respondAuthFailure(
 export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoutesRuntime) {
   const app = new Hono();
 
-  // ── POST /auth/nonce ───────────────────────────────────────────────
+  // ── POST /admin/auth/nonce ───────────────────────────────────────────────
   app.post('/nonce', async (c) => {
     try {
-      const admitted = await beginRequestAdmission(c, runtime.admission, {
+      const admitted = await runtime.admission.begin(c, {
         allowedErrorCodes: ADMIN_AUTH_NONCE_ERROR_CODES,
         unexpectedFailureCode: 'INTERNAL_ERROR',
         ipRateLimitCheck: async (ip) => checkAndIncrement(getAdminRedis(context), ip),
@@ -109,20 +104,19 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
       return c.json(parseAdminAuthChallengeResponse({ nonce }));
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error('[app-api] /auth/nonce failed', safeErrorSummary(err));
+      console.error('[app-api] /admin/auth/nonce failed', safeErrorSummary(err));
       return respondAuthFailure(c, err, ADMIN_AUTH_NONCE_ERROR_CODES);
     }
   });
 
-  // ── POST /auth/verify ──────────────────────────────────────────────
+  // ── POST /admin/auth/verify ──────────────────────────────────────────────
   app.post('/verify', async (c) => {
     let ip: string | null = null;
     try {
       const configuredAuth = runtime.admin;
-      const admitted = await beginRequestAdmission(c, runtime.admission, {
+      const admitted = await runtime.admission.begin(c, {
         allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
         unexpectedFailureCode: 'INTERNAL_ERROR',
-        requiredOrigins: configuredAuth.allowedOrigins,
         jsonBodyLimitBytes: MAX_SMALL_REQUEST_BODY_BYTES,
         ipRateLimitCheck: async (candidateIp) =>
           checkAndIncrement(getAdminRedis(context), candidateIp),
@@ -153,9 +147,8 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
         );
       }
 
-      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+      const subjectAdmission = await runtime.admission.finishAuthenticated(
         c,
-        runtime.admission,
         admitted.value,
         {
           allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
@@ -207,15 +200,14 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
     }
   });
 
-  // ── POST /auth/renew ───────────────────────────────────────────────
+  // ── POST /admin/auth/renew ───────────────────────────────────────────────
   app.post('/renew', async (c) => {
     let ip: string | null = null;
     try {
       const configuredAuth = runtime.admin;
-      const admitted = await beginRequestAdmission(c, runtime.admission, {
+      const admitted = await runtime.admission.begin(c, {
         allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
         unexpectedFailureCode: 'INTERNAL_ERROR',
-        requiredOrigins: configuredAuth.allowedOrigins,
         jsonBodyLimitBytes: MAX_SMALL_REQUEST_BODY_BYTES,
         ipRateLimitCheck: async (candidateIp) =>
           checkAndIncrement(getAdminRedis(context), candidateIp),
@@ -245,9 +237,8 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
         );
       }
 
-      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+      const subjectAdmission = await runtime.admission.finishAuthenticated(
         c,
-        runtime.admission,
         admitted.value,
         {
           allowedErrorCodes: ADMIN_AUTH_VERIFY_ERROR_CODES,
@@ -295,13 +286,12 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
     }
   });
 
-  // ── POST /auth/logout ──────────────────────────────────────────────
+  // ── POST /admin/auth/logout ──────────────────────────────────────────────
   app.post('/logout', async (c) => {
     try {
-      const admitted = await beginRequestAdmission(c, runtime.admission, {
+      const admitted = await runtime.admission.begin(c, {
         allowedErrorCodes: ADMIN_AUTH_LOGOUT_ERROR_CODES,
         unexpectedFailureCode: 'INTERNAL_ERROR',
-        requiredOrigins: runtime.admin.allowedOrigins,
       });
       if (!admitted.ok) return admitted.response;
       const configuredAuth = runtime.admin;
@@ -312,9 +302,8 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
           codedHostError('ADMIN_UNAUTHORIZED', ADMIN_AUTH_LOGOUT_ERROR_CODES),
         );
       }
-      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+      const subjectAdmission = await runtime.admission.finishAuthenticated(
         c,
-        runtime.admission,
         admitted.value,
         {
           allowedErrorCodes: ADMIN_AUTH_LOGOUT_ERROR_CODES,
@@ -329,14 +318,14 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
       return c.json(parseAdminAuthSuccessResponse({ ok: true }));
     } catch (err) {
       // Do not expire the cookie or claim success until the durable cutoff is raised.
-      console.error('[app-api] /auth/logout failed', safeErrorSummary(err)); // eslint-disable-line no-console
+      console.error('[app-api] /admin/auth/logout failed', safeErrorSummary(err)); // eslint-disable-line no-console
       return respondAuthFailure(c, err, ADMIN_AUTH_LOGOUT_ERROR_CODES);
     }
   });
 
-  // ── GET /auth/session ──────────────────────────────────────────────
+  // ── GET /admin/auth/session ──────────────────────────────────────────────
   app.get('/session', async (c) => {
-    const admitted = await beginRequestAdmission(c, runtime.admission, {
+    const admitted = await runtime.admission.begin(c, {
       allowedErrorCodes: ADMIN_SESSION_ERROR_CODES,
       unexpectedFailureCode: 'INTERNAL_ERROR',
     });
@@ -347,9 +336,8 @@ export function createAuthRoutes(context: AdminAppApiContext, runtime: AuthRoute
     if (!session) {
       return respondMapped(c, codedHostError('ADMIN_UNAUTHORIZED', ADMIN_SESSION_ERROR_CODES));
     }
-    const subjectAdmission = await finishAuthenticatedRequestAdmission(
+    const subjectAdmission = await runtime.admission.finishAuthenticated(
       c,
-      runtime.admission,
       admitted.value,
       {
         allowedErrorCodes: ADMIN_SESSION_ERROR_CODES,

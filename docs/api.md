@@ -9,13 +9,13 @@ hand-maintained JSON Schema.
 
 ## Route Groups
 
-| Prefix      | Purpose                      | Available modes                                   |
-| ----------- | ---------------------------- | ------------------------------------------------- |
-| `/health`   | Host health probe            | All modes                                         |
-| `/relay/*`  | Public Relay API flow        | All modes                                         |
-| `/studio/*` | Developer-JWT promotion flow | `relay_with_admin_and_studio`                     |
-| `/auth/*`   | Admin session authentication | `relay_with_admin`, `relay_with_admin_and_studio` |
-| `/api/*`    | Operator admin routes        | `relay_with_admin`, `relay_with_admin_and_studio` |
+| Prefix          | Purpose                                    | Available modes                                   |
+| --------------- | ------------------------------------------ | ------------------------------------------------- |
+| `/health`       | Host health probe                          | All modes                                         |
+| `/relay/*`      | Public Relay API flow                      | All modes                                         |
+| `/studio/*`     | Developer-JWT promotion flow               | `relay_with_admin_and_studio`                     |
+| `/admin/auth/*` | Admin authentication inside management API | `relay_with_admin`, `relay_with_admin_and_studio` |
+| `/admin/*`      | Complete Host management API               | `relay_with_admin`, `relay_with_admin_and_studio` |
 
 ## GET /health
 
@@ -35,20 +35,21 @@ Each mounted Relay, Studio, Auth, or Admin route then applies its relevant
 checks in this order: client-IP admission, Origin and Content-Type admission,
 bounded body reading, credential verification, authenticated-subject
 admission, then route-specific work. A failed earlier check does not start a
-later check. On an Admin-only Host, `/api/promotions*` completes Admin admission
+later check. On an Admin-only Host, `/admin/promotions*` completes Admin admission
 before returning `STUDIO_UNAVAILABLE`; it performs no Promotion-domain I/O.
 
 Requests with a JSON body require `Content-Type: application/json`; valid
 media-type parameters such as `charset=utf-8` are accepted. Missing, different,
-or malformed media types are rejected. Admin mutations and the Auth mutations
-that establish, renew, or end an Admin session require an `Origin` that exactly
-matches one configured in `CORS_ORIGINS`.
+or malformed media types are rejected. Every Admin request carrying `Origin`
+must match `ADMIN_APP_ORIGIN`. When that setting is absent, every supplied
+Origin is rejected. Origin-less clients continue to Admin authentication.
 
 In `relay_only` mode, Studio routes return `STUDIO_UNAVAILABLE` and Auth/Admin
 routes return `ADMIN_UNAVAILABLE` without performing credential or domain
 work. In `relay_with_admin` mode, Auth/Admin routes are available and Studio
 routes return `STUDIO_UNAVAILABLE`. `relay_with_admin_and_studio` exposes all
-three route groups. CORS preflight for the public Studio surface is the
+three route groups. `/relay/*` and `/studio/*` use the same public browser
+policy and accept every origin without credentials. CORS preflight for Studio is the
 transport-level exception: it succeeds in all modes so a browser can issue the
 actual request and read the typed `STUDIO_UNAVAILABLE` response.
 
@@ -242,46 +243,46 @@ even if that Promotion is later deleted or changes status.
 
 ## Auth Routes
 
-`/auth/*` routes create and maintain admin sessions for `@stelis/app-admin`.
+`/admin/auth/*` routes create and maintain admin sessions for `@stelis/app-admin`.
 
 Mounted auth routes:
 
-- `POST /auth/nonce`
-- `POST /auth/verify`
-- `POST /auth/renew`
-- `POST /auth/logout`
-- `GET /auth/session`
+- `POST /admin/auth/nonce`
+- `POST /admin/auth/verify`
+- `POST /admin/auth/renew`
+- `POST /admin/auth/logout`
+- `GET /admin/auth/session`
 
 ## Admin Routes
 
-`/api/*` routes are operator routes. SDK and MCP clients must not depend on them.
+`/admin/*` routes are operator routes. SDK and MCP clients must not depend on them.
 Auth and Admin request and response bodies use the current parsers exported by
 `@stelis/contracts`; `@stelis/app-admin` rejects uncoded errors and malformed
-success responses. `/api/logs` returns structured audit entries with `ts`,
+success responses. `/admin/logs` returns structured audit entries with `ts`,
 `event`, and `ip`, plus the current optional `address`, `reason`, `error`, and
 `detail` fields.
 
 Mounted admin routes:
 
-- `GET /api/blocklist?cursor=<opaqueCursor>&limit=<1..100>`
-- `DELETE /api/blocklist`
-- `GET /api/logs`
-- `GET /api/sponsored-logs/summary`
-- `GET /api/sponsored-logs`
-- `GET /api/sponsor-operations`
-- `POST /api/sponsor-refill-account/withdrawal-challenge`
-- `POST /api/sponsor-refill-account/withdraw`
-- `GET /api/settlement-swap-paths`
-- `GET /api/studio`
-- `GET /api/promotions?status=<status>&cursor=<promotionId>&limit=<1..100>`
-- `POST /api/promotions`
-- `GET /api/promotions/:id`
-- `PUT /api/promotions/:id`
-- `POST /api/promotions/:id/status`
-- `DELETE /api/promotions/:id`
-- `GET /api/promotions/:id/summary`
+- `GET /admin/blocklist?cursor=<opaqueCursor>&limit=<1..100>`
+- `DELETE /admin/blocklist`
+- `GET /admin/logs`
+- `GET /admin/sponsored-logs/summary`
+- `GET /admin/sponsored-logs`
+- `GET /admin/sponsor-operations`
+- `POST /admin/sponsor-refill-account/withdrawal-challenge`
+- `POST /admin/sponsor-refill-account/withdraw`
+- `GET /admin/settlement-swap-paths`
+- `GET /admin/studio`
+- `GET /admin/promotions?status=<status>&cursor=<promotionId>&limit=<1..100>`
+- `POST /admin/promotions`
+- `GET /admin/promotions/:id`
+- `PUT /admin/promotions/:id`
+- `POST /admin/promotions/:id/status`
+- `DELETE /admin/promotions/:id`
+- `GET /admin/promotions/:id/summary`
 
-`GET /api/studio` is the Admin app's Studio-availability authority. A
+`GET /admin/studio` is the Admin app's Studio-availability authority. A
 `relay_with_admin` Host returns `{ "enabled": false }`. A
 `relay_with_admin_and_studio` Host returns an enabled response whose `config`
 reports `developerJwtVerifyUrlConfigured`. Admin Promotion routes return

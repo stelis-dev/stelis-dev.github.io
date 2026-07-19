@@ -32,7 +32,7 @@ describe('API client', () => {
     vi.restoreAllMocks();
   });
 
-  it('getSession sends GET /auth/session with credentials', async () => {
+  it('getSession sends GET /admin/auth/session with credentials', async () => {
     const mockResponse = { address: '0xabc', exp: 9999999999, iat: 1000000000 };
     vi.stubGlobal(
       'fetch',
@@ -46,7 +46,7 @@ describe('API client', () => {
     const result = await getSession();
 
     expect(fetch).toHaveBeenCalledWith(
-      '/auth/session',
+      '/admin/auth/session',
       expect.objectContaining({
         credentials: 'include',
       }),
@@ -54,7 +54,7 @@ describe('API client', () => {
     expect(result).toEqual(mockResponse);
   });
 
-  it('issueAdminAuthChallenge sends POST /auth/nonce with credentials', async () => {
+  it('issueAdminAuthChallenge sends POST /admin/auth/nonce with credentials', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -69,7 +69,7 @@ describe('API client', () => {
     expect(result.nonce).toBe('test-nonce-123');
   });
 
-  it('verifyAdminAuth sends POST /auth/verify with body', async () => {
+  it('verifyAdminAuth sends POST /admin/auth/verify with body', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -82,7 +82,7 @@ describe('API client', () => {
     await verifyAdminAuth({ nonce: 'n', signature: 's', address: '0x1' });
 
     expect(fetch).toHaveBeenCalledWith(
-      '/auth/verify',
+      '/admin/auth/verify',
       expect.objectContaining({
         method: 'POST',
         credentials: 'include',
@@ -91,7 +91,7 @@ describe('API client', () => {
     );
   });
 
-  it('renewAdminSession sends POST /auth/renew with body through the shared API client', async () => {
+  it('renewAdminSession sends POST /admin/auth/renew with body through the shared API client', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -104,7 +104,7 @@ describe('API client', () => {
     await renewAdminSession({ nonce: 'n', signature: 's', address: '0x1' });
 
     expect(fetch).toHaveBeenCalledWith(
-      '/auth/renew',
+      '/admin/auth/renew',
       expect.objectContaining({
         method: 'POST',
         credentials: 'include',
@@ -201,7 +201,7 @@ describe('API client', () => {
     await expect(getSession()).rejects.toThrow(/exp must be a safe integer/);
   });
 
-  it('getSponsorOperations sends GET /api/sponsor-operations', async () => {
+  it('getSponsorOperations sends GET /admin/sponsor-operations', async () => {
     const mockPool = {
       network: 'testnet',
       // `sponsorOperations` is always a concrete payload. The smoke test just
@@ -268,7 +268,7 @@ describe('API client', () => {
     const result = await getSponsorOperations();
 
     expect(fetch).toHaveBeenCalledWith(
-      '/api/sponsor-operations',
+      '/admin/sponsor-operations',
       expect.objectContaining({
         credentials: 'include',
       }),
@@ -498,7 +498,7 @@ describe('API client', () => {
     await executeSponsorRefillAccountWithdrawal({ nonce: 'n', signature: 's', amountMist: '1000' });
 
     expect(fetch).toHaveBeenCalledWith(
-      '/api/sponsor-refill-account/withdraw',
+      '/admin/sponsor-refill-account/withdraw',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ nonce: 'n', signature: 's', amountMist: '1000' }),
@@ -506,7 +506,7 @@ describe('API client', () => {
     );
   });
 
-  it('logout sends POST /auth/logout', async () => {
+  it('logout sends POST /admin/auth/logout', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -519,7 +519,7 @@ describe('API client', () => {
     await logoutAdminSession();
 
     expect(fetch).toHaveBeenCalledWith(
-      '/auth/logout',
+      '/admin/auth/logout',
       expect.objectContaining({
         method: 'POST',
         credentials: 'include',
@@ -527,7 +527,7 @@ describe('API client', () => {
     );
   });
 
-  it('removeBlocklistEntry sends DELETE /api/blocklist with a typed identity', async () => {
+  it('removeBlocklistEntry sends DELETE /admin/blocklist with a typed identity', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -540,7 +540,7 @@ describe('API client', () => {
     await removeBlocklistEntry({ scope: 'studio_user', subject: 'User-A' });
 
     expect(fetch).toHaveBeenCalledWith(
-      '/api/blocklist',
+      '/admin/blocklist',
       expect.objectContaining({
         method: 'DELETE',
         body: JSON.stringify({ scope: 'studio_user', subject: 'User-A' }),

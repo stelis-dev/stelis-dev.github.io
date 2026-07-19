@@ -126,7 +126,7 @@ export type AppApiContext = RelayOnlyAppApiContext | AdminAppApiContext;
  * Minimal context-level sponsor operations API for routes and admin. Composes the
  * Redis-shared state store, spend coordinator, and retained balance observation. Routes read
  * the shared state via `readState()` and derive gate decisions on demand;
- * admin `/api/sponsor-operations` calls `observeBalances()` before reading so
+ * admin `/admin/sponsor-operations` calls `observeBalances()` before reading so
  * its response reflects the latest bounded observation pass.
  */
 export interface AppSponsorAvailability {
@@ -139,7 +139,7 @@ export interface AppSponsorOperations extends AppSponsorAvailability {
   readonly settings: SponsorOperationsSettings;
   /**
    * Awaited dashboard observation. It rejects when the observation cannot be
-   * committed, so `/api/sponsor-operations` never labels stale data as fresh.
+   * committed, so `/admin/sponsor-operations` never labels stale data as fresh.
    */
   observeBalances(): Promise<void>;
   /** Execute an admin-authorized withdrawal through the shared account spend flow. */

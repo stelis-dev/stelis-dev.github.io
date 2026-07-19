@@ -14,6 +14,7 @@ import type { RedisClient } from '../../src/redisClient.js';
 import { requireAdminSession } from '../../src/requireAdminSession.js';
 import { raiseAppApiAdminSessionNotBefore } from '../../src/adminSessionNotBefore.js';
 import { createAuthRoutes } from '../../src/routes/auth.js';
+import { createAdminRequestAdmission } from '../../src/requestAdmission.js';
 
 const JWT_CONFIG: AdminJwtConfig = {
   jwtSecret: 'admin-logout-real-redis-test-secret'.padEnd(32, 'x'),
@@ -70,24 +71,26 @@ describe('admin auth durability — real Redis and production adapters', () => {
     const context = { redis } as AdminAppApiContext;
     const app = new Hono();
     app.route(
-      '/auth',
+      '/admin/auth',
       createAuthRoutes(context, {
-        admission: {
-          resolveClientIp: () => '127.0.0.1',
-          host: {
-            abuseBlocker: {
-              checkIp: async () => ({ blocked: false }),
-              checkSubject: async () => ({ blocked: false }),
-              recordSponsorFailure: async () => {},
-            },
-            rateLimiter: {
-              check: async () => ({ allowed: true, current: 1, limit: 100 }),
+        admission: createAdminRequestAdmission(
+          {
+            resolveClientIp: () => '127.0.0.1',
+            host: {
+              abuseBlocker: {
+                checkIp: async () => ({ blocked: false }),
+                checkSubject: async () => ({ blocked: false }),
+                recordSponsorFailure: async () => {},
+              },
+              rateLimiter: {
+                check: async () => ({ allowed: true, current: 1, limit: 100 }),
+              },
             },
           },
-        },
+          ADMIN_ORIGIN,
+        ),
         admin: {
           address: ADMIN_ADDRESS,
-          allowedOrigins: [ADMIN_ORIGIN],
           auth: {
             jwt: JWT_CONFIG,
             cookie: { maxAgeSeconds: 3_600, secure: false, domain: null },
@@ -102,7 +105,7 @@ describe('admin auth durability — real Redis and production adapters', () => {
     if (!oldSession) throw new Error('expected a valid old session');
     await expect(guardToken(oldToken, adminRedis)).resolves.toEqual({ accepted: true });
 
-    const response = await app.request('/auth/logout', {
+    const response = await app.request('/admin/auth/logout', {
       method: 'POST',
       headers: { Cookie: `stelis_admin=${oldToken}`, Origin: ADMIN_ORIGIN },
     });

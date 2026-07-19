@@ -1,6 +1,7 @@
 /**
- * [app-api] Admin routes — /api/blocklist, /api/logs, /api/sponsor-operations,
- * /api/sponsor-refill-account/withdraw, /api/settlement-swap-paths, /api/studio, /api/promotions*
+ * [app-api] Admin routes — /admin/blocklist, /admin/logs, /admin/sponsor-operations,
+ * /admin/sponsor-refill-account/withdraw, /admin/settlement-swap-paths,
+ * /admin/studio, /admin/promotions*
  *
  * All routes are protected by requireAdminSession (JWT + not_before).
  *
@@ -85,11 +86,9 @@ import { calculateSponsorAvailability } from '../sponsor-operations/gate.js';
 import { encodeSponsorRefillAccountWithdrawalIssuedReceipt } from '../sponsor-operations/accountSpendState.js';
 import type { AdminAppApiContext, RelayWithAdminAndStudioAppApiContext } from '../context.js';
 import { requireAdminSessionFromContext } from '../requireAdminSession.js';
-import {
-  beginRequestAdmission,
-  finishAuthenticatedRequestAdmission,
-  type InitialRequestAdmission,
-  type RequestAdmissionDependencies,
+import type {
+  AdminRequestAdmission,
+  InitialRequestAdmission,
 } from '../requestAdmission.js';
 import { codedHostError, mapError, respondMapped } from '../errorMap.js';
 import { formatRetryAfterSeconds } from '../retryAfter.js';
@@ -183,9 +182,8 @@ function getAdminRedis(context: AdminAppApiContext): AdminRedisClient {
 }
 
 export interface AdminRoutesRuntimeInput {
-  readonly admission: RequestAdmissionDependencies;
+  readonly admission: AdminRequestAdmission;
   readonly network: SuiNetwork;
-  readonly allowedOrigins: readonly string[];
   readonly admin: {
     readonly address: string;
     readonly jwt: AdminJwtConfig;
@@ -208,12 +206,9 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
   const admitAdminRequest =
     (jsonBodyLimitBytes?: number): MiddlewareHandler =>
     async (c, next) => {
-      const admitted = await beginRequestAdmission(c, runtime.admission, {
+      const admitted = await runtime.admission.begin(c, {
         allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
         unexpectedFailureCode: 'INTERNAL_ERROR',
-        ...(!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
-          ? { requiredOrigins: runtime.allowedOrigins }
-          : {}),
         ...(jsonBodyLimitBytes === undefined ? {} : { jsonBodyLimitBytes }),
       });
       if (!admitted.ok) return admitted.response;
@@ -224,9 +219,8 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
           codedHostError('ADMIN_UNAUTHORIZED', ADMIN_REQUEST_ADMISSION_ERROR_CODES),
         );
       }
-      const subjectAdmission = await finishAuthenticatedRequestAdmission(
+      const subjectAdmission = await runtime.admission.finishAuthenticated(
         c,
-        runtime.admission,
         admitted.value,
         {
           allowedErrorCodes: ADMIN_REQUEST_ADMISSION_ERROR_CODES,
@@ -248,7 +242,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
       await next();
     };
 
-  // ── GET /api/blocklist ────────────────────────────────────────────
+  // ── GET /admin/blocklist ────────────────────────────────────────────
   app.get('/blocklist', admitAdminRequest(), async (c) => {
     try {
       const params = parseAdminRequest(c.req.query(), parseAdminBlocklistQuery);
@@ -270,7 +264,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── DELETE /api/blocklist ─────────────────────────────────────────
+  // ── DELETE /admin/blocklist ─────────────────────────────────────────
   app.delete('/blocklist', admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES), async (c) => {
     try {
       const body = parseAdminRequest(
@@ -289,7 +283,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/logs ─────────────────────────────────────────────────
+  // ── GET /admin/logs ─────────────────────────────────────────────────
   app.get('/logs', admitAdminRequest(), async (c) => {
     try {
       const redis = getAdminRedis(context);
@@ -304,7 +298,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/sponsored-logs/summary ─────────────────────────────────
+  // ── GET /admin/sponsored-logs/summary ─────────────────────────────────
   // Lifetime aggregate KPI for the Dashboard (mode=all by default) and
   // Sponsored Logs filter dropdown. Reads exact MIST decimal strings
   // from the durable aggregate; never derives lifetime totals from
@@ -323,7 +317,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/sponsored-logs ─────────────────────────────────────────
+  // ── GET /admin/sponsored-logs ─────────────────────────────────────────
   // Combined summary + bounded recent entries for the Sponsored Logs
   // page. Numeric fields are exact MIST decimal strings (signed where
   // applicable) or `null` for unknown economics.
@@ -344,7 +338,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/sponsor-operations ─────────────────────────────────────────────────
+  // ── GET /admin/sponsor-operations ─────────────────────────────────────────────────
   // Admin view. Sponsor operations fields are read from the shared Redis state
   // store. The route requests one retained, bounded balance observation before
   // the read. An active account spend owns the source-account observation and
@@ -444,7 +438,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── POST /api/sponsor-refill-account/withdrawal-challenge ────────────────────────────
+  // ── POST /admin/sponsor-refill-account/withdrawal-challenge ────────────────────────────
   app.post('/sponsor-refill-account/withdrawal-challenge', admitAdminRequest(), async (c) => {
     let ip: string | null = null;
     try {
@@ -471,7 +465,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── POST /api/sponsor-refill-account/withdraw — execute withdrawal ──────────────────
+  // ── POST /admin/sponsor-refill-account/withdraw — execute withdrawal ──────────────────
   app.post(
     '/sponsor-refill-account/withdraw',
     admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
@@ -663,7 +657,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── GET /api/settlement-swap-paths ────────────────────────────────
+  // ── GET /admin/settlement-swap-paths ────────────────────────────────
   // Operational inspection: returns the active registry loaded at boot.
   app.get('/settlement-swap-paths', admitAdminRequest(), async (c) => {
     try {
@@ -696,7 +690,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/studio ──────────────────────────────────────────────
+  // ── GET /admin/studio ──────────────────────────────────────────────
   // Single Admin-facing authority for Studio availability.
   app.get('/studio', admitAdminRequest(), async (c) => {
     try {
@@ -717,7 +711,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     }
   });
 
-  // ── GET /api/promotions ──────────────────────────────────────────
+  // ── GET /admin/promotions ──────────────────────────────────────────
   app.get(
     '/promotions',
     admitAdminRequest(),
@@ -744,7 +738,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── POST /api/promotions ─────────────────────────────────────────
+  // ── POST /admin/promotions ─────────────────────────────────────────
   app.post(
     '/promotions',
     admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
@@ -759,7 +753,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
         );
         const record = await c.get('studioContext').promotionStore.create(body);
         // Durable admin audit trail: emit the same operation-log event shape used by
-        // every other admin write path so `/api/logs` and `app-admin` can
+        // every other admin write path so `/admin/logs` and `app-admin` can
         // attribute promotion creation without bespoke sink wiring.
         await writeAdminAuditLog(getAdminRedis(context), {
           event: 'PROMOTION_CREATE',
@@ -774,7 +768,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── GET /api/promotions/:id ──────────────────────────────────────
+  // ── GET /admin/promotions/:id ──────────────────────────────────────
   app.get(
     '/promotions/:id',
     admitAdminRequest(),
@@ -803,7 +797,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── PUT /api/promotions/:id ──────────────────────────────────────
+  // ── PUT /admin/promotions/:id ──────────────────────────────────────
   app.put(
     '/promotions/:id',
     admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
@@ -831,7 +825,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── POST /api/promotions/:id/status ──────────────────────────────
+  // ── POST /admin/promotions/:id/status ──────────────────────────────
   app.post(
     '/promotions/:id/status',
     admitAdminRequest(MAX_SMALL_REQUEST_BODY_BYTES),
@@ -862,7 +856,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── DELETE /api/promotions/:id ───────────────────────────────────
+  // ── DELETE /admin/promotions/:id ───────────────────────────────────
   app.delete(
     '/promotions/:id',
     admitAdminRequest(),
@@ -891,7 +885,7 @@ export function createAdminRoutes(context: AdminAppApiContext, runtime: AdminRou
     },
   );
 
-  // ── GET /api/promotions/:id/summary ──────────────────────────────
+  // ── GET /admin/promotions/:id/summary ──────────────────────────────
   app.get(
     '/promotions/:id/summary',
     admitAdminRequest(),

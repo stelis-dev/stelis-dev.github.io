@@ -257,7 +257,7 @@ describe('AuthGuard integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/auth/session': VALID_SESSION,
+        '/admin/auth/session': VALID_SESSION,
       }),
     );
 
@@ -353,14 +353,14 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/sponsor-operations' && method === 'GET') {
+        if (url === '/admin/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           calls.withdrawNonce += 1;
           return Promise.resolve({
             ok: true,
@@ -372,7 +372,7 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdraw' && method === 'POST') {
           calls.withdrawPost += 1;
           return Promise.resolve({
             ok: true,
@@ -396,7 +396,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
+        '/admin/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -418,8 +418,8 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
-        '/api/sponsored-logs/summary?mode=all': {
+        '/admin/sponsor-operations': SPONSOR_OPERATIONS_DATA,
+        '/admin/sponsored-logs/summary?mode=all': {
           summary: {
             mode: 'all',
             sponsoredExecutions: '1250000',
@@ -446,7 +446,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
+        '/admin/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -495,7 +495,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': sponsorOperationsData,
+        '/admin/sponsor-operations': sponsorOperationsData,
       }),
     );
 
@@ -526,7 +526,7 @@ describe('DashboardPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': sponsorOperationsData,
+        '/admin/sponsor-operations': sponsorOperationsData,
       }),
     );
 
@@ -564,21 +564,21 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/sponsor-operations' && method === 'GET') {
+        if (url === '/admin/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve({ nonce, expiresAt: '2026-03-27T00:00:00.000Z' }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdraw' && method === 'POST') {
           withdrawBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
           return Promise.resolve({
             ok: true,
@@ -650,14 +650,14 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/sponsor-operations' && method === 'GET') {
+        if (url === '/admin/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           nonceRequests += 1;
           return Promise.resolve({
             ok: true,
@@ -665,7 +665,7 @@ describe('DashboardPage integration', () => {
             json: () => Promise.resolve({ nonce, expiresAt: '2026-07-12T12:00:00.000Z' }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdraw' && method === 'POST') {
           postedBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
           if (postedBodies.length === 1) {
             return Promise.resolve({
@@ -772,7 +772,7 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/sponsor-operations' && method === 'GET') {
+        if (url === '/admin/sponsor-operations' && method === 'GET') {
           sponsorOperationsReads += 1;
           return Promise.resolve({
             ok: true,
@@ -784,14 +784,14 @@ describe('DashboardPage integration', () => {
               }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdrawal-challenge' && method === 'POST') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve({ nonce, expiresAt: '2026-07-12T12:00:00.000Z' }),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdraw' && method === 'POST') {
           withdrawPosts += 1;
           return Promise.resolve({
             ok: false,
@@ -853,14 +853,14 @@ describe('DashboardPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/sponsor-operations' && method === 'GET') {
+        if (url === '/admin/sponsor-operations' && method === 'GET') {
           return Promise.resolve({
             ok: true,
             status: 200,
             json: () => Promise.resolve(SPONSOR_OPERATIONS_DATA),
           });
         }
-        if (url === '/api/sponsor-refill-account/withdraw' && method === 'POST') {
+        if (url === '/admin/sponsor-refill-account/withdraw' && method === 'POST') {
           return Promise.resolve({
             ok: false,
             status: response.status,
@@ -1122,8 +1122,8 @@ describe('SecurityPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/blocklist': { blocklist: [], nextCursor: null },
-        '/api/logs': {
+        '/admin/blocklist': { blocklist: [], nextCursor: null },
+        '/admin/logs': {
           logs: [
             {
               ts: '2026-01-02T03:04:05.000Z',
@@ -1159,7 +1159,7 @@ describe('SecurityPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string) => {
         requestedUrls.push(url);
-        if (url === '/api/blocklist') {
+        if (url === '/admin/blocklist') {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -1177,7 +1177,7 @@ describe('SecurityPage integration', () => {
               }),
           });
         }
-        if (url === `/api/blocklist?cursor=${cursor}`) {
+        if (url === `/admin/blocklist?cursor=${cursor}`) {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -1195,7 +1195,7 @@ describe('SecurityPage integration', () => {
               }),
           });
         }
-        if (url === '/api/logs') {
+        if (url === '/admin/logs') {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -1225,11 +1225,11 @@ describe('SecurityPage integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
     await waitFor(() => expect(screen.getByText('manipulation')).toBeDefined());
 
-    expect(requestedUrls.filter((url) => url === '/api/logs')).toHaveLength(1);
-    expect(requestedUrls.filter((url) => url.startsWith('/api/blocklist'))).toEqual([
-      '/api/blocklist',
-      `/api/blocklist?cursor=${cursor}`,
-      '/api/blocklist',
+    expect(requestedUrls.filter((url) => url === '/admin/logs')).toHaveLength(1);
+    expect(requestedUrls.filter((url) => url.startsWith('/admin/blocklist'))).toEqual([
+      '/admin/blocklist',
+      `/admin/blocklist?cursor=${cursor}`,
+      '/admin/blocklist',
     ]);
   });
 });
@@ -1264,7 +1264,7 @@ describe('PromotionsPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/promotions': { promotions: [], nextCursor: null },
+        '/admin/promotions': { promotions: [], nextCursor: null },
       }),
     );
 
@@ -1291,7 +1291,7 @@ describe('PromotionsPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string) => {
         requestedUrls.push(url);
-        if (url === '/api/promotions') {
+        if (url === '/admin/promotions') {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -1299,7 +1299,7 @@ describe('PromotionsPage integration', () => {
               Promise.resolve({ promotions: [promotionRecord], nextCursor: CURRENT_PROMOTION_ID }),
           });
         }
-        if (url === `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`) {
+        if (url === `/admin/promotions?cursor=${CURRENT_PROMOTION_ID}`) {
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -1331,9 +1331,9 @@ describe('PromotionsPage integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
     await waitFor(() => expect(screen.getByText('Current Promotion')).toBeDefined());
     expect(requestedUrls).toEqual([
-      '/api/promotions',
-      `/api/promotions?cursor=${CURRENT_PROMOTION_ID}`,
-      '/api/promotions',
+      '/admin/promotions',
+      `/admin/promotions?cursor=${CURRENT_PROMOTION_ID}`,
+      '/admin/promotions',
     ]);
   });
 
@@ -1359,7 +1359,7 @@ describe('PromotionsPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/promotions' && method === 'GET') {
+        if (url === '/admin/promotions' && method === 'GET') {
           listReads += 1;
           return Promise.resolve({
             ok: true,
@@ -1380,7 +1380,7 @@ describe('PromotionsPage integration', () => {
               }),
           });
         }
-        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}` && method === 'PUT') {
+        if (url === `/admin/promotions/${CONFLICT_PROMOTION_ID}` && method === 'PUT') {
           updateWrites += 1;
           return updateConflictGate.then(() => ({
             ok: false,
@@ -1392,7 +1392,7 @@ describe('PromotionsPage integration', () => {
               }),
           }));
         }
-        if (url === `/api/promotions/${CONFLICT_PROMOTION_ID}/status` && method === 'POST') {
+        if (url === `/admin/promotions/${CONFLICT_PROMOTION_ID}/status` && method === 'POST') {
           statusWrites += 1;
           return statusConflictGate.then(() => ({
             ok: false,
@@ -1449,13 +1449,13 @@ describe('PromotionsPage integration', () => {
       label: 'activation',
       action: 'Activate',
       method: 'POST',
-      path: `/api/promotions/${CURRENT_PROMOTION_ID}/status`,
+      path: `/admin/promotions/${CURRENT_PROMOTION_ID}/status`,
     },
     {
       label: 'deletion',
       action: 'Delete',
       method: 'DELETE',
-      path: `/api/promotions/${CURRENT_PROMOTION_ID}`,
+      path: `/admin/promotions/${CURRENT_PROMOTION_ID}`,
     },
   ])('closes the same-record editor after successful $label', async (testCase) => {
     let listReads = 0;
@@ -1469,7 +1469,7 @@ describe('PromotionsPage integration', () => {
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        if (url === '/api/promotions' && method === 'GET') {
+        if (url === '/admin/promotions' && method === 'GET') {
           listReads += 1;
           const promotions =
             listReads === 1
@@ -1530,7 +1530,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
+        '/admin/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -1574,7 +1574,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': sponsorOperationsDataWith1hop,
+        '/admin/sponsor-operations': sponsorOperationsDataWith1hop,
       }),
     );
 
@@ -1594,7 +1594,7 @@ describe('ConfigPage integration', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/api/sponsor-operations': SPONSOR_OPERATIONS_DATA,
+        '/admin/sponsor-operations': SPONSOR_OPERATIONS_DATA,
       }),
     );
 
@@ -1622,11 +1622,11 @@ describe('Admin Studio availability integration', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
-        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
-        if (url === '/api/studio') {
+        if (url === '/admin/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/admin/studio') {
           return studioResponse.promise.then((value) => jsonResponse(value));
         }
-        if (url === '/api/promotions') {
+        if (url === '/admin/promotions') {
           promotionReads += 1;
           return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
         }
@@ -1665,14 +1665,14 @@ describe('Admin Studio availability integration', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
-        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
-        if (url === '/api/studio') {
+        if (url === '/admin/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/admin/studio') {
           studioReads += 1;
           return studioReads === 1
             ? Promise.reject(new Error('Studio status request failed'))
             : Promise.resolve(jsonResponse(STUDIO_AVAILABLE_STATUS));
         }
-        if (url === '/api/promotions') {
+        if (url === '/admin/promotions') {
           promotionReads += 1;
           return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
         }
@@ -1703,18 +1703,18 @@ describe('Admin Studio availability integration', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-        if (url === '/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
-        if (url === '/api/sponsor-operations') {
+        if (url === '/admin/auth/session') return Promise.resolve(jsonResponse(VALID_SESSION));
+        if (url === '/admin/sponsor-operations') {
           return Promise.resolve(jsonResponse(SPONSOR_OPERATIONS_DATA));
         }
-        if (url === '/api/studio') {
+        if (url === '/admin/studio') {
           studioReads += 1;
           if (init?.signal) studioSignals.push(init.signal);
           return (
             studioReads === 1 ? firstStudioResponse.promise : secondStudioResponse.promise
           ).then((value) => jsonResponse(value));
         }
-        if (url === '/api/promotions') {
+        if (url === '/admin/promotions') {
           promotionReads += 1;
           return Promise.resolve(jsonResponse({ promotions: [], nextCursor: null }));
         }
@@ -1767,7 +1767,7 @@ describe('Route structure', () => {
     vi.stubGlobal(
       'fetch',
       mockFetchResponses({
-        '/auth/session': VALID_SESSION,
+        '/admin/auth/session': VALID_SESSION,
       }),
     );
 

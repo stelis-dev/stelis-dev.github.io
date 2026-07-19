@@ -48,8 +48,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3100,
       proxy: {
-        '/auth': apiUrl,
-        '/api': apiUrl,
+        '/admin': apiUrl,
         '/relay': apiUrl,
         '/studio': apiUrl,
         '/health': apiUrl,

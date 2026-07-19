@@ -1,7 +1,7 @@
 /**
  * AuthGuard — protects admin routes.
  *
- * Checks /auth/session on mount and tab focus.
+ * Checks /admin/auth/session on mount and tab focus.
  * Redirects to /login on 401 or missing session.
  * Renders <Outlet /> when authenticated.
  */

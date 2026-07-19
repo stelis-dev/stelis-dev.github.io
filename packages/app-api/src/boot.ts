@@ -1,8 +1,8 @@
 /**
  * [app-api] Boot/instrumentation — runs before the server starts.
  *
- * Validates all required env vars and determines the Host operating mode
- * from the complete Admin and Studio capability groups. Runtime resources are created only after
+ * Validates all required env vars and the explicitly selected Host operating
+ * mode. Runtime resources are created only after
  * every boot input and Sui endpoint has qualified.
  *
  * Shared references:
@@ -13,8 +13,8 @@
  *   - STELIS_CONTRACT_IDS, DEEPBOOK_IDS, requireContractId → @stelis/contracts
  *
  * Admin session keyspace → stelis:app-api:admin:not_before
- * Any setting in a capability group selects that group; partial configuration
- * and Studio without complete Admin fail before runtime resources are created.
+ * HOST_MODE is the only capability selector. Missing, forbidden, and partial
+ * mode-specific configuration fails before runtime resources are created.
  */
 import {
   parseSponsorKey,
@@ -28,6 +28,7 @@ import {
 import {
   STELIS_CONTRACT_IDS,
   DEEPBOOK_IDS,
+  HOST_OPERATING_MODES,
   isNodeTimerDelayMs,
   NODE_TIMER_MAX_DELAY_MS,
   requireContractId,
@@ -76,7 +77,7 @@ export type RelayOnlyAppRuntimeInput = AppRuntimeInputBase<RelayOnlyContextRunti
 interface AdminAppRuntimeInputBase<
   TContext extends AdminContextRuntimeInput,
 > extends AppRuntimeInputBase<TContext> {
-  readonly corsAllowedOrigins: readonly string[];
+  readonly adminAppOrigin: string | null;
   readonly adminAddress: string;
   readonly adminAuth: AdminAuthRuntimeConfig;
 }
@@ -109,34 +110,30 @@ export function resolveTrustedProxyHopsForBoot(input: {
   );
 }
 
-function parseCorsAllowedOrigins(rawValue: string | undefined): string[] {
-  if (!rawValue?.trim()) return [];
-
-  return rawValue
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => {
-      let parsed: URL;
-      try {
-        parsed = new URL(value);
-      } catch {
-        throw new Error(`[app-api] CORS_ORIGINS contains an invalid origin: "${value}"`);
-      }
-      if (
-        (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-        parsed.username !== '' ||
-        parsed.password !== '' ||
-        parsed.pathname !== '/' ||
-        parsed.search !== '' ||
-        parsed.hash !== ''
-      ) {
-        throw new Error(
-          `[app-api] CORS_ORIGINS entry must be an http(s) origin without credentials, path, query, or fragment: "${value}"`,
-        );
-      }
-      return parsed.origin;
-    });
+function parseAdminAppOrigin(rawValue: string | undefined): string | null {
+  const value = rawValue?.trim();
+  if (!value) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      '[app-api] ADMIN_APP_ORIGIN must be one valid http(s) origin without credentials, path, query, or fragment',
+    );
+  }
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  ) {
+    throw new Error(
+      '[app-api] ADMIN_APP_ORIGIN must be one valid http(s) origin without credentials, path, query, or fragment',
+    );
+  }
+  return parsed.origin;
 }
 
 function parseCookieDomain(rawValue: string | undefined): string | null {
@@ -155,7 +152,7 @@ function parseCookieDomain(rawValue: string | undefined): string | null {
         /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label),
     );
   if (!valid) {
-    throw new Error(`[app-api] COOKIE_DOMAIN must be a valid DNS domain, got "${value}"`);
+    throw new Error('[app-api] ADMIN_COOKIE_DOMAIN must be a valid DNS domain');
   }
   return value.toLowerCase();
 }
@@ -175,30 +172,57 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
     return value;
   };
 
-  const adminRequiredKeys = ['ADMIN_ADDRESS', 'ADMIN_JWT_SECRET', 'CORS_ORIGINS'] as const;
-  const adminOptionalKeys = ['ADMIN_SESSION_EXPIRY', 'COOKIE_DOMAIN'] as const;
+  const rawMode = environment.HOST_MODE?.trim();
+  if (!rawMode) {
+    throw new Error(
+      `[app-api] HOST_MODE is required. Choose one of: ${HOST_OPERATING_MODES.join(', ')}`,
+    );
+  }
+  if (!HOST_OPERATING_MODES.includes(rawMode as HostOperatingMode)) {
+    throw new Error(
+      `[app-api] HOST_MODE is invalid. Choose one of: ${HOST_OPERATING_MODES.join(', ')}`,
+    );
+  }
+  const mode = rawMode as HostOperatingMode;
+
+  const adminRequiredKeys = ['ADMIN_ADDRESS', 'ADMIN_JWT_SECRET'] as const;
+  const adminOptionalKeys = [
+    'ADMIN_APP_ORIGIN',
+    'ADMIN_SESSION_EXPIRY',
+    'ADMIN_COOKIE_DOMAIN',
+  ] as const;
   const studioRequiredKeys = ['STUDIO_ALLOWED_TARGETS', 'STUDIO_DEVELOPER_JWT_TRUST_JSON'] as const;
   const studioOptionalKeys = ['STUDIO_DEVELOPER_JWT_VERIFY_URL'] as const;
-  const hasAnyConfiguredKey = (names: readonly string[]): boolean =>
-    names.some((name) => !!environment[name]?.trim());
-  const adminSelected = hasAnyConfiguredKey([...adminRequiredKeys, ...adminOptionalKeys]);
-  const studioSelected = hasAnyConfiguredKey([...studioRequiredKeys, ...studioOptionalKeys]);
-  const mode: HostOperatingMode = studioSelected
-    ? 'relay_with_admin_and_studio'
-    : adminSelected
-      ? 'relay_with_admin'
-      : 'relay_only';
-  if (mode !== 'relay_only') {
-    const requiredKeys =
-      mode === 'relay_with_admin_and_studio'
-        ? [...adminRequiredKeys, ...studioRequiredKeys]
-        : adminRequiredKeys;
-    const missing = requiredKeys.filter((name) => !environment[name]?.trim());
-    if (missing.length > 0) {
-      throw new Error(
-        `[app-api] \`${mode}\` configuration is incomplete. Missing: ${missing.join(', ')}`,
-      );
-    }
+  const allCapabilityKeys = [
+    ...adminRequiredKeys,
+    ...adminOptionalKeys,
+    ...studioRequiredKeys,
+    ...studioOptionalKeys,
+  ] as const;
+  const requiredKeys: readonly string[] =
+    mode === 'relay_with_admin_and_studio'
+      ? [...adminRequiredKeys, ...studioRequiredKeys]
+      : mode === 'relay_with_admin'
+        ? adminRequiredKeys
+        : [];
+  const allowedKeys: readonly string[] =
+    mode === 'relay_with_admin_and_studio'
+      ? allCapabilityKeys
+      : mode === 'relay_with_admin'
+        ? [...adminRequiredKeys, ...adminOptionalKeys]
+        : [];
+  const missing = requiredKeys.filter((name) => !environment[name]?.trim());
+  const forbidden = allCapabilityKeys.filter(
+    (name) => !!environment[name]?.trim() && !allowedKeys.includes(name),
+  );
+  if (missing.length > 0 || forbidden.length > 0) {
+    const reasons = [
+      ...(missing.length > 0 ? [`Missing: ${missing.join(', ')}`] : []),
+      ...(forbidden.length > 0
+        ? [`Not allowed for the selected HOST_MODE: ${forbidden.join(', ')}`]
+        : []),
+    ];
+    throw new Error(`[app-api] HOST_MODE configuration is invalid. ${reasons.join('. ')}`);
   }
 
   // ── 1. Generic required env vars ─────────────────────────────────────────
@@ -413,7 +437,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
   if (!Number.isSafeInteger(withdrawalReceiptTtlMs)) {
     throw new Error('[app-api] ADMIN_SESSION_EXPIRY is too large for withdrawal receipt TTL');
   }
-  const cookieDomain = parseCookieDomain(environment.COOKIE_DOMAIN);
+  const cookieDomain = parseCookieDomain(environment.ADMIN_COOKIE_DOMAIN);
   const adminAuth: AdminAuthRuntimeConfig | null =
     mode !== 'relay_only'
       ? {
@@ -447,11 +471,8 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
     withdrawalReceiptTtlMs,
   });
 
-  const corsAllowedOrigins =
-    mode !== 'relay_only' ? parseCorsAllowedOrigins(environment.CORS_ORIGINS) : [];
-  if (mode !== 'relay_only' && corsAllowedOrigins.length === 0) {
-    throw new Error('[app-api] CORS_ORIGINS must contain at least one Admin origin');
-  }
+  const adminAppOrigin =
+    mode !== 'relay_only' ? parseAdminAppOrigin(environment.ADMIN_APP_ORIGIN) : null;
 
   // ── 10. Studio configuration ────────────────────────────────────────────
   // Validate every local Studio input before any Sui endpoint qualification.
@@ -608,7 +629,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
         studio: studioRuntimeInput!,
       },
       trustedProxyHops,
-      corsAllowedOrigins,
+      adminAppOrigin,
       adminAddress: adminAddress!,
       adminAuth: adminAuth!,
     };
@@ -620,7 +641,7 @@ export async function runBootValidation(signal?: AbortSignal): Promise<AppRuntim
         rpcFleet: qualifiedSui.adminSnapshot,
       },
       trustedProxyHops,
-      corsAllowedOrigins,
+      adminAppOrigin,
       adminAddress: adminAddress!,
       adminAuth: adminAuth!,
     };

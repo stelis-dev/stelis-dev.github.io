@@ -51,12 +51,13 @@ The temporary Vercel demo adapter is an exception to the proxy-hop model. Vercel
 
 In `development` and `test`, an unset `TRUSTED_PROXY_HOPS` defaults to `0` and uses the socket remote address.
 
-`/relay/*` and `/studio/*` allow all origins. `/auth/*` and `/api/*` send
-credentialed CORS responses only to origins listed in `CORS_ORIGINS`. CORS is
-not the mutation authorization check: Admin mutations and the Auth mutations
-that establish, renew, or end an Admin session also require the request's
-`Origin` to exactly match one of those configured origins. The complete HTTP
-request contract is in [`API Reference → Request admission`](./api.md#request-admission).
+`/relay/*` and `/studio/*` allow every browser origin without credentials or an
+origin registry. `/admin/*` emits credentialed CORS only when the request
+origin exactly matches the optional `ADMIN_APP_ORIGIN`. With no configured
+Admin app origin, every request carrying `Origin` is rejected; Origin-less
+clients still require full Admin authentication. CORS is not authorization.
+The complete HTTP request contract is in
+[`API Reference → Request admission`](./api.md#request-admission).
 
 ## On-Chain Admin Updates
 
@@ -179,7 +180,7 @@ Sponsor slot scan policy:
 - The current Redis implementation keeps O(sponsor slot count) Lua scans for sponsor slot checkout, sponsor slot lease status, and sponsor operation state reads.
 - The supported sponsor slot count is capped at 256 so those scans stay inside the current capacity target.
 - Checkout, lease status, and sponsor operation state reads stay within one Redis `EVAL` over at most 256 sponsor slots.
-- `/api/sponsor-operations` returns a per-slot admin snapshot and reads every configured sponsor slot.
+- `/admin/sponsor-operations` returns a per-slot admin snapshot and reads every configured sponsor slot.
 - Deployments with more than 256 sponsor slots are rejected at boot instead of running outside the supported scan bound.
 
 Required timeout variables:
@@ -221,15 +222,16 @@ The Host boots in exactly one current mode:
 | `relay_with_admin`            | available   | unavailable |
 | `relay_with_admin_and_studio` | available   | available   |
 
+Set `HOST_MODE` to exactly one value from the table. It is required and is the
+only mode selector.
+
 Admin configuration is one complete group. Its required settings are:
 
 - `ADMIN_ADDRESS`
 - `ADMIN_JWT_SECRET`
-- `CORS_ORIGINS`
 
-`ADMIN_SESSION_EXPIRY` and `COOKIE_DOMAIN` are optional after the required Admin
-group is complete. Any Admin setting selects this group, so partial Admin
-configuration fails boot.
+`ADMIN_APP_ORIGIN`, `ADMIN_SESSION_EXPIRY`, and `ADMIN_COOKIE_DOMAIN` are
+optional in the two Admin modes.
 
 Studio configuration is a second complete group. It requires complete Admin
 configuration plus:
@@ -237,15 +239,14 @@ configuration plus:
 - `STUDIO_ALLOWED_TARGETS`
 - `STUDIO_DEVELOPER_JWT_TRUST_JSON`
 
-`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional after the required Studio group
-is complete. Any Studio setting selects this group, so partial Studio
-configuration and Studio configuration without complete Admin configuration
-fail boot. Every local Admin and Studio setting is parsed and validated before
-the Host starts Sui endpoint qualification.
+`STUDIO_DEVELOPER_JWT_VERIFY_URL` is optional in full Studio mode. Boot rejects
+every missing required setting and every configured setting forbidden by the
+selected mode. It reports the correction and stops before Sui endpoint
+qualification.
 
 ## Admin Operations
 
-`@stelis/app-admin` uses `/auth/*` for Admin sessions and `/api/*` for operator
+`@stelis/app-admin` uses `/admin/auth/*` for Admin sessions and `/admin/*` for operator
 actions. It operates against `relay_with_admin` and
 `relay_with_admin_and_studio` Hosts. A `relay_with_admin` Host provides the
 dashboard, sponsored-execution logs, SponsorOperations, withdrawals, security
@@ -320,6 +321,6 @@ Current structured event families:
 | Promotion execution ledger          | `LEDGER_RELEASE_FAILED_IN_HANDLER`, `PROMOTION_EXECUTION_LEDGER_REAPER_ERROR`                                                                                                                                                |
 | Abuse blocking                      | `ABUSE_BLOCK_EXPIRY_TASK_FAILED`                                                                                                                                                                                             |
 
-Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/api/logs`.
+Admin audit logs are separate from these stdout-path structured events. Auth and admin routes write Redis-backed audit entries that are read through `/admin/logs`.
 
 Admin endpoints are not part of the SDK or MCP public transaction flow.

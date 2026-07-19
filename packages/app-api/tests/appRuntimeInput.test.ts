@@ -74,7 +74,7 @@ function relayOnlyBoot() {
   };
 }
 
-function relayWithAdminBoot() {
+function relayWithAdminBoot(adminAppOrigin: string | null = 'https://admin.snapshot.example') {
   return {
     context: {
       mode: 'relay_with_admin' as const,
@@ -82,7 +82,7 @@ function relayWithAdminBoot() {
       network: 'testnet' as const,
     },
     trustedProxyHops: 1,
-    corsAllowedOrigins: ['https://admin.snapshot.example'],
+    adminAppOrigin,
     adminAddress: ADMIN_ADDRESS,
     adminAuth: {
       jwt: {
@@ -289,8 +289,8 @@ describe('ApplicationRuntime input and resource boundary', () => {
     const health = await runtime.fetch(new Request('http://host.test/health'));
     await expect(health.json()).resolves.toEqual({ status: 'ok', mode: 'relay_only' });
     for (const [path, code] of [
-      ['/auth/nonce', 'ADMIN_UNAVAILABLE'],
-      ['/api/promotions', 'ADMIN_UNAVAILABLE'],
+      ['/admin/auth/nonce', 'ADMIN_UNAVAILABLE'],
+      ['/admin/promotions', 'ADMIN_UNAVAILABLE'],
       ['/studio/promotions', 'STUDIO_UNAVAILABLE'],
     ] as const) {
       const response = await runtime.fetch(new Request(`http://host.test${path}`));
@@ -309,6 +309,7 @@ describe('ApplicationRuntime input and resource boundary', () => {
     );
     expect(studioPreflight.status).toBe(204);
     expect(studioPreflight.headers.get('access-control-allow-origin')).toBe('*');
+    expect(studioPreflight.headers.get('access-control-allow-credentials')).toBeNull();
     expect(studioPreflight.headers.get('access-control-allow-headers')).toContain('Authorization');
     expect(studioPreflight.headers.get('access-control-allow-methods')?.split(',')).toEqual([
       'GET',
@@ -345,8 +346,23 @@ describe('ApplicationRuntime input and resource boundary', () => {
     await runtime.stop();
   });
 
+  it('keeps previous Admin route prefixes absent', async () => {
+    const boot = relayOnlyBoot();
+    mocks.runBootValidation.mockResolvedValueOnce(boot);
+    const resources = contextResources();
+    mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
+    const runtime = createApplicationRuntime();
+    await runtime.start();
+
+    for (const path of ['/auth/session', '/api/logs']) {
+      const response = await runtime.fetch(new Request(`http://host.test${path}`));
+      expect(response.status).toBe(404);
+    }
+    await runtime.stop();
+  });
+
   it('mounts Admin without creating Studio routes for an Admin-only Host', async () => {
-    const boot = relayWithAdminBoot();
+    const boot = relayWithAdminBoot(null);
     mocks.runBootValidation.mockResolvedValueOnce(boot);
     const resources = contextResources([], { mode: 'relay_with_admin' });
     mocks.createAppApiContextOwner.mockReturnValueOnce(resources.runtime);
@@ -356,6 +372,16 @@ describe('ApplicationRuntime input and resource boundary', () => {
     expect(mocks.createAuthRoutes).toHaveBeenCalledOnce();
     expect(mocks.createAdminRoutes).toHaveBeenCalledOnce();
     expect(mocks.createStudioRoutes).not.toHaveBeenCalled();
+    const adminPreflight = await runtime.fetch(
+      new Request('http://host.test/admin/auth/session', {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'https://public-app.example',
+          'Access-Control-Request-Method': 'GET',
+        },
+      }),
+    );
+    expect(adminPreflight.headers.get('access-control-allow-origin')).toBeNull();
     const response = await runtime.fetch(
       new Request('http://host.test/studio/promotions', {
         headers: { Origin: 'https://example.test' },
@@ -509,22 +535,19 @@ describe('ApplicationRuntime input and resource boundary', () => {
     expect(authRuntime.admin).toEqual({
       address: ADMIN_ADDRESS,
       auth: boot.adminAuth,
-      allowedOrigins: ['https://admin.snapshot.example'],
     });
-    expect(authRuntime.admission).toMatchObject({
-      host: resources.context.host,
-    });
-    expect(mocks.createAdminRoutes.mock.calls[0]?.[1]).toMatchObject({
+    const adminRuntime = mocks.createAdminRoutes.mock.calls[0]?.[1];
+    expect(adminRuntime).toMatchObject({
       network: 'testnet',
-      allowedOrigins: ['https://admin.snapshot.example'],
       admin: {
         address: ADMIN_ADDRESS,
         jwt: boot.adminAuth.jwt,
       },
     });
+    expect(authRuntime.admission).toBe(adminRuntime.admission);
 
     const allowed = await runtime.fetch(
-      new Request('http://host.test/api/promotions/promotion-1', {
+      new Request('http://host.test/admin/promotions/promotion-1', {
         method: 'OPTIONS',
         headers: {
           Origin: 'https://admin.snapshot.example',
@@ -543,7 +566,7 @@ describe('ApplicationRuntime input and resource boundary', () => {
       'OPTIONS',
     ]);
     const authPreflight = await runtime.fetch(
-      new Request('http://host.test/auth/session', {
+      new Request('http://host.test/admin/auth/session', {
         method: 'OPTIONS',
         headers: {
           Origin: 'https://admin.snapshot.example',
@@ -554,6 +577,8 @@ describe('ApplicationRuntime input and resource boundary', () => {
     expect(authPreflight.headers.get('access-control-allow-methods')?.split(',')).toEqual([
       'GET',
       'POST',
+      'PUT',
+      'DELETE',
       'OPTIONS',
     ]);
 

@@ -52,7 +52,7 @@ Every spend uses a fresh Sponsor Refill Account balance and the gas budget encod
 
 ## Health Gate
 
-Prepare routes require at least one healthy sponsor address that is not currently leased. A sponsor route already has a receipt-bound lease, so it checks the fresh observation for that exact sponsor address immediately before the atomic transition into execution. Admin `/api/sponsor-operations` reports lease occupancy as `sponsorOperations.slotLeases`, including current leased and free sponsor address counts.
+Prepare routes require at least one healthy sponsor address that is not currently leased. A sponsor route already has a receipt-bound lease, so it checks the fresh observation for that exact sponsor address immediately before the atomic transition into execution. Admin `/admin/sponsor-operations` reports lease occupancy as `sponsorOperations.slotLeases`, including current leased and free sponsor address counts.
 
 ## Refill Settings
 

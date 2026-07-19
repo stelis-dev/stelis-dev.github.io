@@ -114,6 +114,7 @@ function setRequiredEnvironment(): void {
   vi.stubEnv('SPONSOR_LEASE_HMAC_SECRET', 'boot-runtime-input-hmac-secret-00000000');
   vi.stubEnv('NETWORK', 'testnet');
   vi.stubEnv('REDIS_URL', 'redis://boot-snapshot');
+  vi.stubEnv('HOST_MODE', 'relay_only');
   vi.stubEnv('TRUSTED_PROXY_HOPS', '1');
   vi.stubEnv('HOST_FEE_MIST', '7');
   vi.stubEnv('PREPARE_INFLIGHT_CAPACITY', '5');
@@ -126,13 +127,15 @@ function setRequiredEnvironment(): void {
 }
 
 function setAdminEnvironment(): void {
+  vi.stubEnv('HOST_MODE', 'relay_with_admin');
   vi.stubEnv('ADMIN_JWT_SECRET', 'admin-jwt-secret-for-boot-tests-0000');
   vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
-  vi.stubEnv('CORS_ORIGINS', 'https://admin.before.example');
+  vi.stubEnv('ADMIN_APP_ORIGIN', 'https://admin.before.example');
 }
 
 function setStudioEnvironment(allowedTargets: string, developerJwtTrustJson = '{}'): void {
   setAdminEnvironment();
+  vi.stubEnv('HOST_MODE', 'relay_with_admin_and_studio');
   vi.stubEnv('STUDIO_ALLOWED_TARGETS', allowedTargets);
   // Target validation runs before trust parsing; these tests intentionally
   // isolate the target boundary from JWT key construction.
@@ -143,9 +146,9 @@ function clearCapabilityEnvironment(): void {
   for (const name of [
     'ADMIN_ADDRESS',
     'ADMIN_JWT_SECRET',
-    'CORS_ORIGINS',
+    'ADMIN_APP_ORIGIN',
     'ADMIN_SESSION_EXPIRY',
-    'COOKIE_DOMAIN',
+    'ADMIN_COOKIE_DOMAIN',
     'STUDIO_ALLOWED_TARGETS',
     'STUDIO_DEVELOPER_JWT_TRUST_JSON',
     'STUDIO_DEVELOPER_JWT_VERIFY_URL',
@@ -159,17 +162,13 @@ type CapabilityConfigurationCase = {
   readonly configure: () => void;
   readonly result:
     | { readonly kind: 'mode'; readonly mode: HostOperatingMode }
-    | {
-        readonly kind: 'error';
-        readonly mode: Exclude<HostOperatingMode, 'relay_only'>;
-        readonly missing: string;
-      };
+    | { readonly kind: 'error'; readonly message: string };
 };
 
 const CAPABILITY_CONFIGURATION_CASES: readonly CapabilityConfigurationCase[] = [
   {
     name: 'Relay only',
-    configure: () => undefined,
+    configure: () => vi.stubEnv('HOST_MODE', 'relay_only'),
     result: { kind: 'mode', mode: 'relay_only' },
   },
   {
@@ -183,36 +182,51 @@ const CAPABILITY_CONFIGURATION_CASES: readonly CapabilityConfigurationCase[] = [
     result: { kind: 'mode', mode: 'relay_with_admin_and_studio' },
   },
   {
-    name: 'partial Admin selected by an optional setting',
-    configure: () => vi.stubEnv('ADMIN_SESSION_EXPIRY', '3600'),
-    result: {
-      kind: 'error',
-      mode: 'relay_with_admin',
-      missing: 'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS',
-    },
-  },
-  {
-    name: 'partial Studio selected by an optional setting',
-    configure: () =>
-      vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', 'https://auth.example.test/verify'),
-    result: {
-      kind: 'error',
-      mode: 'relay_with_admin_and_studio',
-      missing:
-        'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS, STUDIO_ALLOWED_TARGETS, STUDIO_DEVELOPER_JWT_TRUST_JSON',
-    },
-  },
-  {
-    name: 'complete Studio without Admin',
+    name: 'Admin setting forbidden by Relay-only',
     configure: () => {
+      vi.stubEnv('HOST_MODE', 'relay_only');
+      vi.stubEnv('ADMIN_SESSION_EXPIRY', '3600');
+    },
+    result: {
+      kind: 'error',
+      message:
+        'HOST_MODE configuration is invalid. Not allowed for the selected HOST_MODE: ADMIN_SESSION_EXPIRY',
+    },
+  },
+  {
+    name: 'Studio setting forbidden by Admin-only',
+    configure: () => {
+      setAdminEnvironment();
+      vi.stubEnv('STUDIO_DEVELOPER_JWT_VERIFY_URL', 'https://auth.example.test/verify');
+    },
+    result: {
+      kind: 'error',
+      message:
+        'HOST_MODE configuration is invalid. Not allowed for the selected HOST_MODE: STUDIO_DEVELOPER_JWT_VERIFY_URL',
+    },
+  },
+  {
+    name: 'full mode missing Admin',
+    configure: () => {
+      vi.stubEnv('HOST_MODE', 'relay_with_admin_and_studio');
       vi.stubEnv('STUDIO_ALLOWED_TARGETS', STUDIO_TARGET);
       vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', VALID_STUDIO_TRUST_JSON);
     },
     result: {
       kind: 'error',
-      mode: 'relay_with_admin_and_studio',
-      missing: 'ADMIN_ADDRESS, ADMIN_JWT_SECRET, CORS_ORIGINS',
+      message:
+        'HOST_MODE configuration is invalid. Missing: ADMIN_ADDRESS, ADMIN_JWT_SECRET',
     },
+  },
+  {
+    name: 'missing explicit mode',
+    configure: () => vi.stubEnv('HOST_MODE', ''),
+    result: { kind: 'error', message: 'HOST_MODE is required' },
+  },
+  {
+    name: 'unknown explicit mode',
+    configure: () => vi.stubEnv('HOST_MODE', 'unrecognized-mode-value'),
+    result: { kind: 'error', message: 'HOST_MODE is invalid' },
   },
 ];
 
@@ -255,7 +269,7 @@ beforeEach(async () => {
       const controller = new AbortController();
       state.qualificationSignal = controller.signal;
       vi.stubEnv('RPC_AUTH_VALUE', 'rpc-auth-after-await');
-      vi.stubEnv('CORS_ORIGINS', 'https://admin.after.example');
+      vi.stubEnv('ADMIN_APP_ORIGIN', 'https://admin.after.example');
       vi.stubEnv('ADMIN_JWT_SECRET', 'x'.repeat(32));
       vi.stubEnv('ADMIN_ADDRESS', `0x${'ab'.repeat(32)}`);
       vi.stubEnv('STUDIO_ALLOWED_TARGETS', `0x${'cd'.repeat(32)}::module::entry`);
@@ -296,9 +310,7 @@ describe('runBootValidation runtime input', () => {
         return;
       }
 
-      await expect(runBootValidation()).rejects.toThrow(
-        `\`${testCase.result.mode}\` configuration is incomplete. Missing: ${testCase.result.missing}`,
-      );
+      await expect(runBootValidation()).rejects.toThrow(testCase.result.message);
       expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
     },
   );
@@ -309,7 +321,7 @@ describe('runBootValidation runtime input', () => {
 
     expect(state.rpcAuthValue).toBe('rpc-auth-before-await');
     expect(result.context.mode).toBe('relay_only');
-    expect(Object.hasOwn(result, 'corsAllowedOrigins')).toBe(false);
+    expect(Object.hasOwn(result, 'adminAppOrigin')).toBe(false);
     expect(Object.hasOwn(result.context, 'studio')).toBe(false);
     expect(result.context.quotedHostFeeMist).toBe(7n);
     expect(result.context.prepareInflightCapacity).toBe(5);
@@ -345,7 +357,7 @@ describe('runBootValidation runtime input', () => {
     if (!('adminAddress' in result)) {
       throw new Error('expected Admin configuration in `relay_with_admin` runtime input');
     }
-    expect(result.corsAllowedOrigins).toEqual(['https://admin.before.example']);
+    expect(result.adminAppOrigin).toBe('https://admin.before.example');
     expect(result.adminAddress).toBe(`0x${'ab'.repeat(32)}`);
     expect(result.context.rpcFleet).toEqual({
       endpoints: [{ origin: 'https://rpc.snapshot.test', role: 'primary' }],
@@ -364,7 +376,7 @@ describe('runBootValidation runtime input', () => {
     if (!('adminAddress' in result)) {
       throw new Error('expected Admin configuration in the Admin-and-Studio runtime input');
     }
-    expect(result.corsAllowedOrigins).toEqual(['https://admin.before.example']);
+    expect(result.adminAppOrigin).toBe('https://admin.before.example');
     expect(result.adminAddress).toBe(`0x${'ab'.repeat(32)}`);
     expect(result.context.rpcFleet).toEqual({
       endpoints: [{ origin: 'https://rpc.snapshot.test', role: 'primary' }],
@@ -442,7 +454,7 @@ describe('runBootValidation runtime input', () => {
     vi.stubEnv('STUDIO_DEVELOPER_JWT_TRUST_JSON', '');
 
     await expect(runBootValidation()).rejects.toThrow(
-      '`relay_with_admin_and_studio` configuration is incomplete. Missing: STUDIO_DEVELOPER_JWT_TRUST_JSON',
+      'HOST_MODE configuration is invalid. Missing: STUDIO_DEVELOPER_JWT_TRUST_JSON',
     );
     expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
@@ -476,15 +488,52 @@ describe('runBootValidation runtime input', () => {
 
   it('rejects malformed response-header configuration before external services', async () => {
     setStudioEnvironment(STUDIO_TARGET, VALID_STUDIO_TRUST_JSON);
-    vi.stubEnv('CORS_ORIGINS', 'https://admin.example/path');
+    vi.stubEnv('ADMIN_APP_ORIGIN', 'https://admin.example/path');
     await expect(runBootValidation()).rejects.toThrow(
-      'CORS_ORIGINS entry must be an http(s) origin',
+      'ADMIN_APP_ORIGIN must be one valid http(s) origin',
     );
 
-    vi.stubEnv('CORS_ORIGINS', 'https://admin.example');
-    vi.stubEnv('COOKIE_DOMAIN', '.example.com; Secure');
-    await expect(runBootValidation()).rejects.toThrow('COOKIE_DOMAIN must be a valid DNS domain');
+    vi.stubEnv('ADMIN_APP_ORIGIN', 'https://admin.example');
+    vi.stubEnv('ADMIN_COOKIE_DOMAIN', '.example.com; Secure');
+    await expect(runBootValidation()).rejects.toThrow(
+      'ADMIN_COOKIE_DOMAIN must be a valid DNS domain',
+    );
 
+    expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'unknown Host mode',
+      configure: () => vi.stubEnv('HOST_MODE', 'private-mode-sentinel'),
+      sentinel: 'private-mode-sentinel',
+    },
+    {
+      name: 'Admin app origin',
+      configure: () => {
+        setAdminEnvironment();
+        vi.stubEnv(
+          'ADMIN_APP_ORIGIN',
+          'https://operator:private-origin-sentinel@admin.example',
+        );
+      },
+      sentinel: 'private-origin-sentinel',
+    },
+    {
+      name: 'Admin cookie domain',
+      configure: () => {
+        setAdminEnvironment();
+        vi.stubEnv('ADMIN_COOKIE_DOMAIN', 'private-cookie-sentinel; Secure');
+      },
+      sentinel: 'private-cookie-sentinel',
+    },
+  ])('does not copy the invalid $name value into its boot diagnostic', async (testCase) => {
+    testCase.configure();
+
+    const error = await runBootValidation().catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain(testCase.sentinel);
     expect(state.qualifySuiRpcEndpoints).not.toHaveBeenCalled();
   });
 

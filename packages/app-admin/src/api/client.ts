@@ -2,7 +2,7 @@
  * API client for app-admin → app-api communication.
  *
  * All requests use `credentials: 'include'` for cookie-based auth.
- * In dev, Vite proxy forwards /auth, /api, /relay, /studio to app-api.
+ * In dev, Vite proxy forwards /admin, /relay, /studio to app-api.
  * In prod, VITE_STELIS_API_URL provides the base URL (same pattern as
  * app-web's RELAY_API_BASE in relayApiEndpoint.ts).
  *
@@ -119,12 +119,17 @@ async function apiFetch<T>(
 // ── Session ────────────────────────────────────────────────────────────────
 
 export function getSession() {
-  return apiFetch('/auth/session', undefined, parseAdminSessionResponse, ADMIN_SESSION_ERROR_CODES);
+  return apiFetch(
+    '/admin/auth/session',
+    undefined,
+    parseAdminSessionResponse,
+    ADMIN_SESSION_ERROR_CODES,
+  );
 }
 
 export function issueAdminAuthChallenge() {
   return apiFetch(
-    '/auth/nonce',
+    '/admin/auth/nonce',
     { method: 'POST' },
     parseAdminAuthChallengeResponse,
     ADMIN_AUTH_NONCE_ERROR_CODES,
@@ -134,7 +139,7 @@ export function issueAdminAuthChallenge() {
 export async function verifyAdminAuth(data: AdminAuthVerifyRequest): Promise<void> {
   const request = parseAdminAuthVerifyRequest(data);
   await apiFetch(
-    '/auth/verify',
+    '/admin/auth/verify',
     {
       method: 'POST',
       body: JSON.stringify(request),
@@ -147,7 +152,7 @@ export async function verifyAdminAuth(data: AdminAuthVerifyRequest): Promise<voi
 export async function renewAdminSession(data: AdminAuthVerifyRequest): Promise<void> {
   const request = parseAdminAuthVerifyRequest(data);
   await apiFetch(
-    '/auth/renew',
+    '/admin/auth/renew',
     {
       method: 'POST',
       body: JSON.stringify(request),
@@ -159,7 +164,7 @@ export async function renewAdminSession(data: AdminAuthVerifyRequest): Promise<v
 
 export async function logoutAdminSession(): Promise<void> {
   await apiFetch(
-    '/auth/logout',
+    '/admin/auth/logout',
     { method: 'POST' },
     parseAdminAuthSuccessResponse,
     ADMIN_AUTH_LOGOUT_ERROR_CODES,
@@ -170,7 +175,7 @@ export async function logoutAdminSession(): Promise<void> {
 
 export function getSponsorOperations() {
   return apiFetch(
-    '/api/sponsor-operations',
+    '/admin/sponsor-operations',
     undefined,
     parseAdminSponsorOperationsResponse,
     ADMIN_READ_ERROR_CODES,
@@ -180,7 +185,7 @@ export function getSponsorOperations() {
 // ── Audit Logs ─────────────────────────────────────────────────────────────
 
 export function getAuditLogs() {
-  return apiFetch('/api/logs', undefined, parseAdminAuditLogsResponse, ADMIN_READ_ERROR_CODES);
+  return apiFetch('/admin/logs', undefined, parseAdminAuditLogsResponse, ADMIN_READ_ERROR_CODES);
 }
 
 // ── Blocklist ──────────────────────────────────────────────────────────────
@@ -192,7 +197,7 @@ export function getBlocklist(query: AdminBlocklistQuery = {}) {
   if (query.limit !== undefined) search.set('limit', String(current.limit));
   const encoded = search.toString();
   return apiFetch(
-    `/api/blocklist${encoded.length === 0 ? '' : `?${encoded}`}`,
+    `/admin/blocklist${encoded.length === 0 ? '' : `?${encoded}`}`,
     undefined,
     parseAdminBlocklistResponse,
     ADMIN_BLOCKLIST_READ_ERROR_CODES,
@@ -202,7 +207,7 @@ export function getBlocklist(query: AdminBlocklistQuery = {}) {
 export function removeBlocklistEntry(identity: AdminBlocklistDeleteRequest) {
   const request = parseAdminBlocklistDeleteRequest(identity);
   return apiFetch(
-    '/api/blocklist',
+    '/admin/blocklist',
     {
       method: 'DELETE',
       body: JSON.stringify(request),
@@ -216,7 +221,7 @@ export function removeBlocklistEntry(identity: AdminBlocklistDeleteRequest) {
 
 export function issueSponsorRefillAccountWithdrawalChallenge() {
   return apiFetch(
-    '/api/sponsor-refill-account/withdrawal-challenge',
+    '/admin/sponsor-refill-account/withdrawal-challenge',
     { method: 'POST' },
     parseSponsorRefillAccountWithdrawalChallengeResponse,
     ADMIN_WITHDRAWAL_CHALLENGE_ERROR_CODES,
@@ -226,7 +231,7 @@ export function issueSponsorRefillAccountWithdrawalChallenge() {
 export function executeSponsorRefillAccountWithdrawal(data: SponsorRefillAccountWithdrawalRequest) {
   const request = parseSponsorRefillAccountWithdrawalRequest(data);
   return apiFetch(
-    '/api/sponsor-refill-account/withdraw',
+    '/admin/sponsor-refill-account/withdraw',
     {
       method: 'POST',
       body: JSON.stringify(request),
@@ -240,7 +245,7 @@ export function executeSponsorRefillAccountWithdrawal(data: SponsorRefillAccount
 
 export function getStudio(signal?: AbortSignal) {
   return apiFetch(
-    '/api/studio',
+    '/admin/studio',
     signal === undefined ? undefined : { signal },
     parseAdminStudioResponse,
     ADMIN_READ_ERROR_CODES,
@@ -257,7 +262,7 @@ export function getPromotions(query: AdminPromotionListQuery = {}) {
   if (query.limit !== undefined) search.set('limit', String(current.limit));
   const encoded = search.toString();
   return apiFetch(
-    `/api/promotions${encoded.length === 0 ? '' : `?${encoded}`}`,
+    `/admin/promotions${encoded.length === 0 ? '' : `?${encoded}`}`,
     undefined,
     parseAdminPromotionListResponse,
     ADMIN_PROMOTION_LIST_ERROR_CODES,
@@ -267,7 +272,7 @@ export function getPromotions(query: AdminPromotionListQuery = {}) {
 export function createPromotion(data: AdminPromotionCreateRequest) {
   const request = parseAdminPromotionCreateRequest(data);
   return apiFetch(
-    '/api/promotions',
+    '/admin/promotions',
     {
       method: 'POST',
       body: JSON.stringify(request),
@@ -280,7 +285,7 @@ export function createPromotion(data: AdminPromotionCreateRequest) {
 export function updatePromotion(id: string, data: AdminPromotionUpdateRequest) {
   const request = parseAdminPromotionUpdateRequest(data);
   return apiFetch(
-    `/api/promotions/${encodeURIComponent(id)}`,
+    `/admin/promotions/${encodeURIComponent(id)}`,
     {
       method: 'PUT',
       body: JSON.stringify(request),
@@ -300,7 +305,7 @@ export function transitionPromotionStatus(
     ...(reason === undefined ? {} : { reason }),
   });
   return apiFetch(
-    `/api/promotions/${encodeURIComponent(id)}/status`,
+    `/admin/promotions/${encodeURIComponent(id)}/status`,
     {
       method: 'POST',
       body: JSON.stringify(request),
@@ -312,7 +317,7 @@ export function transitionPromotionStatus(
 
 export function deletePromotion(id: string) {
   return apiFetch(
-    `/api/promotions/${encodeURIComponent(id)}`,
+    `/admin/promotions/${encodeURIComponent(id)}`,
     { method: 'DELETE' },
     parseAdminPromotionDeleteResponse,
     ADMIN_PROMOTION_DELETE_ERROR_CODES,
@@ -324,7 +329,7 @@ export function deletePromotion(id: string) {
 export function getSponsoredLogsSummary(mode: AdminSponsoredLogsMode = 'all') {
   const query = parseAdminSponsoredLogsQuery({ mode });
   return apiFetch(
-    `/api/sponsored-logs/summary?mode=${encodeURIComponent(query.mode)}`,
+    `/admin/sponsored-logs/summary?mode=${encodeURIComponent(query.mode)}`,
     undefined,
     parseAdminSponsoredLogsSummaryResponse,
     ADMIN_SPONSORED_LOGS_ERROR_CODES,
@@ -338,7 +343,7 @@ export function getSponsoredLogs(mode: AdminSponsoredLogsMode = 'all', limit?: n
   });
   const qs = new URLSearchParams({ mode: query.mode, limit: String(query.limit) });
   return apiFetch(
-    `/api/sponsored-logs?${qs.toString()}`,
+    `/admin/sponsored-logs?${qs.toString()}`,
     undefined,
     parseAdminSponsoredLogsResponse,
     ADMIN_SPONSORED_LOGS_ERROR_CODES,

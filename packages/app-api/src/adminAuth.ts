@@ -41,7 +41,7 @@ export async function verifyAdminJwt(
 
 export function buildAuthCookieHeader(token: string, config: AdminCookieRuntimeConfig): string {
   const secure = config.secure ? '; Secure' : '';
-  // When COOKIE_DOMAIN is set (e.g. ".sample.com"), use SameSite=Lax + Domain
+  // When ADMIN_COOKIE_DOMAIN is set (e.g. ".sample.com"), use SameSite=Lax + Domain
   // to allow cross-subdomain auth (admin.sample.com ↔ api.sample.com).
   // Otherwise, default to SameSite=Strict (same-origin only).
   const domainAttr = config.domain ? `; Domain=${config.domain}` : '';

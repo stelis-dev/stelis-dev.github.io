@@ -118,7 +118,7 @@ describe('issuer boundary', () => {
     vi.stubEnv('ADMIN_JWT_SECRET', 'different-admin-jwt-secret-at-least-32-chars');
     vi.stubEnv('ADMIN_SESSION_EXPIRY', '1s');
     vi.stubEnv('NODE_ENV', 'production');
-    vi.stubEnv('COOKIE_DOMAIN', '.changed.example');
+    vi.stubEnv('ADMIN_COOKIE_DOMAIN', '.changed.example');
 
     await expect(verifyAdminJwt(token, TEST_JWT_CONFIG)).resolves.toMatchObject({
       address: '0xADMIN',

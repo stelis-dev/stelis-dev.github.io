@@ -57,6 +57,14 @@ invariants over many overlapping or low-value examples.
 
 ## Completion Reporting Rule
 
+- Judge an accepted work unit as binary: `1` only when its accepted boundary is
+  fully implemented and verified; otherwise `0`. Progress notes may describe
+  implemented work, but they do not create a middle success state for the unit.
+- Do not use percentages, partial-pass language, or `mostly done` wording as a
+  completion judgment. A missing requirement, unresolved in-boundary defect,
+  in-boundary technical debt, or required but unrun verification keeps the
+  work unit at `0` until it is fixed or the accepted boundary is explicitly
+  replaced from evidence.
 - When reporting the result of an accepted user request, the outcome is binary: success or failure. Do not report an intermediate completion state for the task itself.
 - Judge success against the accepted user request, including reasonably expected verification, not against effort, partial progress, or honest disclosure.
 - If any required part is blocked, partial, missing, or unverified, report failure to complete unless the user explicitly narrowed the request to that smaller result.
@@ -64,6 +72,44 @@ invariants over many overlapping or low-value examples.
 - Use `blocked` only as a cause of failure, not as a neutral final state.
 - Do not soften failure with phrases such as `mostly done`, `should be fine`, `completed except tests`, or `partial complete`.
 - Caveats are supporting details, not substitutes for a clear success/failure statement.
+
+## Dependency Order And Work Units
+
+- A review boundary is observational. Adding, removing, or moving it must not
+  change the planned production structure, behavior, or dependency graph.
+- A work unit must leave its production structure and behavior in the accepted
+  final task output. Do not introduce a transitional production result merely
+  to create a review or commit boundary.
+- If later evidence under the same accepted requirements shows that the
+  planned result must be deleted, replaced, or bypassed, the work unit remains
+  `0`. Stop dependent work, record the plan conflict and alternatives, and
+  implement the correction only under a user-accepted replacement or
+  correction baseline. Do not rename, split, move, or erase the work unit to
+  preserve a success claim.
+- A plan may pause, insert a correction, resume, or be explicitly replaced.
+  Those plan states do not turn a `0` work unit into partial success. A later
+  change to accepted requirements is new work, not retroactive proof that a
+  previously correct work unit failed.
+- A successor starts only from the accepted output of every predecessor it
+  consumes. Each predecessor must hand off a complete value or process boundary
+  that the successor uses without reconstructing or reinterpreting its rules.
+
+## Parallel Work
+
+- Parallelize only order-independent work: every participant uses the same
+  fixed snapshot, has no dependency on another participant, owns a disjoint
+  write and decision surface, and produces the same integrated result
+  regardless of completion order.
+- Parallel read-only reviewers may inspect the same frozen candidate because
+  they have no write or acceptance authority. They provide findings to one
+  integrator; they do not edit the candidate, change the plan, or independently
+  accept it.
+- One integrator reconciles the complete batch before the shared snapshot or
+  plan changes. Architecture decisions, plan editing, shared-boundary changes,
+  and dependency-connected implementation remain sequential.
+- A changed shared premise invalidates every dependent parallel result. Recheck
+  each affected result against the new snapshot; do not append stale findings
+  in arrival order.
 
 ## Stelis-Specific Safety Rules
 

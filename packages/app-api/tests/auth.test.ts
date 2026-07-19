@@ -59,6 +59,7 @@ vi.mock('../src/requireAdminSession.js', () => ({
 }));
 
 import { createAuthRoutes, type AuthRoutesRuntime } from '../src/routes/auth.js';
+import { createAdminRequestAdmission } from '../src/requestAdmission.js';
 import type { AdminAppApiContext } from '../src/context.js';
 import { requireAdminSessionFromContext } from '../src/requireAdminSession.js';
 import { ADMIN_AUDIT_LOG_KEY } from '../src/adminAuditLog.js';
@@ -79,20 +80,22 @@ const ADMIN_AUTH = {
 } as const;
 
 const AUTH_RUNTIME: AuthRoutesRuntime = {
-  admission: {
-    resolveClientIp: mockResolveClientIp,
-    host: {
-      abuseBlocker: {
-        checkIp: mockCheckIp,
-        checkSubject: mockCheckSubject,
-        recordSponsorFailure: mockRecordSponsorFailure,
+  admission: createAdminRequestAdmission(
+    {
+      resolveClientIp: mockResolveClientIp,
+      host: {
+        abuseBlocker: {
+          checkIp: mockCheckIp,
+          checkSubject: mockCheckSubject,
+          recordSponsorFailure: mockRecordSponsorFailure,
+        },
+        rateLimiter: { check: mockRateLimitCheck },
       },
-      rateLimiter: { check: mockRateLimitCheck },
     },
-  },
+    ADMIN_ORIGIN,
+  ),
   admin: {
     address: ADMIN_ADDRESS,
-    allowedOrigins: [ADMIN_ORIGIN],
     auth: {
       jwt: {
         ...ADMIN_AUTH.jwt,
@@ -137,7 +140,7 @@ describe('auth routes', () => {
     mountedContext = context;
     const routes = createAuthRoutes(context, runtime);
     app = new Hono();
-    app.route('/auth', routes);
+    app.route('/admin/auth', routes);
   }
 
   beforeEach(() => {
@@ -160,15 +163,15 @@ describe('auth routes', () => {
     mountAuthRoutes();
   });
 
-  describe('POST /auth/nonce', () => {
+  describe('POST /admin/auth/nonce', () => {
     it('does not expose nonce issuance through GET', async () => {
-      const res = await app.request('/auth/nonce');
+      const res = await app.request('/admin/auth/nonce');
       expect(res.status).toBe(404);
       expect(mockRedis.set).not.toHaveBeenCalled();
     });
 
     it('returns 200 with nonce string', async () => {
-      const res = await app.request('/auth/nonce', { method: 'POST' });
+      const res = await app.request('/admin/auth/nonce', { method: 'POST' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.nonce).toBeDefined();
@@ -183,7 +186,7 @@ describe('auth routes', () => {
         current: 6,
         retryAfterMs: 900000,
       });
-      const res = await app.request('/auth/nonce', { method: 'POST' });
+      const res = await app.request('/admin/auth/nonce', { method: 'POST' });
       expect(res.status).toBe(429);
       expect(res.headers.get('Retry-After')).toBe('900');
       await expect(res.json()).resolves.toEqual(
@@ -197,7 +200,7 @@ describe('auth routes', () => {
         throw clientIpResolutionError();
       });
 
-      const res = await app.request('/auth/nonce', { method: 'POST' });
+      const res = await app.request('/admin/auth/nonce', { method: 'POST' });
 
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toEqual(codedError('CLIENT_IP_UNRESOLVED'));
@@ -211,7 +214,7 @@ describe('auth routes', () => {
       const failure = new Error('redis unavailable at redis://:secret@redis.example:6379');
       (checkAndIncrement as ReturnType<typeof vi.fn>).mockRejectedValueOnce(failure);
 
-      const res = await app.request('/auth/nonce', { method: 'POST' });
+      const res = await app.request('/admin/auth/nonce', { method: 'POST' });
 
       expect(res.status).toBe(500);
       await expect(res.json()).resolves.toEqual(codedError('INTERNAL_ERROR'));
@@ -219,10 +222,10 @@ describe('auth routes', () => {
     });
   });
 
-  describe('POST /auth/verify', () => {
+  describe('POST /admin/auth/verify', () => {
     it('returns 400 on missing fields', async () => {
       const { verifyAdminSignature } = await import('@stelis/core-api/admin');
-      const res = await app.request('/auth/verify', adminJsonPost({ nonce: 'test' }));
+      const res = await app.request('/admin/auth/verify', adminJsonPost({ nonce: 'test' }));
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toEqual(codedError('BAD_REQUEST'));
       expect(verifyAdminSignature).not.toHaveBeenCalled();
@@ -238,7 +241,7 @@ describe('auth routes', () => {
           [field]: '',
         };
 
-        const res = await app.request('/auth/verify', adminJsonPost(body));
+        const res = await app.request('/admin/auth/verify', adminJsonPost(body));
 
         expect(res.status).toBe(400);
         await expect(res.json()).resolves.toEqual(codedError('BAD_REQUEST'));
@@ -249,7 +252,7 @@ describe('auth routes', () => {
     it('returns 401 on invalid nonce (consumed)', async () => {
       mockRedis.del.mockResolvedValueOnce(0); // nonce not found
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'invalid-nonce',
           signature: 'sig',
@@ -264,7 +267,7 @@ describe('auth routes', () => {
       const { verifyAdminSignature } = await import('@stelis/core-api/admin');
       vi.mocked(verifyAdminSignature).mockResolvedValueOnce(false);
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'invalid-signature',
@@ -280,7 +283,7 @@ describe('auth routes', () => {
       mockRedis.del.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
       const request = () =>
         app.request(
-          '/auth/verify',
+          '/admin/auth/verify',
           adminJsonPost({
             nonce: 'shared-nonce',
             signature: 'valid-signature',
@@ -297,7 +300,7 @@ describe('auth routes', () => {
       const { signAdminJwt, buildAuthCookieHeader } = await import('../src/adminAuth.js');
       mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'valid-sig',
@@ -325,7 +328,7 @@ describe('auth routes', () => {
         retryAfterMs: 900000,
       });
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'test-nonce',
           signature: 'sig',
@@ -346,7 +349,7 @@ describe('auth routes', () => {
       });
 
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'test-nonce',
           signature: 'sig',
@@ -364,7 +367,7 @@ describe('auth routes', () => {
       const { resetAttempts } = await import('@stelis/core-api/admin');
       mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
       await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'valid-sig',
@@ -381,7 +384,7 @@ describe('auth routes', () => {
       );
       mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
       const res = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'valid-sig',
@@ -397,7 +400,7 @@ describe('auth routes', () => {
     it('rejects each admission layer before credentials, subject checks, or nonce mutation', async () => {
       const { verifyAdminSignature } = await import('@stelis/core-api/admin');
 
-      const wrongOrigin = await app.request('/auth/verify', {
+      const wrongOrigin = await app.request('/admin/auth/verify', {
         method: 'POST',
         headers: { Origin: 'https://untrusted.example', 'Content-Type': 'application/json' },
         body: '{',
@@ -406,7 +409,7 @@ describe('auth routes', () => {
       await expect(wrongOrigin.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
       expect(verifyAdminSignature).not.toHaveBeenCalled();
 
-      const malformedBody = await app.request('/auth/verify', {
+      const malformedBody = await app.request('/admin/auth/verify', {
         method: 'POST',
         headers: { Origin: ADMIN_ORIGIN, 'Content-Type': 'application/json' },
         body: '{',
@@ -417,7 +420,7 @@ describe('auth routes', () => {
 
       mockCheckSubject.mockResolvedValueOnce({ blocked: true, retryAfterMs: 5_000 });
       const blockedSubject = await app.request(
-        '/auth/verify',
+        '/admin/auth/verify',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'valid-signature',
@@ -435,7 +438,7 @@ describe('auth routes', () => {
     });
   });
 
-  describe('POST /auth/logout', () => {
+  describe('POST /admin/auth/logout', () => {
     it('returns 200 with logout cookie', async () => {
       const { buildLogoutCookieHeader } = await import('../src/adminAuth.js');
       vi.mocked(requireAdminSessionFromContext).mockResolvedValueOnce({
@@ -444,7 +447,7 @@ describe('auth routes', () => {
         exp: 1_800_000_000,
         iatMs: 1_700_000_000_000,
       });
-      const res = await app.request('/auth/logout', adminPost());
+      const res = await app.request('/admin/auth/logout', adminPost());
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
@@ -463,7 +466,7 @@ describe('auth routes', () => {
       vi.mocked(raiseAdminSessionNotBefore).mockRejectedValueOnce(new Error('Redis unavailable'));
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
-        const res = await app.request('/auth/logout', adminPost());
+        const res = await app.request('/admin/auth/logout', adminPost());
         expect(res.status).toBe(500);
         await expect(res.json()).resolves.toEqual(codedError('INTERNAL_ERROR'));
         expect(res.headers.get('Set-Cookie')).toBeNull();
@@ -473,7 +476,7 @@ describe('auth routes', () => {
     });
 
     it('returns coded ADMIN_UNAUTHORIZED without expiring the cookie when session is absent', async () => {
-      const res = await app.request('/auth/logout', adminPost());
+      const res = await app.request('/admin/auth/logout', adminPost());
 
       expect(res.status).toBe(401);
       await expect(res.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
@@ -481,9 +484,9 @@ describe('auth routes', () => {
     });
   });
 
-  describe('GET /auth/session', () => {
+  describe('GET /admin/auth/session', () => {
     it('returns 401 when no session is available', async () => {
-      const res = await app.request('/auth/session');
+      const res = await app.request('/admin/auth/session');
       expect(res.status).toBe(401);
       await expect(res.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
     });
@@ -495,7 +498,7 @@ describe('auth routes', () => {
         exp: 2000,
         iatMs: 1000000,
       });
-      const res = await app.request('/auth/session');
+      const res = await app.request('/admin/auth/session');
       expect(res.status).toBe(200);
       expect(requireAdminSessionFromContext).toHaveBeenCalledWith(
         expect.anything(),
@@ -508,7 +511,7 @@ describe('auth routes', () => {
     });
   });
 
-  describe('POST /auth/renew', () => {
+  describe('POST /admin/auth/renew', () => {
     it('returns 429 when rate limited', async () => {
       const { checkAndIncrement } = await import('@stelis/core-api/admin');
       (checkAndIncrement as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -517,7 +520,7 @@ describe('auth routes', () => {
         retryAfterMs: 900000,
       });
       const res = await app.request(
-        '/auth/renew',
+        '/admin/auth/renew',
         adminJsonPost({
           nonce: 'test-nonce',
           signature: 'sig',
@@ -538,7 +541,7 @@ describe('auth routes', () => {
       });
 
       const res = await app.request(
-        '/auth/renew',
+        '/admin/auth/renew',
         adminJsonPost({
           nonce: 'test-nonce',
           signature: 'sig',
@@ -556,7 +559,7 @@ describe('auth routes', () => {
       const { resetAttempts } = await import('@stelis/core-api/admin');
       mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
       const res = await app.request(
-        '/auth/renew',
+        '/admin/auth/renew',
         adminJsonPost({
           nonce: 'valid-nonce',
           signature: 'valid-sig',

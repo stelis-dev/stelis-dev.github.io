@@ -15,7 +15,7 @@ This document summarizes the current security boundaries that are visible in the
 | Settlement swap path         | Relay validation accepts only configured settlement swap paths. Each supported `settlementTokenType` maps to one SUI-adjacent DeepBook one-hop settlement swap path. |
 | Prepare records              | Prepare records are single-use and time-limited.                                                                                                                     |
 | Promotion calls              | Promotion-sponsored transactions contain 1 to 16 `MoveCall` commands, all matching `STUDIO_ALLOWED_TARGETS`; the Host adds no commands.                              |
-| Admin routes                 | `/api/*` routes require an admin session.                                                                                                                            |
+| Admin routes                 | `/admin/*` routes require an admin session; a supplied browser Origin must match `ADMIN_APP_ORIGIN`.                                                                 |
 
 ## Web3 Security Policy
 

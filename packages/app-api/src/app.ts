@@ -23,7 +23,11 @@ import { createStudioRoutes } from './routes/studio.js';
 import { createClientIpResolver, type ClientIpSourceProvider } from './clientIp.js';
 import { createAdminRedisAdapter } from './adminRedis.js';
 import { initializeAppApiAdminSessionNotBefore } from './adminSessionNotBefore.js';
-import type { RequestAdmissionDependencies } from './requestAdmission.js';
+import {
+  createAdminRequestAdmission,
+  type AdminRequestAdmission,
+  type RequestAdmissionDependencies,
+} from './requestAdmission.js';
 import { codedHostError, respondMapped } from './errorMap.js';
 
 export interface AppBootResult {
@@ -74,14 +78,7 @@ function createHonoAppBase(
     c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
   });
 
-  app.use(
-    '/relay/*',
-    cors({
-      origin: '*',
-      allowMethods: ['GET', 'POST', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
-    }),
-  );
+  installPublicSdkCors(app);
   app.get('/health', (c) => c.json(parseHostHealthResponse({ status: 'ok', mode: context.mode })));
 
   const admission: RequestAdmissionDependencies = Object.freeze({
@@ -92,18 +89,14 @@ function createHonoAppBase(
   return { app, admission };
 }
 
-function installPublicStudioCors(app: Hono): void {
-  // Each mode-specific builder installs this after Host mode is resolved.
-  // Preflight succeeds in every mode so browser clients can read the actual
-  // request's typed STUDIO_UNAVAILABLE result from a Host without Studio.
-  app.use(
-    '/studio/*',
-    cors({
-      origin: '*',
-      allowMethods: ['GET', 'POST', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
-    }),
-  );
+function installPublicSdkCors(app: Hono): void {
+  const publicSdkCors = cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization'],
+  });
+  app.use('/relay/*', publicSdkCors);
+  app.use('/studio/*', publicSdkCors);
 }
 
 function buildRelayOnlyHonoApp(
@@ -112,11 +105,7 @@ function buildRelayOnlyHonoApp(
   clientIpSourceProvider?: ClientIpSourceProvider,
 ): Hono {
   const { app } = createHonoAppBase(runtimeInput, context, clientIpSourceProvider);
-  installPublicStudioCors(app);
-  app.all('/auth/*', (c) =>
-    respondMapped(c, codedHostError('ADMIN_UNAVAILABLE', ['ADMIN_UNAVAILABLE'])),
-  );
-  app.all('/api/*', (c) =>
+  app.all('/admin/*', (c) =>
     respondMapped(c, codedHostError('ADMIN_UNAVAILABLE', ['ADMIN_UNAVAILABLE'])),
   );
   app.all('/studio/*', (c) =>
@@ -125,44 +114,42 @@ function buildRelayOnlyHonoApp(
   return app;
 }
 
+function installAdminBrowserAccess(
+  app: Hono,
+  admission: RequestAdmissionDependencies,
+  adminAppOrigin: string | null,
+): AdminRequestAdmission {
+  if (adminAppOrigin !== null) {
+    app.use(
+      '/admin/*',
+      cors({
+        origin: adminAppOrigin,
+        credentials: true,
+        allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        allowHeaders: ['Content-Type', 'Authorization'],
+      }),
+    );
+  }
+  return createAdminRequestAdmission(admission, adminAppOrigin);
+}
+
 function buildAdminHonoAppBase(
   runtimeInput: AdminAppRuntimeInput,
   context: AdminAppApiContext,
   clientIpSourceProvider?: ClientIpSourceProvider,
 ): { readonly app: Hono; readonly admission: RequestAdmissionDependencies } {
-  const allowedOrigins = [...runtimeInput.corsAllowedOrigins];
   const { app, admission } = createHonoAppBase(runtimeInput, context, clientIpSourceProvider);
-  installPublicStudioCors(app);
-  app.use(
-    '/auth/*',
-    cors({
-      origin: allowedOrigins,
-      credentials: true,
-      allowMethods: ['GET', 'POST', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
-    }),
-  );
-  app.use(
-    '/api/*',
-    cors({
-      origin: allowedOrigins,
-      credentials: true,
-      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
-    }),
-  );
+  const adminAdmission = installAdminBrowserAccess(app, admission, runtimeInput.adminAppOrigin);
   const admin = {
     address: runtimeInput.adminAddress,
     auth: runtimeInput.adminAuth,
-    allowedOrigins,
   };
-  app.route('/auth', createAuthRoutes(context, { admission, admin }));
+  app.route('/admin/auth', createAuthRoutes(context, { admission: adminAdmission, admin }));
   app.route(
-    '/api',
+    '/admin',
     createAdminRoutes(context, {
-      admission,
+      admission: adminAdmission,
       network: runtimeInput.context.network,
-      allowedOrigins,
       admin: { address: admin.address, jwt: admin.auth.jwt },
     }),
   );

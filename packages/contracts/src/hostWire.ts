@@ -54,7 +54,7 @@ export const ABUSE_BLOCK_REASONS = [
 
 export type AdminBlockScope = (typeof ABUSE_BLOCK_SCOPES)[number];
 export type AbuseBlockReason = (typeof ABUSE_BLOCK_REASONS)[number];
-const HOST_OPERATING_MODES = [
+export const HOST_OPERATING_MODES = [
   'relay_only',
   'relay_with_admin',
   'relay_with_admin_and_studio',
@@ -2284,7 +2284,7 @@ export function parseSponsorRefillAccountWithdrawalResponse(
   };
 }
 
-/** Parse the full current `/api/sponsor-operations` Admin response. */
+/** Parse the full current `/admin/sponsor-operations` Admin response. */
 export function parseAdminSponsorOperationsResponse(
   value: unknown,
 ): AdminSponsorOperationsResponse {
