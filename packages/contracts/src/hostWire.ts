@@ -95,6 +95,43 @@ export interface RelayConfigResponse {
   protocolFlatFeeMist: string;
 }
 
+export interface RelaySettlementFundingCheckRequest {
+  txKindBytes: string;
+  senderAddress: string;
+  settlementTokenType: string;
+  estimatedExecutionCostClaimMist: string;
+}
+
+export type RelaySettlementFundingCheckResponse =
+  | {
+      status: 'likely_sufficient';
+      source: 'vault_credit';
+      estimatedExecutionCostClaimMist: string;
+    }
+  | {
+      status: 'likely_sufficient';
+      source: 'settlement_token';
+      estimatedExecutionCostClaimMist: string;
+      quotedRequiredSettlementTokenAmount: string;
+    }
+  | {
+      status: 'likely_insufficient';
+      estimatedExecutionCostClaimMist: string;
+      quotedRequiredSettlementTokenAmount: string;
+      availableSettlementTokenAmount: string;
+    }
+  | {
+      status: 'indeterminate';
+      reason: 'bounded_coin_discovery';
+      estimatedExecutionCostClaimMist: string;
+      quotedRequiredSettlementTokenAmount: string;
+    }
+  | {
+      status: 'indeterminate';
+      reason: 'market_unavailable';
+      estimatedExecutionCostClaimMist: string;
+    };
+
 export interface RelayPrepareRequest {
   txKindBytes: string;
   senderAddress: string;
@@ -1135,6 +1172,119 @@ export function parseRelayPrepareRequest(value: unknown): RelayPrepareRequest {
       raw,
       'prepareAuthorizationSignature',
       'RelayPrepareRequest',
+    ),
+  };
+}
+
+export function parseRelaySettlementFundingCheckRequest(
+  value: unknown,
+): RelaySettlementFundingCheckRequest {
+  const label = 'RelaySettlementFundingCheckRequest';
+  const raw = record(value, label);
+  onlyKeys(
+    raw,
+    ['txKindBytes', 'senderAddress', 'settlementTokenType', 'estimatedExecutionCostClaimMist'],
+    label,
+  );
+  return {
+    txKindBytes: stringField(raw, 'txKindBytes', label),
+    senderAddress: stringField(raw, 'senderAddress', label),
+    settlementTokenType: nonEmptyStringField(raw, 'settlementTokenType', label),
+    estimatedExecutionCostClaimMist: u64DecimalField(raw, 'estimatedExecutionCostClaimMist', label),
+  };
+}
+
+export function parseRelaySettlementFundingCheckResponse(
+  value: unknown,
+): RelaySettlementFundingCheckResponse {
+  const label = 'RelaySettlementFundingCheckResponse';
+  const raw = record(value, label);
+  const status = closedStringField(raw, 'status', label, [
+    'likely_sufficient',
+    'likely_insufficient',
+    'indeterminate',
+  ] as const);
+  const estimatedExecutionCostClaimMist = u64DecimalField(
+    raw,
+    'estimatedExecutionCostClaimMist',
+    label,
+  );
+
+  if (status === 'likely_sufficient') {
+    const source = closedStringField(raw, 'source', label, [
+      'vault_credit',
+      'settlement_token',
+    ] as const);
+    if (source === 'vault_credit') {
+      onlyKeys(raw, ['status', 'source', 'estimatedExecutionCostClaimMist'], label);
+      return { status, source, estimatedExecutionCostClaimMist };
+    }
+    onlyKeys(
+      raw,
+      [
+        'status',
+        'source',
+        'estimatedExecutionCostClaimMist',
+        'quotedRequiredSettlementTokenAmount',
+      ],
+      label,
+    );
+    return {
+      status,
+      source,
+      estimatedExecutionCostClaimMist,
+      quotedRequiredSettlementTokenAmount: u64DecimalField(
+        raw,
+        'quotedRequiredSettlementTokenAmount',
+        label,
+      ),
+    };
+  }
+
+  if (status === 'likely_insufficient') {
+    onlyKeys(
+      raw,
+      [
+        'status',
+        'estimatedExecutionCostClaimMist',
+        'quotedRequiredSettlementTokenAmount',
+        'availableSettlementTokenAmount',
+      ],
+      label,
+    );
+    return {
+      status,
+      estimatedExecutionCostClaimMist,
+      quotedRequiredSettlementTokenAmount: u64DecimalField(
+        raw,
+        'quotedRequiredSettlementTokenAmount',
+        label,
+      ),
+      availableSettlementTokenAmount: decimalField(raw, 'availableSettlementTokenAmount', label),
+    };
+  }
+
+  const reason = closedStringField(raw, 'reason', label, [
+    'bounded_coin_discovery',
+    'market_unavailable',
+  ] as const);
+  if (reason === 'market_unavailable') {
+    onlyKeys(raw, ['status', 'reason', 'estimatedExecutionCostClaimMist'], label);
+    return { status, reason, estimatedExecutionCostClaimMist };
+  }
+  onlyKeys(
+    raw,
+    ['status', 'reason', 'estimatedExecutionCostClaimMist', 'quotedRequiredSettlementTokenAmount'],
+    label,
+  );
+  return {
+    status,
+    reason,
+    estimatedExecutionCostClaimMist,
+    quotedRequiredSettlementTokenAmount: u64DecimalField(
+      raw,
+      'quotedRequiredSettlementTokenAmount',
+      label,
     ),
   };
 }

@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  deriveSettlementFundingProfile,
   checkCreditOnlyEligibility,
   calculateRequiredSwapOutput,
   calculateSwapOutputGuards,
@@ -21,6 +22,28 @@ import {
   ADDR_USABLE_COIN,
   makeInput,
 } from './fixtures/prepareTestFixtures.js';
+
+describe('deriveSettlementFundingProfile', () => {
+  it.each([
+    {
+      credit: { vaultObjectId: '0xVAULT', needsCreate: false },
+      expected: { profile: 'credit_general', vaultObjectId: '0xVAULT' },
+    },
+    {
+      credit: { vaultObjectId: null, needsCreate: true },
+      expected: { profile: 'new_user', vaultObjectId: null },
+    },
+  ])('projects one valid credit snapshot into $expected.profile', ({ credit, expected }) => {
+    expect(deriveSettlementFundingProfile(credit)).toEqual(expected);
+  });
+
+  it.each([
+    { vaultObjectId: '0xVAULT', needsCreate: true },
+    { vaultObjectId: null, needsCreate: false },
+  ])('rejects an inconsistent credit snapshot %#', (credit) => {
+    expect(() => deriveSettlementFundingProfile(credit)).toThrow(/inconsistent vault identity/);
+  });
+});
 
 // ─────────────────────────────────────────────
 // Credit-only eligibility

@@ -9,6 +9,8 @@ export type {
   RelayConfigResponse,
   RelayPrepareRequest,
   RelayPrepareResponse,
+  RelaySettlementFundingCheckRequest,
+  RelaySettlementFundingCheckResponse,
   RelaySponsorRequest,
   RelaySponsorResponse,
   PromotionUnavailableReason,
@@ -210,6 +212,19 @@ export interface GasEstimateResult {
   hasLiquidity: boolean;
   /** True when credit_general profile AND fee fields are available — swap not needed */
   canSkipLiquidity: boolean;
+  /** Exact raw execution-cost claim used by this estimate. */
+  executionCostClaimMist: bigint;
+}
+
+export interface SettlementFundingCheckOptions {
+  /** Sui client used only to build the supplied transaction kind. */
+  client: SuiGrpcClient;
+  /** User wallet address whose current funding is evaluated. */
+  senderAddress: string;
+  /** Settlement token evaluated by the Host. */
+  settlementToken: SettlementToken;
+  /** Exact non-negative Sui u64 estimate from `estimateGas()` or another raw source. */
+  estimatedExecutionCostClaimMist: bigint;
 }
 
 // ─────────────────────────────────────────────

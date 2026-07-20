@@ -9,8 +9,13 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StelisSDK } from '../src/sdk.js';
-import type { RelayConfigResponse, RelayPrepareResponse } from '../src/types.js';
+import type {
+  RelayConfigResponse,
+  RelayPrepareResponse,
+  RelaySettlementFundingCheckResponse,
+} from '../src/types.js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
+import { Transaction } from '@mysten/sui/transactions';
 import { withSuiClientIdentity } from './helpers/suiClientIdentity.js';
 import { STELIS_CONTRACT_IDS, SUI_CHAIN_IDENTIFIERS } from '@stelis/contracts';
 import { makeCreditResult } from './helpers/currentFixtures.js';
@@ -21,12 +26,15 @@ let _creditResult = makeCreditResult();
 // ── Module-level mock: StelisClient ─────────────────────────────────────────────
 const mockPrepare = vi.fn<(params: Record<string, unknown>) => Promise<RelayPrepareResponse>>();
 const mockGetConfig = vi.fn<() => Promise<RelayConfigResponse>>();
+const mockCheckSettlementFunding =
+  vi.fn<(params: Record<string, unknown>) => Promise<RelaySettlementFundingCheckResponse>>();
 vi.mock('../src/client.js', () => ({
   StelisClient: vi.fn().mockImplementation(function () {
     return {
       getStatus: vi.fn().mockResolvedValue({ ok: true }),
       getConfig: mockGetConfig,
       prepare: mockPrepare,
+      checkSettlementFunding: mockCheckSettlementFunding,
       sponsor: vi.fn(),
     };
   }),
@@ -43,12 +51,14 @@ vi.mock('../src/client.js', () => ({
 
 // ── Module-level mock: batchGetHopMidPrices (exchange rate) ─────────────────────
 let _midPrice: bigint | null = 27_000_000_000n; // 1 DEEP ≈ 0.027 SUI
+const mockBuildSuiTransaction = vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]));
 vi.mock('@stelis/core-relay/browser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stelis/core-relay/browser')>();
   return {
     ...actual,
     queryUserCredit: vi.fn(async () => _creditResult),
     batchGetHopMidPrices: vi.fn(async () => (_midPrice !== null ? [_midPrice] : [0n])),
+    buildSuiTransaction: (...args: unknown[]) => mockBuildSuiTransaction(...args),
   };
 });
 
@@ -120,6 +130,8 @@ async function createSDK(configOverrides?: Partial<RelayConfigResponse>): Promis
 describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
   beforeEach(() => {
     mockGetConfig.mockReset();
+    mockCheckSettlementFunding.mockReset();
+    mockBuildSuiTransaction.mockClear();
     _creditResult = makeCreditResult();
     _midPrice = 27_000_000_000n;
   });
@@ -140,7 +152,56 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     expect(result.displayUnit).toBe('DEEP'); // no vault → new_user → settlement token
     expect(result.profile).toBe('new_user');
     expect(result.canSkipLiquidity).toBe(false);
+    expect(result.executionCostClaimMist).toBe(5_100_000n);
   });
+
+  it('keeps an intent budget above Number.MAX_SAFE_INTEGER exact and rejects an overflowing claim', async () => {
+    const exactBudget = 9_007_199_254_740_993n;
+    const sdk = await createSDK();
+    const result = await sdk.estimateGas(makeSuiClient(), {
+      addr: ADDR,
+      settlementToken: { type: DEEP_TYPE },
+      intentGasBudgetMist: exactBudget,
+    });
+    expect(result.executionCostClaimMist).toBe(exactBudget + 100_000n);
+
+    await expect(
+      sdk.estimateGas(makeSuiClient(), {
+        addr: ADDR,
+        settlementToken: { type: DEEP_TYPE },
+        intentGasBudgetMist: (1n << 64n) - 1n,
+      }),
+    ).rejects.toThrow('executionCostClaimMist exceeds the Sui u64 range');
+  });
+
+  it.each([-1n, 1n << 64n, 1 as unknown as bigint])(
+    'rejects a non-u64 intent budget before Sui reads (%s)',
+    async (intentGasBudgetMist) => {
+      const sdk = await createSDK();
+      const client = makeSuiClient();
+      await expect(
+        sdk.estimateGas(client, {
+          addr: ADDR,
+          settlementToken: { type: DEEP_TYPE },
+          intentGasBudgetMist,
+        }),
+      ).rejects.toThrow('intentGasBudgetMist must be a non-negative Sui u64 bigint');
+    },
+  );
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 10_001])(
+    'rejects an invalid gas margin before arithmetic (%s)',
+    async (gasMarginBps) => {
+      const sdk = await createSDK();
+      await expect(
+        sdk.estimateGas(makeSuiClient(), {
+          addr: ADDR,
+          settlementToken: { type: DEEP_TYPE },
+          gasMarginBps,
+        }),
+      ).rejects.toThrow('gasMarginBps must be a safe integer from 0 through 10000');
+    },
+  );
 
   // ── 2: No vault → new_user profile, display in settlement token ────────
 
@@ -316,6 +377,61 @@ describe('StelisSDK.estimateGas — gas estimate with profile branches', () => {
     expect(result.hasLiquidity).toBe(true);
     expect(result.canSkipLiquidity).toBe(false);
     expect(Number(result.amountHuman)).toBeGreaterThan(0);
+  });
+});
+
+describe('StelisSDK.checkSettlementFunding', () => {
+  beforeEach(() => {
+    mockGetConfig.mockReset();
+    mockCheckSettlementFunding.mockReset();
+    mockBuildSuiTransaction.mockClear();
+  });
+
+  it('sends one exact advisory request and returns the Host result unchanged', async () => {
+    const estimatedExecutionCostClaimMist = 9_007_199_254_740_993n;
+    const hostResult: RelaySettlementFundingCheckResponse = {
+      status: 'likely_insufficient',
+      estimatedExecutionCostClaimMist: estimatedExecutionCostClaimMist.toString(),
+      quotedRequiredSettlementTokenAmount: '123',
+      availableSettlementTokenAmount: '45',
+    };
+    mockCheckSettlementFunding.mockResolvedValueOnce(hostResult);
+    const sdk = await createSDK();
+    const tx = new Transaction();
+
+    await expect(
+      sdk.checkSettlementFunding(tx, {
+        client: makeSuiClient(),
+        senderAddress: ADDR,
+        settlementToken: { type: DEEP_TYPE },
+        estimatedExecutionCostClaimMist,
+      }),
+    ).resolves.toBe(hostResult);
+
+    expect(mockBuildSuiTransaction).toHaveBeenCalledWith(expect.anything(), {
+      transaction: tx,
+      onlyTransactionKind: true,
+    });
+    expect(mockCheckSettlementFunding).toHaveBeenCalledWith({
+      txKindBytes: 'AQID',
+      senderAddress: ADDR,
+      settlementTokenType: DEEP_TYPE,
+      estimatedExecutionCostClaimMist: estimatedExecutionCostClaimMist.toString(),
+    });
+  });
+
+  it('rejects an invalid estimate before building the transaction kind', async () => {
+    const sdk = await createSDK();
+    await expect(
+      sdk.checkSettlementFunding(new Transaction(), {
+        client: makeSuiClient(),
+        senderAddress: ADDR,
+        settlementToken: { type: DEEP_TYPE },
+        estimatedExecutionCostClaimMist: -1n,
+      }),
+    ).rejects.toThrow('estimatedExecutionCostClaimMist must be a non-negative Sui u64 bigint');
+    expect(mockBuildSuiTransaction).not.toHaveBeenCalled();
+    expect(mockCheckSettlementFunding).not.toHaveBeenCalled();
   });
 });
 

@@ -38,6 +38,7 @@ export {
 export type { SponsorResultMetadata, SponsorResultCallback } from './handlers/sponsorResult.js';
 
 export { handlePrepare } from './handlers/prepare.js';
+export { handleSettlementFundingCheck } from './handlers/settlementFundingCheck.js';
 export { PrepareValidationError } from './prepare/replay.js';
 export type { PrepareHandlerConfig } from './handlers/prepare.js';
 

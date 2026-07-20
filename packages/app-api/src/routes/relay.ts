@@ -9,6 +9,7 @@ import { Hono } from 'hono';
 import {
   handleStatus,
   handlePrepare,
+  handleSettlementFundingCheck,
   handleSponsor,
   MAX_PREPARE_REQUEST_BODY_BYTES,
   MAX_SPONSOR_REQUEST_BODY_BYTES,
@@ -20,13 +21,16 @@ import {
   HostWireParseError,
   RELAY_CONFIG_ERROR_CODES,
   RELAY_PREPARE_ERROR_CODES,
+  RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES,
   RELAY_SPONSOR_ERROR_CODES,
   RELAY_STATUS_ERROR_CODES,
   SLIPPAGE_CAP_BPS,
   parseRelayPrepareRequest,
+  parseRelaySettlementFundingCheckRequest,
   parseRelaySponsorRequest,
   type RelayConfigResponse,
   type RelayPrepareResponse,
+  type RelaySettlementFundingCheckResponse,
   type RelaySponsorResponse,
 } from '@stelis/contracts';
 
@@ -48,6 +52,8 @@ class RelayPrepareAdmissionError extends Error {
     this.name = 'RelayPrepareAdmissionError';
   }
 }
+
+const CLIENT_CLOSED_REQUEST_STATUS = 499;
 
 export function createRelayRoutes(context: AppApiContext, admission: RequestAdmissionDependencies) {
   const app = new Hono();
@@ -102,6 +108,62 @@ export function createRelayRoutes(context: AppApiContext, admission: RequestAdmi
       // eslint-disable-next-line no-console
       console.error('[/relay/config] getConfig() failed:', safeErrorSummary(err));
       return respondMapped(c, codedHostError('CONFIG_UNAVAILABLE', RELAY_CONFIG_ERROR_CODES));
+    }
+  });
+
+  // ── POST /relay/settlement-funding-check ──────────────────────────
+  app.post('/settlement-funding-check', async (c) => {
+    try {
+      const admitted = await beginRequestAdmission(c, admission, {
+        allowedErrorCodes: RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES,
+        unexpectedFailureCode: 'INTERNAL_ERROR',
+        ipRateLimitKey: (ip) => `settlement-funding-check:client-ip:${ip}`,
+        jsonBodyLimitBytes: MAX_PREPARE_REQUEST_BODY_BYTES,
+      });
+      if (!admitted.ok) return admitted.response;
+      const body = parseRelaySettlementFundingCheckRequest(admitted.value.body);
+      let canonicalSender: string;
+      try {
+        canonicalSender = canonicalizeAddress(body.senderAddress, 'senderAddress');
+      } catch {
+        return respondMapped(
+          c,
+          codedHostError('BAD_REQUEST', RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES),
+        );
+      }
+
+      const result: RelaySettlementFundingCheckResponse = await handleSettlementFundingCheck(
+        context.host,
+        {
+          txKindBytes: body.txKindBytes,
+          senderAddress: canonicalSender,
+          settlementTokenType: body.settlementTokenType,
+          estimatedExecutionCostClaimMist: BigInt(body.estimatedExecutionCostClaimMist),
+          signal: c.req.raw.signal,
+        },
+        context.prepareConfig,
+      );
+      return c.json(result);
+    } catch (err) {
+      if (c.req.raw.signal.aborted && err === c.req.raw.signal.reason) {
+        // The transport is already closed. Do not publish a Host error for a
+        // client-lifetime event or let the adapter reclassify it as a 500.
+        return new Response(null, { status: CLIENT_CLOSED_REQUEST_STATUS });
+      }
+      if (err instanceof HostWireParseError) {
+        return respondMapped(
+          c,
+          codedHostError('BAD_REQUEST', RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES),
+        );
+      }
+      const mapped = mapError(err, RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES, 'INTERNAL_ERROR');
+      if (mapped) return respondMapped(c, mapped);
+      // eslint-disable-next-line no-console
+      console.error('[settlement-funding-check] 500 error:', safeErrorSummary(err));
+      return respondMapped(
+        c,
+        codedHostError('INTERNAL_ERROR', RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES),
+      );
     }
   });
 

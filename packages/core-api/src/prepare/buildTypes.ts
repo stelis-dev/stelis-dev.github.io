@@ -39,24 +39,28 @@ export interface BuildContext {
   configVersion: bigint;
 }
 
-/** Input for the generic prepare build pipeline. */
-export interface GenericPrepareBuildRequest {
-  /** Deserialized user transaction (from replay.ts). */
+/** Current read-only inputs needed by the settlement-funding process. */
+export type SettlementFundingContext = Pick<
+  BuildContext,
+  'sui' | 'deepbookPackageId' | 'minSettleMist' | 'quotedHostFeeMist' | 'protocolFlatFeeMist'
+>;
+
+/** Request-local facts consumed by the shared settlement-funding process. */
+export interface SettlementFundingRequest {
   userTxKindBytes: string;
   senderAddress: string;
-  /** Settlement swap path config. Required for all settle paths. */
   settlementSwapPath: SingleHopSettlementSwapPath;
-  /** Server-only static settlement swap path descriptor used by market policy. */
   descriptor: StaticSettlementSwapPathDescriptor;
+  profile: SettleProfile;
+  vaultObjectId: string | null;
+  credit: string;
+}
+
+/** Input for the generic prepare build pipeline. */
+export interface GenericPrepareBuildRequest extends SettlementFundingRequest {
   sponsorAddress: string;
   slippageBps: Bps;
   gasMarginBps: Bps;
-  /** Profile determined by vault query. */
-  profile: SettleProfile;
-  /** Vault object ID, null for new_user. */
-  vaultObjectId: string | null;
-  /** User credit amount in MIST, "0" for new_user. */
-  credit: string;
   /** Receipt ID (32 bytes). */
   receiptId: Uint8Array;
   /** S-14 monotonic nonce for on-chain replay prevention. */

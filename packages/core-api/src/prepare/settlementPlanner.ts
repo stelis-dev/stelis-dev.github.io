@@ -15,6 +15,7 @@
  */
 
 import type { SingleHopSettlementSwapPath, SettleProfile } from '@stelis/contracts';
+import type { CreditResult } from '@stelis/core-relay';
 import type {
   SwapFundingResolution,
   SwapPlan,
@@ -39,6 +40,23 @@ export interface PlannerInput {
   readonly profile: SettleProfile;
   readonly vaultObjectId: string | null;
   readonly creditMist: bigint;
+}
+
+export type SettlementFundingProfile =
+  | { readonly profile: 'credit_general'; readonly vaultObjectId: string }
+  | { readonly profile: 'new_user'; readonly vaultObjectId: null };
+
+/** Project one validated credit snapshot into the initial settlement profile. */
+export function deriveSettlementFundingProfile(
+  credit: Pick<CreditResult, 'vaultObjectId' | 'needsCreate'>,
+): SettlementFundingProfile {
+  if (credit.vaultObjectId !== null && credit.needsCreate === false) {
+    return { profile: 'credit_general', vaultObjectId: credit.vaultObjectId };
+  }
+  if (credit.vaultObjectId === null && credit.needsCreate === true) {
+    return { profile: 'new_user', vaultObjectId: null };
+  }
+  throw new Error('Credit snapshot has inconsistent vault identity and creation state');
 }
 
 // ─────────────────────────────────────────────
@@ -138,7 +156,7 @@ export function calculateSwapOutputGuards(
  *
  * Call sequence in build.ts:
  *   1. solveExecutableSwap(...)       → swapAmountSmallest + quotedHopOutputs
- *   2. resolvePaymentSource(...)      → funding
+ *   2. evaluatePaymentSource(...)     → funding result
  *   3. calculateSwapOutputGuards(...) → swap
  *   4. assembleSwapSettlementPlan(input, audit, funding, swap)
  */

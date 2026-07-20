@@ -116,6 +116,8 @@ import type {
 } from './executionPolicy.js';
 import { readAuthenticatedSponsorSubmission } from './sponsorSubmissionAuthentication.js';
 import { parseBps, mist, type Bps, type Mist } from '../../internal/brand.js';
+import { requireSettlementSwapPathConfig } from '../../prepare/settlementSwapPathConfig.js';
+import { deriveSettlementFundingProfile } from '../../prepare/settlementPlanner.js';
 
 // -------------------------------------------------------------
 // Public factory input shapes
@@ -605,25 +607,13 @@ async function runGenericRequestValidation(
     );
   }
 
-  state.settlementSwapPath = findSettlementSwapPath(
+  const settlementSwapPathConfig = requireSettlementSwapPathConfig(
     prepare.config.supportedSettlementSwapPaths,
-    prepare.params.settlementTokenType,
-  );
-  if (!state.settlementSwapPath) {
-    throw new PrepareValidationError(
-      'UNSUPPORTED_SETTLEMENT_TOKEN',
-      `Settlement token ${prepare.params.settlementTokenType} is not supported`,
-    );
-  }
-  state.descriptor = findSettlementSwapPathDescriptor(
     prepare.config.settlementSwapPathDescriptors,
     prepare.params.settlementTokenType,
   );
-  if (!state.descriptor) {
-    throw new Error(
-      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${prepare.params.settlementTokenType}`,
-    );
-  }
+  state.settlementSwapPath = settlementSwapPathConfig.settlementSwapPath;
+  state.descriptor = settlementSwapPathConfig.descriptor;
 
   if (prepare.params.orderId !== undefined) {
     const orderIdBytes = new TextEncoder().encode(prepare.params.orderId);
@@ -675,14 +665,14 @@ async function runGenericChainSnapshot(
 
   const credit = requireValue(state.credit, 'credit snapshot');
   const config = requireValue(state.config, 'on-chain config');
-  const hasVault = !!(credit.vaultObjectId && !credit.needsCreate);
-  state.profile = hasVault ? 'credit_general' : 'new_user';
+  const fundingProfile = deriveSettlementFundingProfile(credit);
+  state.profile = fundingProfile.profile;
   state.quoteTimestampMs = prepare.nowMs?.() ?? Date.now();
   state.policyHashHex = computePolicyHash(buildPolicyFields(config));
   state.policyHashBytes = fromHex(state.policyHashHex);
 
   logPrepareStage('onchain_snapshot_loaded', {
-    has_vault: hasVault,
+    has_vault: fundingProfile.vaultObjectId !== null,
     profile: state.profile,
     credit_mist: credit.credit,
     config_version: config.configVersion.toString(),
@@ -1367,22 +1357,6 @@ function buildGenericExecutionPathKey(
     return `${settlementSwapPath.tokenType}:${settlementSwapPath.hops.join(',')}:${settlementSwapPath.settlementSwapDirection}`;
   }
   return 'credit';
-}
-
-function findSettlementSwapPath(
-  settlementSwapPaths: readonly SingleHopSettlementSwapPath[] | undefined,
-  settlementTokenType: string,
-): SingleHopSettlementSwapPath | undefined {
-  return settlementSwapPaths?.find(
-    (settlementSwapPath) => settlementSwapPath.settlementTokenType === settlementTokenType,
-  );
-}
-
-function findSettlementSwapPathDescriptor(
-  descriptors: StaticSettlementSwapPathDescriptorMap | undefined,
-  settlementTokenType: string,
-): StaticSettlementSwapPathDescriptor | undefined {
-  return descriptors?.get(settlementTokenType);
 }
 
 function parseReceiptIdBytes(receiptId: string): Uint8Array {

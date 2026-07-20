@@ -11,6 +11,7 @@
  * orchestration logic can be tested without on-chain calls.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { Transaction } from '@mysten/sui/transactions';
 import {
   SuiOperationError,
@@ -18,6 +19,10 @@ import {
   type SuiSimulationResult,
 } from '@stelis/core-relay';
 import { SuiAddressBalanceGasUnavailableError } from '@stelis/core-relay/server';
+import type {
+  AddressBalanceGasTransaction,
+  buildAddressBalanceGasTransaction,
+} from '@stelis/core-relay/server';
 import {
   DEEPBOOK_IDS,
   DEEPBOOK_MIN_OUT_ABORT,
@@ -35,10 +40,41 @@ import { bps } from '../src/internal/brand.js';
 
 // Keep the installed SDK's Transaction implementation authoritative. Only the
 // exact Sui operation boundary is controlled by this orchestration test.
-const mockGasTransactionSnapshots = new WeakMap<object, BuildContext['sui']>();
-const mockBuildImplementation = async (snapshot: BuildContext['sui'], _options: unknown) => {
-  const transaction = Object.freeze({});
-  mockGasTransactionSnapshots.set(transaction, snapshot);
+type BuildAddressBalanceGasTransactionOptions = Parameters<
+  typeof buildAddressBalanceGasTransaction
+>[1];
+const mockGasTransactionContents = new WeakMap<
+  AddressBalanceGasTransaction,
+  {
+    readonly snapshot: BuildContext['sui'];
+    readonly builderInputHash: string;
+  }
+>();
+const mockBuildImplementation = async (
+  snapshot: BuildContext['sui'],
+  options: BuildAddressBalanceGasTransactionOptions,
+) => {
+  const source = options.transaction.getData();
+  expect(source.sender).not.toBeNull();
+  expect(source.gasData.owner).toBeNull();
+  expect(source.gasData.price).toBeNull();
+  expect(source.gasData.budget).toBeNull();
+  expect(source.gasData.payment).toBeNull();
+  expect(source.expiration).toBeNull();
+
+  const builderInput = JSON.stringify(
+    {
+      transaction: source,
+      sponsorAddress: options.sponsorAddress,
+      gasBudget: options.gasBudget,
+    },
+    (_key, value) => (typeof value === 'bigint' ? value.toString() : value),
+  );
+  const transaction = Object.freeze({}) as AddressBalanceGasTransaction;
+  mockGasTransactionContents.set(transaction, {
+    snapshot,
+    builderInputHash: createHash('sha256').update(builderInput).digest('hex'),
+  });
   return transaction;
 };
 const mockBuild = vi.fn(mockBuildImplementation);
@@ -65,11 +101,14 @@ const mockPaymentSourceReader = Object.freeze({
 const mockCreatePaymentSourceReader = vi.fn(
   (_sui: BuildContext['sui'], _owner: string, _coinType: string) => mockPaymentSourceReader,
 );
-const mockResolvePaymentSource = vi.fn().mockResolvedValue({
-  source: 'coin_object',
-  baseCoinId: MOCK_FUNDING_COIN,
-  mergeCoinIds: [],
-  remainingBalance: 100_000_000n,
+const mockEvaluatePaymentSource = vi.fn().mockResolvedValue({
+  outcome: 'funded',
+  funding: {
+    source: 'coin_object',
+    baseCoinId: MOCK_FUNDING_COIN,
+    mergeCoinIds: [],
+    remainingBalance: 100_000_000n,
+  },
 });
 const mockSolveExecutableSwap = vi.fn().mockResolvedValue({
   swapAmountSmallest: 1_000_000n,
@@ -180,7 +219,7 @@ vi.mock('@stelis/core-relay/server', async (importOriginal) => {
     getSuiRejectedExecutionError: (error: unknown) =>
       error instanceof SuiOperationError ? mockRejectedBuildErrors.get(error) : undefined,
     buildAddressBalanceGasTransaction: (snapshot: BuildContext['sui'], options: unknown) =>
-      mockBuild(snapshot, options),
+      mockBuild(snapshot, options as BuildAddressBalanceGasTransactionOptions),
     simulateAddressBalanceGasTransaction: (...args: unknown[]) =>
       mockSimulateSuiTransaction(...args),
     extractSettlePaymentInputContract: () => ({ paymentInputTrace: {} }),
@@ -245,13 +284,15 @@ const mockQueuedRpcStats: QuotedRpcStatsEntry[] = [];
 vi.mock('../src/prepare/coinSelection.js', () => ({
   createPaymentSourceReader: (sui: BuildContext['sui'], owner: string, coinType: string) =>
     mockCreatePaymentSourceReader(sui, owner, coinType),
-  resolvePaymentSource: (...args: unknown[]) => mockResolvePaymentSource(...args),
+  evaluatePaymentSource: (...args: unknown[]) => mockEvaluatePaymentSource(...args),
 }));
 
 // ── Import after mocks ─────────────────────────────────────────────────────
 
 import {
   __testingGenericPrepareBuildStages,
+  createSettlementFundingRunContext,
+  evaluateCurrentSettlementFunding,
   runGenericPrepareBuildPipeline,
 } from '../src/prepare/build.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
@@ -433,25 +474,30 @@ function makeExecutableQuote(
 function resetBuildMocks(): void {
   vi.clearAllMocks();
   mockSimulateSuiTransaction.mockReset();
-  mockSimulateSuiTransaction.mockImplementation(async (transaction: object) => {
-    const snapshot = mockGasTransactionSnapshots.get(transaction);
-    if (!snapshot) throw new Error('test gas transaction has no originating Sui snapshot');
-    const result = simulationResultBySnapshot.get(snapshot);
-    if (!result) throw new Error('test Sui snapshot has no gateway result');
-    return result;
-  });
+  mockSimulateSuiTransaction.mockImplementation(
+    async (transaction: AddressBalanceGasTransaction) => {
+      const contents = mockGasTransactionContents.get(transaction);
+      if (!contents) throw new Error('test gas transaction has no originating Sui snapshot');
+      const result = simulationResultBySnapshot.get(contents.snapshot);
+      if (!result) throw new Error('test Sui snapshot has no gateway result');
+      return result;
+    },
+  );
   mockBuild.mockReset();
   mockBuild.mockImplementation(mockBuildImplementation);
   mockComputeExecutionCostClaim.mockReset();
   mockBatchGetHopMidPrices.mockReset();
   mockBatchGetHopMidPrices.mockResolvedValue([27_000_000_000n]);
   mockCreatePaymentSourceReader.mockClear();
-  mockResolvePaymentSource.mockReset();
-  mockResolvePaymentSource.mockResolvedValue({
-    source: 'coin_object',
-    baseCoinId: MOCK_FUNDING_COIN,
-    mergeCoinIds: [],
-    remainingBalance: 100_000_000n,
+  mockEvaluatePaymentSource.mockReset();
+  mockEvaluatePaymentSource.mockResolvedValue({
+    outcome: 'funded',
+    funding: {
+      source: 'coin_object',
+      baseCoinId: MOCK_FUNDING_COIN,
+      mergeCoinIds: [],
+      remainingBalance: 100_000_000n,
+    },
   });
   mockSolveExecutableSwap.mockReset();
   mockSolveExecutableSwap.mockResolvedValue(makeExecutableQuote());
@@ -477,6 +523,112 @@ function resetBuildMocks(): void {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+describe('evaluateCurrentSettlementFunding — shared funding owner', () => {
+  beforeEach(() => {
+    resetBuildMocks();
+  });
+
+  it('selects credit without market or payment-source work', async () => {
+    const ctx = makeCtx({ minSettleMist: 1n, quotedHostFeeMist: 2n, protocolFlatFeeMist: 3n });
+    const input = makeInput({ credit: '505' });
+
+    await expect(
+      evaluateCurrentSettlementFunding(
+        ctx,
+        input,
+        500n,
+        createSettlementFundingRunContext(ctx, input),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ outcome: 'credit', useCreditAmount: 505n });
+    expect(mockBatchGetHopMidPrices).not.toHaveBeenCalled();
+    expect(mockEvaluatePaymentSource).not.toHaveBeenCalled();
+  });
+
+  it('uses the exact supplied claim and current fee rules before prefix-aware funding', async () => {
+    const ctx = makeCtx({ minSettleMist: 1n, quotedHostFeeMist: 2n, protocolFlatFeeMist: 3n });
+    const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
+    const runContext = createSettlementFundingRunContext(ctx, input);
+
+    await expect(
+      evaluateCurrentSettlementFunding(ctx, input, 500n, runContext, new AbortController().signal),
+    ).resolves.toMatchObject({
+      outcome: 'funded',
+      funding: { source: 'coin_object' },
+      executionQuote: { swapAmountSmallest: 1_000_000n },
+    });
+    expect(mockSolveExecutableSwap).toHaveBeenCalledWith(
+      expect.objectContaining({ targetOutputMist: 505n }),
+      expect.anything(),
+    );
+    expect(mockEvaluatePaymentSource).toHaveBeenCalledWith(
+      runContext.paymentSourceReader,
+      1_000_000n,
+      'DEEP',
+      runContext.prefixTrace,
+    );
+  });
+
+  it.each([
+    {
+      evaluation: {
+        outcome: 'insufficient' as const,
+        availableSettlementTokenAmount: 0n,
+        error: new PrepareValidationError('INSUFFICIENT_BALANCE', 'insufficient'),
+      },
+      expected: { outcome: 'insufficient', availableSettlementTokenAmount: 0n },
+    },
+    {
+      evaluation: {
+        outcome: 'indeterminate' as const,
+        reason: 'bounded_coin_discovery' as const,
+        error: new PrepareValidationError(
+          'PAYMENT_COIN_LIMIT_EXCEEDED',
+          'bounded discovery incomplete',
+        ),
+      },
+      expected: { outcome: 'indeterminate', reason: 'bounded_coin_discovery' },
+    },
+  ])(
+    'keeps non-funding evidence closed after a complete quote',
+    async ({ evaluation, expected }) => {
+      const ctx = makeCtx();
+      const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
+      mockEvaluatePaymentSource.mockResolvedValueOnce(evaluation);
+
+      await expect(
+        evaluateCurrentSettlementFunding(
+          ctx,
+          input,
+          500n,
+          createSettlementFundingRunContext(ctx, input),
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({
+        ...expected,
+        executionQuote: { swapAmountSmallest: 1_000_000n },
+      });
+    },
+  );
+
+  it('returns market indeterminate without manufacturing quote evidence', async () => {
+    const ctx = makeCtx();
+    const input = makeInput({ profile: 'new_user', vaultObjectId: null, credit: '0' });
+    const { MarketQuoteUnavailableError } = await import('@stelis/core-relay/server');
+    mockSolveExecutableSwap.mockRejectedValueOnce(new MarketQuoteUnavailableError('unavailable'));
+
+    const result = await evaluateCurrentSettlementFunding(
+      ctx,
+      input,
+      500n,
+      createSettlementFundingRunContext(ctx, input),
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({ outcome: 'indeterminate', reason: 'market_unavailable' });
+    expect('executionQuote' in result).toBe(false);
+  });
+});
 
 describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
   beforeEach(() => {
@@ -619,12 +771,14 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
     const ctx = makeCtx();
     const input = makeInput({ credit: '5000000' }); // Below max claim, above measured credit-only total.
 
-    mockResolvePaymentSource.mockRejectedValue(
-      new PrepareValidationError(
+    mockEvaluatePaymentSource.mockResolvedValue({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: 0n,
+      error: new PrepareValidationError(
         'INSUFFICIENT_BALANCE',
         'Settlement-token funding should not be required for a measured credit-only path',
       ),
-    );
+    });
     mockComputeExecutionCostClaim.mockReturnValue({
       simGas: 2_000_000n,
       grossGas: 2_500_000n,
@@ -635,7 +789,7 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
 
     const result = await runGenericPrepareBuildPipeline(ctx, input);
 
-    expect(mockResolvePaymentSource).not.toHaveBeenCalled();
+    expect(mockEvaluatePaymentSource).not.toHaveBeenCalled();
     expect(mockCreatePaymentSourceReader).toHaveBeenCalledOnce();
     expect(mockPaymentSourceReader.readCoins).not.toHaveBeenCalled();
     expect(mockPaymentSourceReader.readAddressBalance).not.toHaveBeenCalled();
@@ -988,9 +1142,9 @@ describe('runGenericPrepareBuildPipeline — boundary conditions', () => {
       input.senderAddress,
       input.settlementSwapPath.settlementTokenType,
     );
-    expect(mockResolvePaymentSource).toHaveBeenCalledTimes(2);
-    expect(mockResolvePaymentSource.mock.calls[0]?.[0]).toBe(mockPaymentSourceReader);
-    expect(mockResolvePaymentSource.mock.calls[1]?.[0]).toBe(mockPaymentSourceReader);
+    expect(mockEvaluatePaymentSource).toHaveBeenCalledTimes(2);
+    expect(mockEvaluatePaymentSource.mock.calls[0]?.[0]).toBe(mockPaymentSourceReader);
+    expect(mockEvaluatePaymentSource.mock.calls[1]?.[0]).toBe(mockPaymentSourceReader);
   });
 
   // ── Credit-insufficient → swap fallback ─────────────────────────────────
@@ -1223,6 +1377,14 @@ describe('generic prepare build stages — slot-free / gas-bound boundary locks'
     );
     expect(mockSimulateSuiTransaction).not.toHaveBeenCalled();
     expect(result.addressBalanceGasTransaction).toBe(await mockBuild.mock.results[0]!.value);
+    const finalTransaction = mockGasTransactionContents.get(result.addressBalanceGasTransaction);
+    expect(finalTransaction).toBeDefined();
+    // Reconstructed at db4f9e0 with the same installed Sui SDK. Together with
+    // the unchanged address-balance gas builder, this locks the final full
+    // transaction bytes/hash to the pre-extraction generic prepare behavior.
+    expect(finalTransaction!.builderInputHash).toBe(
+      '3397150c1f0dcee1ee027ebdf681ab2e4ae5d0b6859a1d4c232c3cce578732b9',
+    );
     expect(result.executionCostClaim).toBe(3_000_000n);
     expect(result.simGas).toBe(2_000_000n);
   });
@@ -2707,7 +2869,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
   // stats so the request keeps observability.
   // ──────────────────────────────────────────────────────────────────────
 
-  it('emits pass_aborted_post_solve when resolvePaymentSource throws after a successful solve', async () => {
+  it('emits pass_aborted_post_solve when payment-source evaluation fails after a successful solve', async () => {
     const ctx = makeCtx();
     const input = makeInput({
       profile: 'new_user',
@@ -2724,14 +2886,17 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     });
 
     mockBatchGetHopMidPrices.mockResolvedValue([27_000_000_000n]);
-    // solveSwapForClaim resolves with the default mock; resolvePaymentSource
-    // then throws. Caller absorption of pass1 stats never runs.
-    mockResolvePaymentSource.mockRejectedValueOnce(
-      new PrepareValidationError(
-        'INSUFFICIENT_BALANCE',
-        'Address balance below required swap amount',
-      ),
+    // solveSwapForClaim resolves with the default mock; payment-source evaluation
+    // returns insufficient evidence and the prepare pipeline raises its carried error.
+    const insufficientError = new PrepareValidationError(
+      'INSUFFICIENT_BALANCE',
+      'Address balance below required swap amount',
     );
+    mockEvaluatePaymentSource.mockResolvedValueOnce({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: 0n,
+      error: insufficientError,
+    });
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);
@@ -2781,12 +2946,15 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     mockBatchGetHopMidPrices.mockResolvedValue([27_000_000_000n]);
     // Resolver output is structurally inconsistent: the base is also listed as
     // a merge source. The compiler rejects rather than materializing it.
-    mockResolvePaymentSource.mockResolvedValueOnce({
-      source: 'mixed_topup',
-      baseCoinId: MOCK_FUNDING_COIN,
-      mergeCoinIds: [MOCK_FUNDING_COIN],
-      remainingBalance: 500_000n,
-      redeemAmount: 500_000n,
+    mockEvaluatePaymentSource.mockResolvedValueOnce({
+      outcome: 'funded',
+      funding: {
+        source: 'mixed_topup',
+        baseCoinId: MOCK_FUNDING_COIN,
+        mergeCoinIds: [MOCK_FUNDING_COIN],
+        remainingBalance: 500_000n,
+        redeemAmount: 500_000n,
+      },
     });
 
     const events = captureStageEvents();
@@ -2810,7 +2978,7 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     expect(aborted!.payload.quote_cache_hits).toBe(0);
     expect(aborted!.payload.pool_id).toBe(POOL_ID);
     expect(aborted!.payload.settlement_token_symbol).toBe('DEEP');
-    // Funding emit happened (resolvePaymentSource succeeded), but pass1 emit
+    // Funding emit happened (payment-source evaluation succeeded), but pass1 emit
     // never did because compile threw before caller absorption.
     expect(events.find((e) => e.stage === 'run_prepare_pass_funding_resolved')).toBeDefined();
     expect(events.find((e) => e.stage === 'pass1_compiled')).toBeUndefined();
@@ -2914,12 +3082,15 @@ describe('runGenericPrepareBuildPipeline — quote RPC observability fields', ()
     // Funding resolution rejects the raised swap input. This is the
     // expected fail-closed branch when the user holds enough settlement-token
     // for the economic target but not for the floor-raised amount.
-    mockResolvePaymentSource.mockRejectedValueOnce(
-      new PrepareValidationError(
-        'INSUFFICIENT_BALANCE',
-        'Address balance below required swap amount',
-      ),
+    const insufficientError = new PrepareValidationError(
+      'INSUFFICIENT_BALANCE',
+      'Address balance below required swap amount',
     );
+    mockEvaluatePaymentSource.mockResolvedValueOnce({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: 0n,
+      error: insufficientError,
+    });
 
     const events = captureStageEvents();
     const err = await runGenericPrepareBuildPipeline(ctx, input).catch((e: unknown) => e);

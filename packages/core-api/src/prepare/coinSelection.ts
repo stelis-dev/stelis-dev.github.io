@@ -32,6 +32,19 @@ export interface PaymentSourceReader {
   readAddressBalance(): Promise<bigint>;
 }
 
+export type PaymentSourceEvaluation =
+  | { readonly outcome: 'funded'; readonly funding: SwapFundingResolution }
+  | {
+      readonly outcome: 'insufficient';
+      readonly availableSettlementTokenAmount: bigint;
+      readonly error: PrepareValidationError;
+    }
+  | {
+      readonly outcome: 'indeterminate';
+      readonly reason: 'bounded_coin_discovery';
+      readonly error: PrepareValidationError;
+    };
+
 function parseRpcBalance(value: string, label: string): bigint {
   if (!DECIMAL_BALANCE_RE.test(value)) {
     throw new PrepareValidationError(
@@ -256,11 +269,15 @@ function resolveCoinObjectFunding(
   };
 }
 
-function coinLimitExceeded(): never {
-  throw new PrepareValidationError(
-    'PAYMENT_COIN_LIMIT_EXCEEDED',
-    'Settlement-token coin objects exceed the bounded read and no complete funding source was proven in the returned page.',
-  );
+function boundedCoinDiscovery(): Extract<PaymentSourceEvaluation, { outcome: 'indeterminate' }> {
+  return {
+    outcome: 'indeterminate',
+    reason: 'bounded_coin_discovery',
+    error: new PrepareValidationError(
+      'PAYMENT_COIN_LIMIT_EXCEEDED',
+      'Settlement-token coin objects exceed the bounded read and no complete funding source was proven in the returned page.',
+    ),
+  };
 }
 
 /**
@@ -271,12 +288,12 @@ function coinLimitExceeded(): never {
  * subset that covers the request. Address-balance or mixed funding is
  * considered only when the result proves the wallet scan is complete.
  */
-export async function resolvePaymentSource(
+export async function evaluatePaymentSource(
   reader: PaymentSourceReader,
   requiredAmount: bigint,
   tokenSymbol: string,
   prefixTrace: PrefixValueTrace,
-): Promise<SwapFundingResolution> {
+): Promise<PaymentSourceEvaluation> {
   const required = normalizeRequiredAmount(requiredAmount, tokenSymbol);
   const discovered = new Map<string, bigint>();
   const coinRead = await reader.readCoins();
@@ -302,16 +319,19 @@ export async function resolvePaymentSource(
         selected.coins.flatMap((coin) => [...coin.snapshotCoinIds]),
       );
       if (!validateValueConstraints(discovered, prefixTrace, false, relevantSnapshotIds)) {
-        coinLimitExceeded();
+        return boundedCoinDiscovery();
       }
     }
     return {
-      source: 'coin_object',
-      ...resolveCoinObjectFunding(selected.coins),
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        ...resolveCoinObjectFunding(selected.coins),
+      },
     };
   }
 
-  if (!complete) coinLimitExceeded();
+  if (!complete) return boundedCoinDiscovery();
 
   const coinBalance = selected.totalBalance;
   const nominalCoinBalance = totalCandidateBalance(candidates);
@@ -322,14 +342,20 @@ export async function resolvePaymentSource(
       : 0n;
 
   if (availableAddressBalance >= required) {
-    return { source: 'address_balance', redeemAmount: required };
+    return {
+      outcome: 'funded',
+      funding: { source: 'address_balance', redeemAmount: required },
+    };
   }
 
   if (selected.coins.length > 0 && coinBalance + availableAddressBalance >= required) {
     return {
-      source: 'mixed_topup',
-      ...resolveCoinObjectFunding(selected.coins),
-      redeemAmount: required - coinBalance,
+      outcome: 'funded',
+      funding: {
+        source: 'mixed_topup',
+        ...resolveCoinObjectFunding(selected.coins),
+        redeemAmount: required - coinBalance,
+      },
     };
   }
 
@@ -346,8 +372,13 @@ export async function resolvePaymentSource(
       `No safe ${tokenSymbol} source remains after user-prefix value tracing and no address balance is available.`,
     );
   }
-  throw new PrepareValidationError(
-    'INSUFFICIENT_BALANCE',
-    `Insufficient ${tokenSymbol} balance: coins=${coinBalance}, addressBalance=${availableAddressBalance}, need=${required}.`,
-  );
+  const availableSettlementTokenAmount = nominalCoinBalance + availableAddressBalance;
+  return {
+    outcome: 'insufficient',
+    availableSettlementTokenAmount,
+    error: new PrepareValidationError(
+      'INSUFFICIENT_BALANCE',
+      `Insufficient ${tokenSymbol} balance: coins=${coinBalance}, addressBalance=${availableAddressBalance}, need=${required}.`,
+    ),
+  };
 }

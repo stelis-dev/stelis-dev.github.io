@@ -23,6 +23,7 @@
 
 // ── Constants (browser-safe, core-relay-interior) ───────────────────────────
 export { SUI_CLOCK_OBJECT_ID } from './constants.js';
+export { isSuiU64 } from './sui/suiU64.js';
 
 // ── Hash utilities (browser-safe, uses SubtleCrypto) ────────────────────────
 export { sha256Bytes } from './hash.js';

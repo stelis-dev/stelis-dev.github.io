@@ -23,6 +23,8 @@ export type {
 export type {
   RelayStatusResponse,
   RelayConfigResponse,
+  RelaySettlementFundingCheckRequest,
+  RelaySettlementFundingCheckResponse,
   RelayPrepareRequest,
   RelayPrepareResponse,
   RelaySponsorRequest,
@@ -87,6 +89,8 @@ export {
   parseHostHealthResponse,
   parseRelayStatusResponse,
   parseRelayConfigResponse,
+  parseRelaySettlementFundingCheckRequest,
+  parseRelaySettlementFundingCheckResponse,
   parseRelayPrepareRequest,
   parseRelayPrepareResponse,
   parseRelaySponsorRequest,
@@ -143,6 +147,7 @@ export {
 export type {
   RelayStatusErrorCode,
   RelayConfigErrorCode,
+  RelaySettlementFundingCheckErrorCode,
   StudioListErrorCode,
   StudioDetailErrorCode,
   StudioClaimErrorCode,
@@ -160,6 +165,7 @@ export type {
 export {
   RELAY_STATUS_ERROR_CODES,
   RELAY_CONFIG_ERROR_CODES,
+  RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES,
   STUDIO_LIST_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
   STUDIO_CLAIM_ERROR_CODES,
