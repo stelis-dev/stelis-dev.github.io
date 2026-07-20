@@ -306,6 +306,78 @@ describe('StelisClient', () => {
     });
   });
 
+  describe('settlement funding check', () => {
+    const request = {
+      txKindBytes: 'base64kind',
+      senderAddress: `0x${'aa'.repeat(32)}`,
+      settlementTokenType: '0x1::deep::DEEP',
+      estimatedExecutionCostClaimMist: '9007199254740993',
+    } as const;
+
+    it('preserves canonical raw amounts through the current request and response parsers', async () => {
+      const response = {
+        status: 'likely_insufficient',
+        estimatedExecutionCostClaimMist: request.estimatedExecutionCostClaimMist,
+        quotedRequiredSettlementTokenAmount: '12345678901234567',
+        availableSettlementTokenAmount: '4567890123456789',
+      } as const;
+      mockFetch.mockResolvedValueOnce(jsonResponse(response));
+
+      await expect(client.checkSettlementFunding(request)).resolves.toEqual(response);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://localhost:3000/relay/settlement-funding-check');
+      expect(JSON.parse(init.body)).toEqual(request);
+    });
+
+    it.each([
+      { ...request, estimatedExecutionCostClaimMist: '-1' },
+      { ...request, estimatedExecutionCostClaimMist: '01' },
+      { ...request, estimatedExecutionCostClaimMist: (1n << 64n).toString() },
+      { ...request, extra: true },
+    ])('rejects a request outside the closed wire contract before fetch', async (invalid) => {
+      await expect(client.checkSettlementFunding(invalid)).rejects.toThrow();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        response: {
+          status: 'indeterminate',
+          reason: 'market_unavailable',
+          estimatedExecutionCostClaimMist: '1',
+          quotedRequiredSettlementTokenAmount: '2',
+        },
+        error: /non-current field/,
+      },
+      {
+        response: {
+          status: 'likely_sufficient',
+          source: 'settlement_token',
+          estimatedExecutionCostClaimMist: '1',
+          quotedRequiredSettlementTokenAmount: (1n << 64n).toString(),
+        },
+        error: /fit in u64/,
+      },
+    ])('rejects Host output outside the proved result branch', async ({ response, error }) => {
+      mockFetch.mockResolvedValueOnce(jsonResponse(response));
+      await expect(client.checkSettlementFunding({ ...request })).rejects.toThrow(error);
+    });
+
+    it('rejects a valid Host result that is bound to a different estimate', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          status: 'likely_sufficient',
+          source: 'vault_credit',
+          estimatedExecutionCostClaimMist: '1',
+        }),
+      );
+
+      await expect(client.checkSettlementFunding(request)).rejects.toThrow(
+        /does not match the request/,
+      );
+    });
+  });
+
   // ─────────────────────────────────────────
   // sponsor
   // ─────────────────────────────────────────

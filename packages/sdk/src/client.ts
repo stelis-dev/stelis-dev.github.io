@@ -11,6 +11,8 @@ import type {
   RelayConfigResponse,
   RelayPrepareRequest,
   RelayPrepareResponse,
+  RelaySettlementFundingCheckRequest,
+  RelaySettlementFundingCheckResponse,
   RelaySponsorRequest,
   RelaySponsorResponse,
   PromotionPrepareRequest,
@@ -30,9 +32,12 @@ import {
   parsePromotionPageQuery,
   parsePromotionListResponse,
   parsePromotionDetailResponse,
+  HostWireParseError,
   parseRelayConfigResponse,
   parseRelayPrepareResponse,
   parseRelayPrepareRequest,
+  parseRelaySettlementFundingCheckRequest,
+  parseRelaySettlementFundingCheckResponse,
   parseHostErrorResponse,
   parseRelaySponsorResponse,
   parseRelaySponsorRequest,
@@ -41,6 +46,7 @@ import {
   PROMOTION_SPONSOR_ERROR_CODES,
   RELAY_CONFIG_ERROR_CODES,
   RELAY_PREPARE_ERROR_CODES,
+  RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES,
   RELAY_SPONSOR_ERROR_CODES,
   RELAY_STATUS_ERROR_CODES,
   STUDIO_DETAIL_ERROR_CODES,
@@ -135,6 +141,26 @@ export class StelisClient {
         headers,
       ),
     );
+  }
+
+  async checkSettlementFunding(
+    params: RelaySettlementFundingCheckRequest,
+  ): Promise<RelaySettlementFundingCheckResponse> {
+    const request = parseRelaySettlementFundingCheckRequest(params);
+    const response = parseRelaySettlementFundingCheckResponse(
+      await this.post(
+        '/settlement-funding-check',
+        request,
+        this.timeouts.prepareMs,
+        RELAY_SETTLEMENT_FUNDING_CHECK_ERROR_CODES,
+      ),
+    );
+    if (response.estimatedExecutionCostClaimMist !== request.estimatedExecutionCostClaimMist) {
+      throw new HostWireParseError(
+        'RelaySettlementFundingCheckResponse.estimatedExecutionCostClaimMist does not match the request',
+      );
+    }
+    return response;
   }
 
   // ─────────────────────────────────────────

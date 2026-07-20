@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
+import { toBase58 } from '@mysten/sui/utils';
 import { describe, expect, test, vi } from 'vitest';
 import type { SponsorResultMetadata } from '../src/handlers/sponsorResult.js';
 import {
@@ -36,12 +39,27 @@ import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.
 
 const RECEIPT_ID = `0x${'11'.repeat(32)}`;
 const SPONSOR_ADDRESS = `0x${'22'.repeat(32)}`;
-const SENDER_ADDRESS = `0x${'33'.repeat(32)}`;
+const USER_KEYPAIR = Ed25519Keypair.generate();
+const SENDER_ADDRESS = USER_KEYPAIR.toSuiAddress();
 const PROMOTION_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = 'runner-user';
-const TX_BYTES = new Uint8Array([1, 2, 3, 4, 5]);
+const transaction = new Transaction();
+transaction.setSender(SENDER_ADDRESS);
+transaction.setGasOwner(SPONSOR_ADDRESS);
+transaction.setGasBudget(5_000);
+transaction.setGasPrice(1);
+transaction.setGasPayment([
+  {
+    objectId: `0x${'44'.repeat(32)}`,
+    version: '1',
+    digest: toBase58(new Uint8Array(32).fill(1)),
+  },
+]);
+const TX_BYTES = await transaction.build({ onlyTransactionKind: false });
 const TX_BYTES_HASH = createHash('sha256').update(TX_BYTES).digest('hex');
-const USER_SIGNATURE = 'user-signature';
+const USER_SIGNATURE = (await USER_KEYPAIR.signTransaction(TX_BYTES)).signature;
+const INVALID_USER_SIGNATURE = (await Ed25519Keypair.generate().signTransaction(TX_BYTES))
+  .signature;
 
 const SUCCESS_RESULT: Extract<ExecResult, { success: true }> = {
   success: true,
@@ -254,7 +272,7 @@ class LifecycleStore implements SponsoredExecutionStoreAdapter {
 
 interface PolicyControl {
   readonly store: LifecycleStore;
-  readonly failAt?: 'UserSignatureValidation' | 'Preflight';
+  readonly failAt?: 'Preflight';
   classifiedResult: ExecResult | null;
   readonly classificationError: Error;
 }
@@ -298,10 +316,11 @@ function makeGenericPolicy(control: PolicyControl): SponsoredExecutionPolicy<'ge
     hooks: {
       ...commonPrepareHooks(),
       ChainSnapshot: () => ({ nonceAcquire: { onchainLastNonce: 0n } }),
-      DecodeSponsorSubmission: () => assertBeforePreparedRead(control, 'decode'),
-      UserSignatureValidation: () => {
-        assertBeforePreparedRead(control, 'signature-validation');
-        if (control.failAt === 'UserSignatureValidation') throw new Error('signature rejected');
+      SponsorSubmissionAdmission: (context) => {
+        assertBeforePreparedRead(control, 'submission-admission');
+        if (context.authentication.outcome === 'rejected') {
+          throw new Error('signature rejected');
+        }
       },
       SharedSponsorChecks: () => {
         assertPrepared(control, 'shared-checks');
@@ -338,10 +357,11 @@ function makePromotionPolicy(control: PolicyControl): SponsoredExecutionPolicy<'
     hooks: {
       ...commonPrepareHooks(),
       ChainSnapshot: () => ({}),
-      DecodeSponsorSubmission: () => assertBeforePreparedRead(control, 'decode'),
-      UserSignatureValidation: () => {
-        assertBeforePreparedRead(control, 'signature-validation');
-        if (control.failAt === 'UserSignatureValidation') throw new Error('signature rejected');
+      SponsorSubmissionAdmission: (context) => {
+        assertBeforePreparedRead(control, 'submission-admission');
+        if (context.authentication.outcome === 'rejected') {
+          throw new Error('signature rejected');
+        }
       },
       SharedSponsorChecks: () => {
         assertPrepared(control, 'shared-checks');
@@ -458,11 +478,12 @@ function requestFor(
   prepared: PreparedTxEntry,
   control: PolicyControl,
   stateChangedError = new Error('durable receipt state changed'),
+  userSignature = USER_SIGNATURE,
 ): SponsorStateMachineRequest<{ digest: string }> {
   return {
     hookContext: { receiptId: prepared.receiptId, clientIp: prepared.clientIp },
     txBytes: TX_BYTES,
-    userSignature: USER_SIGNATURE,
+    userSignature,
     buildRecoveryContext: () => recoveryContext(prepared),
     buildResultMetadata: metadataBuilder(prepared, control),
     stateChangedError: () => stateChangedError,
@@ -478,6 +499,7 @@ function buildHarness(
     readonly callbackError?: Error;
     readonly failAt?: PolicyControl['failAt'];
     readonly sponsorAvailable?: boolean;
+    readonly userSignature?: string;
   } = {},
 ) {
   const store = new LifecycleStore(prepared, options);
@@ -515,7 +537,7 @@ function buildHarness(
     },
     policy: prepared.mode === 'generic' ? makeGenericPolicy(control) : makePromotionPolicy(control),
     receiptPolicy: receiptPolicy(prepared.mode),
-    request: requestFor(prepared, control),
+    request: requestFor(prepared, control, undefined, options.userSignature),
   };
 }
 
@@ -528,8 +550,7 @@ describe('runSponsorStateMachine durable lifecycle', () => {
     ).resolves.toEqual({ digest: TEST_SUI_TRANSACTION_DIGEST });
 
     expect(harness.store.events).toEqual([
-      'decode',
-      'signature-validation',
+      'submission-admission',
       'read',
       'shared-checks',
       'policy-checks',
@@ -551,14 +572,14 @@ describe('runSponsorStateMachine durable lifecycle', () => {
 
   test('does not read the prepared record when user signature validation fails', async () => {
     const harness = buildHarness(GENERIC_PREPARED, {
-      failAt: 'UserSignatureValidation',
+      userSignature: INVALID_USER_SIGNATURE,
     });
 
     await expect(
       runSponsorStateMachine(harness.host, harness.request, harness.policy, harness.receiptPolicy),
     ).rejects.toThrow('signature rejected');
 
-    expect(harness.store.events).toEqual(['decode', 'signature-validation']);
+    expect(harness.store.events).toEqual(['submission-admission']);
     expect(harness.host.isSponsorAddressAvailable).not.toHaveBeenCalled();
     expect(harness.store.beginInputs).toHaveLength(0);
     expect(harness.signAndSubmit).not.toHaveBeenCalled();
@@ -589,8 +610,7 @@ describe('runSponsorStateMachine durable lifecycle', () => {
     ).rejects.toThrow('preflight rejected');
 
     expect(harness.store.events).toEqual([
-      'decode',
-      'signature-validation',
+      'submission-admission',
       'read',
       'shared-checks',
       'policy-checks',

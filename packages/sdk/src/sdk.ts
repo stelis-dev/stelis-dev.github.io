@@ -35,12 +35,14 @@ import {
   SuiOperationError,
   executeSuiTransaction,
   getSuiBalance,
+  isSuiU64,
   simulateSuiTransaction,
   suiExecutionErrorMessage,
 } from '@stelis/core-relay/browser';
 import {
   STELIS_CONTRACT_IDS,
   DEEPBOOK_IDS,
+  GAS_MARGIN_CAP_BPS,
   SUI_CHAIN_IDENTIFIERS,
   requireContractId,
   type PrepareAuthorizationFields,
@@ -62,6 +64,8 @@ import type {
   ExecuteSponsoredResult,
   PrepareSponsoredResult,
   GasEstimateResult,
+  SettlementFundingCheckOptions,
+  RelaySettlementFundingCheckResponse,
   ExecuteSuiFirstResult,
   ExecutePromotionSponsoredOptions,
   ExecutePromotionSponsoredResult,
@@ -77,7 +81,7 @@ import {
 } from './swap.js';
 
 const SUI_DECIMALS = 9;
-const DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST = 5_000_000;
+const DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST = 5_000_000n;
 const PREPARE_REQUEST_NONCE_BYTES = 16;
 
 type OptionalPrepareFields = Pick<
@@ -372,6 +376,34 @@ export class StelisSDK {
   }
 
   /**
+   * Ask the Host for a read-only advisory funding result for one transaction
+   * kind and exact execution-cost estimate. The Host remains authoritative at
+   * `/relay/prepare`; this method does not reserve or authorize execution.
+   */
+  async checkSettlementFunding(
+    tx: Transaction,
+    opts: SettlementFundingCheckOptions,
+  ): Promise<RelaySettlementFundingCheckResponse> {
+    if (!isSuiU64(opts.estimatedExecutionCostClaimMist)) {
+      throw new TypeError('estimatedExecutionCostClaimMist must be a non-negative Sui u64 bigint');
+    }
+    this.getSettlementSwapPathForSettlementToken(opts.settlementToken.type);
+    const endpoints = await this._suiEndpoints(opts.client);
+    const txKindBytes = toBase64(
+      await buildSuiTransaction(endpoints, {
+        transaction: tx,
+        onlyTransactionKind: true,
+      }),
+    );
+    return this._client.checkSettlementFunding({
+      txKindBytes,
+      senderAddress: opts.senderAddress,
+      settlementTokenType: opts.settlementToken.type,
+      estimatedExecutionCostClaimMist: opts.estimatedExecutionCostClaimMist.toString(),
+    });
+  }
+
+  /**
    * Estimate gas cost for a sponsored transaction before signing.
    *
    * **Non-authoritative UX hint.** This estimate does not include the settle TX
@@ -399,20 +431,35 @@ export class StelisSDK {
     opts: {
       addr: string;
       settlementToken: { type: string };
-      intentGasBudget?: number;
+      intentGasBudgetMist?: bigint;
       gasMarginBps?: number;
     },
   ): Promise<GasEstimateResult> {
-    const endpoints = await this._suiEndpoints(client);
-    const intentGasBudget = opts.intentGasBudget ?? DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST;
+    const intentGasBudgetMist = opts.intentGasBudgetMist ?? DEFAULT_ESTIMATE_GAS_INTENT_BUDGET_MIST;
     const gasMarginBps = opts.gasMarginBps ?? DEFAULT_GAS_MARGIN_BPS;
+    if (!isSuiU64(intentGasBudgetMist)) {
+      throw new TypeError('intentGasBudgetMist must be a non-negative Sui u64 bigint');
+    }
+    if (
+      !Number.isSafeInteger(gasMarginBps) ||
+      gasMarginBps < 0 ||
+      gasMarginBps > GAS_MARGIN_CAP_BPS
+    ) {
+      throw new TypeError(
+        `gasMarginBps must be a safe integer from 0 through ${GAS_MARGIN_CAP_BPS}`,
+      );
+    }
+    const endpoints = await this._suiEndpoints(client);
 
     // 1. Compute gas costs using the browser-safe core-relay subset.
     const costs = computeExecutionCostClaim({
-      computationCost: intentGasBudget.toString(),
+      computationCost: intentGasBudgetMist.toString(),
       storageCost: '0',
       storageRebate: '0',
     });
+    if (!isSuiU64(costs.executionCostClaim)) {
+      throw new RangeError('executionCostClaimMist exceeds the Sui u64 range');
+    }
 
     // 2. Add fees from /relay/config (strict required fields)
     const quotedHostFee = parseDecimalBigInt(
@@ -465,6 +512,7 @@ export class StelisSDK {
         profile,
         hasLiquidity,
         canSkipLiquidity,
+        executionCostClaimMist: costs.executionCostClaim,
       };
     }
 
@@ -477,6 +525,7 @@ export class StelisSDK {
         profile,
         hasLiquidity: false,
         canSkipLiquidity: false,
+        executionCostClaimMist: costs.executionCostClaim,
       };
     }
 
@@ -492,6 +541,7 @@ export class StelisSDK {
         profile,
         hasLiquidity: false,
         canSkipLiquidity: false,
+        executionCostClaimMist: costs.executionCostClaim,
       };
     }
     const marginNumerator = BigInt(10_000 + gasMarginBps);
@@ -517,6 +567,7 @@ export class StelisSDK {
       profile,
       hasLiquidity: true,
       canSkipLiquidity: false,
+      executionCostClaimMist: costs.executionCostClaim,
     };
   }
 

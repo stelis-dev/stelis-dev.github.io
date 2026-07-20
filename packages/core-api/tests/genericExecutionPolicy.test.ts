@@ -6,6 +6,7 @@
  * policy preserves the generic sponsor contracts through injected ports.
  */
 import { describe, test, expect, vi } from 'vitest';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { toBase58 } from '@mysten/sui/utils';
 import {
@@ -27,7 +28,11 @@ import type {
   SponsorValidatedContext,
 } from '../src/session/sponsoredExecution/executionPolicy.js';
 import { reconstructReservationHandles } from '../src/session/sponsoredExecution/reservationHandles.js';
-import { SenderSignatureError } from '../src/session/sessionPrimitives.js';
+import {
+  authenticateSponsorSubmission,
+  readAuthenticatedSponsorSubmission,
+  type SponsorSubmissionAuthenticationResult,
+} from '../src/session/sponsoredExecution/sponsorSubmissionAuthentication.js';
 import { PrepareValidationError } from '../src/prepare/replay.js';
 import { getFailurePolicy } from '../src/failures.js';
 import { SETTLE_MODULE, SETTLE_WITH_CREDIT_FUNCTION, type PtbCommand } from '@stelis/contracts';
@@ -42,12 +47,13 @@ import { TEST_SUI_TRANSACTION_DIGEST } from './helpers/suiGatewayResultFixtures.
 import { admitTestClientIp } from './admittedClientIpTestHelpers.js';
 
 const RECEIPT_ID = `0x${'ab'.repeat(32)}`;
-const SENDER = `0x${'11'.repeat(32)}`;
-const OTHER_SENDER = `0x${'33'.repeat(32)}`;
+const USER_KEYPAIR = Ed25519Keypair.generate();
+const OTHER_USER_KEYPAIR = Ed25519Keypair.generate();
+const SENDER = USER_KEYPAIR.toSuiAddress();
+const OTHER_SENDER = OTHER_USER_KEYPAIR.toSuiAddress();
 const SPONSOR = `0x${'22'.repeat(32)}`;
 const SETTLEMENT_TOKEN_TYPE = `0x${'88'.repeat(32)}::deep::DEEP`;
 const STELIS_PACKAGE_ID = `0x${'66'.repeat(32)}`;
-const TX_BYTES = new Uint8Array([1, 2, 3, 4]);
 const TEST_ABUSE_BLOCKER = {
   checkIp: vi.fn().mockResolvedValue({ blocked: false }),
   checkSubject: vi.fn().mockResolvedValue({ blocked: false }),
@@ -172,8 +178,6 @@ function makeSponsorOptions(
     hostContext: ctx,
     sponsor: {
       admittedClientIp: ADMITTED_CLIENT_IP,
-      txBytes: TX_BYTES,
-      userSignature: 'mock-user-signature',
       errors,
     },
     deps: input.deps,
@@ -283,10 +287,12 @@ function makeUnreachedPrepareHost() {
 
 function makeValidatedCtx(
   executionStage: SponsorValidatedContext['executionStage'] = 'before_sponsor_signature',
+  authenticatedSubmission = AUTHENTICATION.submission,
 ): SponsorValidatedContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
+    authenticatedSubmission,
     executionStage,
     sponsorSlot: reconstructReservationHandles.sponsorSlot({
       sponsorAddress: SPONSOR,
@@ -321,10 +327,13 @@ function makeUnaccountableWithdrawalTx(): Transaction {
   } as unknown as Transaction;
 }
 
-function makeSubmissionCtx(): SponsorSubmissionContext {
+function makeSubmissionCtx(
+  authentication: SponsorSubmissionAuthenticationResult = AUTHENTICATION,
+): SponsorSubmissionContext {
   return {
     receiptId: RECEIPT_ID,
     clientIp: '127.0.0.1',
+    authentication,
   };
 }
 
@@ -346,13 +355,24 @@ async function buildTxBytesWithSender(sender: string): Promise<Uint8Array> {
   return tx.build({ onlyTransactionKind: false });
 }
 
+async function buildAuthenticatedSubmission(keypair: Ed25519Keypair) {
+  const txBytes = await buildTxBytesWithSender(keypair.toSuiAddress());
+  const userSignature = (await keypair.signTransaction(txBytes)).signature;
+  const authentication = await authenticateSponsorSubmission({ txBytes, userSignature });
+  if (authentication.outcome !== 'authenticated') {
+    throw new Error(`Test submission authentication failed: ${authentication.message}`);
+  }
+  return authentication;
+}
+
+const AUTHENTICATION = await buildAuthenticatedSubmission(USER_KEYPAIR);
+const OTHER_AUTHENTICATION = await buildAuthenticatedSubmission(OTHER_USER_KEYPAIR);
+
 function seedSponsorState(
   state: GenericExecutionPolicyState,
   overrides: Partial<NonNullable<GenericExecutionPolicyState['sponsor']>> = {},
 ): void {
   state.sponsor = {
-    builtTxForValidation: {} as Transaction,
-    txSender: SENDER,
     prepared: makePrepared(),
     revalidation: makeRevalidation(7n),
     gasBudget: 10_000n,
@@ -575,8 +595,7 @@ describe('createGenericSponsorReceiptPolicy', () => {
 });
 
 describe('generic sponsor validation', () => {
-  test('reuses the one decoded transaction for every generic sponsor validation', async () => {
-    const txBytes = await buildTxBytesWithSender(SENDER);
+  test('reuses the authenticated transaction for every generic sponsor validation', async () => {
     const revalidateGenericSponsorPolicy = vi.fn<
       GenericExecutionPolicyDependencies['revalidateGenericSponsorPolicy']
     >(async (_context, _prepared, builtTx) => ({
@@ -590,7 +609,6 @@ describe('generic sponsor validation', () => {
     const options = {
       ...makeSponsorOptions({
         deps: {
-          verifySenderSignature: vi.fn(async () => undefined),
           checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
           revalidateGenericSponsorPolicy,
           verifyGasOwner,
@@ -598,65 +616,51 @@ describe('generic sponsor validation', () => {
       }),
       sponsor: {
         admittedClientIp: ADMITTED_CLIENT_IP,
-        txBytes,
-        userSignature: 'valid-user-signature',
         errors,
       },
     } satisfies GenericExecutionPolicyOptions;
     const { policy, state } = createGenericExecutionPolicy(options);
-    const transactionFrom = vi.spyOn(Transaction, 'from');
+    const decoded = readAuthenticatedSponsorSubmission(AUTHENTICATION.submission).transaction;
 
-    try {
-      await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
-      const decoded = state.sponsor?.builtTxForValidation;
-      expect(decoded).toBeInstanceOf(Transaction);
+    await policy.hooks.SponsorSubmissionAdmission(makeSubmissionCtx());
+    await createGenericSponsorReceiptPolicy({
+      hostContext: options.hostContext,
+      clientIp: '127.0.0.1',
+      state,
+      errors,
+      deps: options.deps,
+    }).validatePreparedEntry(makePrepared());
+    await policy.hooks.SharedSponsorChecks(makeValidatedCtx());
 
-      await policy.hooks.UserSignatureValidation(makeSubmissionCtx());
-      await createGenericSponsorReceiptPolicy({
-        hostContext: options.hostContext,
-        clientIp: '127.0.0.1',
-        state,
-        errors,
-        deps: options.deps,
-      }).validatePreparedEntry(makePrepared());
-      await policy.hooks.SharedSponsorChecks(makeValidatedCtx());
-
-      expect(transactionFrom).toHaveBeenCalledTimes(1);
-      expect(revalidateGenericSponsorPolicy.mock.calls[0]?.[2]).toBe(decoded);
-      expect(verifyGasOwner.mock.calls[0]?.[0]).toBe(decoded);
-    } finally {
-      transactionFrom.mockRestore();
-    }
+    expect(revalidateGenericSponsorPolicy.mock.calls[0]?.[2]).toBe(decoded);
+    expect(verifyGasOwner.mock.calls[0]?.[0]).toBe(decoded);
   });
 
   test('records signature failure without requiring a prepared entry', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
-    const verifySenderSignature = vi.fn(async () => {
-      throw new SenderSignatureError('bad signature');
-    });
-    const txBytes = await buildTxBytesWithSender(SENDER);
     const options = {
       ...makeSponsorOptions({
         deps: {
-          verifySenderSignature:
-            verifySenderSignature as unknown as GenericExecutionPolicyDependencies['verifySenderSignature'],
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
         },
       }),
       sponsor: {
         admittedClientIp: ADMITTED_CLIENT_IP,
-        txBytes,
-        userSignature: 'bad-user-signature',
         errors,
       },
     } satisfies GenericExecutionPolicyOptions;
     const { policy } = createGenericExecutionPolicy(options);
 
-    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
-    await expect(policy.hooks.UserSignatureValidation(makeSubmissionCtx())).rejects.toMatchObject({
-      code: 'SENDER_SIGNATURE_INVALID',
-    });
+    await expect(
+      policy.hooks.SponsorSubmissionAdmission(
+        makeSubmissionCtx({
+          outcome: 'rejected',
+          reason: 'invalid_signature',
+          message: 'bad signature',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'SENDER_SIGNATURE_INVALID' });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',
@@ -667,11 +671,9 @@ describe('generic sponsor validation', () => {
 
   test('admits the signed sender before comparing it with the prepared entry', async () => {
     const recordSponsorFailureForAbuse = vi.fn();
-    const txBytes = await buildTxBytesWithSender(OTHER_SENDER);
     const options = {
       ...makeSponsorOptions({
         deps: {
-          verifySenderSignature: vi.fn(async () => undefined),
           checkBlockedSubject: vi.fn(async () => ({ blocked: false })),
           recordSponsorFailureForAbuse:
             recordSponsorFailureForAbuse as unknown as typeof import('../src/abuseBlocking.js').recordSponsorFailureForAbuse,
@@ -679,8 +681,6 @@ describe('generic sponsor validation', () => {
       }),
       sponsor: {
         admittedClientIp: ADMITTED_CLIENT_IP,
-        txBytes,
-        userSignature: 'valid-for-other-sender',
         errors,
       },
     } satisfies GenericExecutionPolicyOptions;
@@ -693,13 +693,14 @@ describe('generic sponsor validation', () => {
       deps: options.deps,
     }).validatePreparedEntry(makePrepared());
 
-    await policy.hooks.DecodeSponsorSubmission(makeSubmissionCtx());
     await expect(
-      policy.hooks.UserSignatureValidation(makeSubmissionCtx()),
+      policy.hooks.SponsorSubmissionAdmission(makeSubmissionCtx(OTHER_AUTHENTICATION)),
     ).resolves.toBeUndefined();
-    await expect(policy.hooks.SharedSponsorChecks(makeValidatedCtx())).rejects.toMatchObject({
-      code: 'RECEIPT_SESSION_MISMATCH',
-    });
+    await expect(
+      policy.hooks.SharedSponsorChecks(
+        makeValidatedCtx('before_sponsor_signature', OTHER_AUTHENTICATION.submission),
+      ),
+    ).rejects.toMatchObject({ code: 'RECEIPT_SESSION_MISMATCH' });
     expect(recordSponsorFailureForAbuse).toHaveBeenCalledWith(
       expect.anything(),
       '127.0.0.1',

@@ -76,6 +76,53 @@ Clients treat `supportedSettlementSwapPaths` as the Host's supported settlement 
 Each `settlementTokenType` appears once and maps to one Host-configured SUI-adjacent DeepBook one-hop settlement swap path. `POST /relay/prepare` selects that token's active settlement swap path with `settlementTokenType`; clients do not send a pool ID or path ID.
 The settlement swap path includes the DeepBook pool and `swapDirection` used by the Host. `settlementPayoutRecipient` is an address, not the Host role or a sponsor signing account.
 
+## POST /relay/settlement-funding-check
+
+Returns a read-only advisory about current User Vault credit and settlement-token
+funding for one transaction kind and exact estimated execution-cost claim. The
+route is public and credential-free. It uses normal Relay IP admission, bounded
+JSON body reading, and the same aggregate in-flight chain-work capacity as
+`POST /relay/prepare`.
+
+The request contains exactly:
+
+```json
+{
+  "txKindBytes": "<base64 TransactionKind bytes>",
+  "senderAddress": "0x...",
+  "settlementTokenType": "0x...::coin::COIN",
+  "estimatedExecutionCostClaimMist": "5100000"
+}
+```
+
+`estimatedExecutionCostClaimMist` is a canonical non-negative decimal string
+in the Sui `u64` range and must not exceed the Host's current on-chain
+`maxClaimMist`. The Host validates the transaction kind and uses the same
+ordered funding process as generic prepare: credit-only eligibility, required
+SUI output, current executable market quote including min/lot rules, and
+prefix-aware settlement-token funding.
+
+The response is one closed result:
+
+- `likely_sufficient` with `source: "vault_credit"` or
+  `source: "settlement_token"`;
+- `likely_insufficient` with the quoted required settlement-token amount and
+  `availableSettlementTokenAmount`, the complete amount still available after
+  applying the supplied transaction prefix; or
+- `indeterminate` with `reason: "bounded_coin_discovery"` or
+  `reason: "market_unavailable"`.
+
+Every result echoes the exact estimated claim. A quoted required token amount
+is present only when current market evidence proved it. Bounded-incomplete coin
+discovery never becomes an insufficient result. The route reserves no sponsor,
+nonce, or receipt and writes no domain record; its in-flight capacity lease is
+released after success, failure, or cancellation.
+
+This response is advisory. `POST /relay/prepare` remains authoritative because
+it measures the final transaction claim and uses current reservations and
+state. A client may warn on `likely_insufficient`; it must not treat
+`likely_sufficient` as execution authorization or `indeterminate` as rejection.
+
 ## POST /relay/prepare
 
 Prepares a sponsored transaction.

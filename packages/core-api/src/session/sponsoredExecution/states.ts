@@ -14,8 +14,7 @@ export type PrepareState = 'Intent' | 'RequestValidation' | 'ChainSnapshot' | 'G
 
 /** Sponsor-side states (run inside the `/sponsor` request). */
 export type SponsorState =
-  | 'DecodeSponsorSubmission'
-  | 'UserSignatureValidation'
+  | 'SponsorSubmissionAdmission'
   | 'SharedSponsorChecks'
   | 'PolicySponsorChecks'
   | 'Preflight'

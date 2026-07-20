@@ -21,7 +21,7 @@ import type {
   ExecutingSponsoredExecutionRecord,
   SponsoredExecutionRecoveryContext,
 } from './sponsoredExecutionRecords.js';
-import { sponsorResultMetadata } from './sponsoredExecutionRecords.js';
+import { attemptSponsorResultDelivery } from './sponsorResultDelivery.js';
 import {
   SPONSORED_EXECUTION_RECOVERY_BATCH_SIZE,
   sponsoredExecutionOrderIdHash,
@@ -317,14 +317,12 @@ export class SponsoredExecutionRecovery {
       );
       for (const record of page.records) {
         this.controller.signal.throwIfAborted();
-        try {
-          await this.callback(sponsorResultMetadata(record.result), this.controller.signal);
-        } catch (error) {
-          if (this.controller.signal.aborted) throw error;
-          continue;
-        }
-        this.controller.signal.throwIfAborted();
-        await this.store.markCallbackDelivered(record);
+        await attemptSponsorResultDelivery({
+          record,
+          callback: this.callback,
+          store: this.store,
+          signal: this.controller.signal,
+        });
       }
       if (page.nextCursor === null) return;
       cursor = page.nextCursor;

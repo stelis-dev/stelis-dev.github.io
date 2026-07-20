@@ -175,8 +175,6 @@ export async function handleSponsor(
     hostContext: ctx,
     sponsor: {
       admittedClientIp,
-      txBytes,
-      userSignature: params.userSignature,
       errors,
     },
   } as const;

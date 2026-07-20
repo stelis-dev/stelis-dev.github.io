@@ -90,14 +90,11 @@ import type { HostContext } from '../../context.js';
 import type { GenericPreparedTxEntry } from '../../store/prepareTypes.js';
 import { SponsorLeaseExpiredError } from '../../store/sponsorPoolErrors.js';
 import {
-  extractTxSender,
   GasOwnerMismatchError,
   runPreflight,
-  SenderSignatureError,
   signAndSubmit,
   SponsorPostSignatureUncertaintyError,
   verifyGasOwner,
-  verifySenderSignature,
 } from '../sessionPrimitives.js';
 import type { GasUsedFields } from '../sessionTypes.js';
 import type {
@@ -117,7 +114,10 @@ import type {
   SponsorValidatedContext,
   SponsorSubmissionContext,
 } from './executionPolicy.js';
+import { readAuthenticatedSponsorSubmission } from './sponsorSubmissionAuthentication.js';
 import { parseBps, mist, type Bps, type Mist } from '../../internal/brand.js';
+import { requireSettlementSwapPathConfig } from '../../prepare/settlementSwapPathConfig.js';
+import { deriveSettlementFundingProfile } from '../../prepare/settlementPlanner.js';
 
 // -------------------------------------------------------------
 // Public factory input shapes
@@ -163,8 +163,6 @@ export interface GenericExecutionPolicyOptions {
   };
   readonly sponsor?: {
     readonly admittedClientIp: AdmittedClientIp;
-    readonly txBytes: Uint8Array;
-    readonly userSignature: string;
     readonly errors: GenericSponsorErrorFactory;
   };
   readonly deps?: Partial<GenericExecutionPolicyDependencies>;
@@ -181,7 +179,6 @@ export interface GenericExecutionPolicyDependencies {
   readonly runGenericPrepareBuildPipeline: typeof runGenericPrepareBuildPipeline;
   readonly validateGenericSponsorNonloss: typeof validateGenericSponsorNonloss;
   readonly verifyGasOwner: typeof verifyGasOwner;
-  readonly verifySenderSignature: typeof verifySenderSignature;
 }
 
 export interface GenericExecutionPolicyState {
@@ -206,8 +203,6 @@ export interface GenericPrepareRuntimeState {
 }
 
 export interface GenericSponsorRuntimeState {
-  builtTxForValidation?: Transaction;
-  txSender?: string;
   prepared?: GenericPreparedTxEntry;
   revalidation?: RevalidateGenericResult;
   gasBudget?: bigint;
@@ -288,7 +283,6 @@ const DEFAULT_DEPS: GenericExecutionPolicyDependencies = {
   runGenericPrepareBuildPipeline,
   validateGenericSponsorNonloss,
   verifyGasOwner,
-  verifySenderSignature,
 };
 
 // -------------------------------------------------------------
@@ -330,10 +324,7 @@ export function createGenericExecutionPolicy(options: GenericExecutionPolicyOpti
       ChainSnapshot: async () => runGenericChainSnapshot(options, state),
       GasBoundBuild: async (ctx, input) =>
         runGenericGasBoundBuild(options, state, ctx.receiptId, input),
-      DecodeSponsorSubmission: async (ctx) =>
-        runGenericDecodeSponsorSubmission(options, state, ctx),
-      UserSignatureValidation: async (ctx) =>
-        runGenericUserSignatureValidation(options, state, ctx),
+      SponsorSubmissionAdmission: async (ctx) => runGenericSponsorSubmissionAdmission(options, ctx),
       SharedSponsorChecks: async (ctx) => runGenericSharedSponsorChecks(options, state, ctx),
       PolicySponsorChecks: async (ctx) => runGenericPolicySponsorChecks(options, state, ctx),
       Preflight: async (ctx) => runGenericPreflight(options, state, ctx),
@@ -616,25 +607,13 @@ async function runGenericRequestValidation(
     );
   }
 
-  state.settlementSwapPath = findSettlementSwapPath(
+  const settlementSwapPathConfig = requireSettlementSwapPathConfig(
     prepare.config.supportedSettlementSwapPaths,
-    prepare.params.settlementTokenType,
-  );
-  if (!state.settlementSwapPath) {
-    throw new PrepareValidationError(
-      'UNSUPPORTED_SETTLEMENT_TOKEN',
-      `Settlement token ${prepare.params.settlementTokenType} is not supported`,
-    );
-  }
-  state.descriptor = findSettlementSwapPathDescriptor(
     prepare.config.settlementSwapPathDescriptors,
     prepare.params.settlementTokenType,
   );
-  if (!state.descriptor) {
-    throw new Error(
-      `[PREPARE_CONFIG] Missing StaticSettlementSwapPathDescriptor for ${prepare.params.settlementTokenType}`,
-    );
-  }
+  state.settlementSwapPath = settlementSwapPathConfig.settlementSwapPath;
+  state.descriptor = settlementSwapPathConfig.descriptor;
 
   if (prepare.params.orderId !== undefined) {
     const orderIdBytes = new TextEncoder().encode(prepare.params.orderId);
@@ -686,14 +665,14 @@ async function runGenericChainSnapshot(
 
   const credit = requireValue(state.credit, 'credit snapshot');
   const config = requireValue(state.config, 'on-chain config');
-  const hasVault = !!(credit.vaultObjectId && !credit.needsCreate);
-  state.profile = hasVault ? 'credit_general' : 'new_user';
+  const fundingProfile = deriveSettlementFundingProfile(credit);
+  state.profile = fundingProfile.profile;
   state.quoteTimestampMs = prepare.nowMs?.() ?? Date.now();
   state.policyHashHex = computePolicyHash(buildPolicyFields(config));
   state.policyHashBytes = fromHex(state.policyHashHex);
 
   logPrepareStage('onchain_snapshot_loaded', {
-    has_vault: hasVault,
+    has_vault: fundingProfile.vaultObjectId !== null,
     profile: state.profile,
     credit_mist: credit.credit,
     config_version: config.configVersion.toString(),
@@ -840,58 +819,32 @@ function validateGenericBuildResult(
 // Sponsor hooks
 // -------------------------------------------------------------
 
-async function runGenericDecodeSponsorSubmission(
+async function runGenericSponsorSubmissionAdmission(
   options: GenericExecutionPolicyOptions,
-  runtime: GenericExecutionPolicyState,
   ctx: SponsorSubmissionContext,
 ): Promise<void> {
   const sponsor = requireSponsor(options);
-  const state = requireSponsorState(runtime);
-  try {
-    const builtTx = Transaction.from(sponsor.txBytes);
-    state.builtTxForValidation = builtTx;
-    state.txSender = extractTxSender(builtTx);
-  } catch (err) {
-    if (err instanceof SenderSignatureError) {
-      throw sponsor.errors.sponsorPreflight(err.message);
-    }
-    throw sponsor.errors.sponsorPreflight(
-      `Failed to parse txBytes for sender extraction: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  void ctx;
-}
-
-async function runGenericUserSignatureValidation(
-  options: GenericExecutionPolicyOptions,
-  runtime: GenericExecutionPolicyState,
-  ctx: SponsorSubmissionContext,
-): Promise<void> {
-  const sponsor = requireSponsor(options);
-  const state = requireSponsorState(runtime);
   const d = getDeps(options);
-  const txSender = requireValue(state.txSender, 'tx sender');
-
-  try {
-    await d.verifySenderSignature(sponsor.txBytes, sponsor.userSignature, txSender);
-  } catch (err) {
-    if (err instanceof SenderSignatureError) {
-      await d.recordSponsorFailureForAbuse(
-        options.hostContext.abuseBlocker,
-        ctx.clientIp,
-        undefined,
-        'SENDER_SIGNATURE_INVALID',
+  if (ctx.authentication.outcome === 'rejected') {
+    if (ctx.authentication.reason === 'malformed_transaction') {
+      throw sponsor.errors.sponsorPreflight(
+        `Failed to parse txBytes for sender extraction: ${ctx.authentication.message}`,
       );
-      throw sponsor.errors.sponsorValidation('SENDER_SIGNATURE_INVALID', err.message);
     }
-    throw err;
+    await d.recordSponsorFailureForAbuse(
+      options.hostContext.abuseBlocker,
+      ctx.clientIp,
+      undefined,
+      'SENDER_SIGNATURE_INVALID',
+    );
+    throw sponsor.errors.sponsorValidation('SENDER_SIGNATURE_INVALID', ctx.authentication.message);
   }
 
+  const { senderAddress } = readAuthenticatedSponsorSubmission(ctx.authentication.submission);
   const blocked = await d.checkBlockedSubject(
     options.hostContext.abuseBlocker,
     sponsor.admittedClientIp,
-    { kind: 'address', address: txSender },
+    { kind: 'address', address: senderAddress },
   );
   if (blocked.blocked) {
     throw sponsor.errors.sponsorBlocked(blocked.retryAfterMs);
@@ -907,8 +860,9 @@ async function runGenericSharedSponsorChecks(
   const state = requireSponsorState(runtime);
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
-  const builtTx = requireValue(state.builtTxForValidation, 'decoded generic transaction');
-  const txSender = requireValue(state.txSender, 'tx sender');
+  const { transaction: builtTx, senderAddress: txSender } = readAuthenticatedSponsorSubmission(
+    ctx.authenticatedSubmission,
+  );
 
   if (txSender !== prepared.senderAddress) {
     logStructuredEvent(SPONSOR_SENDER_STORE_DIVERGENCE, {
@@ -935,6 +889,7 @@ async function runGenericSharedSponsorChecks(
       options.hostContext,
       prepared,
       builtTx,
+      txSender,
       ctx.clientIp,
     );
   } catch (err) {
@@ -992,7 +947,9 @@ async function runGenericPolicySponsorChecks(
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const revalidation = requireValue(state.revalidation, 'sponsor revalidation');
-  const txSender = requireValue(state.txSender, 'tx sender');
+  const { senderAddress: txSender } = readAuthenticatedSponsorSubmission(
+    ctx.authenticatedSubmission,
+  );
 
   if (!revalidation.isNewUserSettle) return {};
 
@@ -1058,8 +1015,10 @@ async function runGenericPreflight(
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const revalidation = requireValue(state.revalidation, 'sponsor revalidation');
-  const txSender = requireValue(state.txSender, 'tx sender');
-  const preflight = await d.runPreflight(options.hostContext.sui, sponsor.txBytes);
+  const { senderAddress: txSender, txBytes } = readAuthenticatedSponsorSubmission(
+    ctx.authenticatedSubmission,
+  );
+  const preflight = await d.runPreflight(options.hostContext.sui, txBytes);
 
   if (!preflight.success) {
     const failureMessage = suiExecutionErrorMessage(preflight.error);
@@ -1110,7 +1069,9 @@ async function classifyGenericSponsorResult(
   const d = getDeps(options);
   const prepared = requireValue(state.prepared, 'consumed generic prepared entry');
   const revalidation = requireValue(state.revalidation, 'sponsor revalidation');
-  const txSender = requireValue(state.txSender, 'tx sender');
+  const { senderAddress: txSender } = readAuthenticatedSponsorSubmission(
+    ctx.authenticatedSubmission,
+  );
 
   if (!result.success) {
     const failureMessage = suiExecutionErrorMessage(result.error);
@@ -1279,6 +1240,7 @@ async function revalidateGenericSponsorPolicy(
   ctx: HostContext,
   prepared: GenericPreparedTxEntry,
   builtTx: Transaction,
+  txSender: string,
   clientIp: string,
 ): Promise<RevalidateGenericResult> {
   ctx.invalidateConfigCache();
@@ -1287,8 +1249,6 @@ async function revalidateGenericSponsorPolicy(
   const env = buildGenericSponsorEnv(ctx);
   const builtTxData = builtTx.getData();
   const builtCommands = convertSdkCommands(builtTxData.commands);
-  const txSender = extractTxSender(builtTx);
-
   const l1 = validateGenericSettlementTransaction(builtTx, env);
   if (!l1.ok) {
     emitGenericDriftEvent(
@@ -1397,22 +1357,6 @@ function buildGenericExecutionPathKey(
     return `${settlementSwapPath.tokenType}:${settlementSwapPath.hops.join(',')}:${settlementSwapPath.settlementSwapDirection}`;
   }
   return 'credit';
-}
-
-function findSettlementSwapPath(
-  settlementSwapPaths: readonly SingleHopSettlementSwapPath[] | undefined,
-  settlementTokenType: string,
-): SingleHopSettlementSwapPath | undefined {
-  return settlementSwapPaths?.find(
-    (settlementSwapPath) => settlementSwapPath.settlementTokenType === settlementTokenType,
-  );
-}
-
-function findSettlementSwapPathDescriptor(
-  descriptors: StaticSettlementSwapPathDescriptorMap | undefined,
-  settlementTokenType: string,
-): StaticSettlementSwapPathDescriptor | undefined {
-  return descriptors?.get(settlementTokenType);
 }
 
 function parseReceiptIdBytes(receiptId: string): Uint8Array {

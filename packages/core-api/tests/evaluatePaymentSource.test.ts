@@ -7,7 +7,7 @@ import {
   type PrefixValueTrace,
   type SuiEndpointSnapshot,
 } from '@stelis/core-relay';
-import { createPaymentSourceReader, resolvePaymentSource } from '../src/prepare/coinSelection.js';
+import { createPaymentSourceReader, evaluatePaymentSource } from '../src/prepare/coinSelection.js';
 
 const gatewayMocks = vi.hoisted(() => ({
   readBoundedSuiCoins: vi.fn(),
@@ -56,8 +56,8 @@ function trace(tx: Transaction = new Transaction()) {
   return traceUserPrefixValue(tx, SETTLEMENT_TOKEN);
 }
 
-async function resolve(sui: SuiEndpointSnapshot, tx: Transaction, required: bigint) {
-  return resolvePaymentSource(
+async function evaluate(sui: SuiEndpointSnapshot, tx: Transaction, required: bigint) {
+  return evaluatePaymentSource(
     createPaymentSourceReader(sui, OWNER, SETTLEMENT_TOKEN),
     required,
     'SUI',
@@ -65,17 +65,20 @@ async function resolve(sui: SuiEndpointSnapshot, tx: Transaction, required: bigi
   );
 }
 
-describe('resolvePaymentSource — exact prefix value', () => {
+describe('evaluatePaymentSource — exact prefix value', () => {
   it('subtracts an exact Pure u64 split debit and rejects a one-unit shortfall', async () => {
     const tx = new Transaction();
     tx.splitCoins(tx.object(COIN_A), [100n]);
 
     const exact = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }]);
-    await expect(resolve(exact.sui, tx, 900n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [],
-      remainingBalance: 900n,
+    await expect(evaluate(exact.sui, tx, 900n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [],
+        remainingBalance: 900n,
+      },
     });
     expect(exact.readCoins).toHaveBeenCalledWith(exact.sui, {
       owner: OWNER,
@@ -84,8 +87,10 @@ describe('resolvePaymentSource — exact prefix value', () => {
     expect(exact.getBalance).not.toHaveBeenCalled();
 
     const short = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }], '0');
-    await expect(resolve(short.sui, tx, 901n)).rejects.toMatchObject({
-      code: 'INSUFFICIENT_BALANCE',
+    await expect(evaluate(short.sui, tx, 901n)).resolves.toEqual({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: 900n,
+      error: expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
     });
   });
 
@@ -95,7 +100,7 @@ describe('resolvePaymentSource — exact prefix value', () => {
     tx.splitCoins(tx.object(COIN_A), [dynamicAmount]);
     const mock = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }], '0');
 
-    await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, tx, 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -113,11 +118,14 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1_100n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_B,
-      mergeCoinIds: [],
-      remainingBalance: 1_100n,
+    await expect(evaluate(mock.sui, tx, 1_100n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_B,
+        mergeCoinIds: [],
+        remainingBalance: 1_100n,
+      },
     });
   });
 
@@ -133,11 +141,14 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 100n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [],
-      remainingBalance: 100n,
+    await expect(evaluate(mock.sui, tx, 100n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [],
+        remainingBalance: 100n,
+      },
     });
   });
 
@@ -154,7 +165,7 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, tx, 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -172,7 +183,7 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, tx, 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -190,11 +201,14 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1_200n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [COIN_B],
-      remainingBalance: 1_200n,
+    await expect(evaluate(mock.sui, tx, 1_200n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [COIN_B],
+        remainingBalance: 1_200n,
+      },
     });
   });
 
@@ -212,11 +226,14 @@ describe('resolvePaymentSource — exact prefix value', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 600n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_C,
-      mergeCoinIds: [],
-      remainingBalance: 600n,
+    await expect(evaluate(mock.sui, tx, 600n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_C,
+        mergeCoinIds: [],
+        remainingBalance: 600n,
+      },
     });
   });
 
@@ -244,23 +261,23 @@ describe('resolvePaymentSource — exact prefix value', () => {
         ],
         '0',
       );
-      await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
+      await expect(evaluate(mock.sui, tx, 1n)).rejects.toMatchObject({
         code: 'PAYMENT_COIN_CONFLICT',
       });
     }
   });
 });
 
-describe('resolvePaymentSource — address balance and mixed funding', () => {
+describe('evaluatePaymentSource — address balance and mixed funding', () => {
   it('subtracts a same-token Sender withdrawal exactly once at the availability boundary', async () => {
     const tx = new Transaction();
     tx.withdrawal({ amount: 3_000n, type: SETTLEMENT_TOKEN });
     const exact = mockSui([{ objects: [] }], '10000');
 
     expect(trace(tx).senderWithdrawalDebit).toBe(3_000n);
-    await expect(resolve(exact.sui, tx, 7_000n)).resolves.toEqual({
-      source: 'address_balance',
-      redeemAmount: 7_000n,
+    await expect(evaluate(exact.sui, tx, 7_000n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: { source: 'address_balance', redeemAmount: 7_000n },
     });
     expect(exact.readCoins).toHaveBeenCalledWith(exact.sui, {
       owner: OWNER,
@@ -272,8 +289,10 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
     });
 
     const oneUnitShort = mockSui([{ objects: [] }], '10000');
-    await expect(resolve(oneUnitShort.sui, tx, 7_001n)).rejects.toMatchObject({
-      code: 'INSUFFICIENT_BALANCE',
+    await expect(evaluate(oneUnitShort.sui, tx, 7_001n)).resolves.toEqual({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: 7_000n,
+      error: expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
     });
   });
 
@@ -294,12 +313,15 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
       '4000',
     );
 
-    await expect(resolve(mock.sui, tx, 6_500n)).resolves.toEqual({
-      source: 'mixed_topup',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [COIN_C],
-      remainingBalance: 5_000n,
-      redeemAmount: 1_500n,
+    await expect(evaluate(mock.sui, tx, 6_500n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'mixed_topup',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [COIN_C],
+        remainingBalance: 5_000n,
+        redeemAmount: 1_500n,
+      },
     });
   });
 
@@ -316,17 +338,20 @@ describe('resolvePaymentSource — address balance and mixed funding', () => {
       '2',
     );
 
-    await expect(resolve(mock.sui, new Transaction(), 5n)).resolves.toEqual({
-      source: 'mixed_topup',
-      baseCoinId: COIN_B,
-      mergeCoinIds: [],
-      remainingBalance: 3n,
-      redeemAmount: 2n,
+    await expect(evaluate(mock.sui, new Transaction(), 5n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'mixed_topup',
+        baseCoinId: COIN_B,
+        mergeCoinIds: [],
+        remainingBalance: 3n,
+        redeemAmount: 2n,
+      },
     });
   });
 });
 
-describe('resolvePaymentSource — complete gateway coin snapshot', () => {
+describe('evaluatePaymentSource — complete gateway coin snapshot', () => {
   it('reuses one request-local Coin read and address-balance read across resolutions', async () => {
     const mock = mockSui([{ objects: [{ objectId: COIN_A, balance: '1000' }] }], '1000');
     mock.readCoins
@@ -357,24 +382,27 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
 
     expect(mock.readCoins).not.toHaveBeenCalled();
     expect(mock.getBalance).not.toHaveBeenCalled();
-    await expect(resolvePaymentSource(reader, 900n, 'SUI', trace())).resolves.toMatchObject({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
+    await expect(evaluatePaymentSource(reader, 900n, 'SUI', trace())).resolves.toMatchObject({
+      outcome: 'funded',
+      funding: { source: 'coin_object', baseCoinId: COIN_A },
     });
     const [larger, smaller] = await Promise.all([
-      resolvePaymentSource(reader, 1_500n, 'SUI', trace()),
-      resolvePaymentSource(reader, 1_200n, 'SUI', trace()),
+      evaluatePaymentSource(reader, 1_500n, 'SUI', trace()),
+      evaluatePaymentSource(reader, 1_200n, 'SUI', trace()),
     ]);
     expect(larger).toEqual({
-      source: 'mixed_topup',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [],
-      remainingBalance: 1_000n,
-      redeemAmount: 500n,
+      outcome: 'funded',
+      funding: {
+        source: 'mixed_topup',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [],
+        remainingBalance: 1_000n,
+        redeemAmount: 500n,
+      },
     });
     expect(smaller).toMatchObject({
-      source: 'mixed_topup',
-      redeemAmount: 200n,
+      outcome: 'funded',
+      funding: { source: 'mixed_topup', redeemAmount: 200n },
     });
 
     expect(mock.readCoins).toHaveBeenCalledTimes(1);
@@ -388,10 +416,13 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), 900n)).resolves.toMatchObject({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, new Transaction(), 900n)).resolves.toMatchObject({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.readCoins).toHaveBeenCalledOnce();
   });
@@ -408,11 +439,14 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1_500n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [COIN_C],
-      remainingBalance: 1_900n,
+    await expect(evaluate(mock.sui, tx, 1_500n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [COIN_C],
+        remainingBalance: 1_900n,
+      },
     });
     expect(mock.readCoins).toHaveBeenCalledOnce();
   });
@@ -428,11 +462,14 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), 900n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_B,
-      mergeCoinIds: [],
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, new Transaction(), 900n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_B,
+        mergeCoinIds: [],
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
@@ -449,7 +486,7 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, tx, 1n)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, tx, 1n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -464,11 +501,14 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), 1_000n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [COIN_B],
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, new Transaction(), 1_000n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [COIN_B],
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.readCoins).toHaveBeenCalledOnce();
     expect(mock.getBalance).not.toHaveBeenCalled();
@@ -484,7 +524,7 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), 1_000n)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, new Transaction(), 1_000n)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -501,7 +541,7 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), required)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, new Transaction(), required)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
     });
   });
@@ -519,14 +559,14 @@ describe('resolvePaymentSource — complete gateway coin snapshot', () => {
       },
     ]);
 
-    await expect(resolve(mock.sui, new Transaction(), required)).rejects.toMatchObject({
+    await expect(evaluate(mock.sui, new Transaction(), required)).rejects.toMatchObject({
       code: 'PAYMENT_COIN_CONFLICT',
       message: 'The bounded ordered SUI coin selection could not prove a u64-safe funding subset.',
     });
   });
 });
 
-describe('resolvePaymentSource — bounded partial coin snapshot', () => {
+describe('evaluatePaymentSource — bounded partial coin snapshot', () => {
   it('uses a sufficient single coin without reading address balance', async () => {
     const mock = mockSui(
       [
@@ -541,11 +581,14 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
       'limit_exceeded',
     );
 
-    await expect(resolve(mock.sui, new Transaction(), 900n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_B,
-      mergeCoinIds: [],
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, new Transaction(), 900n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_B,
+        mergeCoinIds: [],
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
@@ -565,11 +608,14 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
       'limit_exceeded',
     );
 
-    await expect(resolve(mock.sui, new Transaction(), 1_000n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_A,
-      mergeCoinIds: [COIN_B],
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, new Transaction(), 1_000n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_A,
+        mergeCoinIds: [COIN_B],
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
@@ -583,11 +629,14 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
       'limit_exceeded',
     );
 
-    await expect(resolve(mock.sui, tx, 900n)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_C,
-      mergeCoinIds: [],
-      remainingBalance: 1_000n,
+    await expect(evaluate(mock.sui, tx, 900n)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_C,
+        mergeCoinIds: [],
+        remainingBalance: 1_000n,
+      },
     });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
@@ -610,13 +659,17 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
     };
 
     await expect(
-      resolvePaymentSource(
+      evaluatePaymentSource(
         createPaymentSourceReader(mock.sui, OWNER, SETTLEMENT_TOKEN),
         1n,
         'SUI',
         prefixTrace,
       ),
-    ).rejects.toMatchObject({ code: 'PAYMENT_COIN_LIMIT_EXCEEDED' });
+    ).resolves.toEqual({
+      outcome: 'indeterminate',
+      reason: 'bounded_coin_discovery',
+      error: expect.objectContaining({ code: 'PAYMENT_COIN_LIMIT_EXCEEDED' }),
+    });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
 
@@ -624,11 +677,23 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
     for (const addressBalance of ['10000', '0']) {
       const mock = mockSui([{ objects: [] }], addressBalance, 'limit_exceeded');
 
-      await expect(resolve(mock.sui, new Transaction(), 1n)).rejects.toMatchObject({
-        code: 'PAYMENT_COIN_LIMIT_EXCEEDED',
+      await expect(evaluate(mock.sui, new Transaction(), 1n)).resolves.toEqual({
+        outcome: 'indeterminate',
+        reason: 'bounded_coin_discovery',
+        error: expect.objectContaining({ code: 'PAYMENT_COIN_LIMIT_EXCEEDED' }),
       });
       expect(mock.getBalance).not.toHaveBeenCalled();
     }
+  });
+
+  it('returns bounded discovery without reading or inventing a current total', async () => {
+    const mock = mockSui([{ objects: [] }], '10000', 'limit_exceeded');
+    await expect(evaluate(mock.sui, new Transaction(), 1n)).resolves.toEqual({
+      outcome: 'indeterminate',
+      reason: 'bounded_coin_discovery',
+      error: expect.objectContaining({ code: 'PAYMENT_COIN_LIMIT_EXCEEDED' }),
+    });
+    expect(mock.getBalance).not.toHaveBeenCalled();
   });
 
   it('does not let an overflowing candidate hide a later sufficient single coin', async () => {
@@ -648,24 +713,44 @@ describe('resolvePaymentSource — bounded partial coin snapshot', () => {
       'limit_exceeded',
     );
 
-    await expect(resolve(mock.sui, new Transaction(), required)).resolves.toEqual({
-      source: 'coin_object',
-      baseCoinId: COIN_C,
-      mergeCoinIds: [],
-      remainingBalance: required,
+    await expect(evaluate(mock.sui, new Transaction(), required)).resolves.toEqual({
+      outcome: 'funded',
+      funding: {
+        source: 'coin_object',
+        baseCoinId: COIN_C,
+        mergeCoinIds: [],
+        remainingBalance: required,
+      },
     });
     expect(mock.getBalance).not.toHaveBeenCalled();
   });
 });
 
-describe('resolvePaymentSource — integer boundaries', () => {
+describe('evaluatePaymentSource — integer boundaries', () => {
   it('keeps balances above Number.MAX_SAFE_INTEGER exact as bigint', async () => {
     const exact = 9_007_199_254_740_993n;
     const mock = mockSui([{ objects: [{ objectId: COIN_A, balance: exact.toString() }] }]);
 
-    await expect(resolve(mock.sui, new Transaction(), exact)).resolves.toMatchObject({
-      source: 'coin_object',
-      remainingBalance: exact,
+    await expect(evaluate(mock.sui, new Transaction(), exact)).resolves.toMatchObject({
+      outcome: 'funded',
+      funding: { source: 'coin_object', remainingBalance: exact },
+    });
+  });
+
+  it('reports the exact complete current balance only after exhaustion is proved', async () => {
+    const coinBalance = 9_007_199_254_740_993n;
+    const addressBalance = 11n;
+    const mock = mockSui(
+      [{ objects: [{ objectId: COIN_A, balance: coinBalance.toString() }] }],
+      addressBalance.toString(),
+    );
+
+    await expect(
+      evaluate(mock.sui, new Transaction(), coinBalance + addressBalance + 1n),
+    ).resolves.toEqual({
+      outcome: 'insufficient',
+      availableSettlementTokenAmount: coinBalance + addressBalance,
+      error: expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
     });
   });
 
@@ -673,7 +758,7 @@ describe('resolvePaymentSource — integer boundaries', () => {
     const mock = mockSui([{ objects: [] }]);
 
     for (const invalid of [-1n, 0n, 1n << 64n]) {
-      await expect(resolve(mock.sui, new Transaction(), invalid)).rejects.toMatchObject({
+      await expect(evaluate(mock.sui, new Transaction(), invalid)).rejects.toMatchObject({
         code: 'INVALID_AMOUNT',
       });
     }
@@ -682,12 +767,12 @@ describe('resolvePaymentSource — integer boundaries', () => {
 
   it('rejects non-decimal coin and address-balance strings', async () => {
     const badCoin = mockSui([{ objects: [{ objectId: COIN_A, balance: '0x10' }] }]);
-    await expect(resolve(badCoin.sui, new Transaction(), 1n)).rejects.toMatchObject({
+    await expect(evaluate(badCoin.sui, new Transaction(), 1n)).rejects.toMatchObject({
       code: 'INVALID_BALANCE_FORMAT',
     });
 
     const badAddress = mockSui([{ objects: [] }], '1e6');
-    await expect(resolve(badAddress.sui, new Transaction(), 1n)).rejects.toMatchObject({
+    await expect(evaluate(badAddress.sui, new Transaction(), 1n)).rejects.toMatchObject({
       code: 'INVALID_BALANCE_FORMAT',
     });
   });

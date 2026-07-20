@@ -233,6 +233,111 @@ describe('auth routes', () => {
     });
   });
 
+  it.each([
+    { path: '/admin/auth/verify', successEvent: 'ADMIN_LOGIN_SUCCESS' },
+    { path: '/admin/auth/renew', successEvent: 'ADMIN_RENEW_SUCCESS' },
+  ])(
+    '$path runs the shared session-issue order and retains its action audit name',
+    async ({ path, successEvent }) => {
+      const { verifyAdminSignature, resetAttempts } = await import('@stelis/core-api/admin');
+      const { signAdminJwt, buildAuthCookieHeader } = await import('../src/adminAuth.js');
+
+      const response = await app.request(
+        path,
+        adminJsonPost({
+          nonce: 'valid-nonce',
+          signature: 'valid-signature',
+          address: ADMIN_ADDRESS,
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+      expect(vi.mocked(verifyAdminSignature).mock.invocationCallOrder[0]).toBeLessThan(
+        mockCheckSubject.mock.invocationCallOrder[0]!,
+      );
+      expect(mockCheckSubject.mock.invocationCallOrder[0]).toBeLessThan(
+        mockRedis.del.mock.invocationCallOrder[0]!,
+      );
+      expect(mockRedis.del.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(signAdminJwt).mock.invocationCallOrder[0]!,
+      );
+      expect(vi.mocked(signAdminJwt).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(buildAuthCookieHeader).mock.invocationCallOrder[0]!,
+      );
+      expect(vi.mocked(buildAuthCookieHeader).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(resetAttempts).mock.invocationCallOrder[0]!,
+      );
+      expect(vi.mocked(resetAttempts).mock.invocationCallOrder[0]).toBeLessThan(
+        mockRedis.lpush.mock.invocationCallOrder[0]!,
+      );
+      expect(JSON.parse(mockRedis.lpush.mock.calls[0]![1] as string)).toMatchObject({
+        event: successEvent,
+        address: ADMIN_ADDRESS,
+      });
+      expect(signAdminJwt).toHaveBeenCalledWith(ADMIN_ADDRESS, ADMIN_AUTH.jwt);
+      expect(buildAuthCookieHeader).toHaveBeenCalledWith('mock-jwt-token', ADMIN_AUTH.cookie);
+      expect(mockRedis.ltrim).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
+      expect(response.headers.get('Set-Cookie')).toContain('stelis_admin');
+    },
+  );
+
+  it.each([
+    { path: '/admin/auth/verify', failureEvent: 'ADMIN_LOGIN_FAILED' },
+    { path: '/admin/auth/renew', failureEvent: 'ADMIN_RENEW_FAILED' },
+  ])(
+    '$path rejects invalid credentials without nonce mutation or cookie staging',
+    async ({ path, failureEvent }) => {
+      const { verifyAdminSignature } = await import('@stelis/core-api/admin');
+      vi.mocked(verifyAdminSignature).mockResolvedValueOnce(false);
+
+      const response = await app.request(
+        path,
+        adminJsonPost({
+          nonce: 'valid-nonce',
+          signature: 'invalid-signature',
+          address: ADMIN_ADDRESS,
+        }),
+      );
+
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
+      expect(mockRedis.del).not.toHaveBeenCalled();
+      expect(response.headers.get('Set-Cookie')).toBeNull();
+      expect(JSON.parse(mockRedis.lpush.mock.calls[0]![1] as string)).toMatchObject({
+        event: failureEvent,
+        reason: 'bad_signature',
+      });
+    },
+  );
+
+  it.each([
+    { path: '/admin/auth/verify', errorEvent: 'ADMIN_LOGIN_ERROR' },
+    { path: '/admin/auth/renew', errorEvent: 'ADMIN_RENEW_ERROR' },
+  ])('$path reports its action error without staging a cookie', async ({ path, errorEvent }) => {
+    const { signAdminJwt } = await import('../src/adminAuth.js');
+    vi.mocked(signAdminJwt).mockRejectedValueOnce(new Error('JWT signing failed'));
+
+    const response = await app.request(
+      path,
+      adminJsonPost({
+        nonce: 'valid-nonce',
+        signature: 'valid-signature',
+        address: ADMIN_ADDRESS,
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(codedError('INTERNAL_ERROR'));
+    expect(response.headers.get('Set-Cookie')).toBeNull();
+    const auditEntry = JSON.parse(mockRedis.lpush.mock.calls[0]![1] as string) as Record<
+      string,
+      unknown
+    >;
+    expect(auditEntry).toMatchObject({ event: errorEvent });
+    expect(auditEntry).not.toHaveProperty('address');
+  });
+
   describe('POST /admin/auth/verify', () => {
     it('returns 400 on missing fields', async () => {
       const { verifyAdminSignature } = await import('@stelis/core-api/admin');
@@ -272,22 +377,7 @@ describe('auth routes', () => {
       );
       expect(res.status).toBe(401);
       await expect(res.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
-    });
-
-    it('does not consume the nonce when signature verification fails', async () => {
-      const { verifyAdminSignature } = await import('@stelis/core-api/admin');
-      vi.mocked(verifyAdminSignature).mockResolvedValueOnce(false);
-      const res = await app.request(
-        '/admin/auth/verify',
-        adminJsonPost({
-          nonce: 'valid-nonce',
-          signature: 'invalid-signature',
-          address: ADMIN_ADDRESS,
-        }),
-      );
-      expect(res.status).toBe(401);
-      await expect(res.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
-      expect(mockRedis.del).not.toHaveBeenCalled();
+      expect(res.headers.get('Set-Cookie')).toBeNull();
     });
 
     it('allows only one concurrent valid request to consume a nonce', async () => {
@@ -307,29 +397,6 @@ describe('auth routes', () => {
       await expect(rejected?.json()).resolves.toEqual(codedError('ADMIN_UNAUTHORIZED'));
     });
 
-    it('returns 200 with Set-Cookie on valid verify', async () => {
-      const { signAdminJwt, buildAuthCookieHeader } = await import('../src/adminAuth.js');
-      mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
-      const res = await app.request(
-        '/admin/auth/verify',
-        adminJsonPost({
-          nonce: 'valid-nonce',
-          signature: 'valid-sig',
-          address: ADMIN_ADDRESS,
-        }),
-      );
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(res.headers.get('Set-Cookie')).toContain('stelis_admin');
-      expect(signAdminJwt).toHaveBeenCalledWith(ADMIN_ADDRESS, ADMIN_AUTH.jwt);
-      expect(buildAuthCookieHeader).toHaveBeenCalledWith('mock-jwt-token', ADMIN_AUTH.cookie);
-      expect(mockCheckSubject.mock.invocationCallOrder[0]).toBeLessThan(
-        mockRedis.del.mock.invocationCallOrder[0]!,
-      );
-      expect(mockRedis.lpush).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, expect.any(String));
-      expect(mockRedis.ltrim).toHaveBeenCalledWith(ADMIN_AUDIT_LOG_KEY, 0, 199);
-    });
 
     it('returns 429 when rate limited', async () => {
       const { checkAndIncrement } = await import('@stelis/core-api/admin');
@@ -374,39 +441,6 @@ describe('auth routes', () => {
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
-    it('calls resetAttempts on successful verify', async () => {
-      const { resetAttempts } = await import('@stelis/core-api/admin');
-      mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
-      await app.request(
-        '/admin/auth/verify',
-        adminJsonPost({
-          nonce: 'valid-nonce',
-          signature: 'valid-sig',
-          address: ADMIN_ADDRESS,
-        }),
-      );
-      expect(resetAttempts).toHaveBeenCalled();
-    });
-
-    it('returns 500 without Set-Cookie when signAdminJwt throws', async () => {
-      const { signAdminJwt } = await import('../src/adminAuth.js');
-      (signAdminJwt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('JWT signing failed'),
-      );
-      mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
-      const res = await app.request(
-        '/admin/auth/verify',
-        adminJsonPost({
-          nonce: 'valid-nonce',
-          signature: 'valid-sig',
-          address: ADMIN_ADDRESS,
-        }),
-      );
-      expect(res.status).toBe(500);
-      await expect(res.json()).resolves.toEqual(codedError('INTERNAL_ERROR'));
-      // Set-Cookie must NOT be present — cookie is staged only after all fallible work
-      expect(res.headers.get('Set-Cookie')).toBeNull();
-    });
 
     it('rejects each admission layer before credentials, subject checks, or nonce mutation', async () => {
       const { verifyAdminSignature } = await import('@stelis/core-api/admin');
@@ -566,19 +600,5 @@ describe('auth routes', () => {
       expect(mockRedis.lpush).not.toHaveBeenCalled();
     });
 
-    it('calls resetAttempts on successful renew', async () => {
-      const { resetAttempts } = await import('@stelis/core-api/admin');
-      mockRedis.del.mockResolvedValueOnce(1); // nonce consumed
-      const res = await app.request(
-        '/admin/auth/renew',
-        adminJsonPost({
-          nonce: 'valid-nonce',
-          signature: 'valid-sig',
-          address: ADMIN_ADDRESS,
-        }),
-      );
-      expect(res.status).toBe(200);
-      expect(resetAttempts).toHaveBeenCalled();
-    });
   });
 });

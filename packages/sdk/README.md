@@ -86,6 +86,7 @@ The supported npm entry points are:
 - `StelisSDK.executeSponsored()`
 - `StelisSDK.executeSuiFirst()`
 - `StelisSDK.estimateGas()`
+- `StelisSDK.checkSettlementFunding()` — ask the Host for a read-only current funding advisory
 - `StelisSDK.getExchangeRate()` — read the current settlement-token/SUI rate through the connected Host network
 - `StelisSDK.queryUserCredit()` — read current User Vault credit after proving the supplied Sui client network
 - `StelisSDK.getSettlementSwapPathForSettlementToken()` — resolve one Host-advertised current settlement swap path by exact coin type
@@ -287,9 +288,43 @@ const est = await sdk.estimateGas(suiClient, {
 // est.suiAmountHuman → '0.0074'
 // est.hasLiquidity  → true
 // est.canSkipLiquidity → true when credit_general (no swap needed)
+// est.executionCostClaimMist → exact bigint for checkSettlementFunding()
 ```
 
 `settlementToken` is required.
+
+`intentGasBudgetMist` is an optional `bigint` in the Sui `u64` range.
+`gasMarginBps` is an optional safe integer from 0 through 10,000. The returned
+`executionCostClaimMist` is the exact raw claim used by this preview; formatted
+display fields remain presentation-only.
+
+### `checkSettlementFunding()` — Read-only Host Funding Advisory
+
+```typescript
+const estimate = await sdk.estimateGas(suiClient, {
+  addr: userAddress,
+  settlementToken: { type: DEEP_TYPE },
+});
+
+const funding = await sdk.checkSettlementFunding(tx, {
+  client: suiClient,
+  senderAddress: userAddress,
+  settlementToken: { type: DEEP_TYPE },
+  estimatedExecutionCostClaimMist: estimate.executionCostClaimMist,
+});
+
+if (funding.status === 'likely_insufficient') {
+  showFundingWarning(funding);
+}
+```
+
+The method builds only the supplied transaction kind and sends the exact raw
+estimate to the Host. `likely_sufficient` and `likely_insufficient` describe
+current read-only evidence; neither authorizes nor rejects execution.
+`indeterminate` means bounded coin discovery or current market evidence could
+not prove an answer. Continue to `/relay/prepare` or report that no preview is
+available. The SDK does not reconstruct the Host's quote, min/lot, prefix, or
+funding policy.
 
 ### Programmatic Signer (Server or Agent Runtime)
 
@@ -726,9 +761,12 @@ funding, obtains the current DeepBook quote, applies the configured margin and
 book constraints, and builds the settlement suffix.
 
 `estimateGas()` is a separate, non-authoritative UX preview. Its
-`intentGasBudget` and `gasMarginBps` inputs affect only that preview. After a
-successful prepare, `onGasEstimate` receives the stronger transaction-specific
-cost as MIST, a human-readable SUI value, and the `SUI` symbol.
+`intentGasBudgetMist` and `gasMarginBps` inputs affect only that preview.
+`checkSettlementFunding()` evaluates the exact preview claim against current
+Host evidence, including the Host's current on-chain maximum claim, but still
+does not authorize prepare. After a successful prepare, `onGasEstimate`
+receives the stronger transaction-specific cost as MIST, a human-readable SUI
+value, and the `SUI` symbol.
 
 Surplus SUI is stored in the user's vault as credit and automatically
 deducted in subsequent transactions.

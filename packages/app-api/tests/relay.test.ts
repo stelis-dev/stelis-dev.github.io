@@ -9,6 +9,7 @@ import { Hono } from 'hono';
 import {
   parseRelayConfigResponse,
   parseRelayPrepareResponse,
+  parseRelaySettlementFundingCheckResponse,
   parseRelaySponsorResponse,
 } from '@stelis/contracts';
 
@@ -37,6 +38,11 @@ vi.mock('@stelis/core-api', async () => {
         quoteTimestampMs: 1700000000000,
         policyHash: '0xcafebabe',
       };
+    }),
+    handleSettlementFundingCheck: vi.fn().mockResolvedValue({
+      status: 'likely_sufficient',
+      source: 'vault_credit',
+      estimatedExecutionCostClaimMist: '500',
     }),
     handleSponsor: vi.fn().mockResolvedValue({
       digest: 'mock-digest',
@@ -254,6 +260,7 @@ describe('relay routes', () => {
     vi.mocked(mockCtx.host.abuseBlocker.checkSubject).mockResolvedValue({ blocked: false });
     vi.mocked(coreApi.readJsonBodyWithLimit).mockClear();
     vi.mocked(coreApi.handlePrepare).mockClear();
+    vi.mocked(coreApi.handleSettlementFundingCheck).mockClear();
     vi.mocked(coreApi.handleSponsor).mockClear();
     vi.mocked(buildSponsorUnavailableResponse).mockClear();
     vi.mocked(buildSponsorUnavailableResponse).mockReturnValue(null);
@@ -355,6 +362,79 @@ describe('relay routes', () => {
       expect(res.status).toBe(503);
       const body = await res.json();
       expect(body.code).toBe('CONFIG_UNAVAILABLE');
+    });
+  });
+
+  describe('POST /relay/settlement-funding-check', () => {
+    const request = {
+      txKindBytes: 'AAAA',
+      senderAddress: '0x' + 'ab'.repeat(32),
+      settlementTokenType: '0xDEEP',
+      estimatedExecutionCostClaimMist: '500',
+    };
+
+    it('passes exact raw funding inputs and the request lifetime to the read-only Host owner', async () => {
+      const controller = new AbortController();
+      const rawRequest = new Request('http://localhost/relay/settlement-funding-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+      const res = await app.request(rawRequest);
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(parseRelaySettlementFundingCheckResponse(body)).toEqual(body);
+      const coreApi = await import('@stelis/core-api');
+      expect(coreApi.handleSettlementFundingCheck).toHaveBeenCalledWith(
+        mockCtx.host,
+        {
+          txKindBytes: request.txKindBytes,
+          senderAddress: request.senderAddress,
+          settlementTokenType: request.settlementTokenType,
+          estimatedExecutionCostClaimMist: 500n,
+          signal: rawRequest.signal,
+        },
+        mockCtx.prepareConfig,
+      );
+      expect(mockCtx.sponsorAvailability.readState).not.toHaveBeenCalled();
+      expect(mockCtx.host.sponsorPool.leaseStatus).not.toHaveBeenCalled();
+    });
+
+    it('preserves generic transaction rejection codes at the public route boundary', async () => {
+      const coreApi = await import('@stelis/core-api');
+      vi.mocked(coreApi.handleSettlementFundingCheck).mockRejectedValueOnce(
+        new coreApi.PrepareValidationError(
+          'UNACCOUNTABLE_WITHDRAWAL',
+          'withdrawal is not accountable',
+        ),
+      );
+
+      const res = await app.request('/relay/settlement-funding-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      });
+
+      expect(res.status).toBe(422);
+      await expect(res.json()).resolves.toMatchObject({ code: 'UNACCOUNTABLE_WITHDRAWAL' });
+    });
+
+    it.each([
+      { ...request, estimatedExecutionCostClaimMist: '-1' },
+      { ...request, estimatedExecutionCostClaimMist: '01' },
+      { ...request, estimatedExecutionCostClaimMist: '18446744073709551616' },
+      { ...request, extra: true },
+    ])('rejects non-current request shapes before the Host owner', async (body) => {
+      const res = await app.request('/relay/settlement-funding-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+      const coreApi = await import('@stelis/core-api');
+      expect(coreApi.handleSettlementFundingCheck).not.toHaveBeenCalled();
     });
   });
 

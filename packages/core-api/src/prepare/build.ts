@@ -54,7 +54,7 @@ import {
 import type { QuoteRpcStats, QuoteCache } from '@stelis/core-relay/server';
 import {
   createPaymentSourceReader,
-  resolvePaymentSource,
+  evaluatePaymentSource,
   type PaymentSourceReader,
 } from './coinSelection.js';
 import { PrepareValidationError, type PrepareErrorMeta } from './replay.js';
@@ -73,7 +73,7 @@ import {
 } from './settlementPlanner.js';
 import type { PlannerConfig, PlannerInput } from './settlementPlanner.js';
 import { compileCreditSettlement, compileSwapSettlement } from './ptbCompiler.js';
-import type { SettlePlanAuditFields } from './settlePlanTypes.js';
+import type { SettlePlanAuditFields, SwapFundingResolution } from './settlePlanTypes.js';
 import { logStructuredEvent } from '../structuredEventLog.js';
 import { PREPARE_BUILD_STAGE } from '../observability/events.js';
 import { mist, unBps, type Mist } from '../internal/brand.js';
@@ -81,6 +81,8 @@ import type {
   BuildContext,
   GenericPrepareBuildOutput,
   GenericPrepareBuildRequest,
+  SettlementFundingContext,
+  SettlementFundingRequest,
 } from './buildTypes.js';
 export type {
   BuildContext,
@@ -174,8 +176,8 @@ function buildSettleMeta(
  * File-local dedup helper.
  */
 function buildPlannerInputs(
-  ctx: BuildContext,
-  input: GenericPrepareBuildRequest,
+  ctx: SettlementFundingContext,
+  input: SettlementFundingRequest,
 ): { config: PlannerConfig; input: PlannerInput } {
   return {
     config: {
@@ -353,7 +355,7 @@ function assertFinalPaymentInputIntegrity(
 }
 
 async function loadRawMidPrices(
-  ctx: BuildContext,
+  ctx: SettlementFundingContext,
   descriptor: StaticSettlementSwapPathDescriptor,
   stage: string,
 ): Promise<bigint[]> {
@@ -413,7 +415,8 @@ function classifyQuoteFailure(
 // path before reaching `solveSwapForClaim`, so it does not appear at runtime
 // today but the type stays honest with the caller signature.
 type PreparePassLabel = 'credit_preswap' | 'pass1' | 'pass2';
-type QuoteSolvePass = PreparePassLabel | 'pass1_5';
+type FundingEvaluationLabel = PreparePassLabel | 'settlement_funding_check';
+type QuoteSolvePass = FundingEvaluationLabel | 'pass1_5';
 
 interface SolveSwapResult {
   quote: ExecutableSwapQuote;
@@ -421,8 +424,8 @@ interface SolveSwapResult {
 }
 
 async function solveSwapForClaim(
-  ctx: BuildContext,
-  input: GenericPrepareBuildRequest,
+  ctx: SettlementFundingContext,
+  input: SettlementFundingRequest,
   executionCostClaim: bigint,
   rawMidPrices: readonly bigint[],
   stage: string,
@@ -539,8 +542,7 @@ async function dryRunPreSwapCreditPathCosts(
   const { tx, effectiveProfile, swapAmountSmallest, paymentInputSource } = await runPreparePass(
     ctx,
     input,
-    runContext.prefixTrace,
-    runContext.paymentSourceReader,
+    runContext,
     {
       executionCostClaim: seedClaim,
       simGasReported: seedClaim,
@@ -653,7 +655,7 @@ async function buildFinalGenericPrepareResult(
   probeQuote: ExecutableSwapQuote | null,
   runContext: GenericPrepareBuildRunContext,
 ): Promise<GenericPrepareBuildOutput> {
-  const { prefixTrace, quoteCache, rpcAcc } = runContext;
+  const { rpcAcc } = runContext;
   const settlementSwapPath = input.settlementSwapPath;
   const { grossGas, gasVarianceFixedMist, slippageBufferMist } = finalCosts;
   // Tag the two fields consumed by downstream sponsor / store code.
@@ -690,8 +692,7 @@ async function buildFinalGenericPrepareResult(
   } = await runPreparePass(
     ctx,
     input,
-    prefixTrace,
-    runContext.paymentSourceReader,
+    runContext,
     {
       executionCostClaim,
       simGasReported: simGas,
@@ -704,7 +705,6 @@ async function buildFinalGenericPrepareResult(
     prefetchedMidPrices,
     'pass2',
     finalSettlePath,
-    quoteCache,
   );
   absorbPassRpcStats(rpcAcc, pass2RpcStats);
   rpcAcc.pass2Quote = pass2RpcStats.quote;
@@ -870,11 +870,14 @@ async function buildFinalGenericPrepareResult(
  *             final executable quote against the pass 1.5 embedded buffer
  *             (swap paths only).
  */
-interface GenericPrepareBuildRunContext {
-  readonly rpcAcc: BuildRpcAccumulator;
+export interface SettlementFundingRunContext {
   readonly quoteCache: QuoteCache;
   readonly prefixTrace: PrefixValueTrace;
   readonly paymentSourceReader: PaymentSourceReader;
+}
+
+interface GenericPrepareBuildRunContext extends SettlementFundingRunContext {
+  readonly rpcAcc: BuildRpcAccumulator;
 }
 
 interface MaxClaimGasProbeResult {
@@ -889,16 +892,15 @@ interface SwapExecutionGapMeasurement {
   readonly probeQuote: ExecutableSwapQuote;
 }
 
-function createGenericPrepareBuildRunContext(
-  ctx: BuildContext,
-  input: GenericPrepareBuildRequest,
-): GenericPrepareBuildRunContext {
+export function createSettlementFundingRunContext(
+  ctx: SettlementFundingContext,
+  input: SettlementFundingRequest,
+): SettlementFundingRunContext {
   // Request-local quote cache shared across pass1 / pass1.5 / pass2 so that
   // floor-bound paths collapse to a single underlying RPC. The cache is not
-  // passed to the credit pre-swap probe because that path returns before the
-  // swap solver and would only pollute swap-path measurements.
+  // consulted by the credit pre-swap probe because that path returns before
+  // the swap solver.
   return {
-    rpcAcc: emptyBuildRpcAccumulator(),
     quoteCache: createRequestQuoteCache(),
     prefixTrace: materializePrefixValueTrace(
       Transaction.fromKind(fromBase64(input.userTxKindBytes)),
@@ -909,6 +911,16 @@ function createGenericPrepareBuildRunContext(
       input.senderAddress,
       input.settlementSwapPath.settlementTokenType,
     ),
+  };
+}
+
+function createGenericPrepareBuildRunContext(
+  ctx: BuildContext,
+  input: GenericPrepareBuildRequest,
+): GenericPrepareBuildRunContext {
+  return {
+    rpcAcc: emptyBuildRpcAccumulator(),
+    ...createSettlementFundingRunContext(ctx, input),
   };
 }
 
@@ -946,8 +958,7 @@ async function runMaxClaimGasProbe(
   } = await runPreparePass(
     ctx,
     input,
-    runContext.prefixTrace,
-    runContext.paymentSourceReader,
+    runContext,
     {
       executionCostClaim: pass1Claim,
       simGasReported: pass1Claim,
@@ -960,7 +971,6 @@ async function runMaxClaimGasProbe(
     undefined,
     'pass1',
     undefined,
-    runContext.quoteCache,
   );
   absorbPassRpcStats(runContext.rpcAcc, pass1RpcStats);
   runContext.rpcAcc.pass1Quote = pass1RpcStats.quote;
@@ -1152,6 +1162,238 @@ interface SettleAuditFields {
   expectedConfigVersion: bigint;
 }
 
+export type SettlementFundingEvaluation =
+  | {
+      readonly outcome: 'credit';
+      readonly useCreditAmount: bigint;
+      readonly rpcStats: PreparePassRpcStats;
+    }
+  | {
+      readonly outcome: 'funded';
+      readonly funding: SwapFundingResolution;
+      readonly rawMidPrices: bigint[];
+      readonly executionQuote: ExecutableSwapQuote;
+      readonly rpcStats: PreparePassRpcStats;
+    }
+  | {
+      readonly outcome: 'insufficient';
+      readonly availableSettlementTokenAmount: bigint;
+      readonly rawMidPrices: bigint[];
+      readonly executionQuote: ExecutableSwapQuote;
+      readonly error: PrepareValidationError;
+      readonly rpcStats: PreparePassRpcStats;
+    }
+  | {
+      readonly outcome: 'indeterminate';
+      readonly reason: 'bounded_coin_discovery';
+      readonly rawMidPrices: bigint[];
+      readonly executionQuote: ExecutableSwapQuote;
+      readonly error: PrepareValidationError;
+      readonly rpcStats: PreparePassRpcStats;
+    }
+  | {
+      readonly outcome: 'indeterminate';
+      readonly reason: 'market_unavailable';
+      readonly error: PrepareValidationError;
+      readonly rpcStats: PreparePassRpcStats;
+    };
+
+interface SettlementFundingEvaluationOptions {
+  readonly label: FundingEvaluationLabel;
+  readonly prefetchedMidPrices?: bigint[];
+  readonly forcedSettlePath?: FinalSettlePath;
+}
+
+function logPostSolveAbort(
+  input: SettlementFundingRequest,
+  label: FundingEvaluationLabel,
+  executionQuote: ExecutableSwapQuote,
+  rpcStats: PreparePassRpcStats,
+  error: unknown,
+): void {
+  logPrepareBuildStage('pass_aborted_post_solve', {
+    pass: label,
+    error_code: error instanceof PrepareValidationError ? error.code : 'UNKNOWN',
+    pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
+    settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
+    ...quoteRpcStatsLogFields(rpcStats.quote, false),
+    ...buildBfqFloorPayload(executionQuote, input.settlementSwapPath.hops[0]?.swapDirection),
+  });
+}
+
+/**
+ * Own the ordered settlement-funding decision shared by generic prepare and
+ * the read-only funding diagnostic. Callers supply one execution claim and
+ * request context; this owner selects credit or performs the complete current
+ * market quote and prefix-aware payment-source resolution.
+ */
+async function evaluateSettlementFunding(
+  ctx: SettlementFundingContext,
+  input: SettlementFundingRequest,
+  executionCostClaim: bigint,
+  runContext: SettlementFundingRunContext,
+  options: SettlementFundingEvaluationOptions,
+): Promise<SettlementFundingEvaluation> {
+  const rpcStats = emptyPreparePassRpcStats();
+  const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
+  const creditCheck = checkCreditOnlyEligibility(plannerConfig, plannerInput, executionCostClaim);
+
+  if (creditCheck && options.forcedSettlePath !== 'swap') {
+    return {
+      outcome: 'credit',
+      useCreditAmount: creditCheck.useCreditAmount,
+      rpcStats,
+    };
+  }
+
+  if (options.forcedSettlePath === 'credit') {
+    throw new PrepareValidationError(
+      'INSUFFICIENT_BALANCE',
+      'Forced credit settlement path is not credit-coverable for the current audit claim',
+      {
+        executionCostClaim: executionCostClaim.toString(),
+        credit: input.credit,
+      },
+    );
+  }
+
+  assertSingleHopOnly(input.settlementSwapPath);
+  const prefixStateCounts = { surviving: 0, consumed: 0, opaque: 0 };
+  for (const state of runContext.prefixTrace.directCoins.values()) {
+    prefixStateCounts[state.status] += 1;
+  }
+  logPrepareBuildStage('run_prepare_pass_prefix_value_traced', {
+    pass: options.label,
+    survivor_count: prefixStateCounts.surviving,
+    consumed_count: prefixStateCounts.consumed,
+    opaque_in_use_count: prefixStateCounts.opaque,
+    prefix_ab_consumed_smallest: runContext.prefixTrace.senderWithdrawalDebit.toString(),
+  });
+
+  let rawMidPrices: bigint[];
+  try {
+    if (
+      options.prefetchedMidPrices &&
+      options.prefetchedMidPrices.length === input.settlementSwapPath.hops.length
+    ) {
+      rawMidPrices = options.prefetchedMidPrices;
+    } else {
+      const midPriceStartedAt = Date.now();
+      try {
+        rawMidPrices = await loadRawMidPrices(ctx, input.descriptor, 'mid_price_collection');
+        rpcStats.midPriceCalls += 1;
+        rpcStats.midPriceTotalMs += Date.now() - midPriceStartedAt;
+      } catch (err) {
+        logPrepareBuildStage('mid_price_rpc_failed', {
+          pass: options.label,
+          error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
+          pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
+          settlement_token_symbol: input.settlementSwapPath.settlementTokenSymbol,
+          mid_price_total_ms: Date.now() - midPriceStartedAt,
+          mid_price_stats_complete: false,
+        });
+        throw err;
+      }
+    }
+
+    logPrepareBuildStage('run_prepare_pass_market_loaded', {
+      pass: options.label,
+      raw_mid_prices: rawMidPrices.map((price) => price.toString()),
+    });
+
+    const { quote: executionQuote, rpcStats: solveRpcStats } = await solveSwapForClaim(
+      ctx,
+      input,
+      executionCostClaim,
+      rawMidPrices,
+      `${options.label}_market_policy`,
+      options.label,
+      options.label !== 'pass1',
+      runContext.quoteCache,
+    );
+    rpcStats.quote = solveRpcStats;
+    logPrepareBuildStage('run_prepare_pass_swap_amount_computed', {
+      pass: options.label,
+      swap_amount_smallest: executionQuote.swapAmountSmallest.toString(),
+      execution_gap_mist: executionQuote.executionGapMist.toString(),
+      actual_sui_out: executionQuote.actualOutputMist.toString(),
+      ...buildBfqFloorPayload(executionQuote, input.settlementSwapPath.hops[0]?.swapDirection),
+    });
+
+    try {
+      const payment = await evaluatePaymentSource(
+        runContext.paymentSourceReader,
+        executionQuote.swapAmountSmallest,
+        input.settlementSwapPath.settlementTokenSymbol,
+        runContext.prefixTrace,
+      );
+      if (payment.outcome !== 'funded') {
+        logPostSolveAbort(input, options.label, executionQuote, rpcStats, payment.error);
+        if (payment.outcome === 'insufficient') {
+          return {
+            outcome: 'insufficient',
+            availableSettlementTokenAmount: payment.availableSettlementTokenAmount,
+            rawMidPrices,
+            executionQuote,
+            error: payment.error,
+            rpcStats,
+          };
+        }
+        return {
+          outcome: 'indeterminate',
+          reason: payment.reason,
+          rawMidPrices,
+          executionQuote,
+          error: payment.error,
+          rpcStats,
+        };
+      }
+      const funding = payment.funding;
+      logPrepareBuildStage('run_prepare_pass_funding_resolved', {
+        pass: options.label,
+        funding_source: funding.source,
+        usable_coin_total_smallest:
+          funding.source === 'address_balance' ? '0' : funding.remainingBalance.toString(),
+        redeem_delta_smallest:
+          funding.source === 'coin_object' ? '0' : funding.redeemAmount.toString(),
+      });
+      return { outcome: 'funded', funding, rawMidPrices, executionQuote, rpcStats };
+    } catch (err) {
+      logPostSolveAbort(input, options.label, executionQuote, rpcStats, err);
+      throw err;
+    }
+  } catch (err) {
+    if (
+      err instanceof PrepareValidationError &&
+      (err.code === 'MARKET_QUOTE_UNAVAILABLE' || err.code === 'SLIPPAGE_EXCEEDED')
+    ) {
+      return {
+        outcome: 'indeterminate',
+        reason: 'market_unavailable',
+        error: err,
+        rpcStats,
+      };
+    }
+    throw err;
+  }
+}
+
+/** Evaluate one read-only advisory claim through the same funding owner. */
+export async function evaluateCurrentSettlementFunding(
+  ctx: SettlementFundingContext,
+  input: SettlementFundingRequest,
+  executionCostClaim: bigint,
+  runContext: SettlementFundingRunContext,
+  signal: AbortSignal,
+): Promise<SettlementFundingEvaluation> {
+  signal.throwIfAborted();
+  const evaluation = await evaluateSettlementFunding(ctx, input, executionCostClaim, runContext, {
+    label: 'settlement_funding_check',
+  });
+  signal.throwIfAborted();
+  return evaluation;
+}
+
 /** Result of a single planner/compiler pass — tx + the effective settle path. */
 interface PreparePassResult {
   tx: Transaction;
@@ -1186,16 +1428,12 @@ interface PreparePassResult {
 async function runPreparePass(
   ctx: BuildContext,
   input: GenericPrepareBuildRequest,
-  prefixTrace: PrefixValueTrace,
-  paymentSourceReader: PaymentSourceReader,
+  fundingRunContext: SettlementFundingRunContext,
   audit: SettleAuditFields,
   prefetchedMidPrices?: bigint[],
   passLabel: PreparePassLabel = 'pass2',
   forcedSettlePath?: FinalSettlePath,
-  quoteCache?: QuoteCache,
 ): Promise<PreparePassResult> {
-  const rpcStats: PreparePassRpcStats = emptyPreparePassRpcStats();
-
   logPrepareBuildStage('run_prepare_pass_start', {
     pass: passLabel,
     forced_settle_path: forcedSettlePath ?? 'auto',
@@ -1205,10 +1443,8 @@ async function runPreparePass(
 
   const tx = Transaction.fromKind(fromBase64(input.userTxKindBytes));
 
-  const settlementSwapPath = input.settlementSwapPath;
-
   // ── Build planner config + input from orchestrator context ─────────────
-  const { config: plannerConfig, input: plannerInput } = buildPlannerInputs(ctx, input);
+  const { input: plannerInput } = buildPlannerInputs(ctx, input);
 
   const auditFields: SettlePlanAuditFields = {
     executionCostClaim: audit.executionCostClaim,
@@ -1226,17 +1462,23 @@ async function runPreparePass(
     orderIdHash: input.orderIdHash ?? new Uint8Array(0),
   };
 
-  // ── Step 1: Credit-only eligibility (planner) ─────────────────────────
-  const creditCheck = checkCreditOnlyEligibility(
-    plannerConfig,
-    plannerInput,
+  const fundingEvaluation = await evaluateSettlementFunding(
+    ctx,
+    input,
     audit.executionCostClaim,
+    fundingRunContext,
+    {
+      label: passLabel,
+      prefetchedMidPrices,
+      forcedSettlePath,
+    },
   );
-  if (creditCheck && forcedSettlePath !== 'swap') {
+
+  if (fundingEvaluation.outcome === 'credit') {
     const plan = assembleCreditSettlementPlan(
       plannerInput,
       auditFields,
-      creditCheck.useCreditAmount,
+      fundingEvaluation.useCreditAmount,
     );
     const paymentInputIntegrityExpectation = compileCreditSettlement(
       tx,
@@ -1246,7 +1488,7 @@ async function runPreparePass(
     );
     logPrepareBuildStage('run_prepare_pass_credit_path', {
       pass: passLabel,
-      use_credit_amount_mist: creditCheck.useCreditAmount.toString(),
+      use_credit_amount_mist: fundingEvaluation.useCreditAmount.toString(),
     });
     return {
       tx,
@@ -1256,114 +1498,17 @@ async function runPreparePass(
       paymentInputSource: 'none_credit_only',
       paymentInputIntegrityExpectation,
       executionQuote: null,
-      rpcStats,
+      rpcStats: fundingEvaluation.rpcStats,
     };
   }
 
-  if (forcedSettlePath === 'credit') {
-    throw new PrepareValidationError(
-      'INSUFFICIENT_BALANCE',
-      'Forced credit settlement path is not credit-coverable for the current audit claim',
-      {
-        executionCostClaim: audit.executionCostClaim.toString(),
-        credit: input.credit,
-      },
-    );
+  if (fundingEvaluation.outcome !== 'funded') {
+    throw fundingEvaluation.error;
   }
 
-  // ── Swap-only prefix value evidence ─────────────────────────────────────────
-  assertSingleHopOnly(settlementSwapPath);
-  const prefixStateCounts = { surviving: 0, consumed: 0, opaque: 0 };
-  for (const state of prefixTrace.directCoins.values()) {
-    prefixStateCounts[state.status] += 1;
-  }
-  logPrepareBuildStage('run_prepare_pass_prefix_value_traced', {
-    pass: passLabel,
-    survivor_count: prefixStateCounts.surviving,
-    consumed_count: prefixStateCounts.consumed,
-    opaque_in_use_count: prefixStateCounts.opaque,
-    prefix_ab_consumed_smallest: prefixTrace.senderWithdrawalDebit.toString(),
-  });
-
-  // ── Step 3: Mid-price snapshot ────────────────────────────────────────
-  let rawMidPrices: bigint[];
-  if (prefetchedMidPrices && prefetchedMidPrices.length === settlementSwapPath.hops.length) {
-    rawMidPrices = prefetchedMidPrices;
-  } else {
-    const midPriceStartedAt = Date.now();
-    try {
-      rawMidPrices = await loadRawMidPrices(ctx, input.descriptor, 'mid_price_collection');
-      rpcStats.midPriceCalls += 1;
-      rpcStats.midPriceTotalMs += Date.now() - midPriceStartedAt;
-    } catch (err) {
-      // Mid-price query failed before any quote-solve work. Without this emit
-      // the request would have zero failure-stage observability for the
-      // mid-price axis. Partial timing reflects the elapsed duration of the
-      // failed attempt; mid_price_calls is 0 because the success-path
-      // increment never ran.
-      logPrepareBuildStage('mid_price_rpc_failed', {
-        pass: passLabel,
-        error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-        pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-        settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
-        mid_price_total_ms: Date.now() - midPriceStartedAt,
-        mid_price_stats_complete: false,
-      });
-      throw err;
-    }
-  }
-  logPrepareBuildStage('run_prepare_pass_market_loaded', {
-    pass: passLabel,
-    raw_mid_prices: rawMidPrices.map((p) => p.toString()),
-  });
-
-  // ── Step 4: Canonical market-policy solve ─────────────────────────────
-  const { quote: executionQuote, rpcStats: solveRpcStats } = await solveSwapForClaim(
-    ctx,
-    input,
-    audit.executionCostClaim,
-    rawMidPrices,
-    `${passLabel}_market_policy`,
-    passLabel,
-    passLabel !== 'pass1',
-    quoteCache,
-  );
-  rpcStats.quote = solveRpcStats;
+  const { funding, rawMidPrices, executionQuote, rpcStats } = fundingEvaluation;
   const swapAmountSmallest = executionQuote.swapAmountSmallest;
-  logPrepareBuildStage('run_prepare_pass_swap_amount_computed', {
-    pass: passLabel,
-    swap_amount_smallest: swapAmountSmallest.toString(),
-    execution_gap_mist: executionQuote.executionGapMist.toString(),
-    actual_sui_out: executionQuote.actualOutputMist.toString(),
-    ...buildBfqFloorPayload(executionQuote, settlementSwapPath.hops[0]?.swapDirection),
-  });
-
-  // ── Steps 5-7: post-solve work (resolve payment, assemble plan, compile)
-  //
-  // `solveSwapForClaim` already populated `rpcStats.quote`, but caller-side
-  // absorption (`rpcAcc.passXQuote = result.rpcStats.quote`) only happens
-  // after this function returns. If any throw fires here the local quote
-  // stats are dropped on the floor. Wrap the post-solve segment so the
-  // stats are emitted as a `pass_aborted_post_solve` stage(partial payload)
-  // before the throw propagates.
   try {
-    // ── Step 5: Funding resolution (chain query) ──────────────────────────
-    const funding = await resolvePaymentSource(
-      paymentSourceReader,
-      swapAmountSmallest,
-      settlementSwapPath.settlementTokenSymbol,
-      prefixTrace,
-    );
-    logPrepareBuildStage('run_prepare_pass_funding_resolved', {
-      pass: passLabel,
-      funding_source: funding.source,
-      usable_coin_total_smallest:
-        funding.source === 'address_balance' ? '0' : funding.remainingBalance.toString(),
-      redeem_delta_smallest:
-        funding.source === 'coin_object' ? '0' : funding.redeemAmount.toString(),
-    });
-
-    // ── Step 6: Assemble swap settlement plan ───────────────────────────
     const quotedHopOutputs = [...executionQuote.quotedHopOutputs];
     const swap = calculateSwapOutputGuards(
       swapAmountSmallest,
@@ -1380,7 +1525,6 @@ async function runPreparePass(
       slippage_bps: input.slippageBps,
     });
 
-    // ── Step 7: Compile plan onto TX (compiler) ─────────────────────────
     const paymentInputIntegrityExpectation = compileSwapSettlement(
       tx,
       plan,
@@ -1407,19 +1551,8 @@ async function runPreparePass(
       executionQuote,
       rpcStats,
     };
-  } catch (err) {
-    // Solve already succeeded (rpcStats.quote populated). Caller absorption
-    // will not run because we are about to rethrow. Emit the partial quote
-    // stats so the request still has request-level observability.
-    const quoteStats = rpcStats.quote;
-    logPrepareBuildStage('pass_aborted_post_solve', {
-      pass: passLabel,
-      error_code: err instanceof PrepareValidationError ? err.code : 'UNKNOWN',
-      pool_id: input.descriptor.hops[0]?.poolId ?? 'unknown',
-      settlement_token_symbol: settlementSwapPath.settlementTokenSymbol,
-      ...quoteRpcStatsLogFields(quoteStats, false),
-      ...buildBfqFloorPayload(executionQuote, settlementSwapPath.hops[0]?.swapDirection),
-    });
-    throw err;
+  } catch (error) {
+    logPostSolveAbort(input, passLabel, executionQuote, rpcStats, error);
+    throw error;
   }
 }
